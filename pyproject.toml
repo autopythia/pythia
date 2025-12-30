@@ -15,6 +15,9 @@ web = [
     "uvicorn[standard]==0.34.3",
 ]
 
+[project.scripts]
+autopythia = "pythia.auto:_main"
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

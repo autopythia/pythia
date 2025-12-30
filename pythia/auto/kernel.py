@@ -99,12 +99,22 @@ class OutputEvent:
     def __str__(self) -> str:
         raise NotImplementedError
 
+    def leaf_type(self) -> str:
+        raise NotImplementedError
+
+    def leaf_events(self):
+        raise NotImplementedError
+
 @dataclass
 class AtomicOutputEvent(OutputEvent):
     events: list[OutputEvent] = field(default_factory=list)
 
     def __str__(self) -> str:
         return "\n\n".join([f"{event}" for event in self.events])
+
+    def leaf_events(self):
+        for event in self.events:
+            yield from event.leaf_events()
 
     def append(self, event: OutputEvent):
         self.events.append(event)
@@ -116,6 +126,12 @@ class BasicOutputEvent(OutputEvent):
     def __str__(self) -> str:
         return self.text
 
+    def leaf_type(self) -> str:
+        return "basic"
+
+    def leaf_events(self):
+        yield self
+
 @dataclass
 class ThinkingOutputEvent(OutputEvent):
     text: str
@@ -123,12 +139,24 @@ class ThinkingOutputEvent(OutputEvent):
     def __str__(self) -> str:
         return f"""{dim("<think>", bold=True)}\n{dim(self.text)}\n{dim("</think>", bold=True)}"""
 
+    def leaf_type(self) -> str:
+        return "thinking"
+
+    def leaf_events(self):
+        yield self
+
 @dataclass
 class AnswerOutputEvent(OutputEvent):
     text: str
 
     def __str__(self) -> str:
         return self.text
+
+    def leaf_type(self) -> str:
+        return "answer"
+
+    def leaf_events(self):
+        yield self
 
 @dataclass
 class Autopythia:
@@ -208,7 +236,7 @@ class Autopythia:
             },
         ]
         # print(plan_query)
-        event = BasicOutputEvent(dim("Thinking...", bold=True))
+        event = BasicOutputEvent(green("Thinking...", bold=True))
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
         t0 = Timestamp()
@@ -222,7 +250,7 @@ class Autopythia:
         # print(plan_result)
 
         res_event = AtomicOutputEvent()
-        event = BasicOutputEvent(dim(f"Thought for {(t1 - t0).pretty_format()}", bold=True))
+        event = BasicOutputEvent(green(f"Thought for {(t1 - t0).pretty_format()}", bold=True))
         res_event.append(event)
 
         message = plan_result.message()

@@ -8,6 +8,7 @@ import os
 import platform
 import signal
 import sys
+import textwrap
 
 from prompt_toolkit.input import create_input
 from prompt_toolkit.keys import Keys
@@ -114,6 +115,27 @@ class _InputState:
         self.rbuf.clear()
         self.pos = -1
         return text
+
+def quotewrap(haystack: str) -> str:
+    parts = haystack.split("\n", maxsplit=1)
+    first = parts[0]
+    quote_both = f"""   {dim("[")}"""
+    if not first:
+        return quote_both
+    if len(parts) > 1:
+        haystack = parts[1]
+    else:
+        return textwrap.indent(first, quote_both)
+    parts = haystack.rsplit("\n", maxsplit=1)
+    haystack = parts[0]
+    quote_first = f"""   {dim("⌜")}"""
+    quote_last = f"""   {dim("⌞")}"""
+    if len(parts) > 1:
+        last = parts[1]
+    else:
+    # if not last:
+        return f"""{textwrap.indent(first, quote_first)}\n{textwrap.indent(haystack, quote_last)}"""
+    return f"""{textwrap.indent(first, quote_first)}\n{textwrap.indent(haystack, "    ")}\n{textwrap.indent(last, quote_last)}"""
 
 async def _setup_main(args):
     input_state = _InputState(
@@ -265,6 +287,23 @@ async def _run_main(args, input_state: _InputState):
                     print1 = True
                 else:
                     prefix = "\n"
+                # output = quotewrap(f"{output}")
+                outputs = []
+                block = []
+                for leaf in output.leaf_events():
+                    if leaf.leaf_type() == "basic":
+                        if block:
+                            outputs.append(quotewrap("\n\n".join(block)))
+                            block.clear()
+                        outputs.append(quotewrap(f"{leaf}"))
+                    elif leaf.leaf_type() in ("thinking", "answer"):
+                        block.append(f"{leaf}")
+                    else:
+                        raise NotImplementedError
+                if block:
+                    outputs.append(quotewrap("\n\n".join(block)))
+                    block.clear()
+                output = "\n\n".join(outputs)
                 print(f"""{prefix}{output}""", flush=True)
                 # auto.append_history(session_ctr, query_ctr, output=output)
         if ret:
@@ -284,7 +323,13 @@ async def _run_main(args, input_state: _InputState):
             if query.startswith("/"):
                 if query in ("/exit", "/q", "/quit"):
                     break
-                elif query in ("/h", "help"):
+                elif query in ("/h", "/help"):
+                    pass
+                elif query in ("/a", "/accept"):
+                    pass
+                elif query in ("/revise",):
+                    pass
+                elif query in ("/review",):
                     pass
                 # auto.append_history(session_ctr, query_ctr, query=query)
             elif query:
