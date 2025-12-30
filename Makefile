@@ -1,3 +1,4 @@
+MAKE := make
 CARGO := cargo --offline
 RUSTC := rustc
 
@@ -9,20 +10,6 @@ v: version
 version:
 	$(RUSTC) --version > rustc.version
 	$(CARGO) --version > cargo.version
-
-.PHONY: dev debug
-dev: debug
-debug:
-	$(CARGO) build --lib --bins
-
-.PHONY: rel release
-rel: release
-release:
-	$(CARGO) build --release --lib --bins
-
-.PHONY: clean
-clean:
-	rm -rf target
 
 .PHONY: o oracle boot-oracle
 o: boot-oracle
@@ -61,3 +48,8 @@ int-last: boot-interp-test-last
 interp-last: boot-interp-test-last
 boot-interp-test-last:
 	./target/release/boot-interp-test-last
+
+.PHONY: py pythia
+py: pythia
+pythia:
+	pip install --use-feature=in-tree-build -v .
