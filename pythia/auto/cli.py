@@ -6,17 +6,20 @@ import functools
 import itertools
 import os
 import platform
+import shutil
 import signal
 import sys
 import textwrap
 
-from prompt_toolkit.input import create_input
-from prompt_toolkit.keys import Keys
-
 from pythia.auto.kernel import (
-    Autopythia, EndControlEvent, OutputEvent,
+    Autopythia,
+    StartControlEvent,
+    EndControlEvent,
+    OutputEvent,
 )
 from pythia.clock import Timestamp
+from pythia.contrib.prompt_toolkit.input.defaults import create_input
+from pythia.contrib.prompt_toolkit.keys import Keys
 from pythia.io_control.command import exec_command
 from pythia.python_utils import _py_version
 from pythia.term_utils import (
@@ -33,6 +36,7 @@ class _InputState:
     buf: list
     rbuf: list
     pos: int
+    width: int
     _input: Any
 
     def handle_key_presses(self):
@@ -138,12 +142,14 @@ def quotewrap(haystack: str) -> str:
     return f"""{textwrap.indent(first, quote_first)}\n{textwrap.indent(haystack, "    ")}\n{textwrap.indent(last, quote_last)}"""
 
 async def _setup_main(args):
+    width, _ = shutil.get_terminal_size()
     input_state = _InputState(
         halt = asyncio.Event(),
         ret = asyncio.Event(),
         buf = [],
         rbuf = [],
         pos = -1,
+        width = width,
         _input = create_input(),
     )
     def input_key_presses():
@@ -194,6 +200,21 @@ async def _run_main(args, input_state: _InputState):
         ):
             githash = githash_result.out.rstrip()
             version = f"editable+git:{githash[:8]}"
+    if args.target is not None:
+        file_target = args.f
+        dir_target = args.d
+        assert not (file_target and dir_target)
+        if not dir_target:
+            file_target = file_target or (
+                args.target.endswith(".tar") or
+                args.target.endswith(".tar.gz") or
+                args.target.endswith(".tar.bz2") or
+                args.target.endswith(".tar.xz")
+            )
+        if file_target:
+            raise NotImplementedError
+        else:
+            os.chdir(args.target)
     cwd = os.getcwd()
     local_work_dir = test_relpath(cwd, ".autopythia")
     agents_md_path = test_relpath(cwd, "AGENTS.md")
@@ -226,7 +247,11 @@ async def _run_main(args, input_state: _InputState):
     auto = Autopythia()
     workqueue = auto._workqueue
     workqueue.add(asyncio.create_task(sleeping_beauty()))
-    session_ctr = auto.fresh_session_ctr()
+    if args.resume:
+        session_ctr = auto._get_session_ctr()
+    else:
+        session_ctr = auto._fresh_session_ctr()
+    auto._set_session(session_ctr)
     print(f"""{bold("autopythia")} {arch}-{osys} python{py_ver}""")
     if True:
         print(f"""{plain("Isolation mode")}      = {"Current working dir"}""")
@@ -256,7 +281,7 @@ async def _run_main(args, input_state: _InputState):
     elif args.verbose:
         print(f"""{plain("STYLE.md path")}       = {dim("<None>")}""")
     print(f"""\r{spin[-1]} {rclear()}""", end="", flush=True)
-    query_ctr = 0
+    step_ctr = 0
     query = None
     start = set()
     halt = False
@@ -275,10 +300,10 @@ async def _run_main(args, input_state: _InputState):
         for task in done:
             event = task.result()
             output = None
-            if isinstance(event, EndControlEvent):
-                # FIXME
-                start.clear()
-                # start.remove(_)
+            if isinstance(event, StartControlEvent):
+                start.add(event.step_ctr)
+            elif isinstance(event, EndControlEvent):
+                start.remove(event.step_ctr)
             elif isinstance(event, OutputEvent):
                 output = event
             if output is not None:
@@ -305,7 +330,7 @@ async def _run_main(args, input_state: _InputState):
                     block.clear()
                 output = "\n\n".join(outputs)
                 print(f"""{prefix}{output}""", flush=True)
-                # auto.append_history(session_ctr, query_ctr, output=output)
+                # auto.append_history(session_ctr, step_ctr, output=output)
         if ret:
             prompt = f"{arr}{arr}"
         elif not start:
@@ -331,12 +356,12 @@ async def _run_main(args, input_state: _InputState):
                     pass
                 elif query in ("/review",):
                     pass
-                # auto.append_history(session_ctr, query_ctr, query=query)
+                # auto.append_history(session_ctr, step_ctr, query=query)
             elif query:
-                query_ctr = auto.fresh_query_ctr(session_ctr)
-                workqueue.add(asyncio.create_task(auto.init(query)))
-                auto.append_history(session_ctr, query_ctr, query=query)
-                start.add(query_ctr)
+                step_ctr = auto._fresh_step_ctr(session_ctr)
+                workqueue.add(asyncio.create_task(auto.init(step_ctr, query)))
+                auto.append_history(session_ctr, step_ctr, query=query)
+                start.add(step_ctr)
             # query = None
     if args.verbose:
         print("\nGoodbye.", flush=True)
@@ -353,7 +378,11 @@ def main(args):
 
 def parse_args(argv: Optional[list[str]] = None):
     args = ArgumentParser()
-    args.add_argument("--verbose", "-v", action=BooleanOptionalAction, default=False)
+    args.add_argument("--resume", action=BooleanOptionalAction, default=False)
+    args.add_argument("-v", "--verbose", action=BooleanOptionalAction, default=False)
+    args.add_argument("-d", action=BooleanOptionalAction, default=False)
+    args.add_argument("-f", action=BooleanOptionalAction, default=False)
+    args.add_argument("target", nargs="?", type=str, default=None)
     if argv is not None:
         args = args.parse_args(argv)
     else:

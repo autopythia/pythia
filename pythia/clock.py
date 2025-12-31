@@ -46,7 +46,7 @@ class Timedelta:
             return f"{h}h {m:02}m {s:02}s"
         elif m > 0:
             s = int(math.ceil(ms / 1000))
-            return f"{m:02}m {s:02}s"
+            return f"{m}m {s:02}s"
         else:
             # FIXME
             s = int(math.ceil(ms / 1000))

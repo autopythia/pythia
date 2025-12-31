@@ -22,10 +22,12 @@ def exec_command(
     cmd: Union[str, list[str]],
     cwd: Optional[str] = None,
     timeout: Optional[Union[float, int]] = None,
-    capture: bool = False,
+    capture: Union[bool, str] = False,
 ) -> IOCommandResult:
+    cap = capture or isinstance(capture, str)
     p = Popen(
         cmd,
+        stdin=PIPE if cap else None,
         stdout=PIPE,
         stderr=PIPE,
         shell=False,
@@ -33,9 +35,12 @@ def exec_command(
         encoding="utf-8",
         text=True,
     )
-    if capture:
+    if cap:
         try:
-            out, err = p.communicate(timeout=timeout)
+            if isinstance(capture, str):
+                out, err = p.communicate(input=capture, timeout=timeout)
+            else:
+                out, err = p.communicate(timeout=timeout)
         except (Exception, BaseException) as e:
             p.kill()
             try:
@@ -60,7 +65,7 @@ class ShellIOCommandController:
         cmd: Union[str, list[str]],
         cwd: Optional[str] = None,
         timeout: Optional[Union[float, int]] = None,
-        capture: bool = False,
+        capture: Union[bool, str] = False,
     ) -> IOCommandResult:
         if isinstance(cmd, str):
             pass
