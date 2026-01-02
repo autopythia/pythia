@@ -1,19 +1,20 @@
 [project]
 name = "pythia"
 version = "0.1.0.dev0"
-description = "approx oracle"
+description = "(auto)pythia"
 authors = [
-    { name = "Peter Jin" }
+    { name = "Peter Jin" },
+    { name = "autopythia" },
 ]
+license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = []
 
-[project.optional-dependencies]
-web = [
-    # "fastapi[standard]==0.116.1",
-    "fastapi[standard]==0.115.14",
-    "uvicorn[standard]==0.34.3",
-]
+# [project.optional-dependencies]
+# web = [
+#     "fastapi[standard]==0.115.14",
+#     "uvicorn[standard]==0.34.3",
+# ]
 
 [project.scripts]
 autopythia = "pythia.auto:_main"
