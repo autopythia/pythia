@@ -1,0 +1,39 @@
+.PHONY: dev debug
+dev: debug
+debug:
+	$(MAKE) -C _pythia $@
+
+.PHONY: rel release
+rel: release
+release:
+	#date
+	#$(CARGO) build --release --lib --bins
+	#date
+	$(MAKE) -C _pythia $@
+
+.PHONY: clean
+clean:
+	#date
+	#rm -rf target
+	#date
+	$(MAKE) -C _pythia $@
+
+.PHONY: pt
+pt:
+	$(MAKE) -C _pythia $@
+
+.PHONY: pt1
+pt1:
+	$(MAKE) -C _pythia $@
+
+.PHONY: t
+t:
+	$(MAKE) -C _pythia $@
+
+.PHONY: t1
+t1:
+	$(MAKE) -C _pythia $@
+
+.PHONY: j
+j:
+	$(MAKE) -C _pythia $@

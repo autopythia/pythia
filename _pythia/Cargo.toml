@@ -1,0 +1,77 @@
+[package]
+name = "_pythia"
+version = "0.1.0-devel"
+edition = "2021"
+authors = [
+    "Peter Jin",
+    "autopythia",
+]
+license = "Apache-2.0"
+rust-version = "1.78.0"
+
+[features]
+default = ["serde"]
+pyo3 = ["dep:pyo3", "serde"]
+serde = ["dep:serde"]
+extra = []
+
+[[bin]]
+name = "parse_test"
+path = "entrypoint/parse_test.rs"
+
+[[bin]]
+name = "mach_test"
+path = "entrypoint/mach_test.rs"
+
+[[bin]]
+name = "jit_test"
+path = "entrypoint/jit_test.rs"
+
+[dependencies]
+bitflags = { version = "^2.8" }
+fxhash2 = { version = "^2" }
+libc = { version = "^0.2" }
+pyo3 = { version = "^0.27", features = ["auto-initialize", "serde"], optional = true }
+#rclite = { version = "^0.2", default-features = false, features = ["rc"], optional = true }
+regex = { version = "^1.10" }
+serde = { version = "^1.0", features = ["derive"], optional = true }
+#serde_json = { version = "^1.0" }
+#serde_json_fmt = { version = "0.2.0-devel" }
+smol_str = { version = "^0.2", default-features = false, features = ["serde"] }
+term_colors = { version = "^2" }
+time = { version = "^0.1" }
+triomphe = { version = "^0.1", default-features = false, features = ["serde", "std"] }
+
+[patch.crates-io]
+aho-corasick = { path = "../dep/aho-corasick" }
+autocfg = { path = "../dep/autocfg" }
+bitflags = { path = "../dep/bitflags" }
+branches = { path = "../dep/branches" }
+fxhash2 = { path = "../dep/fxhash2" }
+heck = { path = "../dep/heck" }
+indoc = { path = "../dep/indoc" }
+libc = { path = "../dep/libc-0.2" }
+memchr = { path = "../dep/memchr" }
+memoffset = { path = "../dep/memoffset" }
+once_cell = { path = "../../once_cell" }
+#once_cell = { path = "../dep/once_cell" }
+portable-atomic = { path = "../dep/portable-atomic" }
+proc-macro2 = { path = "../dep/proc-macro2" }
+pyo3 = { path = "../../pyo3-0.27" }
+#pyo3 = { path = "../dep/pyo3-0.27" }
+quote = { path = "../dep/quote" }
+#rclite = { path = "../dep/rclite" }
+regex = { path = "../dep/regex" }
+regex-syntax = { path = "../dep/regex/regex-syntax" }
+serde = { path = "../dep/serde/serde" }
+#serde_json = { path = "../dep/serde_json" }
+#serde_json_fmt = { path = "../dep/serde_json_fmt" }
+smol_str = { path = "../dep/smol_str" }
+syn = { path = "../dep/syn" }
+target-lexicon = { path = "../../target-lexicon" }
+#target-lexicon = { path = "../dep/target-lexicon" }
+term_colors = { path = "../dep/term_colors" }
+time = { path = "../dep/time-0.1" }
+triomphe = { path = "../dep/triomphe" }
+unicode-ident = { path = "../dep/unicode-ident" }
+unindent = { path = "../dep/indoc/unindent" }

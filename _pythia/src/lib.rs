@@ -1,0 +1,22 @@
+extern crate bitflags;
+extern crate fxhash2;
+#[cfg(feature = "pyo3")]
+extern crate pyo3;
+#[cfg(feature = "extra")]
+extern crate rclite;
+#[cfg(feature = "serde")]
+extern crate serde;
+//extern crate serde_json;
+//extern crate serde_json_fmt;
+extern crate smol_str;
+//extern crate triomphe;
+
+pub mod algo;
+pub mod build;
+pub mod clock;
+pub mod debug;
+pub mod panic_;
+pub mod sys;
+pub mod tap;
+pub mod test_data;
+pub mod zinterp;

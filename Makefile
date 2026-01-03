@@ -11,6 +11,8 @@ version:
 	$(RUSTC) --version > rustc.version
 	$(CARGO) --version > cargo.version
 
+include Makefile._pythia
+
 .PHONY: o oracle boot-oracle
 o: boot-oracle
 oracle: boot-oracle
