@@ -8,6 +8,7 @@ import os
 import platform
 import shutil
 import signal
+import subprocess
 import sys
 import textwrap
 
@@ -30,6 +31,15 @@ HOME = os.environ["HOME"]
 GLOBAL_DIR = os.path.join(HOME, ".pythia", "auto")
 
 @dataclass
+class _InputEvent:
+    def __post_init__(self):
+        self._ctr = -1
+
+    @classmethod
+    async def afresh(cls):
+        return cls()
+
+@dataclass
 class _InputState:
     halt: asyncio.Event
     ret: asyncio.Event
@@ -38,9 +48,12 @@ class _InputState:
     pos: int
     width: int
     _input: Any
+    _workqueue: Optional[set] = None
 
     def handle_key_presses(self):
+        pressed = False
         for key_press in self._input.read_keys():
+            pressed = True
             if key_press.key == Keys.ControlC:
                 self.halt.set()
             elif key_press.key == Keys.ControlD:
@@ -69,6 +82,8 @@ class _InputState:
                 self.pos = -1
                 self.buf = self.buf + self.rbuf
                 self.rbuf.clear()
+            elif key_press.key == Keys.ControlJ:
+                pass
             elif key_press.key == Keys.Left:
                 if self.pos < 0:
                     self.pos = max(0, len(self.buf) + len(self.rbuf) - 1)
@@ -97,6 +112,8 @@ class _InputState:
                 self.buf.append(key_press.data)
                 if self.pos >= 0:
                     self.pos += 1
+        if pressed and self._workqueue is not None:
+            self._workqueue.add(asyncio.create_task(_InputEvent.afresh()))
 
     def build_input_line(self, prompt: str, end: str = "") -> str:
         input_len = len(self.buf) + len(self.rbuf)
@@ -247,6 +264,7 @@ async def _run_main(args, input_state: _InputState):
     auto = Autopythia()
     workqueue = auto._workqueue
     workqueue.add(asyncio.create_task(sleeping_beauty()))
+    input_state._workqueue = workqueue
     if args.resume:
         session_ctr = auto._get_session_ctr()
     else:
@@ -297,8 +315,12 @@ async def _run_main(args, input_state: _InputState):
         if input_state.ret.is_set():
             ret = True
             input_state.ret.clear()
+        done_events = []
         for task in done:
             event = task.result()
+            done_events.append(event)
+        done_events.sort(key=lambda event: event._ctr)
+        for event in done_events:
             output = None
             if isinstance(event, StartControlEvent):
                 start.add(event.step_ctr)
@@ -343,18 +365,42 @@ async def _run_main(args, input_state: _InputState):
             end = ""
         print(input_state.build_input_line(prompt, end), end="", flush=True)
         if ret:
-            input_query = input_state.flush()
-            query = input_query.strip()
-            if query.startswith("/"):
-                if query in ("/exit", "/q", "/quit"):
+            query = input_state.flush().strip()
+            query_args = query.split()
+            query_head = query_args[0] if query_args else None
+            query_args = query_args[1:] if query_args else None
+            if query_head and query_head.startswith("/"):
+                if query_head in ("/exit", "/q", "/quit"):
                     break
-                elif query in ("/h", "/help"):
+                elif query_head in ("/cd",):
                     pass
-                elif query in ("/a", "/accept"):
+                elif query_head in ("/vim",):
+                    p = subprocess.Popen(
+                        ["vim"] + query_args,
+                        stdin=sys.stdin,
+                        stdout=sys.stdout,
+                        stderr=sys.stderr,
+                        shell=False,
+                    )
+                    p.communicate()
+                elif query_head in ("/nano",):
+                    p = subprocess.Popen(
+                        ["nano"] + query_args,
+                        stdin=sys.stdin,
+                        stdout=sys.stdout,
+                        stderr=sys.stderr,
+                        shell=False,
+                    )
+                    p.communicate()
+                elif query_head in ("/h", "/help"):
                     pass
-                elif query in ("/revise",):
+                elif query_head in ("/a", "/accept"):
                     pass
-                elif query in ("/review",):
+                elif query_head in ("/status"):
+                    pass
+                elif query_head in ("/revise",):
+                    pass
+                elif query_head in ("/review",):
                     pass
                 # auto.append_history(session_ctr, step_ctr, query=query)
             elif query:

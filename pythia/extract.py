@@ -76,19 +76,41 @@ class TextBlock(TypedDict):
     start: int
     end: int
     text: str
+    # text_start: Optional[int] = None
+    # text_end: Optional[int] = None
 
 class MarkdownTextBlock(TextBlock):
     pass
 
+class MarkdownCodeBlock(MarkdownTextBlock):
+    lang: Optional[str]
+    # block_start: Optional[int] = None
+    # block_end: Optional[int] = None
+
+    @staticmethod
+    def extract_next(haystack: str, start: Optional[int] = None) -> Optional["MarkdownCodeBlock"]:
+        return extract_next_markdown_code_block(haystack, start)
+
+class MarkdownIndexCodeBlock(TypedDict):
+    block_start: int
+    block_end: int
+    start: int
+    end: int
+    lang: Optional[str]
+
 @dataclass
-class MarkdownHeaderIndex:
-    _pivots: dict[int, list[tuple[int, str]]]
+class MarkdownIndex:
+    _header_pivots: dict[tuple[int, int], list[tuple[int, str]]]
+    _code_blocks:   dict[tuple[int, int], MarkdownIndexCodeBlock]
 
     @classmethod
     def new(cls, haystack: str) -> "MarkdownHeaderIndex":
-        pivots = dict()
+        header_pivots = dict()
         headers = []
-        code = False
+        code_blocks = dict()
+        code_block_start = None
+        code_start = None
+        code_langs = []
         line_start = 0
         line_end = -1
         while True:
@@ -98,9 +120,31 @@ class MarkdownHeaderIndex:
                 line_end = len(haystack)
             line_len = line_end - line_start
             if line_len >= 3 and haystack[line_start:line_start+3] == "```":
-                code = not code
+                code_block_lang = None
+                code_lang = haystack[line_start+3:line_end].strip()
+                if code_lang:
+                    if not code_langs:
+                        code_block_start = line_start
+                        code_start = min(line_end + 1, len(haystack))
+                    code_langs.append(code_lang)
+                elif not code_langs:
+                    code_block_start = line_start
+                    code_start = min(line_end + 1, len(haystack))
+                    code_langs.append(None)
+                else:
+                    code_block_lang = code_langs.pop()
+                if not code_langs:
+                    code_block_end = line_end
+                    code_end = line_start
+                    code_blocks[(code_block_start, code_block_end)] = {
+                        "block_start": code_block_start,
+                        "block_end": code_block_end,
+                        "start": code_start,
+                        "end": code_end,
+                        "lang": code_block_lang,
+                    }
             append_header = False
-            if line_len >= 1 and haystack[line_start] == "#" and not code:
+            if line_len >= 1 and haystack[line_start] == "#" and not code_langs:
                 level = 1
                 while level < line_len and haystack[line_start+level] == "#":
                     level += 1
@@ -113,25 +157,68 @@ class MarkdownHeaderIndex:
             if line_end < len(haystack) and haystack[line_end] == "\r":
                 line_end += 1
             if append_header:
-                pivots[(line_start, line_end)] = headers.copy()
+                header_pivots[(line_start, line_end)] = headers.copy()
             if og_line_end < 0:
                 break
             line_start = line_end
-        return cls(pivots)
+        return cls(header_pivots, code_blocks)
 
+    def extract_text(self, haystack: str, block: dict) -> MarkdownTextBlock:
+        """Given a text block, extract the text span."""
+        start = block["start"]
+        end = block["end"]
+        text = haystack[start:end]
+        return {
+            "start": start,
+            "end": end,
+            "text": text,
+        }
+
+    def extract_prev_line_text(self, haystack: str, block: dict) -> Optional[MarkdownTextBlock]:
+        """Given a text block, extract the first (rightmost) previous non-space line as a text block."""
+        if "block_start" in block:
+            block_start = block["block_start"]
+        else:
+            block_start = block["start"]
+        line_start = block_start
+        while True:
+            line_end = haystack.rfind("\n", line_start)
+            if line_end < 0:
+                return None
+            prev_line_end = haystack.rfind("\n", line_end)
+            if prev_line_end < 0:
+                line_start = 0
+            else:
+                line_start = prev_line_end + 1
+            text = haystack[line_start:line_end]
+            if text.strip():
+                return {
+                    "start": line_start,
+                    "end": line_end,
+                    "text": text,
+                }
+
+    def unstyle_text(self, haystack: str, block: dict) -> MarkdownTextBlock:
+        pass
+
+    def strip_text(self, haystack: str, block: dict) -> MarkdownTextBlock:
+        pass
+
+    # TODO: deprecate.
     def find(self, pos: int) -> list[tuple[int, str]]:
         prev_headers = []
-        for (hstart, _), headers in self._pivots.items():
+        for (hstart, _), headers in self._header_pivots.items():
             if pos < hstart:
                 return prev_headers
             prev_headers = headers
         return prev_headers
 
+    # TODO: deprecate.
     def extract_prelude_text(self, haystack: str, start: int, end: int) -> MarkdownTextBlock:
         prev_hstart = 0
         prev_hend = 0
         prev_headers = []
-        for (hstart, hend), headers in self._pivots.items():
+        for (hstart, hend), headers in self._header_pivots.items():
             if end <= hstart:
                 break
             prev_hstart = hstart
@@ -145,12 +232,7 @@ class MarkdownHeaderIndex:
             "text": text,
         }
 
-class MarkdownCodeBlock(MarkdownTextBlock):
-    lang: Optional[str]
-
-    @staticmethod
-    def extract_next(haystack: str, start: Optional[int] = None) -> Optional["MarkdownCodeBlock"]:
-        return extract_next_markdown_code_block(haystack, start)
+MarkdownHeaderIndex = MarkdownIndex
 
 def extract_next_markdown_code_block(haystack: str, start: Optional[int] = None) -> Optional[MarkdownCodeBlock]:
     if start is not None:

@@ -4,7 +4,7 @@ SYSTEM_PROMPT = (
 Commands that you output in markdown code blocks, in shell languages (e.g. sh, bash, zsh), will be executed directly in the shell environment.
 
 If you need to edit a file in the current working copy:
-- Output a markdown section with title beginning with ./ and containing the relative path to the file.
+- Output a markdown section with title beginning with `/edit` and followed by the relative path to the file starting with `./`.
 - In a markdown code block, at your discretion, output either a fresh version of the file content (to replace the existing file content), or a unified diff (to be applied to the current file).
 
 You may have access to a _plan_.
@@ -13,7 +13,7 @@ You may have access to a _plan_.
 
 You may also have access to a _scratchpad_ which can be used e.g. for saving intermediate results. To use the scratchpad:
 - Output a markdown section beginning with `/scratch`.
-- All output in the section content following `/scratch` will be appended to the scratchpad.
+- The section content inside the fenced code block (language: markdown) following `/scratch` will replace the current scratchpad content.
 - Please be economical with scratchpad space.
 
 The user query may contain keyword-triggered special instructions. These are as follows:
@@ -41,6 +41,10 @@ EVAL_PROMPT_0 = (
 
 {query}
 
+## Current Scratchpad
+
+{scratch}
+
 ## Current Plan
 
 {plan}"""
@@ -51,13 +55,17 @@ EVAL_PROMPT = (
 
 {query}
 
-## Current Plan
-
-{plan}
-
 ## Current Progress
 
-{results}"""
+{results}
+
+## Current Scratchpad
+
+{scratch}
+
+## Current Plan
+
+{plan}"""
 )
 
 BACKUP_PROMPT = (
@@ -74,13 +82,17 @@ To update the plan:
 
 Alternatively, if the plan is complete, then output a markdown section beginning with `/final`, and output a final answer to the user query.
 
-## Current Plan
-
-{plan}
-
 ## Current Progress
 
-{results}"""
+{results}
+
+## Current Scratchpad
+
+{scratch}
+
+## Current Plan
+
+{plan}"""
 )
 
 PLAN_REVISE_PROMPT = (

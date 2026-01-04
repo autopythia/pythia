@@ -1,11 +1,11 @@
-from typing import Any, Optional, TypedDict, Union
+from typing import Any, Optional, TypedDict
 from dataclasses import dataclass, field
 from tempfile import NamedTemporaryFile
 import asyncio
 import functools
 import json
 import os
-import shlex
+# import shlex
 import textwrap
 
 from pythia.api import APIServices
@@ -16,10 +16,12 @@ from pythia.experimental.extract import extract_struct
 from pythia.extract import (
     Message,
     MarkdownCodeBlock,
+    MarkdownIndex,
 )
 from pythia.io_control.command import (
     ShellIOCommandController,
 )
+from pythia.shell import ShellPipeline
 from pythia.term_utils import *
 
 HOME = os.environ["HOME"]
@@ -98,17 +100,37 @@ def async_tail(fun):
                 continue
     return wrapped_fun
 
+def tail_task(a):
+    return a
+    # return asyncio.create_task(a)
+
+# FIXME: should not be global but part of state.
+_EVENT_CTR = 0
+
+def _fresh_event_ctr() -> int:
+    global _EVENT_CTR
+    ctr = _EVENT_CTR + 1
+    _EVENT_CTR = ctr
+    return ctr
+
 @dataclass
 class StartControlEvent:
     step_ctr: int
+
+    def __post_init__(self):
+        self._ctr = _fresh_event_ctr()
 
 @dataclass
 class EndControlEvent:
     step_ctr: int
 
+    def __post_init__(self):
+        self._ctr = _fresh_event_ctr()
+
 @dataclass
 class OutputEvent:
-    pass
+    def __post_init__(self):
+        self._ctr = _fresh_event_ctr()
 
     def __str__(self) -> str:
         raise NotImplementedError
@@ -180,65 +202,6 @@ class SafeStruct(TypedDict):
     # safe: bool
 
 @dataclass
-class _ShellPipelineStage:
-    cmd_args: list[str]
-    out_arg: Optional[str] = None
-    err_arg: Optional[str] = None
-    err2out: Optional[bool] = None
-    pipe: Optional[bool] = None
-
-@dataclass
-class ShellPipeline:
-    cmd: Union[str, list[str]]
-    cmd_args: list[str] = None
-    parsing_error: bool = False
-    not_supported: bool = False
-    stages: list[_ShellPipelineStage] = field(default_factory=list)
-
-    def __post_init__(self):
-        if self.cmd_args is None:
-            if isinstance(self.cmd, str):
-                # FIXME: this can fail!
-                try:
-                    self.cmd_args = shlex.split(self.cmd)
-                except ValueError:
-                    self.parsing_error = True
-                    return
-            elif isinstance(self.cmd, list):
-                self.cmd_args = self.cmd
-            else:
-                raise ValueError
-        stage = _ShellPipelineStage([])
-        cmd_args_iter = iter(self.cmd_args)
-        for arg in cmd_args_iter:
-            if arg == "|":
-                stage.pipe = True
-                self.stages.append(stage)
-                stage = _ShellPipelineStage([])
-            elif arg == "2>&1":
-                stage.err2out = True
-            elif arg == "2>":
-                stage.err_arg = next(cmd_args_iter)
-            elif arg.startswith("2>"):
-                stage.err_arg = arg[2:]
-            elif arg in ("1>", ">"):
-                stage.out_arg = next(cmd_args_iter)
-            elif (
-                arg.startswith("1>(") or
-                arg.startswith(">(")
-            ):
-                self.not_supported = True
-                return
-            elif arg.startswith("1>"):
-                stage.out_arg = arg[2:]
-            elif arg.startswith(">"):
-                stage.out_arg = arg[1:]
-            else:
-                stage.cmd_args.append(arg)
-        if stage.cmd_args:
-            self.stages.append(stage)
-
-@dataclass
 class ShellExecResult:
     cmd: str
     pipeline: ShellPipeline
@@ -276,7 +239,15 @@ class Autopythia:
     def _set_session(self, session_ctr: str):
         self._session = session_ctr
 
-    def append_history(self, session_ctr: str, step_ctr: str, query: str, t0=None):
+    def append_history(
+        self,
+        session_ctr: str,
+        step_ctr: str,
+        query: Optional[str] = None,
+        messages: Optional[list] = None,
+        t0=None,
+        t1=None,
+    ):
         if t0 is None:
             t0 = Timestamp()
         prefix = os.path.join(GLOBAL_SESSION_DIR, session_ctr)
@@ -288,12 +259,16 @@ class Autopythia:
             history_file = open(history_path, "a", encoding="utf-8")
         history_item = {
             "t0": f"{t0}",
+            "t1": f"{t1}" if t1 is not None else None,
             "session_ctr": session_ctr,
             "session_uid": None,
             "step_ctr": step_ctr,
             "step_uid": None,
-            "query": query,
         }
+        if query is not None:
+            history_item["query"] = query
+        elif messages is not None:
+            history_item["messages"] = messages
         print(json.dumps(history_item), file=history_file, flush=True)
         history_file.close()
         return t0
@@ -322,6 +297,7 @@ class Autopythia:
 
         if step_ctr is None:
             step_ctr = self._fresh_step_ctr(self._session)
+        # print(f"DEBUG: init: step ctr = {step_ctr}")
 
         event = StartControlEvent(step_ctr)
         self._workqueue.add(asyncio.create_task(echo_event(event)))
@@ -342,12 +318,14 @@ class Autopythia:
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
         t0 = Timestamp()
-        plan_result = await self.services.client.message(
+        plan_result = self.services.client.message(
             think_model,
             plan_query,
             think_sampling_params,
             fresh=True,
         )
+        self.append_history(self._session, step_ctr, messages=plan_query, t0=t0)
+        plan_result = await plan_result
         t1 = Timestamp()
         # print(plan_result)
 
@@ -384,18 +362,27 @@ class Autopythia:
                 break
             block_start = plan_block["end"]
 
+        index = MarkdownIndex.new(answer)
+        # print(f"DEBUG: markdown index = {index}")
+        plan_block = None
+        for _, block in index._code_blocks.items():
+            if block["lang"] == "markdown":
+                block["text"] = index.extract_text(answer, block)["text"]
+                plan_block = block
+                break
+
         plan = None
         if plan_block is not None:
             # print(f"DEBUG: init: initial code block: {plan_block}", flush=True)
             plan = plan_block["text"].rstrip()
 
         if not plan:
-            return await self.init(None, query)
+            return await tail_task(self.init(None, query))
         else:
             new_results = self._parse_shell_commands(answer)
             results = new_results
 
-            return await self.eval(None, query, plan, None, results)
+            return await tail_task(self.eval(None, query, plan, None, results))
 
     async def eval(self, step_ctr: Optional[str], query: str, plan: str, scratch: Optional[str], results: list = []):
         model_path = self.working_model
@@ -426,6 +413,7 @@ class Autopythia:
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
         formatted_query = textwrap.indent(query, "    ")
+        formatted_scratch = textwrap.indent(scratch, "    ") if scratch is not None else ""
         formatted_plan = plan
 
         if results:
@@ -443,13 +431,15 @@ class Autopythia:
 
             eval_prompt = EVAL_PROMPT.format(
                 query=formatted_query,
-                plan=formatted_plan,
                 results=formatted_results,
+                scratch=formatted_scratch,
+                plan=formatted_plan,
             )
 
         else:
             eval_prompt = EVAL_PROMPT_0.format(
                 query=formatted_query,
+                scratch=formatted_scratch,
                 plan=formatted_plan,
             )
 
@@ -468,12 +458,14 @@ class Autopythia:
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
         t0 = Timestamp()
-        eval_result = await self.services.client.message(
+        eval_result = self.services.client.message(
             think_model,
             eval_query,
             think_sampling_params,
             fresh=True,
         )
+        self.append_history(self._session, step_ctr, messages=eval_query, t0=t0)
+        eval_result = await eval_result
         t1 = Timestamp()
         # print(eval_result)
 
@@ -502,10 +494,32 @@ class Autopythia:
         new_results = self._parse_shell_commands(answer)
         results.extend(new_results)
 
+        index = MarkdownIndex.new(answer)
+        # print(f"DEBUG: markdown index = {index}")
+        write_plan = False
+        write_scratch = False
+        plan_block = None
+        scratch_block = None
+        for _, block in index._code_blocks.items():
+            if block["lang"] == "markdown":
+                prev_line = index.extract_prev_line_text(answer, block)
+                if prev_line is not None and prev_line["text"].strip() == "/plan":
+                    write_plan = True
+                    block["text"] = index.extract_text(answer, block)["text"]
+                    plan_block = block
+                    # break
+                elif prev_line is not None and prev_line["text"].strip() == "/scratch":
+                    write_scratch = True
+                    block["text"] = index.extract_text(answer, block)["text"]
+                    scratch_block = block
+
+        if scratch_block is not None:
+            scratch = scratch_block["text"].rstrip()
+
         if not new_results:
-            return await self.eval(None, query, plan, None, results)
+            return await tail_task(self.eval(None, query, plan, scratch, results))
         else:
-            return await self.backup(None, query, plan, None, results)
+            return await tail_task(self.backup(None, query, plan, scratch, results))
 
     async def backup(self, step_ctr, query: str, plan: str, scratch: Optional[str], results = []):
         model_path = self.working_model
@@ -536,6 +550,7 @@ class Autopythia:
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
         formatted_query = textwrap.indent(query, "    ")
+        formatted_scratch = textwrap.indent(scratch, "    ") if scratch is not None else ""
         formatted_plan = plan
 
         formatted_results_parts = []
@@ -559,8 +574,9 @@ Output: {result.final_output}"""
                 "role": "user",
                 "content": BACKUP_PROMPT.format(
                     query=formatted_query,
-                    plan=formatted_plan,
                     results=formatted_results,
+                    scratch=formatted_scratch,
+                    plan=formatted_plan,
                 ),
             },
         ]
@@ -569,12 +585,14 @@ Output: {result.final_output}"""
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
         t0 = Timestamp()
-        backup_result = await self.services.client.message(
+        backup_result = self.services.client.message(
             think_model,
             backup_query,
             think_sampling_params,
             fresh=True,
         )
+        self.append_history(self._session, step_ctr, messages=backup_query, t0=t0)
+        backup_result = await backup_result
         t1 = Timestamp()
         # print(backup_result)
 
@@ -617,16 +635,45 @@ Output: {result.final_output}"""
                 break
             block_start = plan_block["end"]
 
+        # TODO: index-based impl.
+        final_ = answer.find("/final") >= 0
+
+        index = MarkdownIndex.new(answer)
+        # print(f"DEBUG: markdown index = {index}")
+        write_plan = False
+        write_scratch = False
+        plan_block = None
+        scratch_block = None
+        for _, block in index._code_blocks.items():
+            if block["lang"] == "markdown":
+                prev_line = index.extract_prev_line_text(answer, block)
+                if prev_line is not None and prev_line["text"].strip() == "/plan":
+                    write_plan = True
+                    block["text"] = index.extract_text(answer, block)["text"]
+                    plan_block = block
+                    # break
+                elif prev_line is not None and prev_line["text"].strip() == "/scratch":
+                    write_scratch = True
+                    block["text"] = index.extract_text(answer, block)["text"]
+                    scratch_block = block
+
+        if final_:
+            event = BasicOutputEvent(green("Done.", bold=True))
+            self._workqueue.add(asyncio.create_task(echo_event(event)))
+            return
+
         # new_plan = None
         if plan_block is not None:
-            # print(f"DEBUG: init: initial code block: {plan_block}", flush=True)
             plan = plan_block["text"].rstrip()
             # new_plan = plan
 
+        if scratch_block is not None:
+            scratch = scratch_block["text"].rstrip()
+
         if not new_results:
-            return await self.eval(None, query, plan, None, results)
+            return await tail_task(self.eval(None, query, plan, scratch, results))
         else:
-            return await self.backup(None, query, plan, None, results)
+            return await tail_task(self.backup(None, query, plan, scratch, results))
 
     def _parse_shell_commands(self, answer):
         block_start = None
@@ -638,6 +685,15 @@ Output: {result.final_output}"""
             elif code_block["lang"] in ("sh", "bash", "zsh"):
                 code_blocks.append(code_block)
             block_start = code_block["end"]
+
+        index = MarkdownIndex.new(answer)
+        # print(f"DEBUG: markdown index = {index}")
+        code_blocks = []
+        for _, block in index._code_blocks.items():
+            if block["lang"] in ("sh", "bash", "zsh"):
+                block["text"] = index.extract_text(answer, block)["text"]
+                code_blocks.append(block)
+
         print(f"DEBUG: code blocks = {code_blocks} ...", flush=True)
 
         allow_cmds = [
