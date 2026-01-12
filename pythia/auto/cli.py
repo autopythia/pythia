@@ -1,6 +1,6 @@
 from typing import Any, Optional
 from argparse import ArgumentParser, BooleanOptionalAction
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 import functools
 import itertools
@@ -40,13 +40,140 @@ class _InputEvent:
         return cls()
 
 @dataclass
+class _InputLineBuffer:
+    buf: list[str] = field(default_factory=list)
+    rbuf: list[str] = field(default_factory=list)
+    pos: int = -1
+
+    def buffer_len(self) -> int:
+        return len(self.buf) + len(self.rbuf)
+
+    def buffer_pos(self) -> int:
+        if self.pos < 0:
+            return self.buffer_len()
+        else:
+            return self.pos
+
+    def flush(self) -> str:
+        text = f"""{"".join(self.buf)}{"".join(self.rbuf)}"""
+        self.buf.clear()
+        self.rbuf.clear()
+        self.pos = -1
+        return text
+
+    def backspace(self):
+        if self.buf:
+            self.buf.pop()
+            if self.pos > 0:
+                self.pos -= 1
+        if self.pos == 0 and len(self.rbuf) <= 0:
+            self.pos = -1
+
+    def clear(self):
+        self.buf.clear()
+        self.rbuf.clear()
+        self.pos = -1
+
+    def clear_left(self):
+        self.buf.clear()
+        self.pos = 0
+        if len(self.rbuf) <= 0:
+            self.pos = -1
+
+    def clear_right(self):
+        self.rbuf.clear()
+        self.pos = -1
+
+    def _deprecated_resplit_left(self):
+        # TODO: deprecate.
+        # Re-split the bipartite line buffer at the current cursor position,
+        # assuming it has been moved to the left.
+        assert self.pos >= 0
+        assert self.pos <= len(self.buf)
+        if self.pos == len(self.buf) and len(self.rbuf) <= 0:
+            self.pos = -1
+            return
+        self.rbuf = self.buf[self.pos:] + self.rbuf
+        self.buf = self.buf[:self.pos]
+        if len(self.rbuf) <= 0:
+            self.pos = -1
+
+    def _resplit(self):
+        # Re-split the bipartite line buffer at the current cursor position.
+        if self.pos < 0 and len(self.rbuf) <= 0:
+            pass
+        elif self.pos < 0 or self.pos >= len(self.buf) + len(self.rbuf):
+            self.pos = -1
+            self.buf = self.buf + self.rbuf
+            self.rbuf.clear()
+        elif self.pos >= len(self.buf):
+            buf_len = len(self.buf)
+            self.buf = self.buf + self.rbuf[:(self.pos - buf_len)]
+            self.rbuf = self.rbuf[(self.pos - buf_len):]
+        else:
+            self.rbuf = self.buf[self.pos:] + self.rbuf
+            self.buf = self.buf[:self.pos]
+        # if len(self.rbuf) <= 0:
+        #     self.pos = -1
+
+    def pop_left(self):
+        pos = self.pos
+        if pos < 0:
+            pos = len(self.buf)
+        init = True
+        for p in range(pos - 1, -1, -1):
+            if self.buf[p] in (" ", "\t"):
+                if not init:
+                    break
+            else:
+                init = False
+            pos = p
+        self.pos = pos
+        self.buf = self.buf[:self.pos]
+        self._resplit()
+
+    def key_left(self):
+        if self.pos < 0:
+            self.pos = max(0, len(self.buf) + len(self.rbuf) - 1)
+        else:
+            self.pos = max(0, self.pos - 1)
+        self._resplit()
+
+    def key_right(self):
+        if self.pos < 0:
+            pass
+        else:
+            self.pos = min(len(self.buf) + len(self.rbuf), self.pos + 1)
+        self._resplit()
+
+    def snap_left(self):
+        self.rbuf = self.buf + self.rbuf
+        self.buf.clear()
+        self.pos = 0
+        if len(self.rbuf) <= 0:
+            self.pos = -1
+
+    def snap_right(self):
+        self.buf = self.buf + self.rbuf
+        self.rbuf.clear()
+        self.pos = -1
+
+    def append(self, data: str):
+        # TODO: multi-char keypresses?
+        for elem in data:
+            self.buf.append(elem)
+            if self.pos >= 0:
+                self.pos += 1
+
+@dataclass
 class _InputState:
     halt: asyncio.Event
     ret: asyncio.Event
-    buf: list
-    rbuf: list
-    pos: int
+    lbuf: _InputLineBuffer
+    hpos: int
+    hmax: int
     width: int
+    prompt_len: int
     _input: Any
     _workqueue: Optional[set] = None
 
@@ -54,87 +181,114 @@ class _InputState:
         pressed = False
         for key_press in self._input.read_keys():
             pressed = True
+            self._handle_key_press(key_press)
+        if pressed and self._workqueue is not None:
+            self._workqueue.add(asyncio.create_task(_InputEvent.afresh()))
+
+    def _handle_key_press(self, key_press):
+        while True:
             if key_press.key == Keys.ControlC:
+                if False:
+                    for _ in range(40):
+                        print()
+                    print(f"DEBUG: _InputState: ctrl-c: buf      = {self.lbuf.buf}")
+                    print(f"DEBUG: _InputState: ctrl-c: buf.len  = {len(self.lbuf.buf)}")
+                    print(f"DEBUG: _InputState: ctrl-c: rbuf.len = {len(self.lbuf.rbuf)}")
+                    print(f"DEBUG: _InputState: ctrl-c: pos      = {self.lbuf.pos}")
+                    print(f"DEBUG: _InputState: ctrl-c: hpos     = {self.hpos}")
+                    print(f"DEBUG: _InputState: ctrl-c: hmax     = {self.hmax}")
+                    print(f"DEBUG: _InputState: ctrl-c: width    = {self.width}")
                 self.halt.set()
             elif key_press.key == Keys.ControlD:
                 self.halt.set()
             elif key_press.key == Keys.Enter:
                 self.ret.set()
             elif key_press.key == Keys.Backspace:
-                if self.buf:
-                    self.buf.pop()
-                    if self.pos > 0:
-                        self.pos -= 1
+                self.lbuf.backspace()
             elif key_press.key == Keys.ControlW:
-                pass
+                self.lbuf.pop_left()
             elif key_press.key == Keys.ControlU:
-                self.buf.clear()
-                self.rbuf.clear()
-                self.pos = -1
+                self.lbuf.clear_left()
             elif key_press.key == Keys.ControlK:
-                self.rbuf.clear()
-                self.pos = -1
+                self.lbuf.clear_right()
             elif key_press.key == Keys.ControlA:
-                self.pos = 0
-                self.rbuf = self.buf + self.rbuf
-                self.buf.clear()
+                self.lbuf.snap_left()
             elif key_press.key == Keys.ControlE:
-                self.pos = -1
-                self.buf = self.buf + self.rbuf
-                self.rbuf.clear()
+                self.lbuf.snap_right()
             elif key_press.key == Keys.ControlJ:
                 pass
+            elif key_press.key == Keys.Up:
+                pass
+            elif key_press.key == Keys.Down:
+                pass
             elif key_press.key == Keys.Left:
-                if self.pos < 0:
-                    self.pos = max(0, len(self.buf) + len(self.rbuf) - 1)
-                else:
-                    self.pos = max(0, self.pos - 1)
-                assert self.pos <= len(self.buf)
-                self.rbuf = self.buf[self.pos:] + self.rbuf
-                self.buf = self.buf[:self.pos]
+                self.lbuf.key_left()
             elif key_press.key == Keys.Right:
-                if self.pos < 0:
-                    pass
-                else:
-                    self.pos = min(len(self.buf) + len(self.rbuf), self.pos + 1)
-                if self.pos < 0:
-                    pass
-                elif self.pos >= len(self.buf) + len(self.rbuf):
-                    self.pos = -1
-                    self.buf = self.buf + self.rbuf
-                    self.rbuf.clear()
-                else:
-                    assert self.pos >= len(self.buf)
-                    buf_len = len(self.buf)
-                    self.buf = self.buf + self.rbuf[:(self.pos - buf_len)]
-                    self.rbuf = self.rbuf[(self.pos - buf_len):]
-            elif key_press.data is not None and len(key_press.data) == 1:
-                self.buf.append(key_press.data)
-                if self.pos >= 0:
-                    self.pos += 1
-        if pressed and self._workqueue is not None:
-            self._workqueue.add(asyncio.create_task(_InputEvent.afresh()))
+                self.lbuf.key_right()
+            elif key_press.data is not None:
+                self.lbuf.append(key_press.data)
+            break
 
-    def build_input_line(self, prompt: str, end: str = "") -> str:
-        input_len = len(self.buf) + len(self.rbuf)
-        input_pos = self.pos
-        trailing = f"{rclear()}"
-        if input_pos < 0:
-            pass
-        elif input_pos < input_len:
+    def build_input_line(self, prompt: str, prompt1: str = " > ", prompt2: str = "   ", end: str = "") -> str:
+        assert self.prompt_len == len(prompt)
+        input_width = self.width
+        input_len = self.lbuf.buffer_len()
+        input_pos = self.lbuf.buffer_pos()
+        if False:
+            trailing = f"{rclear()}"
             if input_pos < 0:
-                input_pos = input_len
-            back = input_len - self.pos
-            if back:
-                back = "\b" * back
-                trailing = f"""{trailing}{back}"""
-        return f"""\r{prompt} {"".join(self.buf)}{"".join(self.rbuf)}{trailing}{end}"""
+                pass
+            elif input_pos < input_len:
+                if input_pos < 0:
+                    input_pos = input_len
+                back = input_len - self.lbuf.pos
+                if back:
+                    back = "\b" * back
+                    trailing = f"""{trailing}{back}"""
+            return f"""\r{prompt}{"".join(self.lbuf.buf)}{"".join(self.lbuf.rbuf)}{trailing}{end}"""
+        input_height = (input_len + input_width) // input_width
+        save_hpos = self.hpos
+        save_hmax = self.hmax
+        if self.hmax < input_height:
+            self.hmax = input_height
+        self.hpos = input_pos // input_width
+        hoff = self.hmax - self.hpos - 1
+        roff = self.prompt_len + input_pos % input_width
+        full_buf = self.lbuf.buf + self.lbuf.rbuf
+        input_parts = []
+        if save_hpos > 0:
+            input_parts.append(f"""\x1b[{save_hpos}A""")
+        line = (
+            f"""\r{prompt}{"".join(full_buf[:input_width])}{rclear()}"""
+        )
+        input_parts.append(line)
+        for h in range(1, input_height):
+            line = (
+                f"""\n\r{prompt1}{"".join(full_buf[(input_width*h):(input_width*(h+1))])}{rclear()}"""
+            )
+            input_parts.append(line)
+        for _ in range(input_height, self.hmax):
+            line = f"""\n\r{prompt2}{rclear()}"""
+            input_parts.append(line)
+        if roff > 0:
+            part = f"""\r\x1b[{roff}C"""
+            input_parts.append(part)
+        if hoff > 0:
+            part = f"""\x1b[{hoff}A"""
+            input_parts.append(part)
+        input_parts.append(end)
+        return "".join(input_parts)
 
     def flush(self) -> str:
-        text = f"""{"".join(self.buf)}{"".join(self.rbuf)}"""
-        self.buf.clear()
-        self.rbuf.clear()
-        self.pos = -1
+        if False:
+            text = f"""{"".join(self.lbuf.buf)}{"".join(self.lbuf.rbuf)}"""
+            self.lbuf.buf.clear()
+            self.lbuf.rbuf.clear()
+            self.lbuf.pos = -1
+            return text
+        text = self.lbuf.flush()
+        self.hpos = 0
+        self.hmax = 1
         return text
 
 def quotewrap(haystack: str) -> str:
@@ -163,10 +317,11 @@ async def _setup_main(args):
     input_state = _InputState(
         halt = asyncio.Event(),
         ret = asyncio.Event(),
-        buf = [],
-        rbuf = [],
-        pos = -1,
-        width = width,
+        lbuf = _InputLineBuffer(),
+        hpos = 0,
+        hmax = 1,
+        width = width - 1 - 3,
+        prompt_len = 3,
         _input = create_input(),
     )
     def input_key_presses():
@@ -354,16 +509,16 @@ async def _run_main(args, input_state: _InputState):
                 print(f"""{prefix}{output}""", flush=True)
                 # auto.append_history(session_ctr, step_ctr, output=output)
         if ret:
-            prompt = f"{arr}{arr}"
+            prompt = f"{arr}{arr} "
         elif not start:
-            prompt = f":{arr}"
+            prompt = f":{arr} "
         else:
-            prompt = f"{spin[(t // spin_step) % spin_len]}{arr}"
+            prompt = f"{spin[(t // spin_step) % spin_len]}{arr} "
         if ret:
             end = "\n"
         else:
             end = ""
-        print(input_state.build_input_line(prompt, end), end="", flush=True)
+        print(input_state.build_input_line(prompt, end=end), end="", flush=True)
         if ret:
             query = input_state.flush().strip()
             query_args = query.split()

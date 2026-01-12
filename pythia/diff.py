@@ -1,6 +1,6 @@
 from typing import Optional, TypedDict
 
-from pythia.type_utils import Result, _py_version
+from pythia.types import Result, _py_version
 
 class DiffHunk(TypedDict):
     src_line_start: int

@@ -7,11 +7,11 @@ import os
 # import sys
 import urllib.request
 
-from pythia.http_utils import http_get, http_post
+from pythia.http import http_get, http_post
 from pythia.types import Result
 
 HOME = os.environ["HOME"]
-FOOBAR_DIR = os.path.join(HOME, ".pythia", "foobar")
+FOO_DIR = os.path.join(HOME, ".pythia", "foo")
 STATE_DIR = os.path.join(FOO_DIR, "state")
 
 @dataclass

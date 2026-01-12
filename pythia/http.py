@@ -5,12 +5,18 @@ import subprocess
 import urllib.parse
 import urllib.request
 
+from pythia.types import Result
+
 @dataclass
 class CurlHTTP:
     @staticmethod
-    def http_get(url: str, headers: Optional[dict], params: Optional[dict]) -> dict:
+    def http_get(url: str, headers: Optional[dict], params: Optional[dict]) -> Result:
+        req_url = url
+        if params:
+            req_params = urllib.parse.urlencode(params)
+            req_url = f"{req_url}?{req_params}"
         cmd = ["curl"]
-        cmd.append(url)
+        cmd.append(req_url)
         cmd.append("-L")
         cmd.append("-X")
         cmd.append("GET")
@@ -21,6 +27,8 @@ class CurlHTTP:
         cmd.append("-s")
         cmd.append("-w")
         cmd.append("%{stderr}%{http_code}")
+        print(f"DEBUG: CurlAPIClientWorker._http_get: cmd = {cmd}")
+        # print(f"DEBUG: CurlAPIClientWorker._http_get: err = {repr(err)}")
         # res.t0 = datetime.utcnow().isoformat()
         proc = subprocess.Popen(
             cmd,
@@ -31,8 +39,8 @@ class CurlHTTP:
             encoding="utf-8",
         )
         out, err = proc.communicate()
-        # print(f"DEBUG: CurlAPIClientWorker._http_post: out = {repr(out)}")
-        # print(f"DEBUG: CurlAPIClientWorker._http_post: err = {repr(err)}")
+        # print(f"DEBUG: CurlAPIClientWorker._http_get: out = {repr(out)}")
+        # print(f"DEBUG: CurlAPIClientWorker._http_get: err = {repr(err)}")
         # res.t1 = datetime.utcnow().isoformat()
         res_status = -1
         try:
@@ -50,9 +58,13 @@ class CurlHTTP:
         return {"ok": res_content}
 
     @staticmethod
-    def http_post(url: str, headers: Optional[dict], params: Optional[dict], content: Any) -> dict:
+    def http_post(url: str, headers: Optional[dict], params: Optional[dict], content: Any) -> Result:
+        req_url = url
+        if params:
+            req_params = urllib.parse.urlencode(params)
+            req_url = f"{req_url}?{req_params}"
         cmd = ["curl"]
-        cmd.append(url)
+        cmd.append(req_url)
         cmd.append("-L")
         cmd.append("-X")
         cmd.append("POST")
@@ -96,7 +108,7 @@ class CurlHTTP:
 @dataclass
 class UrllibHTTP:
     @staticmethod
-    def http_get(url: str, headers: Optional[dict], params: Optional[dict]) -> dict:
+    def http_get(url: str, headers: Optional[dict], params: Optional[dict]) -> Result:
         req_url = url
         if params:
             req_params = urllib.parse.urlencode(params)
@@ -123,7 +135,7 @@ class UrllibHTTP:
         return {"ok": res_content}
 
     @staticmethod
-    def http_post(url: str, headers: Optional[dict], params: Optional[dict], content: Any) -> dict:
+    def http_post(url: str, headers: Optional[dict], params: Optional[dict], content: Any) -> Result:
         req_url = url
         if params:
             req_params = urllib.parse.urlencode(params)
@@ -153,8 +165,8 @@ class UrllibHTTP:
 
 DefaultHTTP = UrllibHTTP
 
-def http_get(url: str, headers: Optional[dict], params: Optional[dict]) -> dict:
+def http_get(url: str, headers: Optional[dict], params: Optional[dict]) -> Result:
     return DefaultHTTP.http_get(url, headers, params)
 
-def http_post(url: str, headers: Optional[dict], params: Optional[dict], content: Any) -> dict:
+def http_post(url: str, headers: Optional[dict], params: Optional[dict], content: Any) -> Result:
     return DefaultHTTP.http_post(url, headers, params, content)
