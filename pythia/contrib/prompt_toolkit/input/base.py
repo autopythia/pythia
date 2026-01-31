@@ -8,11 +8,10 @@ from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager
 from typing import Callable, ContextManager, Generator
 
-from pythia.contrib.prompt_toolkit.key_binding import KeyPress
+from ..key_binding import KeyPress
 
 __all__ = [
     "Input",
-    "PipeInput",
     "DummyInput",
 ]
 
@@ -90,20 +89,6 @@ class Input(metaclass=ABCMeta):
     def close(self) -> None:
         "Close input."
         pass
-
-
-class PipeInput(Input):
-    """
-    Abstraction for pipe input.
-    """
-
-    @abstractmethod
-    def send_bytes(self, data: bytes) -> None:
-        """Feed byte string into the pipe"""
-
-    @abstractmethod
-    def send_text(self, data: str) -> None:
-        """Feed a text string into the pipe"""
 
 
 class DummyInput(Input):

@@ -197,7 +197,7 @@ def is_windows_vt100_supported() -> bool:
     """
     if sys.platform == "win32":
         # Import needs to be inline. Windows libraries are not always available.
-        from pythia.contrib.prompt_toolkit.output.windows10 import is_win_vt100_enabled
+        from .output.windows10 import is_win_vt100_enabled
 
         return is_win_vt100_enabled()
 
