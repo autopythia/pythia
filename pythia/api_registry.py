@@ -191,6 +191,15 @@ class APIRegistry:
                 api_url="https://api.x.ai",
                 api_key=api_key,
             )
+        api_key = self.get_env("ZAI_API_KEY")
+        if api_key is not None:
+            self.register_endpoint(
+                "z-ai", ["z.ai", "zai"],
+                domain="z.ai",
+                protocol="openai",
+                api_url="https://api.z.ai",
+                api_key=api_key,
+            )
         self.register_endpoint(
             "__local__",
             domain="localhost",
@@ -551,25 +560,43 @@ class APIRegistry:
             )
         self.register_model(
             "moonshot",
-            "moonshotai/kimi-k2-instruct-0905",
-            endpoint_model_path="kimi-k2-0905-preview",
-            throttle_rps=3,
-            throttle_concurrency=48,
+            "moonshotai/kimi-k2-instruct",
+            endpoint_model_path="kimi-k2-0711-preview",
+            throttle_rps=80,
+            throttle_concurrency=198,
         )
         self.register_model(
             "moonshot",
-            "moonshotai/kimi-k2-instruct",
-            endpoint_model_path="kimi-k2-0711-preview",
-            throttle_rps=3,
-            throttle_concurrency=48,
+            "moonshotai/kimi-k2-instruct-0905",
+            endpoint_model_path="kimi-k2-0905-preview",
+            throttle_rps=80,
+            throttle_concurrency=198,
         )
         self.register_model(
             "moonshot",
             "moonshotai/kimi-k2-thinking",
             endpoint_model_path="kimi-k2-thinking",
             default_thinking=True,
-            throttle_rps=3,
-            throttle_concurrency=48,
+            throttle_rps=80,
+            throttle_concurrency=198,
+        )
+        self.register_model(
+            "moonshot",
+            "moonshotai/kimi-k2.5-thinking-off",
+            endpoint_model_path="kimi-k2.5",
+            throttle_rps=80,
+            throttle_concurrency=198,
+        )
+        self.register_model(
+            "moonshot",
+            "moonshotai/kimi-k2.5-thinking",
+            endpoint_model_path="kimi-k2.5",
+            endpoint_extra_params={
+                "thinking": "enabled",
+            },
+            default_thinking=True,
+            throttle_rps=80,
+            throttle_concurrency=198,
         )
 
     def _register_openai_models(self):
@@ -695,6 +722,18 @@ class APIRegistry:
             ["x-ai/grok-4.1-fast-thinking-on"],
             endpoint_model_path="grok-4-1-fast-reasoning",
             throttle_rps=8,
+        )
+
+    def _register_zai_models(self):
+        self.register_model(
+            "z-ai",
+            "z-ai/glm-4.7-thinking",
+            endpoint_model_path="glm-4.7",
+            endpoint_extra_params={
+                "thinking": "enabled",
+            },
+            default_thinking=True,
+            throttle_concurrency=5,
         )
 
     def _register_local_models(self):

@@ -187,6 +187,8 @@ class APIClientModelEndpoint:
             elif protocol == "openai":
                 if self.model.model_path.startswith("deepinfra/"):
                     self._endpoint_url = "{}/v1/openai/chat/completions".format(api_url)
+                elif self.model.model_path.startswith("z-ai/"):
+                    self._endpoint_url = "{}/api/paas/v4/chat/completions".format(api_url)
                 else:
                     self._endpoint_url = "{}/v1/chat/completions".format(api_url)
             else:
