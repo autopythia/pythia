@@ -161,7 +161,6 @@ class APIRegistry:
                     "openai": "https://api.moonshot.ai",
                     "anthropic": "https://api.moonshot.ai/anthropic",
                 },
-                throttle_rps=0.8,
             )
         api_key = self.get_env("OPENAI_API_KEY")
         if api_key is not None:
@@ -584,6 +583,9 @@ class APIRegistry:
             "moonshot",
             "moonshotai/kimi-k2.5-thinking-off",
             endpoint_model_path="kimi-k2.5",
+            endpoint_extra_params={
+                "thinking": {"type": "disabled"},
+            },
             throttle_rps=80,
             throttle_concurrency=198,
         )
@@ -591,9 +593,6 @@ class APIRegistry:
             "moonshot",
             "moonshotai/kimi-k2.5-thinking",
             endpoint_model_path="kimi-k2.5",
-            endpoint_extra_params={
-                "thinking": "enabled",
-            },
             default_thinking=True,
             throttle_rps=80,
             throttle_concurrency=198,
