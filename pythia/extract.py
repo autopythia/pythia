@@ -182,10 +182,11 @@ class MarkdownIndex:
             block_start = block["start"]
         line_start = block_start
         while True:
-            line_end = haystack.rfind("\n", line_start)
+            line_end = haystack.rfind("\n", 0, line_start)
+            # print(f"DEBUG: extract_prev_line_text: end={line_end} prev start={line_start}", flush=True)
             if line_end < 0:
                 return None
-            prev_line_end = haystack.rfind("\n", line_end)
+            prev_line_end = haystack.rfind("\n", 0, line_end)
             if prev_line_end < 0:
                 line_start = 0
             else:
@@ -270,7 +271,7 @@ def extract_last_markdown_code_block(haystack: str) -> Optional[MarkdownCodeBloc
     end_pos = haystack.rfind("```")
     if end_pos < 0:
         return None
-    start_pos = haystack.rfind("```", end_pos)
+    start_pos = haystack.rfind("```", 0, end_pos)
     if start_pos < 0:
         # FIXME(20250824): could be truncated.
         # start_pos = end_pos

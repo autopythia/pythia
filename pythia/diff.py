@@ -28,7 +28,7 @@ def parse_diff(haystack: str, path_root: Optional[str]) -> DiffResult:
         value = _parse_diff(haystack, path_root)
         result = {"ok": value}
     except Exception as e:
-        result = {"err: {"exc_type": f"{type(e).__name__}", "exc_value": f"{e}"}}
+        result = {"err": {"exc_type": f"{type(e).__name__}", "exc_value": f"{e}", "exc_tb": None}}
     return result
 
 def _parse_diff(haystack: str, path_root: Optional[str]) -> DiffResult:
@@ -161,6 +161,66 @@ def _parse_diff(haystack: str, path_root: Optional[str]) -> DiffResult:
         diff["files"].append(file)
         file = None
     return diff
+
+def apply_diff(diff: Diff, haystack: str) -> str:
+    """Apply a parsed diff to a haystack string.
+
+    Args:
+        diff: The parsed diff structure
+        haystack: The original file content
+
+    Returns:
+        The patched content
+    """
+    if not diff.get("files"):
+        return haystack
+
+    # Apply changes from the first file (assuming single file diff)
+    file_diff = diff["files"][0]
+    hunks = file_diff.get("hunks", [])
+
+    if not hunks:
+        return haystack
+
+    # Sort hunks by source line start in descending order
+    # so we can apply them without worrying about line number shifts
+    sorted_hunks = sorted(hunks, key=lambda h: h.get("src_line_start", 0), reverse=True)
+
+    # Split haystack into lines, preserving whether it ends with newline
+    if haystack.endswith('\n'):
+        if haystack == '\n':
+            lines = []
+        else:
+            lines = haystack[:-1].split('\n')
+        ends_with_newline = True
+    else:
+        lines = haystack.split('\n')
+        ends_with_newline = False
+
+    for hunk in sorted_hunks:
+        src_start = hunk.get("src_line_start", 1)
+        src_count = hunk.get("src_line_count", 0)
+        dst_lines = hunk.get("dst_lines", [])
+
+        # Convert to 0-indexed
+        start_idx = src_start - 1
+        end_idx = start_idx + src_count
+
+        # Ensure indices are within bounds
+        if start_idx < 0:
+            start_idx = 0
+        if end_idx > len(lines):
+            end_idx = len(lines)
+
+        # Replace the lines
+        lines[start_idx:end_idx] = dst_lines
+
+    # Reconstruct the string
+    result = '\n'.join(lines)
+    if ends_with_newline:
+        result += '\n'
+
+    return result
 
 if __name__ == "__main__":
     with open("test_diff_1.diff", "r") as f:

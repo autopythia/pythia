@@ -21,7 +21,7 @@ from pythia.extract import (
 from pythia.io_control.command import (
     ShellIOCommandController,
 )
-from pythia.shell import ShellPipeline
+from pythia.shell import ShellPipeline, detect_shell
 from pythia.term_utils import *
 
 HOME = os.environ["HOME"]
@@ -129,6 +129,10 @@ class EndControlEvent:
 
 @dataclass
 class OutputEvent:
+    @classmethod
+    async def afresh(cls, *args, **kwargs):
+        return cls(*args, **kwargs)
+
     def __post_init__(self):
         self._ctr = _fresh_event_ctr()
 
@@ -209,16 +213,59 @@ class ShellExecResult:
     partial: bool
     final_output: Optional[str]
 
+    def format(self) -> str:
+        section = (
+f"""Command: `{self.cmd}`
+Success: {not result.partial}
+Output: {self.final_output or ""}"""
+        )
+        return section
+
+@dataclass
+class DiffEditResult:
+    path: str
+    diff_text: str
+    success: bool
+
+    def format(self) -> str:
+        section = (
+f"""Path: `{self.path}`
+Success? {result.success}
+Diff:
+{self.diff_text or ""}"""
+        )
+        return section
+
+@dataclass
+class CatEditResult:
+    path: str
+    text: str
+    success: bool
+
+    def format(self) -> str:
+        section = (
+f"""Path: `{self.path}`
+Success? {result.success}
+Content:
+{self.text or ""}"""
+        )
+        return section
+
 @dataclass
 class Autopythia:
-    working_model:  str = "deepseek-ai/deepseek-v3.2-thinking-off"
-    thinking_model: str = "deepseek-ai/deepseek-v3.2-thinking"
+    shell: str = None
+
+    # work_model:  str = "deepseek-ai/deepseek-v3.2-thinking-off"
+    # think_model: str = "deepseek-ai/deepseek-v3.2-thinking"
+    think_model: str = "moonshotai/kimi-k2.5-thinking"
     services: APIServices = None
 
     _session: Optional[str] = None
     _workqueue: Any = None
 
     def __post_init__(self):
+        if self.shell is None:
+            self.shell = detect_shell()
         if self.services is None:
             self.services = APIServices(enable_journal=False)
         if self._workqueue is None:
@@ -232,9 +279,9 @@ class Autopythia:
         ctr = get_ctr(GLOBAL_SESSION_DIR, "session_ctr")
         return f"{ctr}"
 
-    def _fresh_step_ctr(self, session_ctr: str) -> str:
+    def _fresh_step_ctr(self, session_ctr: str) -> int:
         ctr = fresh_ctr(os.path.join(GLOBAL_SESSION_DIR, session_ctr), "step_ctr")
-        return f"{ctr}"
+        return ctr
 
     def _set_session(self, session_ctr: str):
         self._session = session_ctr
@@ -242,7 +289,7 @@ class Autopythia:
     def append_history(
         self,
         session_ctr: str,
-        step_ctr: str,
+        step_ctr: int,
         query: Optional[str] = None,
         messages: Optional[list] = None,
         t0=None,
@@ -262,7 +309,7 @@ class Autopythia:
             "t1": f"{t1}" if t1 is not None else None,
             "session_ctr": session_ctr,
             "session_uid": None,
-            "step_ctr": step_ctr,
+            "step_ctr": f"{step_ctr}",
             "step_uid": None,
         }
         if query is not None:
@@ -273,18 +320,8 @@ class Autopythia:
         history_file.close()
         return t0
 
-    async def init(self, step_ctr: str, query: str):
-        model_path = self.working_model
-        model = self.services.registry.find_model(model_path)
-        sampling_params = {
-            "max_tokens": 8192,
-            # "max_tokens": 16384,
-            # "max_tokens": 65536,
-            # "temperature": 0.6,
-            "temperature": 1.0,
-        }
-
-        think_model_path = self.thinking_model
+    async def init(self, step_ctr: int, query: str):
+        think_model_path = self.think_model
         think_model = self.services.registry.find_model(think_model_path)
         think_sampling_params = {
             # "max_tokens": 8192,
@@ -306,7 +343,7 @@ class Autopythia:
         plan_query = [
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT,
+                "content": SYSTEM_PROMPT.format(shell=self.shell),
             },
             {
                 "role": "user",
@@ -378,24 +415,15 @@ class Autopythia:
 
         if not plan:
             return await tail_task(self.init(None, query))
-        else:
-            new_results = self._parse_shell_commands(answer)
-            results = new_results
 
-            return await tail_task(self.eval(None, query, plan, None, results))
+        new_results = self._parse_shell_commands(answer)
+        results = new_results
 
-    async def eval(self, step_ctr: Optional[str], query: str, plan: str, scratch: Optional[str], results: list = []):
-        model_path = self.working_model
-        model = self.services.registry.find_model(model_path)
-        sampling_params = {
-            "max_tokens": 8192,
-            # "max_tokens": 16384,
-            # "max_tokens": 65536,
-            # "temperature": 0.6,
-            "temperature": 1.0,
-        }
+        # return await tail_task(self.eval(None, query, plan, None, results))
+        return await tail_task(self.backup(None, query, plan, None, results))
 
-        think_model_path = self.thinking_model
+    async def eval(self, step_ctr: Optional[int], query: str, plan: str, scratch: Optional[str], results: list = []):
+        think_model_path = self.think_model
         think_model = self.services.registry.find_model(think_model_path)
         think_sampling_params = {
             # "max_tokens": 8192,
@@ -446,7 +474,7 @@ class Autopythia:
         eval_query = [
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT,
+                "content": SYSTEM_PROMPT.format(shell=self.shell),
             },
             {
                 "role": "user",
@@ -521,18 +549,8 @@ class Autopythia:
         else:
             return await tail_task(self.backup(None, query, plan, scratch, results))
 
-    async def backup(self, step_ctr, query: str, plan: str, scratch: Optional[str], results = []):
-        model_path = self.working_model
-        model = self.services.registry.find_model(model_path)
-        sampling_params = {
-            "max_tokens": 8192,
-            # "max_tokens": 16384,
-            # "max_tokens": 65536,
-            # "temperature": 0.6,
-            "temperature": 1.0,
-        }
-
-        think_model_path = self.thinking_model
+    async def backup(self, step_ctr: Optional[int], query: str, plan: str, scratch: Optional[str], results = []):
+        think_model_path = self.think_model
         think_model = self.services.registry.find_model(think_model_path)
         think_sampling_params = {
             # "max_tokens": 8192,
@@ -568,7 +586,7 @@ Output: {result.final_output}"""
         backup_query = [
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT,
+                "content": SYSTEM_PROMPT.format(shell=self.shell),
             },
             {
                 "role": "user",
@@ -621,6 +639,9 @@ Output: {result.final_output}"""
         new_results = self._parse_shell_commands(answer)
         results.extend(new_results)
 
+        new_results = self._parse_edits(answer)
+        results.extend(new_results)
+
         # TODO
 
         write_plan = answer.find("/plan") >= 0
@@ -670,12 +691,13 @@ Output: {result.final_output}"""
         if scratch_block is not None:
             scratch = scratch_block["text"].rstrip()
 
-        if not new_results:
-            return await tail_task(self.eval(None, query, plan, scratch, results))
-        else:
-            return await tail_task(self.backup(None, query, plan, scratch, results))
+        # if not new_results:
+        #     return await tail_task(self.eval(None, query, plan, scratch, results))
+        # else:
 
-    def _parse_shell_commands(self, answer):
+        return await tail_task(self.backup(None, query, plan, scratch, results))
+
+    def _old_extract_markdown_code_blocks(self, answer):
         block_start = None
         code_blocks = []
         while True:
@@ -685,16 +707,44 @@ Output: {result.final_output}"""
             elif code_block["lang"] in ("sh", "bash", "zsh"):
                 code_blocks.append(code_block)
             block_start = code_block["end"]
+        # print(f"DEBUG: code blocks = {code_blocks} ...", flush=True)
+        return code_blocks
 
-        index = MarkdownIndex.new(answer)
+    def _extract_markdown_code_blocks(self, haystack, index=None):
+        if index is None:
+            index = MarkdownIndex.new(haystack)
         # print(f"DEBUG: markdown index = {index}")
         code_blocks = []
         for _, block in index._code_blocks.items():
-            if block["lang"] in ("sh", "bash", "zsh"):
-                block["text"] = index.extract_text(answer, block)["text"]
-                code_blocks.append(block)
+            block["text"] = index.extract_text(haystack, block)["text"]
+            code_blocks.append(block)
+        # print(f"DEBUG: code blocks = {code_blocks} ...", flush=True)
+        return code_blocks
 
-        print(f"DEBUG: code blocks = {code_blocks} ...", flush=True)
+    def _parse_shell_commands(self, answer):
+        index = MarkdownIndex.new(answer)
+        code_blocks = self._extract_markdown_code_blocks(answer, index)
+        print(f"DEBUG: parse shell: code blocks = {code_blocks}", flush=True)
+
+        shell_code_blocks = []
+        for block in code_blocks:
+            if block["lang"] not in ("sh", "bash", "zsh"):
+                # print(f"DEBUG: parse shell: not sh", flush=True)
+                continue
+            print(f"DEBUG: parse shell: block = {repr(answer[block['block_start']:block['block_end']])}", flush=True)
+            prev_line_block = index.extract_prev_line_text(answer, block)
+            if not prev_line_block:
+                # print(f"DEBUG: parse shell: no prev line", flush=True)
+                continue
+            prev_line_parts = prev_line_block["text"].strip().split()
+            if not prev_line_parts:
+                # print(f"DEBUG: parse shell: no prev line parts", flush=True)
+                continue
+            if prev_line_parts[0] != "/exec":
+                # print(f"DEBUG: parse shell: not /exec", flush=True)
+                continue
+            shell_code_blocks.append(block)
+        print(f"DEBUG: parse shell: shell code blocks = {shell_code_blocks} ...", flush=True)
 
         allow_cmds = [
             ("ls",),
@@ -710,8 +760,11 @@ Output: {result.final_output}"""
 
         new_results = []
         cmd_control = ShellIOCommandController()
-        for code in code_blocks:
-            for cmd_line in code["text"].splitlines():
+        for block in shell_code_blocks:
+            cmd_line = None
+            cmd_pipeline = None
+            block_lines = block["text"].splitlines()
+            for cmd_line in block_lines[:1]:
                 cmd_line = cmd_line.strip()
                 if not cmd_line:
                     continue
@@ -719,9 +772,66 @@ Output: {result.final_output}"""
                     continue
                 # cmd_args = shlex.split(cmd_line)
                 cmd_pipeline = ShellPipeline(cmd_line)
-                if cmd_pipeline.parsing_error or cmd_pipeline.not_supported:
-                    # TODO: report error here.
-                    continue
+            if not cmd_pipeline:
+                continue
+            if cmd_pipeline.parsing_error or cmd_pipeline.not_supported:
+                # TODO: report error here.
+                continue
+            # TODO: heredoc quoting?
+            if (
+                cmd_pipeline.stages and
+                cmd_pipeline.stages[-1].in_hdoc
+            ):
+                cmd_pipeline.stages[-1].in_hdoclines = []
+                for line in block_lines[1:]:
+                    if line.rstrip() == cmd_pipeline.stages[-1].in_hdoc:
+                        cmd_pipeline.stages[-1].in_hdoclines.append("")
+                        break
+                    cmd_pipeline.stages[-1].in_hdoclines.append(line)
+            if (
+                len(cmd_pipeline.stages) == 1 and
+                cmd_pipeline.stages[0].cmd_args[0] == "cat" and
+                cmd_pipeline.stages[0].in_hdoc and
+                cmd_pipeline.stages[0].out_arg
+            ):
+                output = "\n".join(cmd_pipeline.stages[0].in_hdoclines)
+                out_path = os.path.abspath(cmd_pipeline.stages[0].out_arg)
+                cwd_path = os.path.abspath(os.getcwd())
+                if (
+                    os.path.commonpath([cwd_path]) ==
+                    os.path.commonpath([cwd_path, out_path])
+                ):
+                    with open(out_path, "w") as out_file:
+                        out_file.write(output)
+                    allowed = True
+                else:
+                    allowed = False
+                capture = ""
+                result = ShellExecResult(
+                    cmd_line,
+                    cmd_pipeline,
+                    allowed,
+                    not allowed,
+                    capture,
+                )
+                new_results.append(result)
+            elif (
+                len(cmd_pipeline.stages) == 1 and
+                cmd_pipeline.stages[0].cmd_args[0] == "cat" and
+                cmd_pipeline.stages[0].in_hdoc and
+                not cmd_pipeline.stages[0].out_arg
+            ):
+                capture = "\n".join(cmd_pipeline.stages[0].in_hdoclines)
+                allowed = True
+                result = ShellExecResult(
+                    cmd_line,
+                    cmd_pipeline,
+                    allowed,
+                    not allowed,
+                    capture,
+                )
+                new_results.append(result)
+            elif True:
                 cmd_results = []
                 allowed = False
                 capture = True
@@ -761,6 +871,86 @@ Output: {result.final_output}"""
                     )
                 new_results.append(result)
         # print(new_results)
+        return new_results
+
+    def _parse_edits(self, answer):
+        index = MarkdownIndex.new(answer)
+        code_blocks = self._extract_markdown_code_blocks(answer, index)
+        print(f"DEBUG: parse edits: code blocks = {code_blocks} ...", flush=True)
+
+        edit_args = []
+        edit_code_blocks = []
+        for block in code_blocks:
+            prev_line_block = index.extract_prev_line_text(answer, block)
+            if prev_line_block:
+                prev_line_parts = prev_line_block["text"].strip().split()
+                if prev_line_parts and prev_line_parts[0] == "/edit":
+                    edit_args.append(prev_line_parts[1:])
+                    edit_code_blocks.append(block)
+        print(f"DEBUG: parse edits: edit code blocks = {edit_code_blocks} ...", flush=True)
+
+        new_results = []
+
+        for args, block in zip(edit_args, edit_code_blocks):
+            success = False
+            if not args:
+                continue
+            lang = block["lang"]
+            is_diff = lang in ("diff", "patch")
+            dst_text = block["text"]
+            if is_diff:
+                diff_text = dst_text
+            src_path = args[1]
+            src_abspath = os.path.abspath(src_path)
+            cwd_abspath = os.path.abspath(os.getcwd())
+            if not (
+                os.path.commonpath([cwd_abspath]) ==
+                os.path.commonpath([cwd_abspath, src_abspath])
+            ):
+                if is_diff:
+                    result = DiffEditResult(
+                        src_path,
+                        diff_text,
+                        success,
+                    )
+                else:
+                    result = CatEditResult(
+                        src_path,
+                        dst_text,
+                        success,
+                    )
+                new_results.append(result)
+                continue
+            with open(src_path, "r") as src_file:
+                src_text = src_file.read()
+            if is_diff:
+                diff = parse_diff(diff_text, ".")
+                if diff is None:
+                    result = DiffEditResult(
+                        src_path,
+                        diff_text,
+                        success,
+                    )
+                    new_results.append(result)
+                    continue
+                dst_text = apply_diff(diff, src_text)
+            if src_text != dst_text:
+                with open(src_path, "w") as src_file:
+                    src_file.write(dst_text)
+                if is_diff:
+                    result = DiffEditResult(
+                        src_path,
+                        diff_text,
+                        success,
+                    )
+                else:
+                    result = CatEditResult(
+                        src_path,
+                        dst_text,
+                        success,
+                    )
+                new_results.append(result)
+
         return new_results
 
 if __name__ == "__main__":

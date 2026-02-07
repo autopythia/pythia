@@ -17,6 +17,7 @@ from pythia.auto.kernel import (
     StartControlEvent,
     EndControlEvent,
     OutputEvent,
+    BasicOutputEvent,
 )
 from pythia.clock import Timestamp
 from pythia.contrib.prompt_toolkit.input.defaults import create_input
@@ -173,7 +174,7 @@ class _InputState:
     hpos: int
     hmax: int
     width: int
-    prompt_len: int
+    prompt_width: int
     _input: Any
     _workqueue: Optional[set] = None
 
@@ -229,8 +230,8 @@ class _InputState:
                 self.lbuf.append(key_press.data)
             break
 
-    def build_input_line(self, prompt: str, prompt1: str = " > ", prompt2: str = "   ", end: str = "") -> str:
-        assert self.prompt_len == len(prompt)
+    def build_input_line(self, prompt: str, prompt1: str = "\n > ", prompt2: str = "\n   ", end: str = "") -> str:
+        # assert self.prompt_width == len(prompt)
         input_width = self.width
         input_len = self.lbuf.buffer_len()
         input_pos = self.lbuf.buffer_pos()
@@ -253,22 +254,21 @@ class _InputState:
             self.hmax = input_height
         self.hpos = input_pos // input_width
         hoff = self.hmax - self.hpos - 1
-        roff = self.prompt_len + input_pos % input_width
+        roff = self.prompt_width + input_pos % input_width
         full_buf = self.lbuf.buf + self.lbuf.rbuf
         input_parts = []
-        if save_hpos > 0:
-            input_parts.append(f"""\x1b[{save_hpos}A""")
+        input_parts.append(f"""\x1b[{save_hpos + 1}A""")
         line = (
             f"""\r{prompt}{"".join(full_buf[:input_width])}{rclear()}"""
         )
         input_parts.append(line)
         for h in range(1, input_height):
             line = (
-                f"""\n\r{prompt1}{"".join(full_buf[(input_width*h):(input_width*(h+1))])}{rclear()}"""
+                f"""\r{prompt1}{"".join(full_buf[(input_width*h):(input_width*(h+1))])}{rclear()}"""
             )
             input_parts.append(line)
         for _ in range(input_height, self.hmax):
-            line = f"""\n\r{prompt2}{rclear()}"""
+            line = f"""\r{prompt2}{rclear()}"""
             input_parts.append(line)
         if roff > 0:
             part = f"""\r\x1b[{roff}C"""
@@ -321,7 +321,7 @@ async def _setup_main(args):
         hpos = 0,
         hmax = 1,
         width = width - 1 - 3,
-        prompt_len = 3,
+        prompt_width = 3,
         _input = create_input(),
     )
     def input_key_presses():
@@ -341,7 +341,7 @@ async def sleeping_beauty():
         await asyncio.sleep(3)
 
 async def _run_main(args, input_state: _InputState):
-    arr = ">"
+    # arr = ">"
     spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     spin_len = len(spin)
     spin_step = 16
@@ -453,12 +453,13 @@ async def _run_main(args, input_state: _InputState):
         print(f"""{plain("STYLE.md path")}       = {underline(style_md_path)}""")
     elif args.verbose:
         print(f"""{plain("STYLE.md path")}       = {dim("<None>")}""")
-    print(f"""\r{spin[-1]} {rclear()}""", end="", flush=True)
-    step_ctr = 0
+    print(f"""\r\n{spin[-1]} {rclear()}""", end="", flush=True)
+    flush = False
     query = None
+    step_ctr = 0
     start = set()
     halt = False
-    for t in itertools.count():
+    for frame_ctr in itertools.count():
         done, _pending = await asyncio.wait(workqueue, return_when=asyncio.FIRST_COMPLETED, timeout=delay)
         workqueue -= done
         # print(f"DEBUG: done={len(done)} work={len(work)}", flush=True)
@@ -473,6 +474,8 @@ async def _run_main(args, input_state: _InputState):
         done_events = []
         for task in done:
             event = task.result()
+            if event is None:
+                continue
             done_events.append(event)
         done_events.sort(key=lambda event: event._ctr)
         for event in done_events:
@@ -509,24 +512,41 @@ async def _run_main(args, input_state: _InputState):
                 print(f"""{prefix}{output}""", flush=True)
                 # auto.append_history(session_ctr, step_ctr, output=output)
         if ret:
-            prompt = f"{arr}{arr} "
+            prompt = f"\n>> "
         elif not start:
-            prompt = f":{arr} "
+            prompt = f"\n:> "
         else:
-            prompt = f"{spin[(t // spin_step) % spin_len]}{arr} "
+            prompt = f"\n{spin[(frame_ctr // spin_step) % spin_len]}> "
+        if flush:
+            prompt = f"\n{prompt}"
+            flush = False
         if ret:
             end = "\n"
         else:
             end = ""
         print(input_state.build_input_line(prompt, end=end), end="", flush=True)
         if ret:
+            flush = True
             query = input_state.flush().strip()
             query_args = query.split()
             query_head = query_args[0] if query_args else None
             query_args = query_args[1:] if query_args else None
             if query_head and query_head.startswith("/"):
                 if query_head in ("/exit", "/q", "/quit"):
+                    flush = False
                     break
+                elif query_head.startswith("//"):
+                    flush = False
+                elif query_head in ("/echo",):
+                    echo_text = query[5:].lstrip()
+                    workqueue.add(asyncio.create_task(
+                        BasicOutputEvent.afresh(text=echo_text)
+                    ))
+                elif query_head in ("/date", "/now"):
+                    t0 = Timestamp()
+                    workqueue.add(asyncio.create_task(
+                        BasicOutputEvent.afresh(text=f"{t0}")
+                    ))
                 elif query_head in ("/cd",):
                     pass
                 elif query_head in ("/vim",):
@@ -563,6 +583,8 @@ async def _run_main(args, input_state: _InputState):
                 workqueue.add(asyncio.create_task(auto.init(step_ctr, query)))
                 auto.append_history(session_ctr, step_ctr, query=query)
                 start.add(step_ctr)
+            else:
+                flush = False
             # query = None
     if args.verbose:
         print("\nGoodbye.", flush=True)

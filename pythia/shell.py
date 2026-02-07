@@ -7,8 +7,9 @@ import shlex
 class _ShellPipelineStage:
     cmd_args: list[str]
     in_arg: Optional[str] = None
-    in_hdoc: Optional[str] = None
     in_hstr: Optional[str] = None
+    in_hdoc: Optional[str] = None
+    in_hdoclines: Optional[list[str]] = None
     out_arg: Optional[str] = None
     err_arg: Optional[str] = None
     err2out: Optional[bool] = None
@@ -85,6 +86,21 @@ def detect_shell() -> Optional[str]:
     zsh_version = os.environ.get("ZSH_VERSION", None)
     if bash_version is not None and zsh_version is None:
         return "bash"
-    elif bash_version is None and zsh_version is not None:
+    if bash_version is None and zsh_version is not None:
         return "zsh"
+    shell = os.environ.get("SHELL", None)
+    if shell is not None:
+        shell = shell.rsplit("/", 1)[-1]
+    if shell:
+        return shell
     return None
+
+if __name__ == "__main__":
+    test_vec = (
+"""cat > out.txt <<EOF
+hello world
+EOF
+"""
+    )
+    test_args = shlex.split(test_vec)
+    print(test_args)
