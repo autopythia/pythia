@@ -22,7 +22,7 @@ from pythia.io_control.command import (
     ShellIOCommandController,
 )
 from pythia.shell import ShellPipeline, detect_shell
-from pythia.term_utils import *
+from pythia.term_utils import green, bright_key
 
 HOME = os.environ["HOME"]
 GLOBAL_DIR = os.path.join(HOME, ".pythia", "auto")
@@ -177,7 +177,11 @@ class ThinkingOutputEvent(OutputEvent):
     text: str
 
     def __str__(self) -> str:
-        return f"""{dim("<think>", bold=True)}\n{dim(self.text)}\n{dim("</think>", bold=True)}"""
+        return (
+f"""{bright_key("<think>", bold=True)}
+{bright_key(self.text)}
+{bright_key("</think>", bold=True)}"""
+        )
 
     def leaf_type(self) -> str:
         return "thinking"

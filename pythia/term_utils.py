@@ -43,6 +43,12 @@ def gray(s: str, bold=False) -> str:
     else:
         return f"\x1b[37m{s}\x1b[0m"
 
+def bright_key(s: str, bold=False) -> str:
+    if bold:
+        return f"\x1b[90;1m{s}\x1b[0m"
+    else:
+        return f"\x1b[90m{s}\x1b[0m"
+
 def dim(s: str, bold=False) -> str:
     if bold:
         return f"\x1b[2;1m{s}\x1b[0m"

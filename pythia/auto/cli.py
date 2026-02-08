@@ -25,7 +25,7 @@ from pythia.contrib.prompt_toolkit.keys import Keys
 from pythia.io_control.command import exec_command
 from pythia.python_utils import _py_version
 from pythia.term_utils import (
-    rclear, bold, plain, cyan, dim, underline,
+    rclear, bold, plain, cyan, bright_key, dim, underline,
 )
 
 HOME = os.environ["HOME"]
@@ -314,7 +314,7 @@ class _InputState:
 def quotewrap(haystack: str) -> str:
     parts = haystack.split("\n", maxsplit=1)
     first = parts[0]
-    quote_both = f"""   {dim("[")}"""
+    quote_both = f"""   {bright_key("[")}"""
     if not first:
         return quote_both
     if len(parts) > 1:
@@ -323,8 +323,8 @@ def quotewrap(haystack: str) -> str:
         return textwrap.indent(first, quote_both)
     parts = haystack.rsplit("\n", maxsplit=1)
     haystack = parts[0]
-    quote_first = f"""   {dim("⌜")}"""
-    quote_last = f"""   {dim("⌞")}"""
+    quote_first = f"""   {bright_key("⌜")}"""
+    quote_last = f"""   {bright_key("⌞")}"""
     if len(parts) > 1:
         last = parts[1]
     else:
