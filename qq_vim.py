@@ -359,22 +359,23 @@ def main():
             end_think_pos = a_text.find("</think>")
             if end_think_pos >= 0:
                 a_thinking_text = a_text[start_think_end_pos:end_think_pos].strip()
-                a_text = a_text[end_think_pos:].lstrip()
+                a_text = a_text[end_think_pos+8:].lstrip()
             else:
                 a_thinking_text = a_text[start_think_end_pos:].strip()
                 a_text = None
             content = []
-            if a_text is not None:
-                content.append({
-                    "type": "text",
-                    "text": a_text,
-                })
             content.append({
                 "type": "thinking",
                 "thinking": a_thinking_text,
             })
             if a_thinking_sign is not None:
                 content[-1]["signature"] = a_thinking_sign
+            # NB: Kimi 2.5 API wants them in the _correct_ order.
+            if a_text is not None:
+                content.append({
+                    "type": "text",
+                    "text": a_text,
+                })
             messages.append({
                 "role": "assistant",
                 "content": content,
