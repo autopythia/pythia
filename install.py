@@ -14,7 +14,8 @@ def cyan(s: str, bold=False) -> str:
 def install_python_bin(cwd: str, prefix: str, name: str, head: str):
     dst_path = os.path.join(prefix, "bin", name)
     content = (
-f"""PYTHONPATH={shlex.quote(cwd)} PYTHONWARNINGS={shlex.quote("ignore")} {head} "$@"
+f"""#!/bin/sh
+PYTHONPATH={shlex.quote(cwd)} PYTHONWARNINGS={shlex.quote("ignore")} {head} "$@"
 """
     )
     with open(dst_path, "w") as f:
