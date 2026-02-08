@@ -33,7 +33,8 @@ def _load_conf():
     except Exception:
         conf = ConfigParser()
         conf["default"] = {
-            "model": "moonshotai/kimi-k2-thinking",
+            "model": "moonshotai/kimi-k2.5-thinking",
+            # "model": "moonshotai/kimi-k2-thinking",
             # "model": "anthropic/claude-4.5-sonnet-thinking-10k",
             # "model": "deepseek-ai/deepseek-v3.2-exp-thinking",
             # "model": "x-ai/grok-4.1-fast-thinking",
