@@ -230,7 +230,26 @@ class _InputState:
                 self.lbuf.append(key_press.data)
             break
 
-    def build_input_line(self, prompt: str, prompt1: str = "\n > ", prompt2: str = "\n   ", end: str = "") -> str:
+    def buffer_len(self) -> int:
+        input_len = self.lbuf.buffer_len()
+        return input_len
+
+    def reset_input_line(self) -> str:
+        # assert self.prompt_width == len(prompt)
+        input_width = self.width
+        input_len = self.lbuf.buffer_len()
+        input_pos = self.lbuf.buffer_pos()
+        input_height = (input_len + input_width) // input_width
+        save_hpos = self.hpos
+        save_hmax = self.hmax
+        if self.hmax < input_height:
+            self.hmax = input_height
+        self.hpos = input_pos // input_width
+        hoff = self.hmax - self.hpos - 1
+        roff = self.prompt_width + input_pos % input_width
+        return f"""\x1b[{save_hpos + 1}A"""
+
+    def build_input_line(self, prompt: str, prompt1: str = "\n > ", prompt2: str = "\n   ", end: str = "", reset: bool = True) -> str:
         # assert self.prompt_width == len(prompt)
         input_width = self.width
         input_len = self.lbuf.buffer_len()
@@ -255,9 +274,10 @@ class _InputState:
         self.hpos = input_pos // input_width
         hoff = self.hmax - self.hpos - 1
         roff = self.prompt_width + input_pos % input_width
-        full_buf = self.lbuf.buf + self.lbuf.rbuf
         input_parts = []
-        input_parts.append(f"""\x1b[{save_hpos + 1}A""")
+        if reset:
+            input_parts.append(f"""\x1b[{save_hpos + 1}A""")
+        full_buf = self.lbuf.buf + self.lbuf.rbuf
         line = (
             f"""\r{prompt}{"".join(full_buf[:input_width])}{rclear()}"""
         )
@@ -454,8 +474,10 @@ async def _run_main(args, input_state: _InputState):
     elif args.verbose:
         print(f"""{plain("STYLE.md path")}       = {dim("<None>")}""")
     print(f"""\r\n{spin[-1]} {rclear()}""", end="", flush=True)
-    flush = False
+    done_events = []
+    # flush = False
     query = None
+    # ret = False
     step_ctr = 0
     start = set()
     halt = False
@@ -466,87 +488,129 @@ async def _run_main(args, input_state: _InputState):
         if not workqueue or input_state.halt.is_set():
             halt = True
             break
-        print1 = False
-        ret = False
-        if input_state.ret.is_set():
-            ret = True
-            input_state.ret.clear()
-        done_events = []
         for task in done:
             event = task.result()
             if event is None:
                 continue
             done_events.append(event)
-        done_events.sort(key=lambda event: event._ctr)
-        for event in done_events:
+        print1 = False
+        ret = False
+        if input_state.ret.is_set():
+            ret = True
+            input_state.ret.clear()
+        # if ret:
+        if False:
+            prompt = f"\n>> "
+            if flush:
+                prompt = f"\n{prompt}"
+                flush = False
+            end = "\n"
+            print(input_state.build_input_line(prompt, end=end), end="", flush=True)
+            continue
+        if not ret:
+            done_events.sort(key=lambda event: event._ctr)
+            reset = True
             output = None
-            if isinstance(event, StartControlEvent):
-                start.add(event.step_ctr)
-            elif isinstance(event, EndControlEvent):
-                start.remove(event.step_ctr)
-            elif isinstance(event, OutputEvent):
-                output = event
-            if output is not None:
-                if not print1:
-                    prefix = f"\r{rclear()}\n"
-                    print1 = True
-                else:
-                    prefix = "\n"
-                # output = quotewrap(f"{output}")
-                outputs = []
-                block = []
-                for leaf in output.leaf_events():
-                    if leaf.leaf_type() == "basic":
-                        if block:
-                            outputs.append(quotewrap("\n\n".join(block)))
-                            block.clear()
-                        outputs.append(quotewrap(f"{leaf}"))
-                    elif leaf.leaf_type() in ("thinking", "answer"):
-                        block.append(f"{leaf}")
+            for event in done_events:
+                output = None
+                if isinstance(event, StartControlEvent):
+                    start.add(event.step_ctr)
+                elif isinstance(event, EndControlEvent):
+                    start.remove(event.step_ctr)
+                elif isinstance(event, OutputEvent):
+                    output = event
+                if output is not None:
+                    if not print1:
+                        # prefix = f"\r{rclear()}\n"
+                        # prefix = "\n"
+                        print1 = True
                     else:
-                        raise NotImplementedError
-                if block:
-                    outputs.append(quotewrap("\n\n".join(block)))
-                    block.clear()
-                output = "\n\n".join(outputs)
-                print(f"""{prefix}{output}""", flush=True)
-                # auto.append_history(session_ctr, step_ctr, output=output)
+                        # prefix = "\n"
+                        pass
+                    # prefix = ""
+                    # suffix = "\n"
+                    # if input_state.buffer_len() <= 0:
+                    # if False:
+                    if True:
+                        if reset:
+                            prefix = f"{input_state.reset_input_line()}\n"
+                            # prefix = f"{input_state.reset_input_line()}\r{rclear()}\n"
+                            reset = False
+                        else:
+                            prefix = "\n"
+                        suffix = ""
+                    else:
+                        prefix = "\n"
+                        suffix = ""
+                    # output = quotewrap(f"{output}")
+                    outputs = []
+                    block = []
+                    for leaf in output.leaf_events():
+                        if leaf.leaf_type() == "basic":
+                            if block:
+                                outputs.append(quotewrap("\n\n".join(block)))
+                                block.clear()
+                            outputs.append(quotewrap(f"{leaf}"))
+                        elif leaf.leaf_type() in ("thinking", "answer"):
+                            block.append(f"{leaf}")
+                        else:
+                            raise NotImplementedError
+                    if block:
+                        outputs.append(quotewrap("\n\n".join(block)))
+                        block.clear()
+                    output = "\n\n".join(outputs)
+                    print(f"""{prefix}{output}{suffix}""", flush=True)
+                    # auto.append_history(session_ctr, step_ctr, output=output)
+            done_events.clear()
+        # if output is not None:
+        #     print("", flush=True)
         if ret:
             prompt = f"\n>> "
         elif not start:
             prompt = f"\n:> "
         else:
             prompt = f"\n{spin[(frame_ctr // spin_step) % spin_len]}> "
-        if flush:
-            prompt = f"\n{prompt}"
-            flush = False
+        # if flush:
+        #     prompt = f"\n{prompt}"
+        #     flush = False
         if ret:
             end = "\n"
         else:
             end = ""
-        print(input_state.build_input_line(prompt, end=end), end="", flush=True)
+        # print(input_state.build_input_line(prompt, end=end, reset=reset), end="", flush=True)
+        input_line = input_state.build_input_line(prompt, end="", reset=reset)
+        halt = False
+        # flush = False
+        flush = True
         if ret:
-            flush = True
             query = input_state.flush().strip()
             query_args = query.split()
             query_head = query_args[0] if query_args else None
             query_args = query_args[1:] if query_args else None
             if query_head and query_head.startswith("/"):
-                if query_head in ("/exit", "/q", "/quit"):
+                if query_head in ("/exit", "/quit"):
+                    halt = True
                     flush = False
-                    break
+                    # break
                 elif query_head.startswith("//"):
                     flush = False
-                elif query_head in ("/echo",):
-                    echo_text = query[5:].lstrip()
-                    workqueue.add(asyncio.create_task(
-                        BasicOutputEvent.afresh(text=echo_text)
-                    ))
+                    pass
                 elif query_head in ("/date", "/now"):
                     t0 = Timestamp()
                     workqueue.add(asyncio.create_task(
                         BasicOutputEvent.afresh(text=f"{t0}")
                     ))
+                elif query_head in ("/echo",):
+                    qargs_text = query[5:].lstrip()
+                    workqueue.add(asyncio.create_task(
+                        BasicOutputEvent.afresh(text=qargs_text)
+                    ))
+                elif query_head in ("/qq",):
+                    step_ctr = auto._fresh_step_ctr(session_ctr)
+                    qargs_text = query[3:].lstrip()
+                    workqueue.add(asyncio.create_task(auto.qq(step_ctr, qargs_text)))
+                    auto.append_history(session_ctr, step_ctr, query=qargs_text)
+                    start.add(step_ctr)
                 elif query_head in ("/cd",):
                     pass
                 elif query_head in ("/vim",):
@@ -584,8 +648,19 @@ async def _run_main(args, input_state: _InputState):
                 auto.append_history(session_ctr, step_ctr, query=query)
                 start.add(step_ctr)
             else:
-                flush = False
+                # flush = False
+                pass
             # query = None
+        if ret:
+            if flush:
+                end = "\n\n"
+            else:
+                end = "\n"
+        else:
+            end = ""
+        print(input_line, end=end, flush=True)
+        if halt:
+            break
     if args.verbose:
         print("\nGoodbye.", flush=True)
     elif halt:

@@ -320,6 +320,63 @@ class Autopythia:
         history_file.close()
         return t0
 
+    async def qq(self, step_ctr: int, query: str):
+        think_model_path = self.think_model
+        think_model = self.services.registry.find_model(think_model_path)
+        think_sampling_params = {
+            # "max_tokens": 65536,
+            "max_tokens": 262144,
+            "temperature": 1.0,
+        }
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+        # print(f"DEBUG: init: step ctr = {step_ctr}")
+
+        event = StartControlEvent(step_ctr)
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+        qq_query = [
+            {
+                "role": "user",
+                "content": query,
+            },
+        ]
+        event = BasicOutputEvent(green("Thinking...", bold=True))
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+        t0 = Timestamp()
+        qq_result = self.services.client.message(
+            think_model,
+            qq_query,
+            think_sampling_params,
+            fresh=True,
+        )
+        self.append_history(self._session, step_ctr, messages=qq_query, t0=t0)
+        qq_result = await qq_result
+        t1 = Timestamp()
+        # print(qq_result)
+
+        res_event = AtomicOutputEvent()
+        event = BasicOutputEvent(green(f"Thought for {(t1 - t0).pretty_format()}", bold=True))
+        res_event.append(event)
+
+        message = qq_result.message()
+        thinking_part = Message.get_thinking_part(message)
+        answer = Message.get_text(message)
+
+        if thinking_part:
+            # print(f"""<think>\n{thinking_part["thinking"]}\n</think>\n""")
+            event = ThinkingOutputEvent(thinking_part["thinking"])
+            res_event.append(event)
+        # print(answer)
+        event = AnswerOutputEvent(answer)
+        res_event.append(event)
+        self._workqueue.add(asyncio.create_task(echo_event(res_event)))
+
+        event = EndControlEvent(step_ctr)
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
     async def init(self, step_ctr: int, query: str):
         think_model_path = self.think_model
         think_model = self.services.registry.find_model(think_model_path)
