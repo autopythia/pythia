@@ -264,7 +264,7 @@ class Autopythia:
     think_model: str = "moonshotai/kimi-k2.5-thinking"
     services: APIServices = None
 
-    _session: Optional[str] = None
+    _session: Optional[int] = None
     _workqueue: Any = None
 
     def __post_init__(self):
@@ -275,24 +275,41 @@ class Autopythia:
         if self._workqueue is None:
             self._workqueue = set()
 
-    def _fresh_session_ctr(self) -> str:
+    def _fresh_session_ctr(self) -> int:
         ctr = fresh_ctr(GLOBAL_SESSION_DIR, "session_ctr")
-        return f"{ctr}"
-
-    def _get_session_ctr(self) -> str:
-        ctr = get_ctr(GLOBAL_SESSION_DIR, "session_ctr")
-        return f"{ctr}"
-
-    def _fresh_step_ctr(self, session_ctr: str) -> int:
-        ctr = fresh_ctr(os.path.join(GLOBAL_SESSION_DIR, session_ctr), "step_ctr")
         return ctr
 
-    def _set_session(self, session_ctr: str):
+    def _get_session_ctr(self) -> int:
+        ctr = get_ctr(GLOBAL_SESSION_DIR, "session_ctr")
+        return ctr
+
+    def _fresh_step_ctr(self, session_ctr: int) -> int:
+        ctr = fresh_ctr(os.path.join(GLOBAL_SESSION_DIR, f"{session_ctr}"), "step_ctr")
+        return ctr
+
+    def _set_session(self, session_ctr: int):
         self._session = session_ctr
+
+    def append_transcript(self, session_ctr, event):
+        prefix = os.path.join(GLOBAL_SESSION_DIR, f"{session_ctr}")
+        transcript_path = os.path.join(prefix, "transcript.txt")
+        try:
+            transcript_file = open(transcript_path, "a", encoding="utf-8")
+        except OSError:
+            os.makedirs(prefix, exist_ok=True)
+            transcript_file = open(transcript_path, "a", encoding="utf-8")
+        if isinstance(event, str):
+            print(event, file=transcript_file, flush=True)
+        elif isinstance(event, ThinkingOutputEvent):
+            print(f"\n<think>{event.text}</think>", file=transcript_file, flush=True)
+        elif isinstance(event, AnswerOutputEvent):
+            print(f"\n{event.text}", file=transcript_file, flush=True)
+        else:
+            raise NotImplementedError
 
     def append_history(
         self,
-        session_ctr: str,
+        session_ctr: int,
         step_ctr: int,
         query: Optional[str] = None,
         messages: Optional[list] = None,
@@ -301,7 +318,7 @@ class Autopythia:
     ):
         if t0 is None:
             t0 = Timestamp()
-        prefix = os.path.join(GLOBAL_SESSION_DIR, session_ctr)
+        prefix = os.path.join(GLOBAL_SESSION_DIR, f"{session_ctr}")
         history_path = os.path.join(prefix, "history.jsonl")
         try:
             history_file = open(history_path, "a", encoding="utf-8")
@@ -313,7 +330,7 @@ class Autopythia:
             "t1": f"{t1}" if t1 is not None else None,
             "session_ctr": session_ctr,
             "session_uid": None,
-            "step_ctr": f"{step_ctr}",
+            "step_ctr": step_ctr,
             "step_uid": None,
         }
         if query is not None:
@@ -346,6 +363,8 @@ class Autopythia:
                 "content": query,
             },
         ]
+        self.append_transcript(self._session, query)
+
         event = BasicOutputEvent(green("Thinking...", bold=True))
         self._workqueue.add(asyncio.create_task(echo_event(event)))
 
@@ -372,9 +391,11 @@ class Autopythia:
         if thinking_part:
             # print(f"""<think>\n{thinking_part["thinking"]}\n</think>\n""")
             event = ThinkingOutputEvent(thinking_part["thinking"])
+            self.append_transcript(self._session, event)
             res_event.append(event)
         # print(answer)
         event = AnswerOutputEvent(answer)
+        self.append_transcript(self._session, event)
         res_event.append(event)
         self._workqueue.add(asyncio.create_task(echo_event(res_event)))
 
@@ -388,7 +409,8 @@ class Autopythia:
             # "max_tokens": 8192,
             # "max_tokens": 16384,
             # "max_tokens": 32768,
-            "max_tokens": 65536,
+            # "max_tokens": 65536,
+            "max_tokens": 262144,
             # "temperature": 0.6,
             "temperature": 1.0,
         }
@@ -490,7 +512,8 @@ class Autopythia:
             # "max_tokens": 8192,
             # "max_tokens": 16384,
             # "max_tokens": 32768,
-            "max_tokens": 65536,
+            # "max_tokens": 65536,
+            "max_tokens": 262144,
             # "temperature": 0.6,
             "temperature": 1.0,
         }
@@ -617,7 +640,8 @@ class Autopythia:
             # "max_tokens": 8192,
             # "max_tokens": 16384,
             # "max_tokens": 32768,
-            "max_tokens": 65536,
+            # "max_tokens": 65536,
+            "max_tokens": 262144,
             # "temperature": 0.6,
             "temperature": 1.0,
         }
