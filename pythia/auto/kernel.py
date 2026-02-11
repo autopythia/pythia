@@ -261,6 +261,7 @@ class Autopythia:
 
     # work_model:  str = "deepseek-ai/deepseek-v3.2-thinking-off"
     # think_model: str = "deepseek-ai/deepseek-v3.2-thinking"
+    think_off_model: str = "moonshotai/kimi-k2.5-thinking-off"
     think_model: str = "moonshotai/kimi-k2.5-thinking"
     services: APIServices = None
 
@@ -401,6 +402,175 @@ class Autopythia:
 
         event = EndControlEvent(step_ctr)
         self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+    async def cleanhtml(self, step_ctr: int, query: str):
+        think_model_path = self.think_off_model
+        # think_model_path = self.think_model
+        think_model = self.services.registry.find_model(think_model_path)
+        think_sampling_params = {
+            "max_tokens": 65536,
+            # "max_tokens": 131072,
+            # "max_tokens": 262144,
+            "temperature": 1.0,
+        }
+
+        input_path = query.strip()
+        # with open(input_path, "r") as input_file:
+        #     input_text = input_file.read()
+        input_file = open(input_path, "r")
+
+        target_chunk_size = 5000
+        # target_chunk_size = 10000
+        # target_chunk_size = 25000
+        # target_chunk_size = 50000
+        # target_chunk_size = 100000
+        # chunk_lens = []
+        chunks = []
+        chunk_len = 0
+        chunk = []
+        for line in input_file:
+            chunk_len += len(line)
+            chunk.append(line)
+            if chunk_len >= target_chunk_size:
+                chunk = "".join(chunk)
+                chunks.append(chunk)
+                chunk_len = 0
+                chunk = []
+        if chunk:
+            chunk = "".join(chunk)
+            chunks.append(chunk)
+
+        input_file.close()
+
+        input_chunks = chunks
+        output_chunks = []
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+        # print(f"DEBUG: init: step ctr = {step_ctr}")
+
+        event = StartControlEvent(step_ctr)
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+        event = BasicOutputEvent(green(f"Computed {len(input_chunks)} chunks", bold=True))
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+        event = BasicOutputEvent(green("Thinking...", bold=True))
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+        chunk_tasks = []
+        chunk_results = {}
+        chunk_outputs = {}
+
+        async def _pair(key, fut):
+            return key, await fut
+
+        def create_task_pair(key, fut):
+            return asyncio.create_task(_pair(key, fut))
+
+        total_t0 = Timestamp()
+
+# - Remove class, id, style, and non-rendered "metadata" fields inside tags.
+# - Remove link, style (CSS), and script (Javascript) blocks.
+# - Remove leading spaces or tabs that are not rendered (e.g. not inside a pre block).
+# - Do not add any delimiters (e.g. fenced code block) around your HTML output.
+
+        for chunk_idx, chunk in enumerate(input_chunks):
+            chunk_query = [
+                {
+                    "role": "system",
+                    "content": (
+"""You are a meticulous data analyst. Below, you will be given a section of HTML to clean for algorithmic processing. Broadly, the intention of this HTML cleaning is to preserve the structure and content of the HTML document, while removing unneeded style and format.
+
+You should follow these specific HTML cleaning criteria:
+
+- Remove `class`, `style`, and non-rendered metadata fields inside tags.
+- Remove `link`, `script`, and `style` blocks.
+- Remove leading spaces or tabs that are not rendered (e.g. not inside a pre block).
+- Do not add any delimiters (e.g. fenced code block) around your HTML output.
+
+Your output should consist of and only of the cleaned HTML corresponding to the user input.
+"""
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": chunk,
+                },
+            ]
+            # self.append_transcript(self._session, query)
+
+            # event = BasicOutputEvent(green("Thinking...", bold=True))
+            # self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+            t0 = Timestamp()
+            chunk_result = self.services.client.message(
+                think_model,
+                chunk_query,
+                think_sampling_params,
+                fresh=True,
+            )
+            # chunk_results.append(chunk_result)
+            # chunk_results.append(asyncio.create_task(chunk_result))
+            chunk_tasks.append(create_task_pair(chunk_idx, chunk_result))
+            self.append_history(self._session, step_ctr, messages=chunk_query, t0=t0)
+
+        # chunk_results = await asyncio.gather(*chunk_results)
+
+        async def _wait_tasks(tasks):
+            rem_tasks = set([t for t in tasks])
+            while rem_tasks:
+                done, _pending = await asyncio.wait(rem_tasks, return_when=asyncio.FIRST_COMPLETED)
+                rem_tasks -= done
+                # rem_tasks = pending
+                for e in done:
+                    yield e.result()
+
+        async for chunk_idx, chunk_result in _wait_tasks(chunk_tasks):
+            # chunk_result = await chunk_result
+            t1 = Timestamp()
+            # print(chunk_result)
+
+            res_event = AtomicOutputEvent()
+            event = BasicOutputEvent(green(f"Thought for {(t1 - total_t0).pretty_format()}", bold=True))
+            res_event.append(event)
+
+            message = chunk_result.message()
+            thinking_part = Message.get_thinking_part(message)
+            answer = Message.get_text(message)
+
+            output_text = answer
+            if not output_text.endswith("\n"):
+                output_text = f"{output_text}\n"
+
+            with open(f"_tmp_clean.{chunk_idx}.html", "w") as output_file:
+                print(output_text, end="", file=output_file, flush=True)
+
+            chunk_outputs[chunk_idx] = output_text
+
+            if thinking_part:
+                # print(f"""<think>\n{thinking_part["thinking"]}\n</think>\n""")
+                event = ThinkingOutputEvent(thinking_part["thinking"])
+                self.append_transcript(self._session, event)
+                res_event.append(event)
+            # print(answer)
+            event = AnswerOutputEvent(answer)
+            # self.append_transcript(self._session, event)
+            res_event.append(event)
+            self._workqueue.add(asyncio.create_task(echo_event(res_event)))
+
+            # step_ctr = self._fresh_step_ctr(self._session)
+
+        event = EndControlEvent(step_ctr)
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+        for chunk_idx in range(len(input_chunks)):
+            output_text = chunk_outputs[chunk_idx]
+            output_chunks.append(output_text)
+
+        output_text = "".join(output_chunks)
+        with open(f"_tmp_clean.html", "w") as output_file:
+            print(output_text, end="", file=output_file, flush=True)
 
     async def init(self, step_ctr: int, query: str):
         think_model_path = self.think_model

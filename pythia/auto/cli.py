@@ -611,6 +611,12 @@ async def _run_main(args, input_state: _InputState):
                     workqueue.add(asyncio.create_task(auto.qq(step_ctr, qargs_text)))
                     auto.append_history(session_ctr, step_ctr, query=qargs_text)
                     start.add(step_ctr)
+                elif query_head in ("/cleanhtml",):
+                    step_ctr = auto._fresh_step_ctr(session_ctr)
+                    qargs_text = query[len(query_head):].lstrip()
+                    workqueue.add(asyncio.create_task(auto.cleanhtml(step_ctr, qargs_text)))
+                    auto.append_history(session_ctr, step_ctr, query=qargs_text)
+                    start.add(step_ctr)
                 elif query_head in ("/cd",):
                     pass
                 elif query_head in ("/vim",):

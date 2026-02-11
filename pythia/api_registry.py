@@ -296,6 +296,27 @@ class APIRegistry:
                 },
             },
         )
+        self.register_model(
+            "anthropic",
+            "anthropic/claude-4.6-opus-thinking-off",
+            endpoint_model_path="claude-opus-4-6",
+            endpoint_extra_params={
+                "thinking": {
+                    "type": "disabled",
+                },
+            },
+        )
+        self.register_model(
+            "anthropic",
+            "anthropic/claude-4.6-opus-thinking-32k",
+            endpoint_model_path="claude-opus-4-6",
+            endpoint_extra_params={
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 32000,
+                },
+            },
+        )
 
     def _register_deepinfra_models(self):
         self.register_model(
@@ -654,6 +675,22 @@ class APIRegistry:
                 "reasoning_effort": "high",
             },
         )
+        self.register_model(
+            "openai",
+            "openai/gpt-5.2-xhigh",
+            endpoint_model_path="gpt-5.2-2025-12-11",
+            endpoint_extra_params={
+                "reasoning_effort": "xhigh",
+            },
+        )
+        self.register_model(
+            "openai",
+            "openai/gpt-5.2-codex-xhigh",
+            endpoint_model_path="gpt-5.2-codex",
+            endpoint_extra_params={
+                "reasoning_effort": "xhigh",
+            },
+        )
 
     def _register_together_models(self):
         self.register_model(
@@ -742,23 +779,23 @@ class APIRegistry:
         #     "__local__/openai/gpt-oss-20b",
         #     endpoint_model_path="openai/gpt-oss-20b",
         # )
-        self.register_model(
-            "__local__",
-            "__local__/qwen/qwen3-4b-instruct-2507-fp8",
-            endpoint_model_path="Qwen/Qwen3-4B-Instruct-2507-FP8",
-        )
-        self.register_model(
-            "__local__",
-            "__local__/qwen/qwen3-4b-thinking-2507-fp8",
-            endpoint_model_path="Qwen/Qwen3-4B-Thinking-2507-FP8",
-        )
-        self.register_model(
-            "__local__",
-            "__local__/qwen/qwen3-30b-a3b-instruct-2507-fp8",
-            endpoint_model_path="Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
-        )
-        self.register_model(
-            "__local__",
-            "__local__/qwen/qwen3-30b-a3b-thinking-2507-fp8",
-            endpoint_model_path="Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
-        )
+        # self.register_model(
+        #     "__local__",
+        #     "__local__/qwen/qwen3-4b-instruct-2507-fp8",
+        #     endpoint_model_path="Qwen/Qwen3-4B-Instruct-2507-FP8",
+        # )
+        # self.register_model(
+        #     "__local__",
+        #     "__local__/qwen/qwen3-4b-thinking-2507-fp8",
+        #     endpoint_model_path="Qwen/Qwen3-4B-Thinking-2507-FP8",
+        # )
+        # self.register_model(
+        #     "__local__",
+        #     "__local__/qwen/qwen3-30b-a3b-instruct-2507-fp8",
+        #     endpoint_model_path="Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+        # )
+        # self.register_model(
+        #     "__local__",
+        #     "__local__/qwen/qwen3-30b-a3b-thinking-2507-fp8",
+        #     endpoint_model_path="Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
+        # )
