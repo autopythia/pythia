@@ -9,6 +9,7 @@ dependencies = [
  "bitflags",
  "fxhash2",
  "libc",
+ "once_cell",
  "pyo3",
  "regex",
  "serde",

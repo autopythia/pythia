@@ -1,5 +1,6 @@
 extern crate bitflags;
 extern crate fxhash2;
+extern crate once_cell;
 #[cfg(feature = "pyo3")]
 extern crate pyo3;
 #[cfg(feature = "extra")]
@@ -15,6 +16,7 @@ pub mod algo;
 pub mod build;
 pub mod clock;
 pub mod debug;
+pub mod env;
 pub mod panic_;
 pub mod sys;
 pub mod tap;

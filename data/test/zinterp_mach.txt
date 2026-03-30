@@ -8,6 +8,8 @@ zinterp_mach/simple_equal.py
 zinterp_mach/simple_apply.py
 zinterp_mach/simple_apply_2.py
 zinterp_mach/simple_apply_3.py
+zinterp_mach/simple_def.py
+zinterp_mach/simple_def_2.py
 zinterp_mach/simple_group.py
 zinterp_mach/simple_raise.py
 zinterp_mach/simple_list.py
