@@ -4,7 +4,7 @@ use crate::algo::{BTreeMap, Rc};
 
 use crate::zinterp::mach::{
   LReg,
-  ZKntMachLog, ZKntMachState, ZKMachCheck, ZKResumeStatus,
+  ZKntMachLog, ZKntMachState, ZKMachCheck, ZKMachYield_,
 };
 use crate::zinterp::tree::*;
 
@@ -124,10 +124,10 @@ impl ZInterpLog {
     unimplemented!();
   }
 
-  pub fn resume_inplace(&mut self, state: &mut ZInterpState, /*resume_arg: &mut LReg<_>*/) -> Result<ZKResumeStatus, ZKMachCheck> {
+  pub fn resume_inplace(&mut self, state: &mut ZInterpState, /*resume_arg: &mut LReg<_>*/) -> Result<ZKMachYield_, ZKMachCheck> {
     //loop {
       match self.cur.klog.resume_inplace(&mut state.kstate) {
-        Ok(ZKResumeStatus::Yield) => {
+        Ok(ZKMachYield_::Yield) => {
           // TODO
           /*
           // TODO: step function.

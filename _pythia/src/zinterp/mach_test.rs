@@ -57,7 +57,8 @@ impl MachTestsProver {
     let mut mach_log = ZKntMachLog::init();
     let mut mach_state = ZKntMachState::init(mod_.into());
     mach_state.set_tap_buffer(tap_buf.clone().wrap_writer());
-    let _ = match mach_log.resume_inplace(&mut mach_state) {
+    //mach_log.fill_resume_arg(_);
+    let _ = match mach_log.resume(&mut mach_state) {
       Err(e) => {
         writeln!(writer, "{} {} - {:?}", "not ok".red().bold(), rank, &item.key)?;
         writeln!(writer, "# resume error = {:?}", e)?;

@@ -772,7 +772,7 @@ pub enum Term {
   //StrLit(Span, Lit),
   AtomLit(Span, Lit),
   NoneLit(Span, Lit),
-  BoolLit(Span, Lit),
+  LogicLit(Span, Lit),
   IntLit(Span, Lit),
   FloatLit(Span, Lit),
   TupleLit(Span, Vec<TermRef>),
@@ -816,7 +816,7 @@ impl Term {
       //&Term::StrLit(ref span, ..) |
       &Term::AtomLit(ref span, ..) |
       &Term::NoneLit(ref span, ..) |
-      &Term::BoolLit(ref span, ..) |
+      &Term::LogicLit(ref span, ..) |
       &Term::IntLit(ref span, ..) |
       &Term::ListLit(ref span, ..) |
       &Term::Neg(ref span, ..) |
@@ -1142,29 +1142,30 @@ impl<S: AsRef<str>> Parser<S> {
 
   pub fn lbp(&self, tok: &Token) -> RawBp {
     match tok {
+      /*// FIXME: lbp of comma? (Bunch)
+      &Token::Comma => {
+        //800
+        100
+      }*/
       &Token::LDeduct |
       &Token::RDeduct => {
-        100
+        200
       }
       // FIXME: LWalrus should be R-assoc.
       &Token::LWalrus |
       &Token::RWalrus => {
-        110
+        210
       }
       &Token::Equal |
       &Token::SlashEq |
       &Token::LQueryEq => {
-        120
+        220
       }
       // NB: deprecated syntax.
       /*&Token::ColonIdent(_) |*/
       &Token::LParen => {
         400
       }
-      // FIXME: lbp of comma? (Bunch)
-      /*&Token::Comma => {
-        800
-      }*/
       &Token::Query |
       &Token::PlusQuery => {
         // TODO: should be even higher?
@@ -1273,6 +1274,7 @@ impl<S: AsRef<str>> Parser<S> {
     }
   }
 
+  #[track_caller]
   pub fn mod_(&mut self) -> Result<Mod, ParseSpanError> {
     _debugln!(self, "DEBUG: Parser::mod_: ...");
     let depth = 0;
@@ -1300,8 +1302,9 @@ impl<S: AsRef<str>> Parser<S> {
     Ok(Mod{span, body})
   }
 
+  #[track_caller]
   pub fn sent(&mut self, ctx: SentCtx) -> Result<Option<(Sent, SentCtx)>, ParseSpanError> {
-    let stm_ctx = self._sent(ctx, SentPrefix::default())?;
+    let stm_ctx = self._sent(ctx)?;
     loop {
       self.next();
       let cur = self.cur();
@@ -1322,6 +1325,7 @@ impl<S: AsRef<str>> Parser<S> {
     Ok(stm_ctx)
   }
 
+  #[track_caller]
   pub fn term(&mut self, ctx: TermCtx) -> Result<Term, ParseSpanError> {
     self.maybe_term_spaces(ctx.indent)?;
     self.next();
@@ -1370,7 +1374,7 @@ impl<S: AsRef<str>> Parser<S> {
     Ok(lterm)
   }
 
-  pub fn _sent(&mut self, ctx: SentCtx, prefix: SentPrefix) -> Result<Option<(Sent, SentCtx)>, ParseSpanError> {
+  pub fn _sent(&mut self, ctx: SentCtx, /*prefix: SentPrefix*/) -> Result<Option<(Sent, SentCtx)>, ParseSpanError> {
     _debugln!(self, "DEBUG: Parser::stm: ctx={:?} cur? span={:?} tok={:?}", ctx, self.maybe_cur_span(), self.maybe_cur_tok());
     let mut this_ctx = ctx;
     loop {
@@ -1540,16 +1544,18 @@ impl<S: AsRef<str>> Parser<S> {
         return Ok(Some((Sent::Nonlocal(span, static_scope, ident.into()), this_ctx)));
       }
       &Token::Rule => {
-        match prefix {
+        // TODO
+        unimplemented!();
+        /*match prefix {
           SentPrefix::_Nil => {
             self.maybe_spaces_deprecated();
             self.tokens.flag |= TokenizerFlag_::PYTHIA;
-            return self._sent(this_ctx, SentPrefix::Rule);
+            return self._sent(this_ctx, /*SentPrefix::Rule*/);
           }
           SentPrefix::Rule => {
             return Err((cur.span, ParseError::Unexpected(cur.tok.clone())).into());
           }
-        }
+        }*/
       }
       _ => {}
     }
@@ -1899,17 +1905,17 @@ impl<S: AsRef<str>> Parser<S> {
           &Token::Defmatch => {
             _debugln!(self, "DEBUG: Parser::stm: ok: defmatch");
             self.tokens.flag |= TokenizerFlag_::PYTHIA;
-            return Ok(Some((Sent::Defmatch(span, prefix.into_def(), head, params, body), this_ctx)));
+            return Ok(Some((Sent::Defmatch(span, None, /*prefix.into_def(),*/ head, params, body), this_ctx)));
           }
           &Token::Defproc => {
             _debugln!(self, "DEBUG: Parser::stm: ok: defproc");
             self.tokens.flag |= TokenizerFlag_::PYTHIA;
-            return Ok(Some((Sent::Defproc(span, prefix.into_def(), head, params, body), this_ctx)));
+            return Ok(Some((Sent::Defproc(span, None, /*prefix.into_def(),*/ head, params, body), this_ctx)));
           }
           &Token::Def => {
             _debugln!(self, "DEBUG: Parser::stm: ok: def");
             self.tokens.flag |= TokenizerFlag_::PYTHON;
-            return Ok(Some((Sent::Defproc(span, prefix.into_def(), head, params, body), this_ctx)));
+            return Ok(Some((Sent::Defproc(span, None, /*prefix.into_def(),*/ head, params, body), this_ctx)));
           }
           _ => {}
         }
@@ -2050,10 +2056,10 @@ impl<S: AsRef<str>> Parser<S> {
         return Ok(Term::NoneLit(cur.span, "None".into()));
       }
       &Token::True => {
-        return Ok(Term::BoolLit(cur.span, "True".into()));
+        return Ok(Term::LogicLit(cur.span, "True".into()));
       }
       &Token::False => {
-        return Ok(Term::BoolLit(cur.span, "False".into()));
+        return Ok(Term::LogicLit(cur.span, "False".into()));
       }
       &Token::IntLit(ref s) => {
         //_debugln!(self, "DEBUG: Parser::term_led: int lit: tok={:?}", &cur.tok);
@@ -2112,35 +2118,49 @@ impl<S: AsRef<str>> Parser<S> {
       }
       &Token::LBrack => {
         let start = cur.span.clone();
-        //let mut tup = vec![];
+        let mut tup = vec![];
         self.next();
         let cur = self.cur();
         match &cur.tok {
           &Token::RBrack => {
             let span = start.hull(self.pos());
-            return Ok(Term::ListLit(span, Vec::new()));
+            return Ok(Term::ListLit(span, tup));
           }
           _ => {}
         }
         self.restore(&cur.span);
-        let term = self.term(this_ctx)?;
-        match term {
-          Term::Bunch(_, tup) => {
-            self.next();
-            let cur = self.cur();
-            match &cur.tok {
-              &Token::RBrack => {}
-              _ => {
-                return Err((cur.span, ParseError::Expected(Token::RBrack)).into());
+        loop {
+          let term = self.term(this_ctx)?;
+          match term {
+            Term::Bunch(_, tup) => {
+              self.next();
+              let cur = self.cur();
+              match &cur.tok {
+                &Token::RBrack => {}
+                _ => {
+                  return Err((cur.span, ParseError::Expected(Token::RBrack)).into());
+                }
               }
+              let span = start.hull(self.pos());
+              return Ok(Term::ListLit(span, tup));
             }
-            let span = start.hull(self.pos());
-            return Ok(Term::ListLit(span, tup));
+            term => {
+              tup.push(term.into());
+            }
           }
-          _ => {
-            let span = start.hull(self.pos());
-            return Ok(Term::ListLit(span, vec![term.into()]));
-            //return Err((cur.span, ParseError::ExpectedBunch).into());
+          self.maybe_term_spaces(ctx_indent)?;
+          self.next();
+          let cur = self.cur();
+          match &cur.tok {
+            &Token::Comma => {
+            }
+            &Token::RBrack => {
+              let span = start.hull(self.pos());
+              return Ok(Term::ListLit(span, tup));
+            }
+            _ => {
+              return Err((cur.span, ParseError::_Bot).into());
+            }
           }
         }
       }
@@ -2278,7 +2298,9 @@ impl<S: AsRef<str>> Parser<S> {
       &Token::Comma => {
         let start = lterm.span();
         self.maybe_term_spaces(ctx_indent)?;
-        let peek = self.maybe_peek();
+        //let peek = self.maybe_peek();
+        let peek = Some(self.peek());
+        println!("DEBUG: term_led: Comma: peek? {:?}", peek);
         match peek.as_ref().map(|t| &t.tok) {
           //Some(&Token::RBrack) |
           Some(&Token::RParen) => {
@@ -2293,6 +2315,7 @@ impl<S: AsRef<str>> Parser<S> {
           }
           _ => {}
         }
+        println!("DEBUG: term_led: Comma: rterm...");
         let rterm = self.term(this_ctx)?;
         match &mut lterm {
           &mut Term::Bunch(ref mut span, ref mut tup) => {
@@ -2581,7 +2604,7 @@ impl<S: AsRef<str>> Printer<S> {
       &Term::NoneLit(ref span, ..) => {
         print!("{}~[{:?}]", self._snippet(span), span);
       }
-      &Term::BoolLit(ref span, ..) => {
+      &Term::LogicLit(ref span, ..) => {
         print!("{}~[{:?}]", self._snippet(span), span);
       }
       &Term::IntLit(ref span, ..) => {
