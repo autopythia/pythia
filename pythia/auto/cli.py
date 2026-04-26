@@ -436,7 +436,7 @@ async def _run_main(args, input_state: _InputState):
             workcopy_githash = workcopy_githash_result.out.rstrip()
         else:
             workcopy_githash = None
-    auto = Autopythia()
+    auto = Autopythia(contradex_api_base_url=args.api_base_url)
     workqueue = auto._workqueue
     workqueue.add(asyncio.create_task(sleeping_beauty()))
     input_state._workqueue = workqueue
@@ -710,6 +710,12 @@ def main(args):
 
 def parse_args(argv: Optional[list[str]] = None):
     args = ArgumentParser()
+    args.add_argument(
+        "--api-base-url",
+        type=str,
+        default=None,
+        help="Optional base URL override passed to /contradex backend requests",
+    )
     args.add_argument("--resume", action=BooleanOptionalAction, default=False)
     args.add_argument("-v", "--verbose", action=BooleanOptionalAction, default=False)
     args.add_argument("-d", action=BooleanOptionalAction, default=False)

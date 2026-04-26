@@ -259,6 +259,7 @@ Content:
 @dataclass
 class Autopythia:
     shell: str = None
+    contradex_api_base_url: Optional[str] = None
 
     # work_model:  str = "deepseek-ai/deepseek-v3.2-thinking-off"
     # think_model: str = "deepseek-ai/deepseek-v3.2-thinking"
@@ -373,7 +374,10 @@ class Autopythia:
             "model_client_kind": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL_CLIENT", "urllib"),
             "api_key": os.environ.get("AUTO_PYTHIA_CONTRADEX_API_KEY"),
             "api_provider": api_provider,
-            "api_base_url": os.environ.get("AUTO_PYTHIA_CONTRADEX_API_BASE_URL"),
+            "api_base_url": (
+                os.environ.get("AUTO_PYTHIA_CONTRADEX_API_BASE_URL")
+                or self.contradex_api_base_url
+            ),
             "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.3-codex"),
             "reasoning_effort": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_EFFORT", "xhigh"),
             "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY", "auto"),
@@ -409,7 +413,7 @@ class Autopythia:
             def run_turn():
                 display = TurnEventDisplay(
                     display_level=config.display_level,
-                    assistant_mode="oneshot_on_close",
+                    assistant_mode="message",
                     emit=emit_to_autopythia,
                 )
                 try:
