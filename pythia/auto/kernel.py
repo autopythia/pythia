@@ -1,5 +1,6 @@
-from typing import Any, Optional, TypedDict
+from typing import Any, Callable, Optional, TypedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 import asyncio
 import functools
@@ -290,6 +291,148 @@ class Autopythia:
 
     def _set_session(self, session_ctr: int):
         self._session = session_ctr
+
+    def _enqueue_event(self, event) -> None:
+        self._workqueue.add(asyncio.create_task(echo_event(event)))
+
+    def _enqueue_event_threadsafe(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        event_factory: Callable[[], OutputEvent | StartControlEvent | EndControlEvent],
+    ) -> None:
+        def enqueue() -> None:
+            self._enqueue_event(event_factory())
+
+        loop.call_soon_threadsafe(enqueue)
+
+    def _emit_output_threadsafe(self, loop: asyncio.AbstractEventLoop, text: str) -> None:
+        if not text:
+            return
+        self._enqueue_event_threadsafe(loop, lambda: BasicOutputEvent(text=text))
+
+    def _resolve_default_contradex_api_provider(self) -> str:
+        explicit_api_key = os.environ.get("AUTO_PYTHIA_CONTRADEX_API_KEY")
+        if explicit_api_key is not None and explicit_api_key.strip():
+            return "api"
+
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if openai_api_key is not None and openai_api_key.strip():
+            return "api"
+
+        codex_api_key = os.environ.get("CODEX_API_KEY")
+        if codex_api_key is not None and codex_api_key.strip():
+            return "codex"
+
+        codex_home = os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME")
+        auth_file = os.environ.get("AUTO_PYTHIA_CONTRADEX_AUTH_FILE")
+        try:
+            from contradex.auth import load_auth_dot_json
+            from contradex.auth import resolve_auth_json_path
+
+            auth_path = resolve_auth_json_path(
+                codex_home=codex_home,
+                auth_file=auth_file,
+            )
+            auth_payload = load_auth_dot_json(auth_path)
+        except Exception:
+            auth_payload = None
+
+        if auth_payload is None:
+            return "api"
+
+        normalized_mode = (auth_payload.auth_mode or "").replace("_", "").replace("-", "").lower()
+        if normalized_mode == "chatgptauthtokens":
+            return "codex"
+        if normalized_mode == "chatgpt":
+            return "codex"
+        if normalized_mode == "apikey":
+            return "api"
+        if auth_payload.openai_api_key is not None:
+            return "api"
+        if auth_payload.access_token is not None:
+            return "codex"
+        return "api"
+
+    def _load_contradex_config_from_env(self) -> dict[str, Any]:
+        raw_display_level = os.environ.get("AUTO_PYTHIA_CONTRADEX_DISPLAY_LEVEL")
+        display_level = 1
+        if raw_display_level is not None:
+            try:
+                display_level = int(raw_display_level)
+            except ValueError:
+                display_level = 1
+
+        raw_provider = os.environ.get("AUTO_PYTHIA_CONTRADEX_API_PROVIDER")
+        if raw_provider is not None and raw_provider.strip():
+            api_provider = raw_provider.strip()
+        else:
+            api_provider = self._resolve_default_contradex_api_provider()
+
+        return {
+            "cwd": Path.cwd(),
+            "model_client_kind": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL_CLIENT", "urllib"),
+            "api_key": os.environ.get("AUTO_PYTHIA_CONTRADEX_API_KEY"),
+            "api_provider": api_provider,
+            "api_base_url": os.environ.get("AUTO_PYTHIA_CONTRADEX_API_BASE_URL"),
+            "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.3-codex"),
+            "reasoning_effort": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_EFFORT", "xhigh"),
+            "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY", "auto"),
+            "codex_home": os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME"),
+            "auth_file": os.environ.get("AUTO_PYTHIA_CONTRADEX_AUTH_FILE"),
+            "display_level": display_level,
+        }
+
+    async def contradex(self, step_ctr: int, query: str):
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+        loop = asyncio.get_running_loop()
+
+        try:
+            from contradex.display import TurnEventDisplay
+            from contradex.integrations.autopythia import AutopythiaContradexConfig
+            from contradex.integrations.autopythia import run_single_turn
+
+            config = AutopythiaContradexConfig(**self._load_contradex_config_from_env())
+
+            def emit_to_autopythia(*args, **kwargs) -> None:
+                sep = kwargs.get("sep", " ")
+                end = kwargs.get("end", "\n")
+                text = sep.join(str(arg) for arg in args)
+                chunk = f"{text}{end}"
+                if chunk.endswith("\n"):
+                    chunk = chunk[:-1]
+                if chunk:
+                    self._emit_output_threadsafe(loop, chunk)
+
+            def run_turn():
+                display = TurnEventDisplay(
+                    display_level=config.display_level,
+                    assistant_mode="oneshot_on_close",
+                    emit=emit_to_autopythia,
+                )
+                try:
+                    return run_single_turn(
+                        query,
+                        config=config,
+                        event_handler=display.handle,
+                    )
+                finally:
+                    display.close()
+
+            state = await asyncio.to_thread(run_turn)
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=green(f"Contradex done. Tokens: {state.total_usage_tokens}", bold=True),
+                )
+            )
+        except Exception as exc:
+            self._enqueue_event(
+                BasicOutputEvent(text=f"contradex failed: {exc.__class__.__name__}: {exc}")
+            )
+        finally:
+            self._enqueue_event(EndControlEvent(step_ctr))
 
     def append_transcript(self, session_ctr, event):
         prefix = os.path.join(GLOBAL_SESSION_DIR, f"{session_ctr}")
