@@ -446,6 +446,9 @@ async def _run_main(args, input_state: _InputState):
         session_ctr = auto._fresh_session_ctr()
     auto._set_session(session_ctr)
     print(f"""{bold("autopythia")} {arch}-{osys} python{py_ver}""")
+    if args.verbose:
+        print(f"""{plain("Py executable")}       = {sys.executable}""")
+        print(f"""{plain("Py argv")}             = {sys.argv}""")
     if True:
         print(f"""{plain("Isolation mode")}      = {"Current working dir"}""")
     else:
@@ -481,6 +484,7 @@ async def _run_main(args, input_state: _InputState):
     step_ctr = 0
     start = set()
     halt = False
+    reboot = False
     for frame_ctr in itertools.count():
         done, _pending = await asyncio.wait(workqueue, return_when=asyncio.FIRST_COMPLETED, timeout=delay)
         workqueue -= done
@@ -580,6 +584,7 @@ async def _run_main(args, input_state: _InputState):
         # print(input_state.build_input_line(prompt, end=end, reset=reset), end="", flush=True)
         input_line = input_state.build_input_line(prompt, end="", reset=reset)
         halt = False
+        reboot = False
         # flush = False
         flush = True
         if ret:
@@ -591,7 +596,9 @@ async def _run_main(args, input_state: _InputState):
                 if query_head in ("/exit", "/quit"):
                     halt = True
                     flush = False
-                    # break
+                # elif query_head in ("/reboot",):
+                #     reboot = True
+                #     flush = False
                 elif query_head.startswith("//"):
                     flush = False
                     pass
@@ -605,6 +612,12 @@ async def _run_main(args, input_state: _InputState):
                     workqueue.add(asyncio.create_task(
                         BasicOutputEvent.afresh(text=qargs_text)
                     ))
+                elif query_head in ("/auto",):
+                    step_ctr = auto._fresh_step_ctr(session_ctr)
+                    qargs_text = query[5:].lstrip()
+                    workqueue.add(asyncio.create_task(auto.init(step_ctr, qargs_text)))
+                    auto.append_history(session_ctr, step_ctr, query=query)
+                    start.add(step_ctr)
                 elif query_head in ("/qq",):
                     step_ctr = auto._fresh_step_ctr(session_ctr)
                     qargs_text = query[3:].lstrip()
@@ -665,17 +678,19 @@ async def _run_main(args, input_state: _InputState):
         else:
             end = ""
         print(input_line, end=end, flush=True)
-        if halt:
+        if halt or reboot:
             break
     if args.verbose:
         print("\nGoodbye.", flush=True)
-    elif halt:
+    else:
         print("", flush=True)
     cur = asyncio.current_task()
     for t in asyncio.all_tasks():
         if t is cur:
             continue
         t.cancel()
+    if reboot:
+        pass
 
 def main(args):
     asyncio.run(_setup_main(args))
