@@ -426,9 +426,31 @@ class Autopythia:
                     display.close()
 
             state = await asyncio.to_thread(run_turn)
+            usage_summary = (
+                " | ".join(
+                    [
+                        f"output sum={state.output_tokens_sum:,}",
+                        f"input sum={state.input_tokens_sum:,}",
+                        f"non-cache input sum={state.non_cache_hit_input_tokens_sum:,}",
+                        f"cache-hit input sum={state.cache_hit_input_tokens_sum:,}",
+                        f"cache-hit input max={state.cache_hit_input_tokens_max:,}",
+                    ]
+                )
+                if (
+                    state.output_tokens_sum
+                    or state.input_tokens_sum
+                    or state.non_cache_hit_input_tokens_sum
+                    or state.cache_hit_input_tokens_sum
+                    or state.cache_hit_input_tokens_max
+                )
+                else "no detailed token usage metadata"
+            )
             self._enqueue_event(
                 BasicOutputEvent(
-                    text=green(f"Contradex done. Tokens: {state.total_usage_tokens}", bold=True),
+                    text=green(
+                        f"Contradex done. Tokens: {state.total_usage_tokens:,}. {usage_summary}",
+                        bold=True,
+                    ),
                 )
             )
         except Exception as exc:
