@@ -430,18 +430,18 @@ class Autopythia:
                 " | ".join(
                     [
                         f"output sum={state.output_tokens_sum:,}",
-                        f"input sum={state.input_tokens_sum:,}",
-                        f"non-cache input sum={state.non_cache_hit_input_tokens_sum:,}",
-                        f"cache-hit input sum={state.cache_hit_input_tokens_sum:,}",
                         f"cache-hit input max={state.cache_hit_input_tokens_max:,}",
+                        f"cache-hit input sum={state.cache_hit_input_tokens_sum:,}",
+                        f"non-cache input sum={state.non_cache_hit_input_tokens_sum:,}",
+                        f"total input sum={state.input_tokens_sum:,}",
                     ]
                 )
                 if (
                     state.output_tokens_sum
-                    or state.input_tokens_sum
-                    or state.non_cache_hit_input_tokens_sum
-                    or state.cache_hit_input_tokens_sum
                     or state.cache_hit_input_tokens_max
+                    or state.cache_hit_input_tokens_sum
+                    or state.non_cache_hit_input_tokens_sum
+                    or state.input_tokens_sum
                 )
                 else "no detailed token usage metadata"
             )
