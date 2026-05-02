@@ -611,9 +611,9 @@ async def _run_main(args, input_state: _InputState):
                     workqueue.add(asyncio.create_task(
                         BasicOutputEvent.afresh(text=qargs_text)
                     ))
-                elif query_head in ("/auto",):
+                elif query_head in ("/auto", "/pythia"):
                     step_ctr = auto._fresh_step_ctr(session_ctr)
-                    qargs_text = query[5:].lstrip()
+                    qargs_text = query[len(query_head):].lstrip()
                     workqueue.add(asyncio.create_task(auto.init(step_ctr, qargs_text)))
                     auto.append_history(session_ctr, step_ctr, query=query)
                     start.add(step_ctr)
@@ -675,7 +675,7 @@ async def _run_main(args, input_state: _InputState):
                 # auto.append_history(session_ctr, step_ctr, query=query)
             elif query:
                 step_ctr = auto._fresh_step_ctr(session_ctr)
-                workqueue.add(asyncio.create_task(auto.init(step_ctr, query)))
+                workqueue.add(asyncio.create_task(auto.contradex(step_ctr, query)))
                 auto.append_history(session_ctr, step_ctr, query=query)
                 start.add(step_ctr)
             else:

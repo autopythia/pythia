@@ -269,6 +269,9 @@ class Autopythia:
 
     _session: Optional[int] = None
     _workqueue: Any = None
+    _contradex_session: Any = None
+    _contradex_config: Any = None
+    _contradex_lock: Any = None
 
     def __post_init__(self):
         if self.shell is None:
@@ -277,6 +280,8 @@ class Autopythia:
             self.services = APIServices(enable_journal=False)
         if self._workqueue is None:
             self._workqueue = set()
+        if self._contradex_lock is None:
+            self._contradex_lock = asyncio.Lock()
 
     def _fresh_session_ctr(self) -> int:
         ctr = fresh_ctr(GLOBAL_SESSION_DIR, "session_ctr")
@@ -388,6 +393,16 @@ class Autopythia:
             "display_level": display_level,
         }
 
+    def _load_or_create_contradex_session(self):
+        from contradex.integrations.autopythia import AutopythiaContradexConfig
+        from contradex.integrations.autopythia import AutopythiaContradexSession
+
+        config = AutopythiaContradexConfig(**self._load_contradex_config_from_env())
+        if self._contradex_session is None or self._contradex_config != config:
+            self._contradex_session = AutopythiaContradexSession.create(config)
+            self._contradex_config = config
+        return config, self._contradex_session
+
     async def contradex(self, step_ctr: int, query: str):
         if step_ctr is None:
             step_ctr = self._fresh_step_ctr(self._session)
@@ -397,10 +412,6 @@ class Autopythia:
 
         try:
             from contradex.display import TurnEventDisplay
-            from contradex.integrations.autopythia import AutopythiaContradexConfig
-            from contradex.integrations.autopythia import run_single_turn
-
-            config = AutopythiaContradexConfig(**self._load_contradex_config_from_env())
 
             def emit_to_autopythia(*args, **kwargs) -> None:
                 sep = kwargs.get("sep", " ")
@@ -412,22 +423,23 @@ class Autopythia:
                 if chunk:
                     self._emit_output_threadsafe(loop, chunk)
 
-            def run_turn():
+            def run_turn(config, contradex_session):
                 display = TurnEventDisplay(
                     display_level=config.display_level,
                     assistant_mode="message",
                     emit=emit_to_autopythia,
                 )
                 try:
-                    return run_single_turn(
+                    return contradex_session.run_turn(
                         query,
-                        config=config,
                         event_handler=display.handle,
                     )
                 finally:
                     display.close()
 
-            state = await asyncio.to_thread(run_turn)
+            async with self._contradex_lock:
+                config, contradex_session = self._load_or_create_contradex_session()
+                state = await asyncio.to_thread(run_turn, config, contradex_session)
             usage_summary = (
                 " | ".join(
                     [
