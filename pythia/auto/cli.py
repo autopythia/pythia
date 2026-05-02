@@ -623,19 +623,6 @@ async def _run_main(args, input_state: _InputState):
                     workqueue.add(asyncio.create_task(auto.qq(step_ctr, qargs_text)))
                     auto.append_history(session_ctr, step_ctr, query=qargs_text)
                     start.add(step_ctr)
-                elif query_head in ("/contradex",):
-                    qargs_text = query[len(query_head):].lstrip()
-                    if not qargs_text:
-                        workqueue.add(
-                            asyncio.create_task(
-                                BasicOutputEvent.afresh(text="Usage: /contradex <query>")
-                            )
-                        )
-                    else:
-                        step_ctr = auto._fresh_step_ctr(session_ctr)
-                        workqueue.add(asyncio.create_task(auto.contradex(step_ctr, qargs_text)))
-                        auto.append_history(session_ctr, step_ctr, query=qargs_text)
-                        start.add(step_ctr)
                 elif query_head in ("/cleanhtml",):
                     step_ctr = auto._fresh_step_ctr(session_ctr)
                     qargs_text = query[len(query_head):].lstrip()
@@ -672,12 +659,27 @@ async def _run_main(args, input_state: _InputState):
                     pass
                 elif query_head in ("/review",):
                     pass
+                elif (plugin_extension := auto._resolve_plugin_extension(query_head)) is not None:
+                    qargs_text = query[len(query_head):].lstrip()
+                    if not qargs_text:
+                        workqueue.add(
+                            asyncio.create_task(
+                                BasicOutputEvent.afresh(text=f"Usage: {query_head} <query>")
+                            )
+                        )
+                    else:
+                        step_ctr = auto._fresh_step_ctr(session_ctr)
+                        workqueue.add(asyncio.create_task(plugin_extension(step_ctr, qargs_text)))
+                        auto.append_history(session_ctr, step_ctr, query=qargs_text)
+                        start.add(step_ctr)
                 # auto.append_history(session_ctr, step_ctr, query=query)
             elif query:
-                step_ctr = auto._fresh_step_ctr(session_ctr)
-                workqueue.add(asyncio.create_task(auto.contradex(step_ctr, query)))
-                auto.append_history(session_ctr, step_ctr, query=query)
-                start.add(step_ctr)
+                default_plugin_extension = auto._resolve_default_plugin_extension()
+                if default_plugin_extension is not None:
+                    step_ctr = auto._fresh_step_ctr(session_ctr)
+                    workqueue.add(asyncio.create_task(default_plugin_extension(step_ctr, query)))
+                    auto.append_history(session_ctr, step_ctr, query=query)
+                    start.add(step_ctr)
             else:
                 # flush = False
                 pass
