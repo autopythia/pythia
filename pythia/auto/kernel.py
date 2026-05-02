@@ -373,12 +373,14 @@ class Autopythia:
             "cwd": Path.cwd(),
             "model_client_kind": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL_CLIENT", "urllib"),
             "api_key": os.environ.get("AUTO_PYTHIA_CONTRADEX_API_KEY"),
-            "api_provider": api_provider,
             "api_base_url": (
                 os.environ.get("AUTO_PYTHIA_CONTRADEX_API_BASE_URL")
                 or self.contradex_api_base_url
             ),
-            "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.3-codex"),
+            "api_provider": api_provider,
+            # "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.3-codex"),
+            "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.4"),
+            # "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.5"),
             "reasoning_effort": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_EFFORT", "xhigh"),
             "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY", "auto"),
             "codex_home": os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME"),
@@ -430,9 +432,9 @@ class Autopythia:
                 " | ".join(
                     [
                         f"output sum={state.output_tokens_sum:,}",
-                        f"cache-hit input max={state.cache_hit_input_tokens_max:,}",
-                        f"cache-hit input sum={state.cache_hit_input_tokens_sum:,}",
-                        f"non-cache input sum={state.non_cache_hit_input_tokens_sum:,}",
+                        f"warm input max={state.cache_hit_input_tokens_max:,}",
+                        f"warm input sum={state.cache_hit_input_tokens_sum:,}",
+                        f"cold input sum={state.non_cache_hit_input_tokens_sum:,}",
                         f"total input sum={state.input_tokens_sum:,}",
                     ]
                 )
@@ -448,7 +450,7 @@ class Autopythia:
             self._enqueue_event(
                 BasicOutputEvent(
                     text=green(
-                        f"Contradex done. Tokens: {state.total_usage_tokens:,}. {usage_summary}",
+                        f"contradex: done. context sum={state.total_usage_tokens:,} | {usage_summary}",
                         bold=True,
                     ),
                 )

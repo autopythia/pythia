@@ -20,8 +20,7 @@ from pythia.auto.kernel import (
     BasicOutputEvent,
 )
 from pythia.clock import Timestamp
-from pythia.contrib.prompt_toolkit.input.defaults import create_input
-from pythia.contrib.prompt_toolkit.keys import Keys
+from pythia.term_input import create_input, Keys
 from pythia.io_control.command import exec_command
 from pythia.python_utils import _py_version
 from pythia.term_utils import (
