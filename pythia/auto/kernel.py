@@ -330,47 +330,7 @@ class Autopythia:
         self._enqueue_event_threadsafe(loop, lambda: BasicOutputEvent(text=text))
 
     def _resolve_default_contradex_api_provider(self) -> str:
-        explicit_api_key = os.environ.get("AUTO_PYTHIA_CONTRADEX_API_KEY")
-        if explicit_api_key is not None and explicit_api_key.strip():
-            return "api"
-
-        openai_api_key = os.environ.get("OPENAI_API_KEY")
-        if openai_api_key is not None and openai_api_key.strip():
-            return "api"
-
-        codex_api_key = os.environ.get("CODEX_API_KEY")
-        if codex_api_key is not None and codex_api_key.strip():
-            return "codex"
-
-        codex_home = os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME")
-        auth_file = os.environ.get("AUTO_PYTHIA_CONTRADEX_AUTH_FILE")
-        try:
-            from contradex.auth import load_auth_dot_json
-            from contradex.auth import resolve_auth_json_path
-
-            auth_path = resolve_auth_json_path(
-                codex_home=codex_home,
-                auth_file=auth_file,
-            )
-            auth_payload = load_auth_dot_json(auth_path)
-        except Exception:
-            auth_payload = None
-
-        if auth_payload is None:
-            return "api"
-
-        normalized_mode = (auth_payload.auth_mode or "").replace("_", "").replace("-", "").lower()
-        if normalized_mode == "chatgptauthtokens":
-            return "codex"
-        if normalized_mode == "chatgpt":
-            return "codex"
-        if normalized_mode == "apikey":
-            return "api"
-        if auth_payload.openai_api_key is not None:
-            return "api"
-        if auth_payload.access_token is not None:
-            return "codex"
-        return "api"
+        return "auto"
 
     def _load_contradex_config_from_env(self) -> dict[str, Any]:
         raw_display_level = os.environ.get("AUTO_PYTHIA_CONTRADEX_DISPLAY_LEVEL")

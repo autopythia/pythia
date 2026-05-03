@@ -3,6 +3,7 @@ from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass, field
 import asyncio
 import functools
+import inspect
 import itertools
 import os
 import platform
@@ -10,7 +11,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import textwrap
 
 from pythia.auto.kernel import (
     Autopythia,
@@ -29,6 +29,36 @@ from pythia.term_utils import (
 
 HOME = os.environ["HOME"]
 GLOBAL_DIR = os.path.join(HOME, ".pythia", "auto")
+
+
+def _resolve_plugin_query_parameter(plugin_extension):
+    try:
+        signature = inspect.signature(plugin_extension)
+    except (TypeError, ValueError):
+        return None
+    parameters = list(signature.parameters.values())
+    if len(parameters) < 2:
+        return None
+    return parameters[1]
+
+
+def _plugin_extension_supports_empty_query(plugin_extension) -> bool:
+    query_parameter = _resolve_plugin_query_parameter(plugin_extension)
+    if query_parameter is None:
+        return True
+    if query_parameter.kind in (
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    ):
+        return True
+    return query_parameter.default is not inspect.Parameter.empty
+
+
+def _call_plugin_extension(plugin_extension, step_ctr: int, query_text: str):
+    query_parameter = _resolve_plugin_query_parameter(plugin_extension)
+    if query_parameter is None:
+        return plugin_extension(step_ctr)
+    return plugin_extension(step_ctr, query_text)
 
 @dataclass
 class _InputEvent:
@@ -311,25 +341,25 @@ class _InputState:
         return text
 
 def quotewrap(haystack: str) -> str:
-    parts = haystack.split("\n", maxsplit=1)
-    first = parts[0]
     quote_both = f"""   {bright_key("[")}"""
-    if not first:
+    lines = haystack.split("\n")
+    if haystack.endswith("\n"):
+        # Treat a single terminal newline as a line terminator, not as an
+        # extra blank content line.
+        lines.pop()
+    if not lines or (len(lines) == 1 and not lines[0]):
         return quote_both
-    if len(parts) > 1:
-        haystack = parts[1]
-    else:
-        return textwrap.indent(first, quote_both)
-    parts = haystack.rsplit("\n", maxsplit=1)
-    haystack = parts[0]
+    if len(lines) == 1:
+        return f"{quote_both}{lines[0]}"
     quote_first = f"""   {bright_key("⌜")}"""
     quote_last = f"""   {bright_key("⌞")}"""
-    if len(parts) > 1:
-        last = parts[1]
-    else:
-    # if not last:
-        return f"""{textwrap.indent(first, quote_first)}\n{textwrap.indent(haystack, quote_last)}"""
-    return f"""{textwrap.indent(first, quote_first)}\n{textwrap.indent(haystack, "    ")}\n{textwrap.indent(last, quote_last)}"""
+    parts = [f"{quote_first}{lines[0]}"]
+    parts.extend(
+        f"    {line}" if line else ""
+        for line in lines[1:-1]
+    )
+    parts.append(f"{quote_last}{lines[-1]}")
+    return "\n".join(parts)
 
 async def _setup_main(args):
     width, _ = shutil.get_terminal_size()
@@ -661,7 +691,9 @@ async def _run_main(args, input_state: _InputState):
                     pass
                 elif (plugin_extension := auto._resolve_plugin_extension(query_head)) is not None:
                     qargs_text = query[len(query_head):].lstrip()
-                    if not qargs_text:
+                    if not qargs_text and not _plugin_extension_supports_empty_query(
+                        plugin_extension
+                    ):
                         workqueue.add(
                             asyncio.create_task(
                                 BasicOutputEvent.afresh(text=f"Usage: {query_head} <query>")
@@ -669,8 +701,12 @@ async def _run_main(args, input_state: _InputState):
                         )
                     else:
                         step_ctr = auto._fresh_step_ctr(session_ctr)
-                        workqueue.add(asyncio.create_task(plugin_extension(step_ctr, qargs_text)))
-                        auto.append_history(session_ctr, step_ctr, query=qargs_text)
+                        workqueue.add(
+                            asyncio.create_task(
+                                _call_plugin_extension(plugin_extension, step_ctr, qargs_text)
+                            )
+                        )
+                        auto.append_history(session_ctr, step_ctr, query=qargs_text or query)
                         start.add(step_ctr)
                 # auto.append_history(session_ctr, step_ctr, query=query)
             elif query:
