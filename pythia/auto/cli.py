@@ -176,6 +176,38 @@ class _InputLineBuffer:
             self.pos = min(len(self.buf) + len(self.rbuf), self.pos + 1)
         self._resplit()
 
+    def word_left(self):
+        full_buf = self.buf + self.rbuf
+        pos = self.buffer_pos()
+        if pos <= 0:
+            self.snap_left()
+            return
+
+        pos -= 1
+        while pos > 0 and full_buf[pos] in (" ", "\t"):
+            pos -= 1
+        while pos > 0 and full_buf[pos - 1] not in (" ", "\t"):
+            pos -= 1
+
+        self.pos = pos
+        self._resplit()
+
+    def word_right(self):
+        full_buf = self.buf + self.rbuf
+        pos = self.buffer_pos()
+        limit = len(full_buf)
+        if pos >= limit:
+            self.snap_right()
+            return
+
+        while pos < limit and full_buf[pos] in (" ", "\t"):
+            pos += 1
+        while pos < limit and full_buf[pos] not in (" ", "\t"):
+            pos += 1
+
+        self.pos = pos
+        self._resplit()
+
     def snap_left(self):
         self.rbuf = self.buf + self.rbuf
         self.buf.clear()
@@ -247,6 +279,8 @@ class _InputState:
                 self.lbuf.snap_right()
             elif key_press.key == Keys.ControlJ:
                 pass
+            elif key_press.key == Keys.Escape:
+                pass
             elif key_press.key == Keys.Up:
                 pass
             elif key_press.key == Keys.Down:
@@ -255,6 +289,10 @@ class _InputState:
                 self.lbuf.key_left()
             elif key_press.key == Keys.Right:
                 self.lbuf.key_right()
+            elif key_press.key == Keys.WordLeft:
+                self.lbuf.word_left()
+            elif key_press.key == Keys.WordRight:
+                self.lbuf.word_right()
             elif key_press.data is not None:
                 self.lbuf.append(key_press.data)
             break

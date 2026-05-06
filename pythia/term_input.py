@@ -39,6 +39,8 @@ class Keys(str, Enum):
     Right = "right"
     Up = "up"
     Down = "down"
+    WordLeft = "word-left"
+    WordRight = "word-right"
 
     BracketedPaste = "<bracketed-paste>"
 
@@ -77,6 +79,18 @@ _ESCAPE_SEQUENCES: dict[str, str | Keys | tuple[Keys, ...]] = {
     "\x1bOB": Keys.Down,
     "\x1bOC": Keys.Right,
     "\x1bOD": Keys.Left,
+    "\x1bb": Keys.WordLeft,
+    "\x1bf": Keys.WordRight,
+    "\x1b[1;3C": Keys.WordRight,
+    "\x1b[1;3D": Keys.WordLeft,
+    "\x1b[1;5C": Keys.WordRight,
+    "\x1b[1;5D": Keys.WordLeft,
+    "\x1b[1;9C": Keys.WordRight,
+    "\x1b[1;9D": Keys.WordLeft,
+    "\x1b[5C": Keys.WordRight,
+    "\x1b[5D": Keys.WordLeft,
+    "\x1bOc": Keys.WordRight,
+    "\x1bOd": Keys.WordLeft,
     "\x1b[200~": Keys.BracketedPaste,
 }
 _BRACKETED_PASTE_END = "\x1b[201~"

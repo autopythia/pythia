@@ -62,8 +62,7 @@ class Contradex(AutopythiaPlugin):
                 " | ".join(
                     [
                         f"output sum={state.output_tokens_sum:,}",
-                        f"warm input max={state.cache_hit_input_tokens_max:,}",
-                        f"warm input sum={state.cache_hit_input_tokens_sum:,}",
+                        f"warm input max={state.cache_hit_input_tokens_max:,} sum={state.cache_hit_input_tokens_sum:,}",
                         f"cold input sum={state.non_cache_hit_input_tokens_sum:,}",
                         f"total input sum={state.input_tokens_sum:,}",
                     ]
@@ -77,10 +76,15 @@ class Contradex(AutopythiaPlugin):
                 )
                 else "no detailed token usage metadata"
             )
+            compaction_summary = (
+                f" | compactions={state.compaction_count:,}"
+                if state.compaction_count > 0
+                else ""
+            )
             self._enqueue_event(
                 BasicOutputEvent(
                     text=green(
-                        f"contradex: done | context sum={state.total_usage_tokens:,} | {usage_summary}",
+                        f"contradex: done | context sum={state.total_usage_tokens:,}{compaction_summary} | {usage_summary}",
                         bold=True,
                     ),
                 )
