@@ -332,6 +332,9 @@ class Autopythia:
     def _resolve_default_contradex_api_provider(self) -> str:
         return "auto"
 
+    def _resolve_default_contradex_model_path(self) -> str:
+        return "gpt-5.4"
+
     def _load_contradex_config_from_env(self) -> dict[str, Any]:
         raw_display_level = os.environ.get("AUTO_PYTHIA_CONTRADEX_DISPLAY_LEVEL")
         display_level = 1
@@ -347,6 +350,14 @@ class Autopythia:
         else:
             api_provider = self._resolve_default_contradex_api_provider()
 
+        raw_model_path = os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL")
+        if self.contradex_model_path is not None and self.contradex_model_path.strip():
+            model_path = self.contradex_model_path.strip()
+        elif raw_model_path is not None and raw_model_path.strip():
+            model_path = raw_model_path.strip()
+        else:
+            model_path = self._resolve_default_contradex_model_path()
+
         return {
             "cwd": Path.cwd(),
             "model_client_kind": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL_CLIENT", "urllib"),
@@ -356,9 +367,7 @@ class Autopythia:
                 or self.contradex_api_base_url
             ),
             "api_provider": api_provider,
-            # "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.3-codex"),
-            "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.4"),
-            # "model_path": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL", "gpt-5.5"),
+            "model_path": model_path,
             "reasoning_effort": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_EFFORT", "xhigh"),
             "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY", "auto"),
             "codex_home": os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME"),

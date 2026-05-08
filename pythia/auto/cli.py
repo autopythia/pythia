@@ -503,7 +503,12 @@ async def _run_main(args, input_state: _InputState):
             workcopy_githash = workcopy_githash_result.out.rstrip()
         else:
             workcopy_githash = None
-    auto = Autopythia(contradex_api_base_url=args.api_base_url)
+    auto_kwargs = {
+        "contradex_api_base_url": args.api_base_url,
+    }
+    if args.model is not None:
+        auto_kwargs["contradex_model_path"] = args.model
+    auto = Autopythia(**auto_kwargs)
     workqueue = auto._workqueue
     workqueue.add(asyncio.create_task(sleeping_beauty()))
     input_state._workqueue = workqueue
@@ -790,6 +795,12 @@ def parse_args(argv: Optional[list[str]] = None):
         type=str,
         default=None,
         help="Optional base URL override passed to /contradex backend requests",
+    )
+    args.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Optional contradex model override. Defaults to gpt-5.4 when unset.",
     )
     args.add_argument("--resume", action=BooleanOptionalAction, default=False)
     args.add_argument("-v", "--verbose", action=BooleanOptionalAction, default=False)

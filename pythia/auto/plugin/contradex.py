@@ -8,6 +8,7 @@ from pythia.auto.plugin import AutopythiaPlugin
 @dataclass
 class Contradex(AutopythiaPlugin):
     contradex_api_base_url: Optional[str] = None
+    contradex_model_path: Optional[str] = None
     _contradex_session: Any = None
     _contradex_config: Any = None
     _contradex_lock: Any = None
