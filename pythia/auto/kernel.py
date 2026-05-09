@@ -277,6 +277,9 @@ class Autopythia:
         if self._workqueue is None:
             self._workqueue = set()
 
+    def shutdown(self):
+        pass
+
     @classmethod
     def _plugin_extension_names(cls) -> tuple[str, ...]:
         return getattr(cls, "_autopythia_plugin_extensions", ())

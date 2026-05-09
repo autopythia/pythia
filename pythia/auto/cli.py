@@ -2,13 +2,11 @@ from typing import Any, Optional
 from argparse import ArgumentParser, BooleanOptionalAction
 from dataclasses import dataclass, field
 import asyncio
-import functools
 import inspect
 import itertools
 import os
 import platform
 import shutil
-import signal
 import subprocess
 import sys
 
@@ -777,13 +775,14 @@ async def _run_main(args, input_state: _InputState):
         print("\nGoodbye.", flush=True)
     else:
         print("", flush=True)
+    if reboot:
+        pass
+    auto.shutdown()
     cur = asyncio.current_task()
     for t in asyncio.all_tasks():
         if t is cur:
             continue
         t.cancel()
-    if reboot:
-        pass
 
 def main(args):
     asyncio.run(_setup_main(args))

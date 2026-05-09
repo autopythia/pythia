@@ -14,9 +14,13 @@ class Contradex(AutopythiaPlugin):
     _contradex_lock: Any = None
 
     @staticmethod
-    def __post_init__(self):
+    def _post_init(self):
         if self._contradex_lock is None:
             self._contradex_lock = asyncio.Lock()
+
+    @staticmethod
+    def _post_shutdown(self):
+        pass
 
     @staticmethod
     async def contradex(self, step_ctr: int, query: str):

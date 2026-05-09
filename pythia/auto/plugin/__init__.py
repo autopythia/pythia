@@ -13,7 +13,21 @@ class AutopythiaPlugin:
 
     @classmethod
     def _resolve_post_init(cls):
-        v = cls.__dict__.get("__post_init__")
+        v = cls.__dict__.get("_post_init")
+        if not isinstance(v, staticmethod):
+            return None
+        return v.__func__
+
+    @classmethod
+    def _resolve_pre_shutdown(cls):
+        v = cls.__dict__.get("_pre_shutdown")
+        if not isinstance(v, staticmethod):
+            return None
+        return v.__func__
+
+    @classmethod
+    def _resolve_post_shutdown(cls):
+        v = cls.__dict__.get("_post_shutdown")
         if not isinstance(v, staticmethod):
             return None
         return v.__func__
@@ -79,6 +93,8 @@ def resolve_autopythia_class(base_cls):
         "__doc__": base_cls.__doc__,
     }
     post_inits = []
+    pre_shutdown_hooks = []
+    post_shutdown_hooks = []
     extension_names = []
 
     for plugin_type in plugin_types:
@@ -92,6 +108,14 @@ def resolve_autopythia_class(base_cls):
         if post_init is not None:
             post_inits.append(post_init)
 
+        pre_shutdown_hook = plugin_type._resolve_pre_shutdown()
+        if pre_shutdown_hook is not None:
+            pre_shutdown_hooks.append(pre_shutdown_hook)
+
+        post_shutdown_hook = plugin_type._resolve_post_shutdown()
+        if post_shutdown_hook is not None:
+            post_shutdown_hooks.append(post_shutdown_hook)
+
         for name, fun in plugin_type._resolve_extensions():
             if hasattr(base_cls, name) or name in namespace:
                 raise ValueError(f"duplicate autopythia plugin extension: {name}")
@@ -99,6 +123,7 @@ def resolve_autopythia_class(base_cls):
             extension_names.append(name)
 
     base_post_init = getattr(base_cls, "__post_init__", None)
+    base_shutdown = getattr(base_cls, "shutdown", None)
 
     def __post_init__(self):
         if base_post_init is not None:
@@ -106,7 +131,16 @@ def resolve_autopythia_class(base_cls):
         for post_init in post_inits:
             post_init(self)
 
+    def shutdown(self):
+        for pre_shutdown_hook in pre_shutdown_hooks:
+            pre_shutdown_hook(self)
+        if base_shutdown is not None:
+            base_shutdown(self)
+        for post_shutdown_hook in post_shutdown_hooks:
+            post_shutdown_hook(self)
+
     namespace["__post_init__"] = __post_init__
+    namespace["shutdown"] = shutdown
     namespace["_autopythia_plugin_types"] = plugin_types
     namespace["_autopythia_plugin_extensions"] = tuple(extension_names)
 
