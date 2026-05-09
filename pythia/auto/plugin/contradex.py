@@ -4,6 +4,8 @@ from typing import Any, Optional
 
 from pythia.auto.plugin import AutopythiaPlugin
 
+REAUTH_TIMEOUT_SECONDS = 120.0
+
 
 @dataclass
 class Contradex(AutopythiaPlugin):
@@ -99,6 +101,98 @@ class Contradex(AutopythiaPlugin):
                 BasicOutputEvent(text=f"contradex failed: {exc.__class__.__name__}: {exc}")
             )
         finally:
+            self._enqueue_event(EndControlEvent(step_ctr))
+
+    @staticmethod
+    async def reauth(self, step_ctr: int, query: str = ""):
+        from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
+        from pythia.term_utils import green
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+
+        workspace_hint = query.strip() or None
+        server = None
+        try:
+            from contradex.auth import create_chatgpt_signin_request
+            from contradex.auth import start_chatgpt_signin_callback_server
+
+            bootstrap_request = create_chatgpt_signin_request(
+                local_port=0,
+                allowed_workspace_id=workspace_hint,
+            )
+            server = start_chatgpt_signin_callback_server(bootstrap_request)
+            signin_request = create_chatgpt_signin_request(
+                redirect_uri=(
+                    f"http://localhost:{server.actual_port}{server.callback_path}"
+                ),
+                allowed_workspace_id=workspace_hint,
+                force_state=bootstrap_request.state,
+                force_code_verifier=bootstrap_request.code_verifier,
+            )
+
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=green(
+                        (
+                            "contradex reauth: local callback server listening on "
+                            f"http://localhost:{server.actual_port}{server.callback_path}"
+                        ),
+                        bold=True,
+                    )
+                )
+            )
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=(
+                        "Open this URL in your browser to sign in:\n"
+                        f"{signin_request.auth_url}"
+                    )
+                )
+            )
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=(
+                        "Waiting for signin callback "
+                        f"(timeout: {int(REAUTH_TIMEOUT_SECONDS)}s)..."
+                    )
+                )
+            )
+
+            completion = await asyncio.to_thread(
+                server.wait_for_result,
+                REAUTH_TIMEOUT_SECONDS,
+            )
+            if completion.success:
+                self._enqueue_event(
+                    BasicOutputEvent(
+                        text=green(
+                            "contradex reauth: success (authorization code captured)",
+                            bold=True,
+                        )
+                    )
+                )
+            else:
+                self._enqueue_event(
+                    BasicOutputEvent(
+                        text=(
+                            "contradex reauth: "
+                            f"{completion.error or 'failed'}"
+                        )
+                    )
+                )
+        except Exception as exc:
+            self._enqueue_event(
+                BasicOutputEvent(text=f"contradex reauth failed: {exc.__class__.__name__}: {exc}")
+            )
+        finally:
+            if server is not None:
+                try:
+                    server.close()
+                except Exception:
+                    pass
             self._enqueue_event(EndControlEvent(step_ctr))
 
     @staticmethod
