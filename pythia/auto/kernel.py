@@ -256,6 +256,14 @@ Content:
         )
         return section
 
+@dataclass(frozen=True)
+class SlashCommandSpec:
+    names: tuple[str, ...]
+    description: str
+
+    def format(self) -> str:
+        return f"{', '.join(self.names)}: {self.description}"
+
 @dataclass
 class Autopythia:
     shell: str = None
@@ -281,8 +289,51 @@ class Autopythia:
         pass
 
     @classmethod
+    def _builtin_slash_command_specs(cls) -> tuple[SlashCommandSpec, ...]:
+        return (
+            SlashCommandSpec(
+                names=("/help", "/h"),
+                description="show built-in and plugin slash commands",
+            ),
+            SlashCommandSpec(
+                names=("/auto", "/pythia"),
+                description="start the built-in planning workflow",
+            ),
+            SlashCommandSpec(
+                names=("/qq",),
+                description="send a direct model query",
+            ),
+            SlashCommandSpec(
+                names=("/cleanhtml",),
+                description="clean an HTML file at the given path",
+            ),
+        )
+
+    @classmethod
     def _plugin_extension_names(cls) -> tuple[str, ...]:
         return getattr(cls, "_autopythia_plugin_extensions", ())
+
+    @classmethod
+    def _plugin_command_groups(cls) -> tuple[tuple[type, tuple[str, ...]], ...]:
+        plugin_types = list(getattr(cls, "_autopythia_plugin_types", ()))
+        groups = []
+        for plugin_type in plugin_types:
+            extensions = tuple(name for name, _ in plugin_type._resolve_extensions())
+            if extensions:
+                groups.append((plugin_type, extensions))
+
+        default_group_idx = next(
+            (
+                idx
+                for idx, (_plugin_type, extensions) in enumerate(groups)
+                if "default" in extensions
+            ),
+            None,
+        )
+        if default_group_idx is not None:
+            groups.insert(0, groups.pop(default_group_idx))
+
+        return tuple(groups)
 
     def _resolve_plugin_extension(self, name: str):
         if name.startswith("/"):
@@ -438,6 +489,31 @@ class Autopythia:
         print(json.dumps(history_item), file=history_file, flush=True)
         history_file.close()
         return t0
+
+    async def help(self, step_ctr: int, query: str = ""):
+        del query
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+
+        builtin_lines = [
+            "Built-in commands:",
+            *[f"- {spec.format()}" for spec in type(self)._builtin_slash_command_specs()],
+        ]
+
+        plugin_groups = type(self)._plugin_command_groups()
+        if plugin_groups:
+            plugin_lines = ["", "Plugin commands:"]
+            for plugin_type, extensions in plugin_groups:
+                commands = ", ".join(f"/{name}" for name in extensions)
+                plugin_lines.append(f"- {plugin_type.__name__}: {commands}")
+        else:
+            plugin_lines = ["", "Plugin commands:", "- <none>"]
+
+        self._enqueue_event(BasicOutputEvent(text="\n".join(builtin_lines + plugin_lines)))
+        self._enqueue_event(EndControlEvent(step_ctr))
 
     async def qq(self, step_ctr: int, query: str):
         think_model_path = self.think_model

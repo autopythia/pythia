@@ -721,7 +721,10 @@ async def _run_main(args, input_state: _InputState):
                     )
                     p.communicate()
                 elif query_head in ("/h", "/help"):
-                    pass
+                    step_ctr = auto._fresh_step_ctr(session_ctr)
+                    workqueue.add(asyncio.create_task(auto.help(step_ctr)))
+                    auto.append_history(session_ctr, step_ctr, query=query)
+                    start.add(step_ctr)
                 elif query_head in ("/a", "/accept"):
                     pass
                 elif query_head in ("/status"):
