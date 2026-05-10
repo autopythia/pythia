@@ -259,3 +259,63 @@ class Contradex(AutopythiaPlugin):
             )
         finally:
             self._enqueue_event(EndControlEvent(step_ctr))
+
+    @staticmethod
+    async def model(self, step_ctr: int, query: str = ""):
+        from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
+        from contradex.model import is_supported_agent_model_path
+        from contradex.model import supported_agent_model_paths
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+
+        try:
+            async with self._contradex_lock:
+                config, _contradex_session = self._load_or_create_contradex_session()
+                current_model = config.model_path
+                requested_model = query.strip()
+
+                if requested_model:
+                    if not is_supported_agent_model_path(requested_model):
+                        supported_models = ", ".join(supported_agent_model_paths())
+                        self._enqueue_event(
+                            BasicOutputEvent(
+                                text=(
+                                    f"warning: unsupported model {requested_model!r}; "
+                                    f"supported models: {supported_models}; "
+                                    f"current model remains: {current_model}"
+                                )
+                            )
+                        )
+                    elif requested_model == current_model:
+                        self._enqueue_event(
+                            BasicOutputEvent(
+                                text=f"model unchanged: {current_model} -> {current_model}"
+                            )
+                        )
+                    else:
+                        previous_override = self.contradex_model_path
+                        self.contradex_model_path = requested_model
+                        try:
+                            new_config, _new_session = self._load_or_create_contradex_session()
+                        except Exception:
+                            self.contradex_model_path = previous_override
+                            raise
+                        self._enqueue_event(
+                            BasicOutputEvent(
+                                text=(
+                                    f"model switched: {current_model} -> "
+                                    f"{new_config.model_path}"
+                                )
+                            )
+                        )
+                else:
+                    self._enqueue_event(BasicOutputEvent(text=f"current model: {current_model}"))
+        except Exception as exc:
+            self._enqueue_event(
+                BasicOutputEvent(text=f"contradex model failed: {exc.__class__.__name__}: {exc}")
+            )
+        finally:
+            self._enqueue_event(EndControlEvent(step_ctr))
