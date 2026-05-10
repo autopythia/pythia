@@ -682,29 +682,30 @@ async def _run_main(args, input_state: _InputState):
                     workqueue.add(asyncio.create_task(
                         BasicOutputEvent.afresh(text=qargs_text)
                     ))
-                elif query_head in ("/auto", "/pythia"):
-                    step_ctr = auto._fresh_step_ctr(session_ctr)
-                    qargs_text = query[len(query_head):].lstrip()
-                    workqueue.add(asyncio.create_task(auto.init(step_ctr, qargs_text)))
-                    auto.append_history(session_ctr, step_ctr, query=query)
-                    start.add(step_ctr)
-                elif query_head in ("/qq",):
-                    step_ctr = auto._fresh_step_ctr(session_ctr)
-                    qargs_text = query[3:].lstrip()
-                    workqueue.add(asyncio.create_task(auto.qq(step_ctr, qargs_text)))
-                    auto.append_history(session_ctr, step_ctr, query=qargs_text)
-                    start.add(step_ctr)
-                elif query_head in ("/cleanhtml",):
-                    step_ctr = auto._fresh_step_ctr(session_ctr)
-                    qargs_text = query[len(query_head):].lstrip()
-                    workqueue.add(asyncio.create_task(auto.cleanhtml(step_ctr, qargs_text)))
-                    auto.append_history(session_ctr, step_ctr, query=qargs_text)
-                    start.add(step_ctr)
                 elif query_head in ("/cd",):
-                    pass
+                    old_dir = os.getcwd()
+                    target_dir = query[len(query_head):].lstrip()
+                    if not target_dir:
+                        target_dir = HOME
+                    target_dir = os.path.expanduser(target_dir)
+                    try:
+                        os.chdir(target_dir)
+                    except OSError as exc:
+                        text = (
+                            f"cd failed: {exc.__class__.__name__}: {exc}\n"
+                            f"cwd: {old_dir} -> {old_dir}"
+                        )
+                    else:
+                        new_dir = os.getcwd()
+                        text = (
+                            f"cwd: {old_dir} -> {new_dir}\n"
+                            "warning: cwd changes are not fully propagated to plugins "
+                            "(e.g. contradex)"
+                        )
+                    workqueue.add(asyncio.create_task(BasicOutputEvent.afresh(text=text)))
                 elif query_head in ("/vim",):
                     p = subprocess.Popen(
-                        ["vim"] + query_args,
+                        ["vim"] + (query_args or []),
                         stdin=sys.stdin,
                         stdout=sys.stdout,
                         stderr=sys.stderr,
@@ -713,7 +714,7 @@ async def _run_main(args, input_state: _InputState):
                     p.communicate()
                 elif query_head in ("/nano",):
                     p = subprocess.Popen(
-                        ["nano"] + query_args,
+                        ["nano"] + (query_args or []),
                         stdin=sys.stdin,
                         stdout=sys.stdout,
                         stderr=sys.stderr,
@@ -725,14 +726,6 @@ async def _run_main(args, input_state: _InputState):
                     workqueue.add(asyncio.create_task(auto.help(step_ctr)))
                     auto.append_history(session_ctr, step_ctr, query=query)
                     start.add(step_ctr)
-                elif query_head in ("/a", "/accept"):
-                    pass
-                elif query_head in ("/status"):
-                    pass
-                elif query_head in ("/revise",):
-                    pass
-                elif query_head in ("/review",):
-                    pass
                 elif (plugin_extension := auto._resolve_plugin_extension(query_head)) is not None:
                     qargs_text = query[len(query_head):].lstrip()
                     if not qargs_text and not _plugin_extension_supports_empty_query(
