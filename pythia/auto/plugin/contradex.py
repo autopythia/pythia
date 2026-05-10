@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -23,6 +25,37 @@ class Contradex(AutopythiaPlugin):
     @staticmethod
     def _post_shutdown(self):
         pass
+
+    @staticmethod
+    def _pre_shutdown(self):
+        if self._contradex_session is None or self._session is None:
+            return
+
+        state = getattr(self._contradex_session, "state", None)
+        if state is None:
+            return
+
+        to_wire_dict = getattr(state, "to_wire_dict", None)
+        if not callable(to_wire_dict):
+            return
+
+        try:
+            from pythia.auto.kernel import GLOBAL_SESSION_DIR
+
+            session_dir = os.path.join(GLOBAL_SESSION_DIR, f"{self._session}")
+            os.makedirs(session_dir, exist_ok=True)
+            snapshot_path = os.path.join(session_dir, "snapshot.json")
+            temp_path = os.path.join(
+                session_dir,
+                f".snapshot.json.tmp-{os.getpid()}",
+            )
+            payload = to_wire_dict()
+            with open(temp_path, "w", encoding="utf-8") as snapshot_file:
+                snapshot_file.write(json.dumps(payload, indent=2))
+                snapshot_file.write("\n")
+            os.replace(temp_path, snapshot_path)
+        except Exception:
+            return
 
     @staticmethod
     async def contradex(self, step_ctr: int, query: str):
