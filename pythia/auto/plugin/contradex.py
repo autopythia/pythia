@@ -23,39 +23,12 @@ class Contradex(AutopythiaPlugin):
             self._contradex_lock = asyncio.Lock()
 
     @staticmethod
-    def _post_shutdown(self):
+    def _pre_shutdown(self):
         pass
 
     @staticmethod
-    def _pre_shutdown(self):
-        if self._contradex_session is None or self._session is None:
-            return
-
-        state = getattr(self._contradex_session, "state", None)
-        if state is None:
-            return
-
-        to_wire_dict = getattr(state, "to_wire_dict", None)
-        if not callable(to_wire_dict):
-            return
-
-        try:
-            from pythia.auto.kernel import GLOBAL_SESSION_DIR
-
-            session_dir = os.path.join(GLOBAL_SESSION_DIR, f"{self._session}")
-            os.makedirs(session_dir, exist_ok=True)
-            snapshot_path = os.path.join(session_dir, "snapshot.json")
-            temp_path = os.path.join(
-                session_dir,
-                f".snapshot.json.tmp-{os.getpid()}",
-            )
-            payload = to_wire_dict()
-            with open(temp_path, "w", encoding="utf-8") as snapshot_file:
-                snapshot_file.write(json.dumps(payload, indent=2))
-                snapshot_file.write("\n")
-            os.replace(temp_path, snapshot_path)
-        except Exception:
-            return
+    def _post_shutdown(self):
+        pass
 
     @staticmethod
     async def contradex(self, step_ctr: int, query: str):
@@ -135,6 +108,66 @@ class Contradex(AutopythiaPlugin):
             )
         finally:
             self._enqueue_event(EndControlEvent(step_ctr))
+
+    @staticmethod
+    async def snapshot(self, step_ctr: int, query: str = ""):
+        from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
+
+        del query
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+
+        try:
+            async with self._contradex_lock:
+                snapshot_path = Contradex._snapshot(self)
+            if snapshot_path is None:
+                text = "contradex snapshot unavailable: no active contradex session"
+            else:
+                text = f"contradex snapshot saved: {snapshot_path}"
+            self._enqueue_event(BasicOutputEvent(text=text))
+        except Exception as exc:
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=f"contradex snapshot failed: {exc.__class__.__name__}: {exc}"
+                )
+            )
+        finally:
+            self._enqueue_event(EndControlEvent(step_ctr))
+
+    @staticmethod
+    def _snapshot(self) -> str | None:
+        if self._contradex_session is None or self._session is None:
+            return None
+
+        state = getattr(self._contradex_session, "state", None)
+        if state is None:
+            return None
+
+        to_wire_dict = getattr(state, "to_wire_dict", None)
+        if not callable(to_wire_dict):
+            return None
+
+        try:
+            from pythia.auto.kernel import GLOBAL_SESSION_DIR
+
+            session_dir = os.path.join(GLOBAL_SESSION_DIR, f"{self._session}")
+            os.makedirs(session_dir, exist_ok=True)
+            snapshot_path = os.path.join(session_dir, "snapshot.json")
+            temp_path = os.path.join(
+                session_dir,
+                f".snapshot.json.tmp-{os.getpid()}",
+            )
+            payload = to_wire_dict()
+            with open(temp_path, "w", encoding="utf-8") as snapshot_file:
+                snapshot_file.write(json.dumps(payload, indent=2))
+                snapshot_file.write("\n")
+            os.replace(temp_path, snapshot_path)
+            return snapshot_path
+        except Exception:
+            return None
 
     @staticmethod
     async def reauth(self, step_ctr: int, query: str = ""):
