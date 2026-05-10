@@ -793,7 +793,7 @@ def parse_args(argv: Optional[list[str]] = None):
         "--api-base-url",
         type=str,
         default=None,
-        help="Optional base URL override passed to /contradex backend requests",
+        help="Optional base URL override passed to /default backend requests",
     )
     args.add_argument(
         "--model",

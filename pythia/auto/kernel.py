@@ -295,8 +295,8 @@ class Autopythia:
         extension_names = type(self)._plugin_extension_names()
         if len(extension_names) == 1:
             return getattr(self, extension_names[0])
-        if "contradex" in extension_names:
-            return getattr(self, "contradex")
+        if "default" in extension_names:
+            return getattr(self, "default")
         return None
 
     def _fresh_session_ctr(self) -> int:

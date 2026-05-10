@@ -31,7 +31,7 @@ class Contradex(AutopythiaPlugin):
         pass
 
     @staticmethod
-    async def contradex(self, step_ctr: int, query: str):
+    async def default(self, step_ctr: int, query: str):
         from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
         from pythia.term_utils import green
 
