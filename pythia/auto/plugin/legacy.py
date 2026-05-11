@@ -17,10 +17,8 @@ class Legacy(AutopythiaPlugin):
         self._enqueue_event(EndControlEvent(step_ctr))
 
     @staticmethod
-    async def auto(self, step_ctr: int, query: str = ""):
+    async def legacy(self, step_ctr: int, query: str = ""):
         await self.init(step_ctr, query)
-
-    pythia = auto
 
     @staticmethod
     async def qq(self, step_ctr: int, query: str = ""):
@@ -231,11 +229,9 @@ Your output should consist of and only of the cleaned HTML corresponding to the 
             print(output_text, end="", file=output_file, flush=True)
 
     @staticmethod
-    async def a(self, step_ctr: int, query: str = ""):
+    async def accept(self, step_ctr: int, query: str = ""):
         del query
         Legacy._complete_immediately(self, step_ctr)
-
-    accept = a
 
     @staticmethod
     async def status(self, step_ctr: int, query: str = ""):
