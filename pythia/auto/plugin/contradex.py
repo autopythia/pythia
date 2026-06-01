@@ -31,9 +31,32 @@ class Contradex(AutopythiaPlugin):
         pass
 
     @staticmethod
-    async def default(self, step_ctr: int, query: str):
+    def _load_contradex_config(self):
+        from contradex.integrations.autopythia import AutopythiaContradexConfig
+
+        return AutopythiaContradexConfig(**self._load_contradex_config_from_env())
+
+    @staticmethod
+    def _resolve_contradex_session(self, *, isolated_session: bool = False):
+        from contradex.integrations.autopythia import AutopythiaContradexSession
+
+        if not isolated_session:
+            return self._load_or_create_contradex_session()
+        config = Contradex._load_contradex_config(self)
+        return config, AutopythiaContradexSession.create(config)
+
+    @staticmethod
+    async def default(
+        self,
+        step_ctr: int,
+        query: str,
+        *,
+        post_user_developer_prompt: str | None = None,
+        isolated_session: bool = False,
+    ):
         from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
         from pythia.term_utils import green
+        from contradex.protocol import Message
 
         if step_ctr is None:
             step_ctr = self._fresh_step_ctr(self._session)
@@ -60,16 +83,28 @@ class Contradex(AutopythiaPlugin):
                     assistant_mode="message",
                     emit=emit_to_autopythia,
                 )
+                post_user_items = None
+                if (
+                    post_user_developer_prompt is not None
+                    and post_user_developer_prompt.strip()
+                ):
+                    post_user_items = [
+                        Message(role="developer", text=post_user_developer_prompt)
+                    ]
                 try:
                     return contradex_session.run_turn(
                         query,
+                        post_user_items=post_user_items,
                         event_handler=display.handle,
                     )
                 finally:
                     display.close()
 
             async with self._contradex_lock:
-                config, contradex_session = self._load_or_create_contradex_session()
+                config, contradex_session = Contradex._resolve_contradex_session(
+                    self,
+                    isolated_session=isolated_session,
+                )
                 state = await asyncio.to_thread(run_turn, config, contradex_session)
             usage_summary = (
                 " | ".join(
@@ -186,7 +221,6 @@ class Contradex(AutopythiaPlugin):
             from contradex.auth import start_chatgpt_signin_callback_server
 
             bootstrap_request = create_chatgpt_signin_request(
-                local_port=0,
                 allowed_workspace_id=workspace_hint,
             )
             server = start_chatgpt_signin_callback_server(bootstrap_request)
