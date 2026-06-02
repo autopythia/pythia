@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from pythia.auto.plugin import AutopythiaPlugin
 
-REAUTH_TIMEOUT_SECONDS = 120.0
+LOGIN_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass
@@ -44,6 +44,39 @@ class Contradex(AutopythiaPlugin):
             return self._load_or_create_contradex_session()
         config = Contradex._load_contradex_config(self)
         return config, AutopythiaContradexSession.create(config)
+
+    @staticmethod
+    def _resolve_auth_path(config) -> str:
+        from contradex.auth import resolve_auth_json_path
+
+        return str(
+            resolve_auth_json_path(
+                codex_home=config.codex_home,
+                auth_file=config.auth_file,
+            )
+        )
+
+    @staticmethod
+    def _rehash_contradex_auth(self, *, create_if_missing: bool) -> str:
+        if self._contradex_session is None:
+            if not create_if_missing:
+                return (
+                    "contradex rehash skipped: no active contradex session; "
+                    "saved auth will be loaded on the next contradex turn"
+                )
+            config, _contradex_session = self._load_or_create_contradex_session()
+            return (
+                "contradex rehash: loaded auth from "
+                f"{Contradex._resolve_auth_path(config)} into a new contradex session"
+            )
+
+        contradex_session = self._contradex_session
+        contradex_session.rehash_auth()
+        self._contradex_config = contradex_session.config
+        return (
+            "contradex rehash: reloaded auth from "
+            f"{Contradex._resolve_auth_path(contradex_session.config)}"
+        )
 
     @staticmethod
     async def default(
@@ -205,7 +238,7 @@ class Contradex(AutopythiaPlugin):
             return None
 
     @staticmethod
-    async def reauth(self, step_ctr: int, query: str = ""):
+    async def login(self, step_ctr: int, query: str = ""):
         from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
         from pythia.term_utils import green
 
@@ -218,6 +251,7 @@ class Contradex(AutopythiaPlugin):
         server = None
         try:
             from contradex.auth import create_chatgpt_signin_request
+            from contradex.auth import login_with_chatgpt_authorization_code
             from contradex.auth import start_chatgpt_signin_callback_server
 
             bootstrap_request = create_chatgpt_signin_request(
@@ -237,7 +271,7 @@ class Contradex(AutopythiaPlugin):
                 BasicOutputEvent(
                     text=green(
                         (
-                            "contradex reauth: local callback server listening on "
+                            "contradex login: local callback server listening on "
                             f"http://localhost:{server.actual_port}{server.callback_path}"
                         ),
                         bold=True,
@@ -256,36 +290,58 @@ class Contradex(AutopythiaPlugin):
                 BasicOutputEvent(
                     text=(
                         "Waiting for signin callback "
-                        f"(timeout: {int(REAUTH_TIMEOUT_SECONDS)}s)..."
+                        f"(timeout: {int(LOGIN_TIMEOUT_SECONDS)}s)..."
                     )
                 )
             )
 
             completion = await asyncio.to_thread(
                 server.wait_for_result,
-                REAUTH_TIMEOUT_SECONDS,
+                LOGIN_TIMEOUT_SECONDS,
             )
             if completion.success:
+                if completion.authorization_code is None:
+                    raise RuntimeError("signin callback succeeded without an authorization code")
+                config = (
+                    self._contradex_session.config
+                    if self._contradex_session is not None
+                    else Contradex._load_contradex_config(self)
+                )
+                auth_path = await asyncio.to_thread(
+                    login_with_chatgpt_authorization_code,
+                    signin_request,
+                    completion.authorization_code,
+                    allowed_workspace_id=workspace_hint,
+                    codex_home=config.codex_home,
+                    auth_file=config.auth_file,
+                )
                 self._enqueue_event(
                     BasicOutputEvent(
                         text=green(
-                            "contradex reauth: success (authorization code captured)",
+                            f"contradex login: success (auth saved to {auth_path})",
                             bold=True,
                         )
                     )
                 )
+                if self._contradex_session is not None:
+                    async with self._contradex_lock:
+                        rehash_text = Contradex._rehash_contradex_auth(
+                            self,
+                            create_if_missing=False,
+                        )
+                    self._enqueue_event(BasicOutputEvent(text=rehash_text))
             else:
                 self._enqueue_event(
                     BasicOutputEvent(
                         text=(
-                            "contradex reauth: "
+                            "contradex login: "
                             f"{completion.error or 'failed'}"
                         )
                     )
                 )
         except Exception as exc:
             self._enqueue_event(
-                BasicOutputEvent(text=f"contradex reauth failed: {exc.__class__.__name__}: {exc}")
+                BasicOutputEvent(text=f"contradex login failed: {exc.__class__.__name__}: {exc}")
             )
         finally:
             if server is not None:
@@ -383,6 +439,31 @@ class Contradex(AutopythiaPlugin):
         except Exception as exc:
             self._enqueue_event(
                 BasicOutputEvent(text=f"contradex model failed: {exc.__class__.__name__}: {exc}")
+            )
+        finally:
+            self._enqueue_event(EndControlEvent(step_ctr))
+
+    @staticmethod
+    async def rehash(self, step_ctr: int, query: str = ""):
+        from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
+
+        del query
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+
+        try:
+            async with self._contradex_lock:
+                text = Contradex._rehash_contradex_auth(
+                    self,
+                    create_if_missing=True,
+                )
+            self._enqueue_event(BasicOutputEvent(text=text))
+        except Exception as exc:
+            self._enqueue_event(
+                BasicOutputEvent(text=f"contradex rehash failed: {exc.__class__.__name__}: {exc}")
             )
         finally:
             self._enqueue_event(EndControlEvent(step_ctr))
