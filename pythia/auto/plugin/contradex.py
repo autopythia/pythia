@@ -16,6 +16,7 @@ class Contradex(AutopythiaPlugin):
     _contradex_session: Any = None
     _contradex_config: Any = None
     _contradex_lock: Any = None
+    _pending_grok_signin_request: Any = None
 
     @staticmethod
     def _post_init(self):
@@ -349,6 +350,90 @@ class Contradex(AutopythiaPlugin):
                     server.close()
                 except Exception:
                     pass
+            self._enqueue_event(EndControlEvent(step_ctr))
+
+    @staticmethod
+    async def login_grok(self, step_ctr: int, query: str = ""):
+        from pythia.auto.kernel import BasicOutputEvent, EndControlEvent, StartControlEvent
+        from pythia.term_utils import green
+
+        if step_ctr is None:
+            step_ctr = self._fresh_step_ctr(self._session)
+
+        self._enqueue_event(StartControlEvent(step_ctr))
+
+        authorization_code = query.strip() or None
+        try:
+            from contradex._auth import create_grok_signin_request
+            from contradex._auth import login_with_grok_authorization_code
+
+            if authorization_code is not None:
+                pending_signin_request = self._pending_grok_signin_request
+                if pending_signin_request is None:
+                    self._enqueue_event(
+                        BasicOutputEvent(
+                            text=(
+                                "contradex grok login: no pending authorization request; "
+                                "run /login-grok first"
+                            )
+                        )
+                    )
+                    return
+
+                auth_path = await asyncio.to_thread(
+                    login_with_grok_authorization_code,
+                    pending_signin_request,
+                    authorization_code,
+                )
+                self._pending_grok_signin_request = None
+                self._enqueue_event(
+                    BasicOutputEvent(
+                        text=green(
+                            f"contradex grok login: success (auth saved to {auth_path})",
+                            bold=True,
+                        )
+                    )
+                )
+                return
+
+            signin_request = create_grok_signin_request()
+            self._pending_grok_signin_request = signin_request
+
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=(
+                        "Open this URL in your browser to sign in:\n"
+                        f"{signin_request.auth_url}"
+                    )
+                )
+            )
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=(
+                        "After signing in, copy the authorization code from the browser and "
+                        "finish with:\n"
+                        "/login-grok <authorization-code>"
+                    )
+                )
+            )
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=green(
+                        "contradex grok login: waiting for pasted authorization code",
+                        bold=True,
+                    )
+                )
+            )
+        except Exception as exc:
+            self._enqueue_event(
+                BasicOutputEvent(
+                    text=(
+                        "contradex grok login failed: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                )
+            )
+        finally:
             self._enqueue_event(EndControlEvent(step_ctr))
 
     @staticmethod

@@ -322,6 +322,10 @@ class Autopythia:
         return getattr(cls, "_autopythia_plugin_extensions", ())
 
     @classmethod
+    def _plugin_extension_cli_name(cls, name: str) -> str:
+        return name.replace("_", "-")
+
+    @classmethod
     def _plugin_command_groups(cls) -> tuple[tuple[type, tuple[str, ...]], ...]:
         plugin_types = list(getattr(cls, "_autopythia_plugin_types", ()))
         groups = []
@@ -346,9 +350,13 @@ class Autopythia:
     def _resolve_plugin_extension(self, name: str):
         if name.startswith("/"):
             name = name[1:]
-        if name not in type(self)._plugin_extension_names():
+        extension_names = type(self)._plugin_extension_names()
+        if name in extension_names:
+            return getattr(self, name)
+        alias_name = name.replace("-", "_")
+        if alias_name not in extension_names:
             return None
-        return getattr(self, name)
+        return getattr(self, alias_name)
 
     def _resolve_default_plugin_extension(self):
         extension_names = type(self)._plugin_extension_names()
@@ -515,7 +523,10 @@ class Autopythia:
         if plugin_groups:
             plugin_lines = ["", "Plugin commands:"]
             for plugin_type, extensions in plugin_groups:
-                commands = ", ".join(f"/{name}" for name in extensions)
+                commands = ", ".join(
+                    f"/{type(self)._plugin_extension_cli_name(name)}"
+                    for name in extensions
+                )
                 plugin_lines.append(f"- {plugin_type.__name__}: {commands}")
         else:
             plugin_lines = ["", "Plugin commands:", "- <none>"]
