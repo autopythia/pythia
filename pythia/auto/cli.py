@@ -506,6 +506,10 @@ async def _run_main(args, input_state: _InputState):
     }
     if args.model is not None:
         auto_kwargs["contradex_model_path"] = args.model
+    if args.api_provider is not None:
+        auto_kwargs["contradex_api_provider"] = args.api_provider
+    if args.enable_apply_patch_unified_tool:
+        auto_kwargs["contradex_enable_apply_patch_unified_tool"] = True
     auto = Autopythia(**auto_kwargs)
     workqueue = auto._workqueue
     workqueue.add(asyncio.create_task(sleeping_beauty()))
@@ -796,6 +800,18 @@ def parse_args(argv: Optional[list[str]] = None):
         type=str,
         default=None,
         help="Optional contradex model override. Defaults to gpt-5.4 when unset.",
+    )
+    args.add_argument(
+        "--api-provider",
+        type=str,
+        default=None,
+        help="API provider override for the contradex backend (auto/api/codex).",
+    )
+    args.add_argument(
+        "--enable-apply-patch-unified-tool",
+        action="store_true",
+        default=False,
+        help="Use the contradex apply_patch tool description that mentions both custom and unified-diff formats.",
     )
     args.add_argument("--resume", action=BooleanOptionalAction, default=False)
     args.add_argument("-v", "--verbose", action=BooleanOptionalAction, default=False)

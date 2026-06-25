@@ -13,6 +13,8 @@ LOGIN_TIMEOUT_SECONDS = 120.0
 class Contradex(AutopythiaPlugin):
     contradex_api_base_url: Optional[str] = None
     contradex_model_path: Optional[str] = None
+    contradex_api_provider: Optional[str] = None
+    contradex_enable_apply_patch_unified_tool: bool = False
     _contradex_session: Any = None
     _contradex_config: Any = None
     _contradex_lock: Any = None

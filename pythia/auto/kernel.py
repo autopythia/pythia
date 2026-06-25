@@ -419,6 +419,8 @@ class Autopythia:
             api_provider = raw_provider.strip()
         else:
             api_provider = self._resolve_default_contradex_api_provider()
+        if self.contradex_api_provider is not None and self.contradex_api_provider.strip():
+            api_provider = self.contradex_api_provider.strip()
 
         raw_model_path = os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL")
         if self.contradex_model_path is not None and self.contradex_model_path.strip():
@@ -442,6 +444,9 @@ class Autopythia:
             "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY", "auto"),
             "codex_home": os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME"),
             "auth_file": os.environ.get("AUTO_PYTHIA_CONTRADEX_AUTH_FILE"),
+            "enable_apply_patch_unified_tool": self.contradex_enable_apply_patch_unified_tool or (
+                os.environ.get("AUTO_PYTHIA_CONTRADEX_ENABLE_APPLY_PATCH_UNIFIED_TOOL", "").lower() in ("1", "true", "yes", "on")
+            ),
             "display_level": display_level,
         }
 
