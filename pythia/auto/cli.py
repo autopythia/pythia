@@ -508,6 +508,8 @@ async def _run_main(args, input_state: _InputState):
         auto_kwargs["contradex_model_path"] = args.model
     if args.api_provider is not None:
         auto_kwargs["contradex_api_provider"] = args.api_provider
+    if args.reasoning_effort is not None:
+        auto_kwargs["contradex_reasoning_effort"] = args.reasoning_effort
     if args.enable_apply_patch_unified_tool:
         auto_kwargs["contradex_enable_apply_patch_unified_tool"] = True
     auto = Autopythia(**auto_kwargs)
@@ -806,6 +808,12 @@ def parse_args(argv: Optional[list[str]] = None):
         type=str,
         default=None,
         help="API provider override for the contradex backend (auto/api/codex).",
+    )
+    args.add_argument(
+        "--reasoning-effort",
+        type=str,
+        default=None,
+        help="Reasoning effort override for the contradex backend.",
     )
     args.add_argument(
         "--enable-apply-patch-unified-tool",

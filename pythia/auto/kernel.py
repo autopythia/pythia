@@ -430,6 +430,14 @@ class Autopythia:
         else:
             model_path = self._resolve_default_contradex_model_path()
 
+        raw_reasoning_effort = os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_EFFORT")
+        if self.contradex_reasoning_effort is not None and self.contradex_reasoning_effort.strip():
+            reasoning_effort = self.contradex_reasoning_effort.strip()
+        elif raw_reasoning_effort is not None and raw_reasoning_effort.strip():
+            reasoning_effort = raw_reasoning_effort.strip()
+        else:
+            reasoning_effort = None
+
         return {
             "cwd": Path.cwd(),
             "model_client_kind": os.environ.get("AUTO_PYTHIA_CONTRADEX_MODEL_CLIENT", "urllib"),
@@ -440,8 +448,8 @@ class Autopythia:
             ),
             "api_provider": api_provider,
             "model_path": model_path,
-            "reasoning_effort": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_EFFORT", "xhigh"),
-            "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY", "auto"),
+            "reasoning_effort": reasoning_effort,
+            "reasoning_summary": os.environ.get("AUTO_PYTHIA_CONTRADEX_REASONING_SUMMARY"),
             "codex_home": os.environ.get("AUTO_PYTHIA_CONTRADEX_CODEX_HOME"),
             "auth_file": os.environ.get("AUTO_PYTHIA_CONTRADEX_AUTH_FILE"),
             "enable_apply_patch_unified_tool": self.contradex_enable_apply_patch_unified_tool or (

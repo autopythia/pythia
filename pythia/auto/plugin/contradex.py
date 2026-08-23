@@ -14,6 +14,7 @@ class Contradex(AutopythiaPlugin):
     contradex_api_base_url: Optional[str] = None
     contradex_model_path: Optional[str] = None
     contradex_api_provider: Optional[str] = None
+    contradex_reasoning_effort: Optional[str] = None
     contradex_enable_apply_patch_unified_tool: bool = False
     _contradex_session: Any = None
     _contradex_config: Any = None
