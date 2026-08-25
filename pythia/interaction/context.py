@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from collections.abc import Iterator
+from collections.abc import Sequence
+from typing import List
+from typing import Tuple
+from typing import Union
+from typing import overload
+
+from .items import ContextCompaction
+from .items import InteractionItem
+from .items import ModelSampleBoundary
+from .items import ToolCall
+from .items import ToolResult
+from .items import is_interaction_item
+
+
+class ContextValidationError(ValueError):
+    pass
+
+
+def _validate_item(item: object, field_name: str) -> InteractionItem:
+    if not is_interaction_item(item):
+        raise ContextValidationError(
+            f"{field_name} must be an InteractionItem, got {type(item).__name__}"
+        )
+    return item
+
+
+def _validate_tool_sequence(
+    items: Sequence[InteractionItem],
+    *,
+    allow_pending: bool,
+) -> Tuple[ToolCall, ...]:
+    seen_call_ids = set()
+    pending = {}
+    call_batch_closed = False
+    results_started = False
+
+    for index, item in enumerate(items):
+        if isinstance(item, ToolCall):
+            if pending and (call_batch_closed or results_started):
+                raise ContextValidationError(
+                    "tool call appears before results for the preceding model "
+                    f"sample at item {index}: {item.call_id!r}"
+                )
+            if item.call_id in seen_call_ids:
+                raise ContextValidationError(
+                    f"duplicate tool call id at item {index}: {item.call_id!r}"
+                )
+            seen_call_ids.add(item.call_id)
+            pending[item.call_id] = item
+            continue
+
+        if isinstance(item, ModelSampleBoundary):
+            if pending:
+                call_batch_closed = True
+            continue
+
+        if isinstance(item, ToolResult):
+            if item.call_id not in pending:
+                raise ContextValidationError(
+                    "tool result does not match an unresolved tool call at "
+                    f"item {index}: {item.call_id!r}"
+                )
+            results_started = True
+            call_batch_closed = True
+            del pending[item.call_id]
+            if not pending:
+                call_batch_closed = False
+                results_started = False
+            continue
+
+        if pending:
+            call_ids = ", ".join(call.call_id for call in pending.values())
+            raise ContextValidationError(
+                f"item {index} appears before unresolved tool results: {call_ids}"
+            )
+
+    pending_calls = tuple(pending.values())
+    if pending_calls and not allow_pending:
+        call_ids = ", ".join(call.call_id for call in pending_calls)
+        raise ContextValidationError(
+            f"context contains unresolved tool calls: {call_ids}"
+        )
+    return pending_calls
+
+
+def _validate_compaction_replacement(
+    replacement_items: Sequence[InteractionItem],
+) -> Tuple[InteractionItem, ...]:
+    replacement = tuple(replacement_items)
+    for index, item in enumerate(replacement):
+        _validate_item(item, f"replacement_items[{index}]")
+        if isinstance(item, ContextCompaction):
+            raise ContextValidationError(
+                "ContextCompaction replacement_items must not contain "
+                "another ContextCompaction"
+            )
+    _validate_tool_sequence(replacement, allow_pending=False)
+    return replacement
+
+
+def _project_items(
+    items: Sequence[InteractionItem],
+) -> Tuple[InteractionItem, ...]:
+    active: List[InteractionItem] = []
+    for item in items:
+        if isinstance(item, ContextCompaction):
+            _validate_tool_sequence(active, allow_pending=False)
+            active = list(
+                _validate_compaction_replacement(item.replacement_items)
+            )
+        else:
+            active.append(item)
+    _validate_tool_sequence(active, allow_pending=True)
+    return tuple(active)
+
+
+def _validate_log(items: Sequence[InteractionItem]) -> None:
+    for index, item in enumerate(items):
+        _validate_item(item, f"items[{index}]")
+        if isinstance(item, ContextCompaction):
+            _validate_compaction_replacement(item.replacement_items)
+    _project_items(items)
+
+
+class ModelContext(Sequence[InteractionItem]):
+    def __init__(self, items: Iterable[InteractionItem] = ()) -> None:
+        initial_items = list(items)
+        _validate_log(initial_items)
+        self._items = initial_items
+
+    def __iter__(self) -> Iterator[InteractionItem]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    @overload
+    def __getitem__(self, index: int) -> InteractionItem:
+        ...
+
+    @overload
+    def __getitem__(self, index: slice) -> List[InteractionItem]:
+        ...
+
+    def __getitem__(
+        self,
+        index: Union[int, slice],
+    ) -> Union[InteractionItem, List[InteractionItem]]:
+        return self._items[index]
+
+    @property
+    def items(self) -> Tuple[InteractionItem, ...]:
+        return tuple(self._items)
+
+    def model_items(self) -> Tuple[InteractionItem, ...]:
+        return _project_items(self._items)
+
+    def pending_tool_calls(self) -> Tuple[ToolCall, ...]:
+        return _validate_tool_sequence(
+            self.model_items(),
+            allow_pending=True,
+        )
+
+    def assert_model_ready(self) -> None:
+        pending = self.pending_tool_calls()
+        if pending:
+            call_ids = ", ".join(call.call_id for call in pending)
+            raise ContextValidationError(
+                f"cannot sample with unresolved tool calls: {call_ids}"
+            )
+
+    def append(self, item: InteractionItem) -> None:
+        self.extend((item,))
+
+    def extend(self, items: Iterable[InteractionItem]) -> None:
+        new_items = list(items)
+        candidate = [*self._items, *new_items]
+        _validate_log(candidate)
+        self._items.extend(new_items)
+
+    def copy(self) -> "ModelContext":
+        return ModelContext(self._items)
+
+    def __repr__(self) -> str:
+        return f"ModelContext({self._items!r})"
+
+
+__all__ = [
+    "ContextValidationError",
+    "ModelContext",
+]

@@ -1,0 +1,616 @@
+from __future__ import annotations
+
+import json
+import math
+import re
+import socket
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
+from collections.abc import Sequence
+from dataclasses import dataclass
+from dataclasses import field
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+
+from .context import ContextValidationError
+from .context import ModelContext
+from .items import ContextCompaction
+from .items import InteractionItem
+from .items import Message
+from .items import ModelSampleBoundary
+from .items import OpaqueCompaction
+from .items import Reasoning
+from .items import ToolCall
+from .items import ToolResult
+from .items import UserInteractionBoundary
+from .model import ModelConfigurationError
+from .model import ModelContextWindowError
+from .model import ModelResponseError
+from .model import ModelSample
+from .model import ModelTimeoutError
+from .model import ModelTransportError
+from .model import SamplingOptions
+from .model import TokenUsage
+
+
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ChatCompletionsEndpoint:
+    host: str
+    port: int
+    model: Optional[str] = None
+    scheme: str = "http"
+    request_timeout_seconds: float = 60.0
+    api_key: Optional[str] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host, str):
+            raise TypeError("host must be a string")
+        host = self.host.strip()
+        if not host:
+            raise ModelConfigurationError("host must not be empty")
+        if "://" in host or "/" in host:
+            raise ModelConfigurationError(
+                "host must be a bare hostname or IP address"
+            )
+        object.__setattr__(self, "host", host)
+
+        if (
+            isinstance(self.port, bool)
+            or not isinstance(self.port, int)
+            or not 1 <= self.port <= 65535
+        ):
+            raise ModelConfigurationError(
+                "port must be an integer from 1 through 65535"
+            )
+
+        if not isinstance(self.scheme, str):
+            raise TypeError("scheme must be a string")
+        scheme = self.scheme.strip().lower()
+        if scheme not in {"http", "https"}:
+            raise ModelConfigurationError("scheme must be 'http' or 'https'")
+        object.__setattr__(self, "scheme", scheme)
+
+        if self.model is not None:
+            if not isinstance(self.model, str):
+                raise TypeError("model must be a string or None")
+            model = self.model.strip() or None
+            object.__setattr__(self, "model", model)
+
+        if self.api_key is not None:
+            if not isinstance(self.api_key, str):
+                raise TypeError("api_key must be a string or None")
+            api_key = self.api_key.strip()
+            if not api_key:
+                raise ModelConfigurationError("api_key must not be empty")
+            if any(character.isspace() for character in api_key):
+                raise ModelConfigurationError(
+                    "api_key must not contain whitespace"
+                )
+            object.__setattr__(self, "api_key", api_key)
+
+        timeout = self.request_timeout_seconds
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise ModelConfigurationError(
+                "request_timeout_seconds must be positive and finite"
+            )
+        object.__setattr__(self, "request_timeout_seconds", float(timeout))
+
+    @property
+    def url(self) -> str:
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return (
+            f"{self.scheme}://{host}:{self.port}"
+            "/v1/chat/completions"
+        )
+
+
+def _append_text(existing: Optional[str], value: str, separator: str = "") -> str:
+    if not existing:
+        return value
+    if not value:
+        return existing
+    return f"{existing}{separator}{value}"
+
+
+def _encode_context_messages(
+    items: Sequence[InteractionItem],
+) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    assistant: Optional[Dict[str, Any]] = None
+
+    def ensure_assistant() -> Dict[str, Any]:
+        nonlocal assistant
+        if assistant is None:
+            assistant = {"role": "assistant"}
+        return assistant
+
+    def flush_assistant() -> None:
+        nonlocal assistant
+        if assistant is None:
+            return
+        if "content" not in assistant:
+            assistant["content"] = None if assistant.get("tool_calls") else ""
+        messages.append(assistant)
+        assistant = None
+
+    for index, item in enumerate(items):
+        if isinstance(
+            item,
+            (ModelSampleBoundary, UserInteractionBoundary),
+        ):
+            flush_assistant()
+            continue
+
+        if isinstance(item, Message):
+            if item.role == "assistant":
+                pending = ensure_assistant()
+                pending["content"] = _append_text(
+                    pending.get("content"),
+                    item.text,
+                )
+                continue
+            if item.role not in {"system", "developer", "user"}:
+                raise ModelConfigurationError(
+                    f"unsupported message role at item {index}: {item.role!r}"
+                )
+            flush_assistant()
+            messages.append({"role": item.role, "content": item.text})
+            continue
+
+        if isinstance(item, Reasoning):
+            pending = ensure_assistant()
+            reasoning_text = item.text or "\n".join(item.summary)
+            pending["reasoning_content"] = _append_text(
+                pending.get("reasoning_content"),
+                reasoning_text,
+                separator="\n",
+            )
+            continue
+
+        if isinstance(item, ToolCall):
+            pending = ensure_assistant()
+            tool_calls = pending.setdefault("tool_calls", [])
+            if not isinstance(tool_calls, list):
+                raise ModelConfigurationError(
+                    "assistant tool_calls accumulator must be a list"
+                )
+            tool_calls.append(
+                {
+                    "id": item.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": item.name,
+                        "arguments": item.arguments_json,
+                    },
+                }
+            )
+            continue
+
+        if isinstance(item, ToolResult):
+            flush_assistant()
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.call_id,
+                    "content": item.output,
+                }
+            )
+            continue
+
+        if isinstance(item, OpaqueCompaction):
+            raise ModelConfigurationError(
+                "Chat Completions cannot encode OpaqueCompaction"
+            )
+
+        if isinstance(item, ContextCompaction):
+            raise ModelConfigurationError(
+                "ContextCompaction must be projected before request encoding"
+            )
+
+        raise ModelConfigurationError(
+            f"unsupported interaction item at index {index}: {item!r}"
+        )
+
+    flush_assistant()
+    if not messages:
+        raise ModelConfigurationError("cannot sample an empty model context")
+    return messages
+
+
+def _encode_tools(tools: Sequence[Any]) -> List[Dict[str, Any]]:
+    encoded: List[Dict[str, Any]] = []
+    seen = set()
+    for index, tool in enumerate(tools):
+        name = getattr(tool, "name", None)
+        description = getattr(tool, "description", None)
+        parameters = getattr(tool, "parameters", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ModelConfigurationError(
+                f"tool {index} must have a non-empty name"
+            )
+        if name in seen:
+            raise ModelConfigurationError(f"duplicate tool name: {name!r}")
+        seen.add(name)
+        if not isinstance(description, str):
+            raise ModelConfigurationError(
+                f"tool {name!r} must have a string description"
+            )
+        if not isinstance(parameters, Mapping):
+            raise ModelConfigurationError(
+                f"tool {name!r} parameters must be a mapping"
+            )
+        encoded.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": dict(parameters),
+                },
+            }
+        )
+    return encoded
+
+
+def _apply_sampling_options(
+    payload: Dict[str, Any],
+    options: Optional[SamplingOptions],
+) -> None:
+    if options is None:
+        return
+    if options.max_tokens is not None:
+        payload["max_tokens"] = options.max_tokens
+    if options.temperature is not None:
+        payload["temperature"] = options.temperature
+    if options.top_p is not None:
+        payload["top_p"] = options.top_p
+    if options.stop:
+        payload["stop"] = list(options.stop)
+    if options.seed is not None:
+        payload["seed"] = options.seed
+
+
+def _coerce_content_text(value: Any, field_name: str) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        parts: List[str] = []
+        for index, part in enumerate(value):
+            if not isinstance(part, Mapping):
+                raise ModelResponseError(
+                    f"{field_name}[{index}] must be an object"
+                )
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+                continue
+            content = part.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+        return "".join(parts)
+    raise ModelResponseError(f"{field_name} must be text, a content list, or null")
+
+
+def _extract_reasoning_and_content(message: Mapping[str, Any]) -> Tuple[str, str]:
+    content = _coerce_content_text(message.get("content"), "message.content")
+    reasoning_value = message.get("reasoning_content")
+    reasoning = (
+        _coerce_content_text(reasoning_value, "message.reasoning_content")
+        if reasoning_value is not None
+        else ""
+    )
+
+    if not reasoning:
+        match = _THINK_RE.search(content)
+        if match is not None:
+            reasoning = match.group(1).strip()
+            content = f"{content[:match.start()]}{content[match.end():]}".strip()
+    return reasoning, content
+
+
+def _decode_tool_calls(raw_tool_calls: Any) -> Tuple[ToolCall, ...]:
+    if raw_tool_calls is None:
+        return ()
+    if not isinstance(raw_tool_calls, Sequence) or isinstance(
+        raw_tool_calls,
+        (str, bytes, bytearray),
+    ):
+        raise ModelResponseError("message.tool_calls must be a list")
+
+    calls: List[ToolCall] = []
+    for index, raw_call in enumerate(raw_tool_calls):
+        if not isinstance(raw_call, Mapping):
+            raise ModelResponseError(f"tool call {index} must be an object")
+        call_id = raw_call.get("id", raw_call.get("call_id"))
+        function = raw_call.get("function")
+        if isinstance(function, Mapping):
+            name = function.get("name")
+            arguments = function.get("arguments", "")
+        else:
+            name = raw_call.get("name")
+            arguments = raw_call.get("arguments", "")
+
+        if not isinstance(call_id, str) or not call_id.strip():
+            raise ModelResponseError(f"tool call {index} has no call id")
+        if not isinstance(name, str) or not name.strip():
+            raise ModelResponseError(f"tool call {index} has no name")
+        if not isinstance(arguments, str):
+            try:
+                arguments = json.dumps(
+                    arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ModelResponseError(
+                    f"tool call {index} arguments are not JSON-compatible"
+                ) from exc
+
+        calls.append(
+            ToolCall(
+                name=name,
+                call_id=call_id,
+                arguments_json=arguments,
+            )
+        )
+    return tuple(calls)
+
+
+def _nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _decode_usage(raw_usage: Any) -> TokenUsage:
+    if not isinstance(raw_usage, Mapping):
+        return TokenUsage()
+    input_tokens = _nonnegative_int(raw_usage.get("prompt_tokens"))
+    output_tokens = _nonnegative_int(raw_usage.get("completion_tokens"))
+    total_tokens = _nonnegative_int(raw_usage.get("total_tokens"))
+    if total_tokens == 0:
+        total_tokens = input_tokens + output_tokens
+
+    cached_input_tokens = 0
+    details = raw_usage.get("prompt_tokens_details")
+    if isinstance(details, Mapping):
+        cached_input_tokens = min(
+            input_tokens,
+            _nonnegative_int(details.get("cached_tokens")),
+        )
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
+    )
+
+
+def _map_finish_reason(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ModelResponseError("finish_reason must be a string or null")
+    return {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "tool_calls": "tool_use",
+        "tool_call": "tool_use",
+        "content_filter": "refusal",
+    }.get(value, value)
+
+
+def _decode_response(payload: Any) -> ModelSample:
+    if not isinstance(payload, Mapping):
+        raise ModelResponseError("Chat Completions response must be an object")
+    choices = payload.get("choices")
+    if not isinstance(choices, Sequence) or isinstance(
+        choices,
+        (str, bytes, bytearray),
+    ) or not choices:
+        raise ModelResponseError("Chat Completions response has no choices")
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        raise ModelResponseError("choices[0] must be an object")
+    message = choice.get("message")
+    if not isinstance(message, Mapping):
+        raise ModelResponseError("choices[0].message must be an object")
+
+    reasoning, content = _extract_reasoning_and_content(message)
+    calls = _decode_tool_calls(message.get("tool_calls"))
+    items: List[InteractionItem] = []
+    if reasoning:
+        items.append(Reasoning(text=reasoning))
+    if content or not calls:
+        items.append(Message(role="assistant", text=content))
+    items.extend(calls)
+
+    return ModelSample(
+        items=tuple(items),
+        stop_reason=_map_finish_reason(choice.get("finish_reason")),
+        usage=_decode_usage(payload.get("usage")),
+    )
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        payload = exc.read()
+    except Exception:
+        return ""
+    if not isinstance(payload, (bytes, bytearray)):
+        return ""
+    return bytes(payload).decode("utf-8", errors="replace")
+
+
+def _is_context_window_error(text: str) -> bool:
+    normalized = text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "context window",
+            "maximum context length",
+            "context length exceeded",
+            "too many tokens",
+        )
+    )
+
+
+class ChatCompletionsModel:
+    def __init__(
+        self,
+        endpoint: ChatCompletionsEndpoint,
+        *,
+        opener: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        if not isinstance(endpoint, ChatCompletionsEndpoint):
+            raise TypeError("endpoint must be ChatCompletionsEndpoint")
+        self.endpoint = endpoint
+        self._opener = opener or urllib.request.urlopen
+
+    def _build_request_payload(
+        self,
+        context: ModelContext,
+        tools: Sequence[Any],
+        options: Optional[SamplingOptions],
+    ) -> Dict[str, Any]:
+        if not isinstance(context, ModelContext):
+            raise TypeError("context must be ModelContext")
+        context.assert_model_ready()
+        payload: Dict[str, Any] = {
+            "messages": _encode_context_messages(context.model_items()),
+            "stream": False,
+        }
+        if self.endpoint.model is not None:
+            payload["model"] = self.endpoint.model
+        encoded_tools = _encode_tools(tools)
+        if encoded_tools:
+            payload["tools"] = encoded_tools
+            payload["parallel_tool_calls"] = False
+        _apply_sampling_options(payload, options)
+        return payload
+
+    def sample(
+        self,
+        context: ModelContext,
+        *,
+        tools: Sequence[Any] = (),
+        options: Optional[SamplingOptions] = None,
+    ) -> ModelSample:
+        if options is not None and not isinstance(options, SamplingOptions):
+            raise TypeError("options must be SamplingOptions or None")
+        payload = self._build_request_payload(context, tools, options)
+        try:
+            request_data = json.dumps(
+                payload,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ModelConfigurationError(
+                "Chat Completions request is not JSON-serializable"
+            ) from exc
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "pythia-interaction/0.1",
+        }
+        if self.endpoint.api_key is not None:
+            headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
+        request = urllib.request.Request(
+            self.endpoint.url,
+            data=request_data,
+            headers=headers,
+            method="POST",
+        )
+
+        try:
+            response = self._opener(
+                request,
+                timeout=self.endpoint.request_timeout_seconds,
+            )
+        except urllib.error.HTTPError as exc:
+            body = _read_http_error_body(exc)
+            detail = body or str(exc)
+            if _is_context_window_error(detail):
+                raise ModelContextWindowError(detail) from exc
+            raise ModelTransportError(
+                f"Chat Completions HTTP {exc.code}: {detail}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise ModelTimeoutError(str(exc)) from exc
+            raise ModelTransportError(str(exc)) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise ModelTimeoutError(str(exc)) from exc
+        except OSError as exc:
+            raise ModelTransportError(str(exc)) from exc
+
+        try:
+            status = getattr(response, "status", None)
+            raw = response.read()
+        except (TimeoutError, socket.timeout) as exc:
+            raise ModelTimeoutError(str(exc)) from exc
+        except OSError as exc:
+            raise ModelTransportError(str(exc)) from exc
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+        if isinstance(status, int) and not 200 <= status < 300:
+            if not isinstance(raw, (bytes, bytearray)):
+                raise ModelResponseError("HTTP response body must be bytes")
+            text = bytes(raw).decode("utf-8", errors="replace")
+            if _is_context_window_error(text):
+                raise ModelContextWindowError(text)
+            raise ModelTransportError(
+                f"Chat Completions HTTP {status}: {text}"
+            )
+
+        if not isinstance(raw, (bytes, bytearray)):
+            raise ModelResponseError("HTTP response body must be bytes")
+        try:
+            text = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ModelResponseError("response is not UTF-8 JSON") from exc
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ModelResponseError("response is not valid JSON") from exc
+        try:
+            return _decode_response(decoded)
+        except ContextValidationError as exc:
+            raise ModelResponseError(str(exc)) from exc
+        except ModelResponseError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise ModelResponseError(str(exc)) from exc
+
+
+__all__ = [
+    "ChatCompletionsEndpoint",
+    "ChatCompletionsModel",
+]
