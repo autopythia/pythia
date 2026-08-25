@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -93,10 +92,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "using Pythia's default local tools."
         ),
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model")
-    parser.add_argument("--scheme", default="http")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--cwd", default=".")
     parser.add_argument("--max-samples", type=int, default=100)
@@ -114,10 +111,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     cwd = Path(args.cwd).expanduser().resolve()
     endpoint = ChatCompletionsEndpoint(
-        host=args.host,
-        port=args.port,
+        api_url=args.api_url,
         model=args.model,
-        scheme=args.scheme,
         request_timeout_seconds=args.request_timeout_seconds,
         api_key=args.api_key,
     )

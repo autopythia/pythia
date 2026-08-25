@@ -5,6 +5,7 @@ import math
 import re
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -43,40 +44,61 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 @dataclass(frozen=True)
 class ChatCompletionsEndpoint:
-    host: str
-    port: int
+    api_url: str
     model: Optional[str] = None
-    scheme: str = "http"
     request_timeout_seconds: float = 60.0
     api_key: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.host, str):
-            raise TypeError("host must be a string")
-        host = self.host.strip()
-        if not host:
-            raise ModelConfigurationError("host must not be empty")
-        if "://" in host or "/" in host:
+        if not isinstance(self.api_url, str):
+            raise TypeError("api_url must be a string")
+        api_url = self.api_url.strip()
+        if not api_url:
+            raise ModelConfigurationError("api_url must not be empty")
+        if any(character.isspace() for character in api_url):
             raise ModelConfigurationError(
-                "host must be a bare hostname or IP address"
-            )
-        object.__setattr__(self, "host", host)
-
-        if (
-            isinstance(self.port, bool)
-            or not isinstance(self.port, int)
-            or not 1 <= self.port <= 65535
-        ):
-            raise ModelConfigurationError(
-                "port must be an integer from 1 through 65535"
+                "api_url must not contain whitespace"
             )
 
-        if not isinstance(self.scheme, str):
-            raise TypeError("scheme must be a string")
-        scheme = self.scheme.strip().lower()
+        try:
+            parsed = urllib.parse.urlsplit(api_url)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise ModelConfigurationError("api_url is invalid") from exc
+        scheme = parsed.scheme.lower()
         if scheme not in {"http", "https"}:
-            raise ModelConfigurationError("scheme must be 'http' or 'https'")
-        object.__setattr__(self, "scheme", scheme)
+            raise ModelConfigurationError(
+                "api_url scheme must be 'http' or 'https'"
+            )
+        if not parsed.netloc or hostname is None:
+            raise ModelConfigurationError(
+                "api_url must be an absolute URL with a host"
+            )
+        if port == 0:
+            raise ModelConfigurationError(
+                "api_url port must be from 1 through 65535"
+            )
+        if parsed.username is not None or parsed.password is not None:
+            raise ModelConfigurationError(
+                "api_url must not contain user information"
+            )
+        if parsed.query:
+            raise ModelConfigurationError("api_url must not contain a query")
+        if parsed.fragment:
+            raise ModelConfigurationError(
+                "api_url must not contain a fragment"
+            )
+        path_prefix = parsed.path.rstrip("/")
+        if path_prefix.endswith("/v1/chat/completions"):
+            raise ModelConfigurationError(
+                "api_url must not include the fixed "
+                "/v1/chat/completions path"
+            )
+        api_url = urllib.parse.urlunsplit(
+            (scheme, parsed.netloc, path_prefix, "", "")
+        )
+        object.__setattr__(self, "api_url", api_url)
 
         if self.model is not None:
             if not isinstance(self.model, str):
@@ -110,13 +132,7 @@ class ChatCompletionsEndpoint:
 
     @property
     def url(self) -> str:
-        host = self.host
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        return (
-            f"{self.scheme}://{host}:{self.port}"
-            "/v1/chat/completions"
-        )
+        return f"{self.api_url}/v1/chat/completions"
 
 
 def _append_text(existing: Optional[str], value: str, separator: str = "") -> str:

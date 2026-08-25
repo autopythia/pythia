@@ -256,42 +256,52 @@ class UserInteractionTests(unittest.TestCase):
 
 
 class EndpointTests(unittest.TestCase):
-    def test_endpoint_builds_fixed_chat_completions_url(self):
+    def test_endpoint_builds_url_after_path_prefix(self):
         endpoint = ChatCompletionsEndpoint(
-            host="127.0.0.1",
-            port=8000,
+            api_url=" HTTPS://api.example.test:8443/proxy/root/ ",
             model=" example-model ",
         )
 
         self.assertEqual(
+            endpoint.api_url,
+            "https://api.example.test:8443/proxy/root",
+        )
+        self.assertEqual(
             endpoint.url,
-            "http://127.0.0.1:8000/v1/chat/completions",
+            "https://api.example.test:8443/proxy/root/v1/chat/completions",
         )
         self.assertEqual(endpoint.model, "example-model")
 
     def test_endpoint_normalizes_absent_model(self):
         endpoint = ChatCompletionsEndpoint(
-            host="localhost",
-            port=9000,
+            api_url="http://localhost:9000/",
             model=" ",
-            scheme="HTTPS",
         )
 
         self.assertIsNone(endpoint.model)
+        self.assertEqual(endpoint.api_url, "http://localhost:9000")
         self.assertEqual(
             endpoint.url,
-            "https://localhost:9000/v1/chat/completions",
+            "http://localhost:9000/v1/chat/completions",
         )
 
     def test_endpoint_rejects_invalid_configuration(self):
+        with self.assertRaisesRegex(TypeError, "api_url"):
+            ChatCompletionsEndpoint(api_url=object())
+
         cases = [
-            {"host": "", "port": 8000},
-            {"host": "http://localhost", "port": 8000},
-            {"host": "localhost", "port": 0},
-            {"host": "localhost", "port": 8000, "scheme": "ftp"},
+            {"api_url": ""},
+            {"api_url": "localhost:8000"},
+            {"api_url": "ftp://localhost"},
+            {"api_url": "http:///missing-host"},
+            {"api_url": "http://user:password@localhost"},
+            {"api_url": "http://localhost/prefix?query=value"},
+            {"api_url": "http://localhost/prefix#fragment"},
+            {"api_url": "http://localhost:not-a-port"},
+            {"api_url": "http://localhost:0"},
+            {"api_url": "http://localhost/v1/chat/completions"},
             {
-                "host": "localhost",
-                "port": 8000,
+                "api_url": "http://localhost",
                 "request_timeout_seconds": 0,
             },
         ]
@@ -302,8 +312,7 @@ class EndpointTests(unittest.TestCase):
 
     def test_endpoint_validates_and_redacts_api_key(self):
         endpoint = ChatCompletionsEndpoint(
-            host="localhost",
-            port=8000,
+            api_url="http://localhost:8000",
             api_key=" example-secret ",
         )
 
@@ -312,8 +321,7 @@ class EndpointTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "api_key"):
             ChatCompletionsEndpoint(
-                host="localhost",
-                port=8000,
+                api_url="http://localhost:8000",
                 api_key=object(),
             )
         for api_key in ("", " ", "two words"):
@@ -323,8 +331,7 @@ class EndpointTests(unittest.TestCase):
                     "api_key",
                 ):
                     ChatCompletionsEndpoint(
-                        host="localhost",
-                        port=8000,
+                        api_url="http://localhost:8000",
                         api_key=api_key,
                     )
 
@@ -381,8 +388,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         opener = _ScriptedOpener(response)
         model = ChatCompletionsModel(
             ChatCompletionsEndpoint(
-                host="localhost",
-                port=8000,
+                api_url="http://localhost:8000",
                 model="demo",
             ),
             opener=opener,
@@ -464,9 +470,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(response)
         endpoint = ChatCompletionsEndpoint(
-            host="api.example.test",
-            port=443,
-            scheme="https",
+            api_url="https://api.example.test/proxy",
             api_key=" example-secret ",
         )
         model = ChatCompletionsModel(
@@ -482,6 +486,10 @@ class ChatCompletionsModelTests(unittest.TestCase):
         self.assertEqual(
             request.get_header("Authorization"),
             "Bearer example-secret",
+        )
+        self.assertEqual(
+            request.full_url,
+            "https://api.example.test/proxy/v1/chat/completions",
         )
         self.assertEqual(sample.last_assistant_text, "authenticated")
 
@@ -524,7 +532,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(first_response, final_response)
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(host="localhost", port=8000),
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
 
@@ -614,7 +622,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(host="localhost", port=8000),
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
         context = ModelContext(
@@ -668,7 +676,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(host="localhost", port=8000),
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
         context = ModelContext(
@@ -708,7 +716,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(host="localhost", port=8000),
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
 
@@ -727,7 +735,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ),
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(host="localhost", port=8000),
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=_ScriptedOpener(error),
         )
 

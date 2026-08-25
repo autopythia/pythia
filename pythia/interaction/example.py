@@ -1,5 +1,4 @@
 import argparse
-import os
 
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
@@ -12,19 +11,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run one caller-controlled Chat Completions sample.",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model")
-    parser.add_argument("--scheme", default="http")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("prompt")
     args = parser.parse_args()
 
     endpoint = ChatCompletionsEndpoint(
-        host=args.host,
-        port=args.port,
+        api_url=args.api_url,
         model=args.model,
-        scheme=args.scheme,
         api_key=args.api_key,
     )
     model = ChatCompletionsModel(endpoint=endpoint)
