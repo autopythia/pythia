@@ -74,12 +74,17 @@ _GIT_GLOBAL_OPTION_PREFIXES_WITH_VALUE = (
 
 _ANSI_RED = "\x1b[31m"
 _ANSI_GREEN = "\x1b[32m"
+_ANSI_BRIGHT_BLACK = "\x1b[90m"
 _ANSI_RESET = "\x1b[0m"
 
 
 @dataclass(frozen=True)
 class DisplayItem:
-    """One complete human-readable interaction display block."""
+    """One complete human-readable interaction display block.
+
+    ``text`` is the canonical, undecorated block contents.  Printing an item
+    applies the same left-hand quote gutter used by Autopythia/Contradex.
+    """
 
     text: str
 
@@ -94,7 +99,7 @@ class DisplayItem:
             )
 
     def __str__(self) -> str:
-        return self.text
+        return _quote_wrap_display_text(self.text)
 
 
 @dataclass(frozen=True)
@@ -486,6 +491,22 @@ def _colorize_diff_text(payload: str) -> str:
         )
         for index, line in enumerate(lines)
     )
+
+
+def _bright_black(text: str) -> str:
+    return f"{_ANSI_BRIGHT_BLACK}{text}{_ANSI_RESET}"
+
+
+def _quote_wrap_display_text(text: str) -> str:
+    """Apply the Autopythia display gutter to a completed block."""
+    lines = text.split("\n")
+    if len(lines) == 1:
+        return f"   {_bright_black('[')}{lines[0]}"
+
+    parts = [f"   {_bright_black('⌜')}{lines[0]}"]
+    parts.extend(f"    {line}" if line else "" for line in lines[1:-1])
+    parts.append(f"   {_bright_black('⌞')}{lines[-1]}")
+    return "\n".join(parts)
 
 
 def _colorize_diff_line(

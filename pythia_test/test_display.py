@@ -22,6 +22,7 @@ from pythia.interaction import render_interaction_items
 
 ANSI_GREEN = "\x1b[32m"
 ANSI_RED = "\x1b[31m"
+ANSI_BRIGHT_BLACK = "\x1b[90m"
 ANSI_RESET = "\x1b[0m"
 
 
@@ -30,7 +31,26 @@ class DisplayItemTests(unittest.TestCase):
         item = DisplayItem("line one\nline two")
 
         self.assertEqual(item.text, "line one\nline two")
-        self.assertEqual(str(item), "line one\nline two")
+        self.assertEqual(
+            str(item),
+            (
+                f"   {ANSI_BRIGHT_BLACK}⌜{ANSI_RESET}line one\n"
+                f"   {ANSI_BRIGHT_BLACK}⌞{ANSI_RESET}line two"
+            ),
+        )
+        self.assertEqual(
+            str(DisplayItem("line one")),
+            f"   {ANSI_BRIGHT_BLACK}[{ANSI_RESET}line one",
+        )
+        self.assertEqual(
+            str(DisplayItem("line one\nline two\n\nline three")),
+            (
+                f"   {ANSI_BRIGHT_BLACK}⌜{ANSI_RESET}line one\n"
+                "    line two\n"
+                "\n"
+                f"   {ANSI_BRIGHT_BLACK}⌞{ANSI_RESET}line three"
+            ),
+        )
         self.assertIn("DisplayItem", repr(item))
 
         for invalid in (None, 1):
@@ -72,7 +92,7 @@ class InteractionItemRendererTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            tuple(str(item) for item in rendered),
+            tuple(item.text for item in rendered),
             (
                 "[system] system",
                 "[developer] developer",
