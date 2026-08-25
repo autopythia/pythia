@@ -7,9 +7,11 @@ import shlex
 from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Dict
 from typing import List
 from typing import Optional
+from typing import Set
 from typing import Tuple
 
 from .items import ContextCompaction
@@ -83,10 +85,12 @@ class DisplayItem:
     """One complete human-readable interaction display block.
 
     ``text`` is the canonical, undecorated block contents.  Printing an item
-    applies the same left-hand quote gutter used by Autopythia/Contradex.
+    applies the Autopythia/Contradex left-hand quote gutter and, for diff
+    blocks, the Contradex diff colorscheme.
     """
 
     text: str
+    is_diff: bool = field(default=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
@@ -97,16 +101,19 @@ class DisplayItem:
             raise ValueError(
                 "display item text must not have a trailing newline"
             )
+        if not isinstance(self.is_diff, bool):
+            raise TypeError("display item is_diff must be a bool")
 
     def __str__(self) -> str:
-        return _quote_wrap_display_text(self.text)
+        text = _colorize_diff_text(self.text) if self.is_diff else self.text
+        return _quote_wrap_display_text(text)
 
 
 @dataclass(frozen=True)
 class InteractionItemRenderer:
     """Render completed interaction items using Contradex-style labels."""
 
-    color: bool = False
+    color: bool = True
     show_generic_arguments: bool = False
 
     def __post_init__(self) -> None:
@@ -132,17 +139,22 @@ class InteractionItemRenderer:
                 )
 
             blocks: Tuple[str, ...]
+            diff_block_indices: Set[int] = set()
             if isinstance(item, Message):
                 blocks = _render_message(item)
             elif isinstance(item, Reasoning):
                 blocks = _render_reasoning(item)
             elif isinstance(item, ToolCall):
                 call_by_id[item.call_id] = item
-                blocks = self._render_tool_call(item)
+                blocks = self._render_tool_call(
+                    item,
+                    diff_block_indices,
+                )
             elif isinstance(item, ToolResult):
                 blocks = self._render_tool_result(
                     item,
                     call_by_id.get(item.call_id),
+                    diff_block_indices,
                 )
             elif isinstance(
                 item,
@@ -161,10 +173,18 @@ class InteractionItemRenderer:
                     f"unsupported interaction item: {type(item).__name__}"
                 )
 
-            for block in blocks:
+            for block_index, block in enumerate(blocks):
                 normalized = _normalize_display_block(block)
                 if normalized is not None:
-                    rendered.append(DisplayItem(normalized))
+                    rendered.append(
+                        DisplayItem(
+                            normalized,
+                            is_diff=(
+                                self.color
+                                and block_index in diff_block_indices
+                            ),
+                        )
+                    )
 
         return tuple(rendered)
 
@@ -186,7 +206,11 @@ class InteractionItemRenderer:
             calls[call.call_id] = call
         return calls
 
-    def _render_tool_call(self, item: ToolCall) -> Tuple[str, ...]:
+    def _render_tool_call(
+        self,
+        item: ToolCall,
+        diff_block_indices: Set[int],
+    ) -> Tuple[str, ...]:
         label = _format_tool_call_label(item.name, item.call_id)
         parsed, raw_arguments = _parse_tool_arguments(item.arguments_json)
         payload = parsed if isinstance(parsed, Mapping) else {}
@@ -201,8 +225,8 @@ class InteractionItemRenderer:
             raw_arguments,
         )
         if code_payload is not None:
-            if self.color and item.name == "apply_patch":
-                code_payload = _colorize_diff_text(code_payload)
+            if item.name == "apply_patch":
+                diff_block_indices.add(1)
             return (label, code_payload)
 
         if item.name == "update_plan":
@@ -222,6 +246,7 @@ class InteractionItemRenderer:
         self,
         item: ToolResult,
         source_call: Optional[ToolCall],
+        diff_block_indices: Set[int],
     ) -> Tuple[str, ...]:
         name = source_call.name if source_call is not None else "tool"
         status = "ok" if item.success else "error"
@@ -245,8 +270,7 @@ class InteractionItemRenderer:
             plan_lines and output == "Plan updated"
         ):
             if (
-                self.color
-                and source_call is not None
+                source_call is not None
                 and name in _SHELL_TOOL_NAMES
             ):
                 parsed, _ = _parse_tool_arguments(
@@ -258,7 +282,7 @@ class InteractionItemRenderer:
                     command is not None
                     and _looks_like_git_diff_command(command)
                 ):
-                    output = _colorize_diff_text(output)
+                    diff_block_indices.add(0)
             lines.append(output)
 
         return ("\n".join(lines),)
@@ -268,7 +292,7 @@ def render_interaction_items(
     items: Iterable[InteractionItem],
     *,
     source_calls: Iterable[ToolCall] = (),
-    color: bool = False,
+    color: bool = True,
     show_generic_arguments: bool = False,
 ) -> Tuple[DisplayItem, ...]:
     return InteractionItemRenderer(

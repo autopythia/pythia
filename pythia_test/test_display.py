@@ -38,6 +38,7 @@ class DisplayItemTests(unittest.TestCase):
                 f"   {ANSI_BRIGHT_BLACK}⌞{ANSI_RESET}line two"
             ),
         )
+
         self.assertEqual(
             str(DisplayItem("line one")),
             f"   {ANSI_BRIGHT_BLACK}[{ANSI_RESET}line one",
@@ -338,7 +339,7 @@ class InteractionItemRendererTests(unittest.TestCase):
             ),
         )
 
-    def test_apply_patch_payload_uses_separate_blocks_and_optional_color(self):
+    def test_apply_patch_payload_uses_separate_blocks_and_diff_color(self):
         patch = "\n".join(
             (
                 "*** Begin Patch",
@@ -355,29 +356,48 @@ class InteractionItemRendererTests(unittest.TestCase):
             arguments_json=json.dumps({"patch": f"{patch}\n"}),
         )
 
+        rendered = render_interaction_items((call,))
         self.assertEqual(
-            render_interaction_items((call,)),
+            rendered,
             (
                 DisplayItem("[tool-call] apply_patch (patch-1)"),
-                DisplayItem(patch),
+                DisplayItem(patch, is_diff=True),
             ),
         )
         self.assertEqual(
-            InteractionItemRenderer(color=True).render_items((call,)),
+            str(rendered[1]),
+            "\n".join(
+                (
+                    f"   {ANSI_BRIGHT_BLACK}⌜{ANSI_RESET}*** Begin Patch",
+                    "    *** Update File: example.txt",
+                    "    @@",
+                    f"    {ANSI_RED}-old{ANSI_RESET}",
+                    f"    {ANSI_GREEN}+new{ANSI_RESET}",
+                    f"   {ANSI_BRIGHT_BLACK}⌞{ANSI_RESET}*** End Patch",
+                )
+            ),
+        )
+
+        uncolored = InteractionItemRenderer(color=False).render_items((call,))
+        self.assertEqual(
+            tuple(item.text for item in uncolored),
             (
-                DisplayItem("[tool-call] apply_patch (patch-1)"),
-                DisplayItem(
-                    "\n".join(
-                        (
-                            "*** Begin Patch",
-                            "*** Update File: example.txt",
-                            "@@",
-                            f"{ANSI_RED}-old{ANSI_RESET}",
-                            f"{ANSI_GREEN}+new{ANSI_RESET}",
-                            "*** End Patch",
-                        )
-                    )
-                ),
+                "[tool-call] apply_patch (patch-1)",
+                patch,
+            ),
+        )
+        self.assertFalse(uncolored[1].is_diff)
+        self.assertEqual(
+            str(uncolored[1]),
+            "\n".join(
+                (
+                    f"   {ANSI_BRIGHT_BLACK}⌜{ANSI_RESET}*** Begin Patch",
+                    "    *** Update File: example.txt",
+                    "    @@",
+                    "    -old",
+                    "    +new",
+                    f"   {ANSI_BRIGHT_BLACK}⌞{ANSI_RESET}*** End Patch",
+                )
             ),
         )
 
@@ -402,7 +422,7 @@ class InteractionItemRendererTests(unittest.TestCase):
             call_id="cat-1",
             arguments_json='{"cmd":"cat example.diff"}',
         )
-        renderer = InteractionItemRenderer(color=True)
+        renderer = InteractionItemRenderer()
 
         git_result = renderer.render_items(
             (ToolResult(call_id="git-1", output=diff),),
@@ -413,18 +433,35 @@ class InteractionItemRendererTests(unittest.TestCase):
             source_calls=(cat_call,),
         )
 
+        expected_text = (
+            "[tool-ret]  exec_command (git-1) [ok]\n"
+            "diff --git a/example.txt b/example.txt\n"
+            "--- a/example.txt\n"
+            "+++ b/example.txt\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new"
+        )
         self.assertEqual(
             git_result,
             (
-                DisplayItem(
-                    "[tool-ret]  exec_command (git-1) [ok]\n"
-                    "diff --git a/example.txt b/example.txt\n"
-                    "--- a/example.txt\n"
-                    "+++ b/example.txt\n"
-                    "@@ -1 +1 @@\n"
-                    f"{ANSI_RED}-old{ANSI_RESET}\n"
-                    f"{ANSI_GREEN}+new{ANSI_RESET}"
-                ),
+                DisplayItem(expected_text, is_diff=True),
+            ),
+        )
+        self.assertEqual(
+            str(git_result[0]),
+            "\n".join(
+                (
+                    f"   {ANSI_BRIGHT_BLACK}⌜{ANSI_RESET}[tool-ret]  "
+                    "exec_command (git-1) [ok]",
+                    "    diff --git a/example.txt b/example.txt",
+                    "    --- a/example.txt",
+                    "    +++ b/example.txt",
+                    "    @@ -1 +1 @@",
+                    f"    {ANSI_RED}-old{ANSI_RESET}",
+                    f"   {ANSI_BRIGHT_BLACK}⌞{ANSI_RESET}"
+                    f"{ANSI_GREEN}+new{ANSI_RESET}",
+                )
             ),
         )
         self.assertEqual(
@@ -436,6 +473,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 ),
             ),
         )
+        self.assertFalse(cat_result[0].is_diff)
 
 
 if __name__ == "__main__":
