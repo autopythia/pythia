@@ -329,12 +329,21 @@ def _coerce_content_text(value: Any, field_name: str) -> str:
 
 def _extract_reasoning_and_content(message: Mapping[str, Any]) -> Tuple[str, str]:
     content = _coerce_content_text(message.get("content"), "message.content")
-    reasoning_value = message.get("reasoning_content")
-    reasoning = (
-        _coerce_content_text(reasoning_value, "message.reasoning_content")
-        if reasoning_value is not None
-        else ""
-    )
+
+    # Provider field names vary.  Prefer a non-empty "reasoning" value, but
+    # retain compatibility with inference engines that still use
+    # "reasoning_content".  A present-but-empty field must not hide the other.
+    reasoning = ""
+    for field_name in ("reasoning", "reasoning_content"):
+        reasoning_value = message.get(field_name)
+        if reasoning_value is None:
+            continue
+        reasoning = _coerce_content_text(
+            reasoning_value,
+            f"message.{field_name}",
+        )
+        if reasoning:
+            break
 
     if not reasoning:
         match = _THINK_RE.search(content)
