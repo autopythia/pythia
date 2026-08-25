@@ -5,40 +5,55 @@ import sys
 from pathlib import Path
 from typing import Optional
 from typing import Sequence
+from typing import Union
 
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
+from .display import render_interaction_items
 from .environment import Environment
 from .items import Message
+from .items import ModelSampleBoundary
+from .items import UserInteractionBoundary
 from .model import Model
 from .model import SamplingOptions
+from .session import load_interaction_session
+from .session import save_interaction_session
 from .user import UserInteraction
 
-
-DEFAULT_PROMPT = "Summarize the repository in the current working directory."
 
 _SYSTEM_MESSAGE = (
     "You are a repository analyst. Inspect the repository with tools as "
     "needed. Do not modify files when the user only asks for analysis."
 )
 
+DEFAULT_PROMPT = "Summarize the repository in the current working directory."
+DEFAULT_SESSION_PATH = Path("interaction.jsonl")
+
 
 def run_repository_summary(
     model: Model,
     environment: Environment,
     *,
-    prompt: str = DEFAULT_PROMPT,
+    prompt: Optional[str] = DEFAULT_PROMPT,
     max_samples: int = 100,
     options: Optional[SamplingOptions] = None,
+    session_path: Optional[Union[str, Path]] = None,
+    resume: bool = False,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
     if not isinstance(environment, Environment):
         raise TypeError("environment must be Environment")
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("prompt must not be empty")
+    if not isinstance(resume, bool):
+        raise TypeError("resume must be a bool")
+    if prompt is not None and (
+        not isinstance(prompt, str) or not prompt.strip()
+    ):
+        raise ValueError("prompt must be a non-empty string or None")
+    if resume and session_path is None:
+        raise ValueError("resume requires session_path")
     if (
         isinstance(max_samples, bool)
         or not isinstance(max_samples, int)
@@ -48,17 +63,54 @@ def run_repository_summary(
     if options is not None and not isinstance(options, SamplingOptions):
         raise TypeError("options must be SamplingOptions or None")
 
-    context = ModelContext(
-        (
-            Message(role="system", text=_SYSTEM_MESSAGE),
+    if resume:
+        context = load_interaction_session(session_path)
+
+        # Restore the human-visible transcript as well as the model state.
+        for display_item in render_interaction_items(context.items):
+            print(display_item)
+    else:
+        if prompt is None:
+            raise ValueError("prompt must not be None without resume")
+        context = ModelContext(
+            (
+                # Message(role="system", text=_SYSTEM_MESSAGE),
+            )
         )
-    )
-    user_interaction = UserInteraction(
-        items=(Message(role="user", text=prompt),),
-    )
-    context.extend(user_interaction.context_items())
-    for display_item in user_interaction.display_items():
-        print(display_item)
+
+    if session_path is not None:
+        save_interaction_session(session_path, context)
+
+    def _persist() -> None:
+        if session_path is not None:
+            save_interaction_session(session_path, context)
+
+    pending_calls = context.pending_tool_calls()
+    if pending_calls:
+        # A process interruption may leave the durable context after model
+        # output but before its tool results.  Complete that batch before
+        # asking the model for a new sample.
+        result = environment.execute_tool_calls(pending_calls)
+        context.extend(result.context_items())
+        _persist()
+        for display_item in result.display_items(source_calls=pending_calls):
+            print(display_item)
+    elif resume and prompt is None:
+        final_text = _final_assistant_text(context)
+        if final_text is None or not final_text.strip():
+            raise RuntimeError("resumed session has no final assistant text")
+        return final_text
+
+    if prompt is not None:
+        # For a resumed session, add the follow-up only after any pending
+        # tool batch has been made valid again.
+        user_interaction = UserInteraction(
+            items=(Message(role="user", text=prompt),),
+        )
+        context.extend(user_interaction.context_items())
+        _persist()
+        for display_item in user_interaction.display_items():
+            print(display_item)
 
     for _ in range(max_samples):
         sample = model.sample(
@@ -67,6 +119,7 @@ def run_repository_summary(
             options=options,
         )
         context.extend(sample.context_items())
+        _persist()
         for display_item in sample.display_items():
             print(display_item)
         if not sample.tool_calls:
@@ -77,12 +130,24 @@ def run_repository_summary(
 
         result = environment.execute_tool_calls(sample.tool_calls)
         context.extend(result.context_items())
+        _persist()
         for display_item in result.display_items(source_calls=sample.tool_calls):
             print(display_item)
 
     raise RuntimeError(
         f"model did not produce a final answer within {max_samples} samples"
     )
+
+
+def _final_assistant_text(context: ModelContext) -> Optional[str]:
+    """Return final assistant text if the effective context ends with it."""
+    for item in reversed(context.model_items()):
+        if isinstance(item, (ModelSampleBoundary, UserInteractionBoundary)):
+            continue
+        if isinstance(item, Message) and item.role == "assistant":
+            return item.text
+        return None
+    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -103,13 +168,21 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=60.0,
     )
-    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--prompt")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume interaction.jsonl instead of starting a new session",
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     cwd = Path(args.cwd).expanduser().resolve()
+    prompt = args.prompt
+    if prompt is None and not args.resume:
+        prompt = DEFAULT_PROMPT
     endpoint = ChatCompletionsEndpoint(
         api_url=args.api_url,
         model=args.model,
@@ -133,9 +206,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             run_repository_summary(
                 model,
                 environment,
-                prompt=args.prompt,
+                prompt=prompt,
                 max_samples=args.max_samples,
                 options=options,
+                session_path=DEFAULT_SESSION_PATH,
+                resume=args.resume,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

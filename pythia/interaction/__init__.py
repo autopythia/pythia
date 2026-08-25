@@ -47,6 +47,11 @@ from .display import DisplayItem
 from .display import InteractionItemRenderer
 from .display import render_interaction_items
 from .user import UserInteraction
+from .session import SessionError
+from .session import interaction_item_from_dict
+from .session import interaction_item_to_dict
+from .session import load_interaction_session
+from .session import save_interaction_session
 
 __all__ = [
     "ChatCompletionsEndpoint",
@@ -84,6 +89,7 @@ __all__ = [
     "PromptSummarizingCompactor",
     "Reasoning",
     "SamplingOptions",
+    "SessionError",
     "TokenUsage",
     "Tool",
     "ToolCall",
@@ -98,4 +104,8 @@ __all__ = [
     "create_update_plan_tool",
     "create_write_stdin_tool",
     "render_interaction_items",
+    "interaction_item_from_dict",
+    "interaction_item_to_dict",
+    "load_interaction_session",
+    "save_interaction_session",
 ]
