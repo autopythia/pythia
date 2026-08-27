@@ -15,6 +15,8 @@ from .items import Message
 from .items import ModelSampleBoundary
 from .items import Reasoning
 from .items import ToolCall
+from .items import TurnMetadata
+from .usage import TokenUsage
 
 if TYPE_CHECKING:
     from .display import DisplayItem
@@ -102,25 +104,6 @@ class SamplingOptions:
 
 
 @dataclass(frozen=True)
-class TokenUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-    cached_input_tokens: int = 0
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_input_tokens",
-        ):
-            value = getattr(self, field_name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{field_name} must be a nonnegative integer")
-
-
-@dataclass(frozen=True)
 class ModelSample:
     items: Tuple[InteractionItem, ...]
     stop_reason: Optional[str] = None
@@ -152,13 +135,19 @@ class ModelSample:
         return tuple(item for item in self.items if isinstance(item, ToolCall))
 
     def context_items(self) -> Tuple[InteractionItem, ...]:
-        """Return this sample's output followed by its durable boundary."""
-        return (*self.items, ModelSampleBoundary())
+        """Return this sample's output, turn metadata, and durable boundary."""
+        return (
+            *self.items,
+            TurnMetadata(usage=self.usage),
+            ModelSampleBoundary(),
+        )
 
     def display_items(self) -> Tuple["DisplayItem", ...]:
         from .display import render_interaction_items
 
-        return render_interaction_items(self.items)
+        return render_interaction_items(
+            (*self.items, TurnMetadata(usage=self.usage)),
+        )
 
     @property
     def assistant_messages(self) -> Tuple[Message, ...]:

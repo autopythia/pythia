@@ -13,6 +13,7 @@ from .items import InteractionItem
 from .items import ModelSampleBoundary
 from .items import ToolCall
 from .items import ToolResult
+from .items import TurnMetadata
 from .items import is_interaction_item
 
 
@@ -53,7 +54,10 @@ def _validate_tool_sequence(
             pending[item.call_id] = item
             continue
 
-        if isinstance(item, ModelSampleBoundary):
+        if isinstance(
+            item,
+            (ModelSampleBoundary, TurnMetadata),
+        ):
             if pending:
                 call_batch_closed = True
             continue

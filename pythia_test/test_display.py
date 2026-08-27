@@ -15,6 +15,8 @@ from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
+from pythia.interaction import TokenUsage
+from pythia.interaction import TurnMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import render_interaction_items
@@ -85,6 +87,14 @@ class InteractionItemRendererTests(unittest.TestCase):
                 ),
                 Reasoning(text="fallback"),
                 Reasoning(text=" "),
+                TurnMetadata(
+                    usage=TokenUsage(
+                        input_tokens=20,
+                        output_tokens=5,
+                        total_tokens=25,
+                        cached_input_tokens=4,
+                    )
+                ),
                 ModelSampleBoundary(),
                 UserInteractionBoundary(),
                 OpaqueCompaction(encrypted_content="secret"),
@@ -102,6 +112,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 "[reasoning] first",
                 "[reasoning] second",
                 "[reasoning] fallback",
+                "[turn] usage input=20 output=5 total=25 cached=4",
                 "[compaction] opaque checkpoint",
                 "[compaction] context checkpoint (2 replacement items)",
             ),
@@ -116,7 +127,13 @@ class InteractionItemRendererTests(unittest.TestCase):
             items=(
                 Reasoning(text="inspect"),
                 Message(role="assistant", text="answer"),
-            )
+            ),
+            usage=TokenUsage(
+                input_tokens=20,
+                output_tokens=5,
+                total_tokens=25,
+                cached_input_tokens=4,
+            ),
         )
         checkpoint = ContextCompaction(
             replacement_items=(Message(role="user", text="summary"),)
@@ -132,6 +149,9 @@ class InteractionItemRendererTests(unittest.TestCase):
             (
                 DisplayItem("[reasoning] inspect"),
                 DisplayItem("[assistant] answer"),
+                DisplayItem(
+                    "[turn] usage input=20 output=5 total=25 cached=4"
+                ),
             ),
         )
         self.assertEqual(compaction.context_items(), (checkpoint,))

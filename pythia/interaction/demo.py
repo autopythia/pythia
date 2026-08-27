@@ -15,6 +15,7 @@ from .display import render_interaction_items
 from .environment import Environment
 from .items import Message
 from .items import ModelSampleBoundary
+from .items import TurnMetadata
 from .items import UserInteractionBoundary
 from .model import Model
 from .model import SamplingOptions
@@ -28,7 +29,11 @@ _SYSTEM_MESSAGE = (
     "needed. Do not modify files when the user only asks for analysis."
 )
 
-DEFAULT_PROMPT = "Summarize the repository in the current working directory."
+# DEFAULT_PROMPT = "Summarize the repository in the current working directory."
+# DEFAULT_PROMPT = "Here is the log for a recent run of the pythia/interaction demo. Let's investigate why there appears to be no interleaved assistant reasoning/response text, but only tool calls."
+# DEFAULT_PROMPT = "Here is the log (demo.log.1) for a recent run of the pythia/interaction demo. Let's review the investigation of why there appears to be no interleaved assistant reasoning/response text but only tool calls, and implement a narrow fix for reasoning (no system message change). (Note that we should support both \"reasoning_content\" and \"reasoning\", as the former is still returned by some inference engines (although we might prioritize the latter if it exists and is non-null/non-empty)."
+# DEFAULT_PROMPT = "Here is the log (demo.log.1) for a recent run of the pythia/interaction demo. Notice that the blocks (`[user] ...`, `[assistant] ...`, etc.) are not left-indented/delimited like in the existing autopythia/contradex implementation. Let's investigate and plan to re-add the same left-indentation/decoration to pythia.interaction as part of the display item impl."
+DEFAULT_PROMPT = "In pythia.interaction is the model context (list of interaction items) sufficient state for saving/resuming sessions? (Pending/interrupted tool calls/results might pose an issue, but we can ignore those for now so long as those interrupted calls can be swept over on resume.) Assuming sufficiency, let's implement initial support for saving the current session (in interaction.jsonl), and optionally resuming from it by passing --resume to the demo (let's also keep the working tree changes to the demo)."
 DEFAULT_SESSION_PATH = Path("interaction.jsonl")
 
 
@@ -142,7 +147,10 @@ def run_repository_summary(
 def _final_assistant_text(context: ModelContext) -> Optional[str]:
     """Return final assistant text if the effective context ends with it."""
     for item in reversed(context.model_items()):
-        if isinstance(item, (ModelSampleBoundary, UserInteractionBoundary)):
+        if isinstance(
+            item,
+            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary),
+        ):
             continue
         if isinstance(item, Message) and item.role == "assistant":
             return item.text

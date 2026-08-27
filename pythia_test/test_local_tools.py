@@ -856,25 +856,33 @@ class DemoTests(unittest.TestCase):
             self.assertTrue(
                 all(isinstance(item, DisplayItem) for item in emitted)
             )
-            rendered = tuple(str(item) for item in emitted)
-            self.assertEqual(rendered[0], f"[user] {DEFAULT_PROMPT}")
+            rendered = tuple(item.text for item in emitted)
+            self.assertEqual(
+                str(emitted[0]),
+                f"   \x1b[90m[\x1b[0m[user] {DEFAULT_PROMPT}",
+            )
             self.assertEqual(
                 rendered[1],
                 "[tool-call] exec_command (inspect-1)\n"
                 "find . -maxdepth 2 -type f -print",
             )
             self.assertTrue(
-                rendered[2].startswith(
+                rendered[3].startswith(
                     "[tool-ret]  exec_command (inspect-1) [ok]\n"
                 )
             )
-            self.assertIn("README.md", rendered[2])
+            self.assertIn("README.md", rendered[3])
             self.assertEqual(
-                rendered[3],
+                rendered[4],
                 "[assistant] The repository contains a README and Python "
                 "source.",
             )
-            self.assertEqual(len(rendered), 4)
+            self.assertEqual(
+                rendered[5],
+                "[turn] usage input=0 output=0 total=0 cached=0",
+            )
+            self.assertNotEqual(rendered[5], rendered[4])
+            self.assertEqual(len(rendered), 6)
 
     def test_repository_summary_demo_bounds_tool_loop(self):
         with tempfile.TemporaryDirectory() as tmpdir:

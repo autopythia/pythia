@@ -29,6 +29,7 @@ from pythia.interaction import ToolCall
 from pythia.interaction import ToolOutcome
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
+from pythia.interaction import TurnMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
 
@@ -199,6 +200,45 @@ class ModelContextTests(unittest.TestCase):
         )
         context.assert_model_ready()
 
+    def test_turn_metadata_is_a_transparent_control_item(self):
+        call = ToolCall(
+            name="lookup",
+            call_id="call-1",
+            arguments_json="{}",
+        )
+        metadata = TurnMetadata(
+            usage=TokenUsage(
+                input_tokens=20,
+                output_tokens=5,
+                total_tokens=25,
+                cached_input_tokens=4,
+            )
+        )
+        context = ModelContext(
+            [
+                Message(role="user", text="lookup"),
+                UserInteractionBoundary(),
+                call,
+                metadata,
+                ModelSampleBoundary(),
+            ]
+        )
+
+        self.assertIn(call, context.pending_tool_calls())
+        self.assertEqual(
+            context.model_items(),
+            (
+                Message(role="user", text="lookup"),
+                UserInteractionBoundary(),
+                call,
+                metadata,
+                ModelSampleBoundary(),
+            ),
+        )
+
+        context.append(ToolResult(call_id="call-1", output="done"))
+        context.assert_model_ready()
+
     def test_unknown_tool_result_is_rejected_atomically(self):
         context = ModelContext([Message(role="user", text="hello")])
 
@@ -341,11 +381,30 @@ class ChatCompletionsModelTests(unittest.TestCase):
         sample = ModelSample(
             items=(Message(role="assistant", text="answer"),),
         )
+        usage = TokenUsage(
+            input_tokens=20,
+            output_tokens=5,
+            total_tokens=25,
+            cached_input_tokens=4,
+        )
+        sample_with_usage = ModelSample(
+            items=(Message(role="assistant", text="answer"),),
+            usage=usage,
+        )
 
         self.assertEqual(
             sample.context_items(),
             (
                 Message(role="assistant", text="answer"),
+                TurnMetadata(usage=TokenUsage()),
+                ModelSampleBoundary(),
+            ),
+        )
+        self.assertEqual(
+            sample_with_usage.context_items(),
+            (
+                Message(role="assistant", text="answer"),
+                TurnMetadata(usage=usage),
                 ModelSampleBoundary(),
             ),
         )
@@ -436,6 +495,17 @@ class ChatCompletionsModelTests(unittest.TestCase):
         self.assertEqual(sample.stop_reason, "tool_use")
         self.assertEqual(sample.usage.total_tokens, 25)
         self.assertEqual(sample.usage.cached_input_tokens, 4)
+        self.assertEqual(
+            sample.context_items()[-2:],
+            (
+                TurnMetadata(usage=sample.usage),
+                ModelSampleBoundary(),
+            ),
+        )
+        self.assertEqual(
+            sample.display_items()[-1].text,
+            "[turn] usage input=20 output=5 total=25 cached=4",
+        )
         self.assertTrue(response.closed)
 
         request, timeout = opener.calls[0]
@@ -655,6 +725,55 @@ class ChatCompletionsModelTests(unittest.TestCase):
                     "reasoning_content": "second reasoning",
                     "content": "second answer",
                 },
+                {"role": "user", "content": "continue"},
+            ],
+        )
+
+    def test_turn_metadata_is_not_sent_to_chat_completions(self):
+        opener = _ScriptedOpener(
+            _FakeHTTPResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "answer",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            )
+        )
+        model = ChatCompletionsModel(
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            opener=opener,
+        )
+        context = ModelContext(
+            [
+                Message(role="user", text="question"),
+                UserInteractionBoundary(),
+                Message(role="assistant", text="prior answer"),
+                TurnMetadata(
+                    usage=TokenUsage(
+                        input_tokens=20,
+                        output_tokens=5,
+                        total_tokens=25,
+                        cached_input_tokens=4,
+                    )
+                ),
+                ModelSampleBoundary(),
+                Message(role="user", text="continue"),
+            ]
+        )
+
+        model.sample(context)
+
+        self.assertEqual(
+            _request_payload(opener)["messages"],
+            [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "prior answer"},
                 {"role": "user", "content": "continue"},
             ],
         )

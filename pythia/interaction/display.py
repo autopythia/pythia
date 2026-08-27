@@ -22,6 +22,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
+from .items import TurnMetadata
 from .items import UserInteractionBoundary
 from .items import is_interaction_item
 
@@ -156,6 +157,8 @@ class InteractionItemRenderer:
                     call_by_id.get(item.call_id),
                     diff_block_indices,
                 )
+            elif isinstance(item, TurnMetadata):
+                blocks = _render_turn_metadata(item)
             elif isinstance(
                 item,
                 (ModelSampleBoundary, UserInteractionBoundary),
@@ -309,6 +312,17 @@ def _render_message(item: Message) -> Tuple[str, ...]:
         return ()
     role = item.role.strip() or "message"
     return (f"[{role}] {item.text}",)
+
+
+def _render_turn_metadata(item: TurnMetadata) -> Tuple[str, ...]:
+    usage = item.usage
+    return (
+        "[turn] usage "
+        f"input={usage.input_tokens} "
+        f"output={usage.output_tokens} "
+        f"total={usage.total_tokens} "
+        f"cached={usage.cached_input_tokens}",
+    )
 
 
 def _render_reasoning(item: Reasoning) -> Tuple[str, ...]:

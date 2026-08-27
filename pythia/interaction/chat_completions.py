@@ -28,6 +28,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
+from .items import TurnMetadata
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
@@ -167,7 +168,7 @@ def _encode_context_messages(
     for index, item in enumerate(items):
         if isinstance(
             item,
-            (ModelSampleBoundary, UserInteractionBoundary),
+            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary),
         ):
             flush_assistant()
             continue

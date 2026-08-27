@@ -16,6 +16,8 @@ from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
+from pythia.interaction import TokenUsage
+from pythia.interaction import TurnMetadata
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import interaction_item_from_dict
 from pythia.interaction import interaction_item_to_dict
@@ -38,6 +40,14 @@ class SessionTests(unittest.TestCase):
             ),
             ModelSampleBoundary(),
             ToolResult(call_id="call-1", output="done", success=False),
+            TurnMetadata(
+                usage=TokenUsage(
+                    input_tokens=20,
+                    output_tokens=5,
+                    total_tokens=25,
+                    cached_input_tokens=4,
+                )
+            ),
             OpaqueCompaction("opaque"),
             ContextCompaction(
                 (
@@ -216,10 +226,15 @@ class SessionResumeTests(unittest.TestCase):
         self.assertEqual(summary, "resumed answer")
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
-            tuple(type(item) for item in resumed.items[-3:]),
-            (ToolResult, Message, ModelSampleBoundary),
+            tuple(type(item) for item in resumed.items[-4:]),
+            (
+                ToolResult,
+                Message,
+                TurnMetadata,
+                ModelSampleBoundary,
+            ),
         )
-        self.assertIn("swept", resumed.items[-3].output)
+        self.assertIn("swept", resumed.items[-4].output)
 
 
 if __name__ == "__main__":

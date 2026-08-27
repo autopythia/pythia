@@ -24,6 +24,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
+from .items import TurnMetadata
 from .items import UserInteractionBoundary
 from .local_tools import CommandRuntime
 from .local_tools import PlanState
@@ -97,6 +98,7 @@ __all__ = [
     "ToolOutcome",
     "ToolResult",
     "ToolSpec",
+    "TurnMetadata",
     "UserInteraction",
     "UserInteractionBoundary",
     "create_apply_patch_tool",

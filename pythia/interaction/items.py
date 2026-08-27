@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Tuple
 from typing import Union
 
+from .usage import TokenUsage
+
 
 def _require_string(value: object, field_name: str, *, allow_empty: bool = True) -> str:
     if not isinstance(value, str):
@@ -72,6 +74,17 @@ class UserInteractionBoundary:
 
 
 @dataclass(frozen=True)
+class TurnMetadata:
+    """Durable, non-provider control metadata for one completed turn."""
+
+    usage: TokenUsage
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.usage, TokenUsage):
+            raise TypeError("usage must be TokenUsage")
+
+
+@dataclass(frozen=True)
 class OpaqueCompaction:
     encrypted_content: str
 
@@ -97,6 +110,7 @@ InteractionItem = Union[
     ToolCall,
     ToolResult,
     ModelSampleBoundary,
+    TurnMetadata,
     UserInteractionBoundary,
     OpaqueCompaction,
     ContextCompaction,
@@ -108,6 +122,7 @@ INTERACTION_ITEM_TYPES = (
     ToolCall,
     ToolResult,
     ModelSampleBoundary,
+    TurnMetadata,
     UserInteractionBoundary,
     OpaqueCompaction,
     ContextCompaction,
@@ -127,6 +142,7 @@ __all__ = [
     "Reasoning",
     "ToolCall",
     "ToolResult",
+    "TurnMetadata",
     "UserInteractionBoundary",
     "is_interaction_item",
 ]
