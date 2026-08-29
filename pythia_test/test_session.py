@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -145,6 +146,61 @@ class SessionTests(unittest.TestCase):
 
 
 class SessionResumeTests(unittest.TestCase):
+    def test_resume_without_session_warns_and_starts_fresh(self):
+        class Model:
+            def __init__(self):
+                self.contexts = []
+
+            def sample(self, context, *, tools=(), options=None):
+                del tools, options
+                self.contexts.append(context.copy())
+                return ModelSample(
+                    items=(Message(role="assistant", text="fresh answer"),),
+                    stop_reason="end_turn",
+                )
+
+        model = Model()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "interaction.jsonl"
+            with DefaultEnvironment(cwd=Path(tmpdir)) as environment:
+                with mock.patch("builtins.print") as print_mock:
+                    summary = run_repository_summary(
+                        model,
+                        environment,
+                        prompt=None,
+                        max_samples=1,
+                        session_path=path,
+                        resume=True,
+                    )
+
+            restored = load_interaction_session(path)
+
+        self.assertEqual(summary, "fresh answer")
+        self.assertEqual(len(model.contexts), 1)
+        self.assertIsInstance(restored.items[0], SessionInit)
+        self.assertEqual(
+            tuple(
+                item.text
+                for item in restored.items
+                if isinstance(item, Message)
+            ),
+            (
+                "Summarize the repository in the current working directory.",
+                "fresh answer",
+            ),
+        )
+        self.assertTrue(
+            any(
+                call.args
+                == (
+                    "Warning: no existing interaction.jsonl was found; "
+                    "a fresh one was created.",
+                )
+                and call.kwargs.get("file") is sys.stderr
+                for call in print_mock.call_args_list
+            )
+        )
+
     def test_resume_replays_existing_items(self):
         context = ModelContext(
             (

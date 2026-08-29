@@ -70,13 +70,23 @@ def run(
     if options is not None and not isinstance(options, SamplingOptions):
         raise TypeError("options must be SamplingOptions or None")
 
-    if resume:
+    resumed_existing_session = False
+    if resume and Path(session_path).exists():
         context = load_interaction_session(session_path)
+        resumed_existing_session = True
 
         # Restore the human-visible transcript as well as the model state.
         for display_item in render_interaction_items(context.items):
             print(display_item)
     else:
+        if resume:
+            print(
+                f"Warning: no existing {Path(session_path).name} was found; "
+                "a fresh one was created.",
+                file=sys.stderr,
+            )
+            if prompt is None:
+                prompt = DEFAULT_PROMPT
         if prompt is None:
             raise ValueError("prompt must not be None without resume")
         context = ModelContext(
@@ -103,7 +113,7 @@ def run(
         _persist()
         for display_item in result.display_items(source_calls=pending_calls):
             print(display_item)
-    elif resume and prompt is None:
+    elif resumed_existing_session and prompt is None:
         final_text = _final_assistant_text(context)
         if final_text is None or not final_text.strip():
             raise RuntimeError("resumed session has no final assistant text")
