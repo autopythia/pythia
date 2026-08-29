@@ -108,6 +108,9 @@ class ModelSample:
     items: Tuple[InteractionItem, ...]
     stop_reason: Optional[str] = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    provider_session_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_state: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -129,6 +132,20 @@ class ModelSample:
             raise TypeError("stop_reason must be a string or None")
         if not isinstance(self.usage, TokenUsage):
             raise TypeError("usage must be TokenUsage")
+        for field_name in (
+            "provider_session_id",
+            "provider_turn_id",
+            "provider_turn_state",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise TypeError(f"{field_name} must be a string or None")
+            if not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"{field_name} must not contain newlines")
 
     @property
     def tool_calls(self) -> Tuple[ToolCall, ...]:
@@ -138,7 +155,12 @@ class ModelSample:
         """Return this sample's output, turn metadata, and durable boundary."""
         return (
             *self.items,
-            TurnMetadata(usage=self.usage),
+            TurnMetadata(
+                usage=self.usage,
+                provider_session_id=self.provider_session_id,
+                provider_turn_id=self.provider_turn_id,
+                provider_turn_state=self.provider_turn_state,
+            ),
             ModelSampleBoundary(),
         )
 

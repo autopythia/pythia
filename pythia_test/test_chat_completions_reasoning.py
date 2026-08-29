@@ -26,8 +26,10 @@ class _FakeResponse:
 class _FakeOpener:
     def __init__(self, payload: Any):
         self.payload = payload
+        self.calls = []
 
     def __call__(self, request, *, timeout):
+        self.calls.append((request, timeout))
         return _FakeResponse(self.payload)
 
 
@@ -94,6 +96,41 @@ class ReasoningFieldTests(unittest.TestCase):
             tuple(item.text for item in sample.items if isinstance(item, Reasoning)),
             ("legacy reasoning",),
         )
+
+    def test_encrypted_reasoning_is_not_sent_to_chat_completions(self):
+        opener = _FakeOpener(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "answer",
+                        },
+                    }
+                ]
+            }
+        )
+        model = ChatCompletionsModel(
+            ChatCompletionsEndpoint(api_url="http://127.0.0.1:1"),
+            opener=opener,
+        )
+        context = ModelContext(
+            (
+                Message(role="user", text="hello"),
+                Reasoning(
+                    text="visible reasoning",
+                    encrypted_content="provider-ciphertext",
+                ),
+            )
+        )
+
+        model.sample(context)
+
+        request, _ = opener.calls[0]
+        payload_text = request.data.decode("utf-8")
+        self.assertIn("visible reasoning", payload_text)
+        self.assertNotIn("provider-ciphertext", payload_text)
 
 
 if __name__ == "__main__":

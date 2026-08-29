@@ -822,6 +822,41 @@ class _LoopingRepositoryModel:
 
 
 class DemoTests(unittest.TestCase):
+    def test_repository_summary_demo_accepts_unbounded_sample_limit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            model = _ScriptedRepositoryModel()
+            with mock.patch("builtins.print"):
+                with DefaultEnvironment(cwd=root) as environment:
+                    summary = run_repository_summary(
+                        model,
+                        environment,
+                        prompt=DEFAULT_PROMPT,
+                        max_samples=None,
+                    )
+
+        self.assertEqual(
+            summary,
+            "The repository contains a README and Python source.",
+        )
+        self.assertEqual(len(model.calls), 2)
+
+    def test_repository_summary_demo_rejects_invalid_sample_limits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with DefaultEnvironment(cwd=tmpdir) as environment:
+                for max_samples in (True, 0, -1, 1.5, "2"):
+                    with self.subTest(max_samples=max_samples):
+                        with self.assertRaisesRegex(
+                            (TypeError, ValueError),
+                            "positive integer or None",
+                        ):
+                            run_repository_summary(
+                                _LoopingRepositoryModel(),
+                                environment,
+                                max_samples=max_samples,
+                            )
+
     def test_repository_summary_demo_runs_explicit_tool_loop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

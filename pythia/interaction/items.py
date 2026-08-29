@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
+from typing import Optional
 from typing import Tuple
 from typing import Union
 
@@ -29,6 +31,7 @@ class Message:
 class Reasoning:
     text: str
     summary: Tuple[str, ...] = ()
+    encrypted_content: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _require_string(self.text, "text")
@@ -36,6 +39,12 @@ class Reasoning:
         for index, value in enumerate(summary):
             _require_string(value, f"summary[{index}]")
         object.__setattr__(self, "summary", summary)
+        if self.encrypted_content is not None:
+            _require_string(
+                self.encrypted_content,
+                "encrypted_content",
+                allow_empty=False,
+            )
 
 
 @dataclass(frozen=True)
@@ -78,10 +87,24 @@ class TurnMetadata:
     """Durable, non-provider control metadata for one completed turn."""
 
     usage: TokenUsage
+    provider_session_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_state: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.usage, TokenUsage):
             raise TypeError("usage must be TokenUsage")
+        for field_name in (
+            "provider_session_id",
+            "provider_turn_id",
+            "provider_turn_state",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            _require_string(value, field_name, allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"{field_name} must not contain newlines")
 
 
 @dataclass(frozen=True)

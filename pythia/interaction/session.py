@@ -64,6 +64,8 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
         encoded.update(role=item.role, text=item.text)
     elif isinstance(item, Reasoning):
         encoded.update(text=item.text, summary=list(item.summary))
+        if item.encrypted_content is not None:
+            encoded["encrypted_content"] = item.encrypted_content
     elif isinstance(item, ToolCall):
         encoded.update(
             name=item.name,
@@ -90,6 +92,14 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             "total_tokens": item.usage.total_tokens,
             "cached_input_tokens": item.usage.cached_input_tokens,
         }
+        for field_name in (
+            "provider_session_id",
+            "provider_turn_id",
+            "provider_turn_state",
+        ):
+            value = getattr(item, field_name)
+            if value is not None:
+                encoded[field_name] = value
     elif isinstance(
         item,
         (ModelSampleBoundary, UserInteractionBoundary),
@@ -113,6 +123,17 @@ def _require_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str):
         raise SessionError(f"{field_name} must be a string")
     return value
+
+
+def _optional_string(
+    mapping: Mapping[str, Any],
+    key: str,
+    field_name: str,
+) -> Optional[str]:
+    value = mapping.get(key)
+    if value is None:
+        return None
+    return _require_string(value, field_name)
 
 
 def _require_nonnegative_int(value: Any, field_name: str) -> int:
@@ -143,6 +164,11 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                 _require_string(value, f"reasoning.summary[{index}]")
                 for index, value in enumerate(summary_value)
             ],
+            encrypted_content=_optional_string(
+                mapping,
+                "encrypted_content",
+                "reasoning.encrypted_content",
+            ),
         )
     if item_type == "tool_call":
         return ToolCall(
@@ -192,7 +218,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         if not isinstance(usage, Mapping):
             raise SessionError("turn_metadata.usage must be an object")
         return TurnMetadata(
-            TokenUsage(
+            usage=TokenUsage(
                 input_tokens=_require_nonnegative_int(
                     usage.get("input_tokens"),
                     "turn_metadata.usage.input_tokens",
@@ -209,7 +235,22 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                     usage.get("cached_input_tokens"),
                     "turn_metadata.usage.cached_input_tokens",
                 ),
-            )
+            ),
+            provider_session_id=_optional_string(
+                mapping,
+                "provider_session_id",
+                "turn_metadata.provider_session_id",
+            ),
+            provider_turn_id=_optional_string(
+                mapping,
+                "provider_turn_id",
+                "turn_metadata.provider_turn_id",
+            ),
+            provider_turn_state=_optional_string(
+                mapping,
+                "provider_turn_state",
+                "turn_metadata.provider_turn_state",
+            ),
         )
     if item_type == "model_sample_boundary":
         return ModelSampleBoundary()

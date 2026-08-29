@@ -1,5 +1,8 @@
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
+from .codex_auth import CodexAuth
+from .codex_auth import CodexAuthError
+from .codex_auth import load_codex_auth
 from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import Compactor
@@ -44,6 +47,11 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import TokenUsage
+from .responses import CODEX_RESPONSES_API_URL
+from .responses import CodexResponsesModel
+from .responses import OPENAI_RESPONSES_API_URL
+from .responses import StreamingResponsesEndpoint
+from .responses import X_CODEX_TURN_STATE_HEADER
 from .display import DisplayItem
 from .display import InteractionItemRenderer
 from .display import render_interaction_items
@@ -57,6 +65,10 @@ from .session import save_interaction_session
 __all__ = [
     "ChatCompletionsEndpoint",
     "ChatCompletionsModel",
+    "CodexAuth",
+    "CodexAuthError",
+    "CODEX_RESPONSES_API_URL",
+    "CodexResponsesModel",
     "CommandRuntime",
     "CompactionError",
     "CompactionResult",
@@ -84,11 +96,13 @@ __all__ = [
     "ModelTimeoutError",
     "ModelTransportError",
     "OpaqueCompaction",
+    "OPENAI_RESPONSES_API_URL",
     "PlanState",
     "PlanStep",
     "PlanStore",
     "PromptSummarizingCompactor",
     "Reasoning",
+    "StreamingResponsesEndpoint",
     "SamplingOptions",
     "SessionError",
     "TokenUsage",
@@ -101,6 +115,7 @@ __all__ = [
     "TurnMetadata",
     "UserInteraction",
     "UserInteractionBoundary",
+    "X_CODEX_TURN_STATE_HEADER",
     "create_apply_patch_tool",
     "create_exec_command_tool",
     "create_update_plan_tool",
@@ -108,6 +123,7 @@ __all__ = [
     "render_interaction_items",
     "interaction_item_from_dict",
     "interaction_item_to_dict",
+    "load_codex_auth",
     "load_interaction_session",
     "save_interaction_session",
 ]

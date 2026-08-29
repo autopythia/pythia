@@ -31,7 +31,11 @@ class SessionTests(unittest.TestCase):
         items = (
             Message(role="user", text="hello"),
             UserInteractionBoundary(),
-            Reasoning(text="thinking", summary=("short",)),
+            Reasoning(
+                text="thinking",
+                summary=("short",),
+                encrypted_content="encrypted-reasoning",
+            ),
             Message(role="assistant", text="calling tool"),
             ToolCall(
                 name="lookup",
@@ -46,7 +50,10 @@ class SessionTests(unittest.TestCase):
                     output_tokens=5,
                     total_tokens=25,
                     cached_input_tokens=4,
-                )
+                ),
+                provider_session_id="session-1",
+                provider_turn_id="turn-1",
+                provider_turn_state="turn-state-1",
             ),
             OpaqueCompaction("opaque"),
             ContextCompaction(
