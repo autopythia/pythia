@@ -177,6 +177,42 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
     return None
 
 
+def _build_model(args: argparse.Namespace) -> Model:
+    if args.model_api == "chat-completions":
+        if args.codex_home is not None or args.codex_auth_file is not None:
+            raise ValueError(
+                "--codex-home and --codex-auth-file require "
+                "--model-api codex-responses"
+            )
+        endpoint = ChatCompletionsEndpoint(
+            api_url=args.api_url or "http://127.0.0.1:8000",
+            model=args.model,
+            request_timeout_seconds=args.request_timeout_seconds,
+            api_key=args.api_key,
+        )
+        return ChatCompletionsModel(endpoint)
+
+    if args.model_api in ("codex", "codex-responses"):
+        if args.api_key is not None:
+            raise ValueError(
+                "--api-key is not used with --model-api codex-responses; "
+                "use an existing Codex login"
+            )
+        if args.model is None or not args.model.strip():
+            raise ValueError(
+                "--model is required with --model-api codex-responses"
+            )
+        return CodexResponsesModel(
+            model=args.model,
+            api_url=args.api_url,
+            request_timeout_seconds=args.request_timeout_seconds,
+            codex_home=args.codex_home,
+            auth_file=args.codex_auth_file,
+        )
+
+    raise ValueError(f"unsupported model API: {args.model_api!r}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -215,39 +251,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="resume interaction.jsonl instead of starting a new session",
     )
     return parser
-
-
-def _build_model(args: argparse.Namespace) -> Model:
-    if args.model_api == "chat-completions":
-        if args.codex_home is not None or args.codex_auth_file is not None:
-            raise ValueError(
-                "--codex-home and --codex-auth-file require "
-                "--model-api codex-responses"
-            )
-        endpoint = ChatCompletionsEndpoint(
-            api_url=args.api_url or "http://127.0.0.1:8000",
-            model=args.model,
-            request_timeout_seconds=args.request_timeout_seconds,
-            api_key=args.api_key,
-        )
-        return ChatCompletionsModel(endpoint)
-
-    if args.api_key is not None:
-        raise ValueError(
-            "--api-key is not used with --model-api codex-responses; "
-            "use an existing Codex login"
-        )
-    if args.model is None or not args.model.strip():
-        raise ValueError(
-            "--model is required with --model-api codex-responses"
-        )
-    return CodexResponsesModel(
-        model=args.model,
-        api_url=args.api_url,
-        request_timeout_seconds=args.request_timeout_seconds,
-        codex_home=args.codex_home,
-        auth_file=args.codex_auth_file,
-    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -1064,6 +1064,16 @@ class DemoConfigurationTests(unittest.TestCase):
                 )
             )
 
+    def test_demo_rejects_unsupported_model_api_namespace(self):
+        args = _build_parser().parse_args([])
+        args.model_api = "unsupported-api"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported model API: 'unsupported-api'",
+        ):
+            _build_model(args)
+
 
 if __name__ == "__main__":
     unittest.main()
