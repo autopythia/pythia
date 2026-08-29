@@ -18,6 +18,7 @@ from pythia.interaction import ModelSample
 from pythia.interaction import PlanState
 from pythia.interaction import PlanStep
 from pythia.interaction import PlanStore
+from pythia.interaction import SessionInit
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import create_apply_patch_tool
@@ -876,6 +877,7 @@ class DemoTests(unittest.TestCase):
                 "The repository contains a README and Python source.",
             )
             self.assertEqual(len(model.calls), 2)
+            self.assertIsInstance(model.calls[0][0].items[0], SessionInit)
             self.assertEqual(
                 tuple(spec.name for spec in model.calls[0][1]),
                 (

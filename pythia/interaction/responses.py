@@ -31,6 +31,7 @@ from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
+from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -179,6 +180,7 @@ class _ProviderState:
     session_id: Optional[str] = None
     turn_id: Optional[str] = None
     turn_state: Optional[str] = None
+    persist_session_id: bool = False
 
 
 def _resolve_request_model(
@@ -199,7 +201,12 @@ def _encode_context_items(
     for index, item in enumerate(items):
         if isinstance(
             item,
-            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary),
+            (
+                ModelSampleBoundary,
+                SessionInit,
+                TurnMetadata,
+                UserInteractionBoundary,
+            ),
         ):
             continue
 
@@ -378,15 +385,21 @@ def _resolve_provider_state(
     identifier_factory: Callable[[], Any],
 ) -> _ProviderState:
     items = context.items
-    session_id = _latest_metadata_value(
-        items,
-        "provider_session_id",
-    )
-    if session_id is None:
-        session_id = _new_identifier(
-            identifier_factory,
+    session_init = items[0] if items else None
+    if isinstance(session_init, SessionInit):
+        session_id = session_init.session_id
+        persist_session_id = False
+    else:
+        session_id = _latest_metadata_value(
+            items,
             "provider_session_id",
         )
+        if session_id is None:
+            session_id = _new_identifier(
+                identifier_factory,
+                "provider_session_id",
+            )
+        persist_session_id = True
 
     current_turn_start = 0
     for index, item in enumerate(items):
@@ -413,6 +426,7 @@ def _resolve_provider_state(
         session_id=session_id,
         turn_id=turn_id,
         turn_state=turn_state,
+        persist_session_id=persist_session_id,
     )
 
 
@@ -769,7 +783,11 @@ def _collect_sample(
         items=items,
         stop_reason=stop_reason,
         usage=usage,
-        provider_session_id=provider_state.session_id,
+        provider_session_id=(
+            provider_state.session_id
+            if provider_state.persist_session_id
+            else None
+        ),
         provider_turn_id=provider_state.turn_id,
         provider_turn_state=captured_turn_state,
     )

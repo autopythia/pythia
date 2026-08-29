@@ -18,6 +18,7 @@ from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelTransportError
 from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
+from pythia.interaction import SessionInit
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
@@ -329,6 +330,45 @@ class CodexResponsesConstructionTests(unittest.TestCase):
 
 
 class CodexResponsesModelTests(unittest.TestCase):
+    def test_session_init_owns_codex_session_and_prompt_cache_key(self):
+        opener = _ScriptedOpener(
+            _FakeSSEResponse(
+                _message_event(0, "done"),
+                _completed_event(),
+            )
+        )
+
+        turn_identifiers = iter(("turn-1",))
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            opener=opener,
+            identifier_factory=lambda: next(turn_identifiers),
+        )
+        context = ModelContext(
+            (
+                SessionInit("session-from-context"),
+                Message(role="user", text="hello"),
+            )
+        )
+
+        sample = model.sample(context)
+
+        payload = _request_payload(opener)
+        headers = _request_headers(opener)
+        self.assertEqual(
+            payload["prompt_cache_key"],
+            "session-from-context",
+        )
+        self.assertEqual(headers["session_id"], "session-from-context")
+        self.assertIsNone(sample.provider_session_id)
+        metadata = sample.context_items()[-2]
+        self.assertIsNone(metadata.provider_session_id)
+
     def test_codex_reasoning_model_aliases_set_base_model_and_effort(self):
         cases = (
             ("gpt-5.6-sol-medium", "gpt-5.6-sol", "medium"),

@@ -20,6 +20,7 @@ from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
+from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -161,7 +162,7 @@ class InteractionItemRenderer:
                 blocks = _render_turn_metadata(item)
             elif isinstance(
                 item,
-                (ModelSampleBoundary, UserInteractionBoundary),
+                (ModelSampleBoundary, SessionInit, UserInteractionBoundary),
             ):
                 blocks = ()
             elif isinstance(item, OpaqueCompaction):

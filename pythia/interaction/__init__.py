@@ -25,6 +25,7 @@ from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
+from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -104,6 +105,7 @@ __all__ = [
     "Reasoning",
     "StreamingResponsesEndpoint",
     "SamplingOptions",
+    "SessionInit",
     "SessionError",
     "TokenUsage",
     "Tool",

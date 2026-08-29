@@ -11,6 +11,7 @@ from typing import overload
 from .items import ContextCompaction
 from .items import InteractionItem
 from .items import ModelSampleBoundary
+from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -102,6 +103,11 @@ def _validate_compaction_replacement(
                 "ContextCompaction replacement_items must not contain "
                 "another ContextCompaction"
             )
+        if isinstance(item, SessionInit):
+            raise ContextValidationError(
+                "ContextCompaction replacement_items must not contain "
+                "SessionInit"
+            )
     _validate_tool_sequence(replacement, allow_pending=False)
     return replacement
 
@@ -125,6 +131,10 @@ def _project_items(
 def _validate_log(items: Sequence[InteractionItem]) -> None:
     for index, item in enumerate(items):
         _validate_item(item, f"items[{index}]")
+        if isinstance(item, SessionInit) and index != 0:
+            raise ContextValidationError(
+                "SessionInit must be the first interaction item"
+            )
         if isinstance(item, ContextCompaction):
             _validate_compaction_replacement(item.replacement_items)
     _project_items(items)
@@ -161,7 +171,11 @@ class ModelContext(Sequence[InteractionItem]):
         return tuple(self._items)
 
     def model_items(self) -> Tuple[InteractionItem, ...]:
-        return _project_items(self._items)
+        return tuple(
+            item
+            for item in _project_items(self._items)
+            if not isinstance(item, SessionInit)
+        )
 
     def pending_tool_calls(self) -> Tuple[ToolCall, ...]:
         return _validate_tool_sequence(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Optional
@@ -15,6 +16,22 @@ def _require_string(value: object, field_name: str, *, allow_empty: bool = True)
     if not allow_empty and not value.strip():
         raise ValueError(f"{field_name} must not be empty")
     return value
+
+
+def _fresh_session_id() -> str:
+    return f"session_{uuid.uuid4().hex}"
+
+
+@dataclass(frozen=True)
+class SessionInit:
+    """Durable identity established before an interaction begins."""
+
+    session_id: str = field(default_factory=_fresh_session_id)
+
+    def __post_init__(self) -> None:
+        _require_string(self.session_id, "session_id", allow_empty=False)
+        if "\r" in self.session_id or "\n" in self.session_id:
+            raise ValueError("session_id must not contain newlines")
 
 
 @dataclass(frozen=True)
@@ -128,6 +145,7 @@ class ContextCompaction:
 
 
 InteractionItem = Union[
+    SessionInit,
     Message,
     Reasoning,
     ToolCall,
@@ -140,6 +158,7 @@ InteractionItem = Union[
 ]
 
 INTERACTION_ITEM_TYPES = (
+    SessionInit,
     Message,
     Reasoning,
     ToolCall,
@@ -163,6 +182,7 @@ __all__ = [
     "ModelSampleBoundary",
     "OpaqueCompaction",
     "Reasoning",
+    "SessionInit",
     "ToolCall",
     "ToolResult",
     "TurnMetadata",

@@ -19,6 +19,7 @@ from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
+from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -34,6 +35,7 @@ class SessionError(ValueError):
 
 
 _ITEM_TYPES = {
+    SessionInit: "session_init",
     Message: "message",
     Reasoning: "reasoning",
     ToolCall: "tool_call",
@@ -62,6 +64,8 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
 
     if isinstance(item, Message):
         encoded.update(role=item.role, text=item.text)
+    elif isinstance(item, SessionInit):
+        encoded["session_id"] = item.session_id
     elif isinstance(item, Reasoning):
         encoded.update(text=item.text, summary=list(item.summary))
         if item.encrypted_content is not None:
@@ -153,6 +157,13 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         return Message(
             role=_require_string(mapping.get("role"), "message.role"),
             text=_require_string(mapping.get("text"), "message.text"),
+        )
+    if item_type == "session_init":
+        return SessionInit(
+            session_id=_require_string(
+                mapping.get("session_id"),
+                "session_init.session_id",
+            )
         )
     if item_type == "reasoning":
         summary_value = mapping.get("summary", ())

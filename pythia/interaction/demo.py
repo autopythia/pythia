@@ -15,6 +15,7 @@ from .display import render_interaction_items
 from .environment import Environment
 from .items import Message
 from .items import ModelSampleBoundary
+from .items import SessionInit
 from .items import TurnMetadata
 from .items import UserInteractionBoundary
 from .model import Model
@@ -80,6 +81,7 @@ def run(
             raise ValueError("prompt must not be None without resume")
         context = ModelContext(
             (
+                SessionInit(),
                 # Message(role="system", text=_SYSTEM_MESSAGE),
             )
         )

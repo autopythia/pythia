@@ -14,6 +14,7 @@ from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
+from pythia.interaction import SessionInit
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import TokenUsage
@@ -27,6 +28,63 @@ from pythia.interaction.demo import run_repository_summary
 
 
 class SessionTests(unittest.TestCase):
+    def test_session_init_is_first_and_round_trips(self):
+        context = ModelContext(
+            (
+                SessionInit("session-test"),
+                Message(role="user", text="hello"),
+                UserInteractionBoundary(),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "interaction.jsonl"
+            save_interaction_session(path, context)
+            first_record = json.loads(path.read_text().splitlines()[0])
+            restored = load_interaction_session(path)
+
+        self.assertEqual(
+            first_record,
+            {"type": "session_init", "session_id": "session-test"},
+        )
+        self.assertEqual(restored.items, context.items)
+        self.assertNotIn(restored.items[0], restored.model_items())
+
+    def test_session_init_must_be_first_and_not_compacted(self):
+        with self.assertRaisesRegex(ValueError, "must be the first"):
+            ModelContext(
+                (
+                    Message(role="user", text="hello"),
+                    SessionInit("session-test"),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "must not contain"):
+            ModelContext(
+                (
+                    ContextCompaction(
+                        (SessionInit("session-test"),)
+                    ),
+                )
+            )
+
+    def test_legacy_session_is_loaded_without_migration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "interaction.jsonl"
+            path.write_text(
+                json.dumps(
+                    {"type": "message", "role": "user", "text": "hello"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restored = load_interaction_session(path)
+
+        self.assertEqual(
+            restored.items,
+            (Message(role="user", text="hello"),),
+        )
+
     def test_interaction_items_round_trip_through_jsonl(self):
         items = (
             Message(role="user", text="hello"),
