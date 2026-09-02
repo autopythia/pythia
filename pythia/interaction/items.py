@@ -49,6 +49,7 @@ class Reasoning:
     text: str
     summary: Tuple[str, ...] = ()
     encrypted_content: Optional[str] = field(default=None, repr=False)
+    content_signature: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _require_string(self.text, "text")
@@ -60,6 +61,12 @@ class Reasoning:
             _require_string(
                 self.encrypted_content,
                 "encrypted_content",
+                allow_empty=False,
+            )
+        if self.content_signature is not None:
+            _require_string(
+                self.content_signature,
+                "content_signature",
                 allow_empty=False,
             )
 

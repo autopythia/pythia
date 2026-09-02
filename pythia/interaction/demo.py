@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,9 @@ from .items import TurnMetadata
 from .items import UserInteractionBoundary
 from .model import Model
 from .model import SamplingOptions
+from .messages import ANTHROPIC_MESSAGES_API_URL
+from .messages import MessagesEndpoint
+from .messages import MessagesModel
 from .responses import CodexResponsesModel
 from .session import load_interaction_session
 from .session import save_interaction_session
@@ -192,6 +196,22 @@ def _build_model(args: argparse.Namespace) -> Model:
         )
         return ChatCompletionsModel(endpoint)
 
+    if args.model_api == "messages":
+        if args.codex_home is not None or args.codex_auth_file is not None:
+            raise ValueError(
+                "--codex-home and --codex-auth-file require "
+                "--model-api codex-responses"
+            )
+        if args.model is None or not args.model.strip():
+            raise ValueError("--model is required with --model-api messages")
+        endpoint = MessagesEndpoint(
+            api_url=args.api_url or ANTHROPIC_MESSAGES_API_URL,
+            model=args.model,
+            request_timeout_seconds=args.request_timeout_seconds,
+            api_key=args.api_key or os.environ.get("ANTHROPIC_API_KEY"),
+        )
+        return MessagesModel(endpoint)
+
     if args.model_api in ("codex", "codex-responses"):
         if args.api_key is not None:
             raise ValueError(
@@ -216,19 +236,23 @@ def _build_model(args: argparse.Namespace) -> Model:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Ask a Chat Completions or Codex Responses model to summarize a "
-            "repository using Pythia's default local tools."
+            "Ask a Chat Completions, Messages, or Codex Responses model to "
+            "summarize a repository using Pythia's default local tools."
         ),
     )
     parser.add_argument(
         "--model-api",
-        choices=("chat-completions", "codex", "codex-responses"),
+        choices=("chat-completions", "messages", "codex", "codex-responses"),
         default="chat-completions",
         help="model API (codex is shorthand for codex-responses)",
     )
     parser.add_argument("--api-url")
     parser.add_argument("--model")
-    parser.add_argument("--api-key", default=None)
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="API key (Messages defaults to ANTHROPIC_API_KEY)",
+    )
     parser.add_argument("--codex-home")
     parser.add_argument("--codex-auth-file")
     parser.add_argument("--cwd", default=".")

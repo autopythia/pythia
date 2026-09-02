@@ -48,6 +48,10 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import TokenUsage
+from .messages import ANTHROPIC_MESSAGES_API_URL
+from .messages import DEFAULT_ANTHROPIC_VERSION
+from .messages import MessagesEndpoint
+from .messages import MessagesModel
 from .responses import CODEX_RESPONSES_API_URL
 from .responses import CodexResponsesModel
 from .responses import OPENAI_RESPONSES_API_URL
@@ -64,6 +68,7 @@ from .session import load_interaction_session
 from .session import save_interaction_session
 
 __all__ = [
+    "ANTHROPIC_MESSAGES_API_URL",
     "ChatCompletionsEndpoint",
     "ChatCompletionsModel",
     "CodexAuth",
@@ -77,6 +82,7 @@ __all__ = [
     "ContextCompaction",
     "ContextValidationError",
     "DefaultEnvironment",
+    "DEFAULT_ANTHROPIC_VERSION",
     "DEFAULT_COMPACTION_PROMPT",
     "DEFAULT_SUMMARY_PREFIX",
     "DisplayItem",
@@ -86,6 +92,8 @@ __all__ = [
     "InteractionItem",
     "InteractionItemRenderer",
     "Message",
+    "MessagesEndpoint",
+    "MessagesModel",
     "Model",
     "ModelConfigurationError",
     "ModelContext",

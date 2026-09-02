@@ -94,6 +94,7 @@ class SessionTests(unittest.TestCase):
                 text="thinking",
                 summary=("short",),
                 encrypted_content="encrypted-reasoning",
+                content_signature="thinking-signature",
             ),
             Message(role="assistant", text="calling tool"),
             ToolCall(
@@ -125,6 +126,12 @@ class SessionTests(unittest.TestCase):
             ),
         )
         context = ModelContext(items)
+        encoded_reasoning = interaction_item_to_dict(items[2])
+        self.assertEqual(
+            encoded_reasoning["content_signature"],
+            "thinking-signature",
+        )
+        self.assertNotIn("signature", encoded_reasoning)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"

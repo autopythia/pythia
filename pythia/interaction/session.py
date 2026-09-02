@@ -70,6 +70,8 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
         encoded.update(text=item.text, summary=list(item.summary))
         if item.encrypted_content is not None:
             encoded["encrypted_content"] = item.encrypted_content
+        if item.content_signature is not None:
+            encoded["content_signature"] = item.content_signature
     elif isinstance(item, ToolCall):
         encoded.update(
             name=item.name,
@@ -179,6 +181,11 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                 mapping,
                 "encrypted_content",
                 "reasoning.encrypted_content",
+            ),
+            content_signature=_optional_string(
+                mapping,
+                "content_signature",
+                "reasoning.content_signature",
             ),
         )
     if item_type == "tool_call":
