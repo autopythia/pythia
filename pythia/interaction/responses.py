@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import socket
 import urllib.error
 import urllib.parse
@@ -35,6 +36,7 @@ from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
+from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
@@ -48,11 +50,38 @@ from .usage import TokenUsage
 
 OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1"
 CODEX_RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex"
+META_RESPONSES_API_URL = "https://api.meta.ai/v1"
 X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
 
-_CODEX_REASONING_MODEL_ALIASES = {
-    "gpt-5.6-sol-medium": ("gpt-5.6-sol", "medium"),
-    "gpt-5.6-sol-max": ("gpt-5.6-sol", "max"),
+
+@dataclass(frozen=True)
+class _CodexModelRoute:
+    api_model: str
+    api_url: str = CODEX_RESPONSES_API_URL
+    reasoning_effort: Optional[str] = None
+    api_key_environment_variable: Optional[str] = None
+
+
+_CODEX_MODEL_ROUTES = {
+    "gpt-5.6-sol-medium": _CodexModelRoute(
+        api_model="gpt-5.6-sol",
+        reasoning_effort="medium",
+    ),
+    "gpt-5.6-sol-max": _CodexModelRoute(
+        api_model="gpt-5.6-sol",
+        reasoning_effort="max",
+    ),
+    "muse-spark-1.3": _CodexModelRoute(
+        api_model="muse-spark-1.3-contributor",
+        api_url=META_RESPONSES_API_URL,
+        api_key_environment_variable="META_API_KEY",
+    ),
+    "muse-spark-1.3-xhigh": _CodexModelRoute(
+        api_model="muse-spark-1.3-contributor",
+        api_url=META_RESPONSES_API_URL,
+        reasoning_effort="xhigh",
+        api_key_environment_variable="META_API_KEY",
+    ),
 }
 
 
@@ -188,9 +217,46 @@ def _resolve_request_model(
 ) -> Tuple[str, Optional[str]]:
     if endpoint.api_provider != "codex":
         return endpoint.model, None
-    return _CODEX_REASONING_MODEL_ALIASES.get(
-        endpoint.model,
-        (endpoint.model, None),
+    route = _CODEX_MODEL_ROUTES.get(endpoint.model)
+    if route is None:
+        return endpoint.model, None
+    return route.api_model, route.reasoning_effort
+
+
+def _resolve_default_codex_api_url(model: str) -> str:
+    route = _CODEX_MODEL_ROUTES.get(model)
+    if route is None:
+        return CODEX_RESPONSES_API_URL
+    return route.api_url
+
+
+def _load_default_model_auth(
+    model: str,
+    *,
+    codex_home: Optional[CodexAuthPath],
+    auth_file: Optional[CodexAuthPath],
+) -> CodexAuth:
+    route = _CODEX_MODEL_ROUTES.get(model)
+    api_key_environment_variable = (
+        route.api_key_environment_variable
+        if route is not None
+        else None
+    )
+    if (
+        api_key_environment_variable is not None
+        and codex_home is None
+        and auth_file is None
+    ):
+        api_key = os.environ.get(api_key_environment_variable)
+        if api_key is None or not api_key.strip():
+            raise ModelConfigurationError(
+                f"{api_key_environment_variable} is required for model "
+                f"{model!r}"
+            )
+        return CodexAuth(access_token=api_key)
+    return load_codex_auth(
+        codex_home=codex_home,
+        auth_file=auth_file,
     )
 
 
@@ -205,6 +271,7 @@ def _encode_context_items(
                 ModelSampleBoundary,
                 SessionInit,
                 TurnMetadata,
+                TurnSummary,
                 UserInteractionBoundary,
             ),
         ):
@@ -878,7 +945,7 @@ def _response_header(response: Any, name: str) -> Optional[str]:
 
 
 class CodexResponsesModel:
-    """Codex-backed Responses model with optional endpoint/auth overrides."""
+    """Codex-compatible Responses model with model and endpoint routing."""
 
     def __init__(
         self,
@@ -927,7 +994,8 @@ class CodexResponsesModel:
                 )
             if not isinstance(model, str):
                 raise TypeError("model must be a string")
-            if not model.strip():
+            model = model.strip()
+            if not model:
                 raise ModelConfigurationError("model must not be empty")
             if auth is not None:
                 if not isinstance(auth, CodexAuth):
@@ -938,13 +1006,14 @@ class CodexResponsesModel:
                     )
                 resolved_auth = auth
             else:
-                resolved_auth = load_codex_auth(
+                resolved_auth = _load_default_model_auth(
+                    model,
                     codex_home=codex_home,
                     auth_file=auth_file,
                 )
             resolved_endpoint = StreamingResponsesEndpoint(
                 api_url=(
-                    CODEX_RESPONSES_API_URL
+                    _resolve_default_codex_api_url(model)
                     if api_url is None
                     else api_url
                 ),
@@ -1133,6 +1202,7 @@ class CodexResponsesModel:
 __all__ = [
     "CODEX_RESPONSES_API_URL",
     "CodexResponsesModel",
+    "META_RESPONSES_API_URL",
     "OPENAI_RESPONSES_API_URL",
     "StreamingResponsesEndpoint",
     "X_CODEX_TURN_STATE_HEADER",

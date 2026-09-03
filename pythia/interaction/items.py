@@ -109,7 +109,13 @@ class UserInteractionBoundary:
 
 @dataclass(frozen=True)
 class TurnMetadata:
-    """Durable, non-provider control metadata for one completed turn."""
+    """Durable per-sample provider usage result.
+
+    One ``TurnMetadata`` is recorded per completed model sample
+    (see ``ModelSample.context_items``). It preserves the provider's
+    ``TokenUsage`` for that sample plus the provider continuity tokens.
+    It is *not* a cumulative end-of-turn aggregate; see ``TurnSummary``.
+    """
 
     usage: TokenUsage
     provider_session_id: Optional[str] = field(default=None, repr=False)
@@ -130,6 +136,117 @@ class TurnMetadata:
             _require_string(value, field_name, allow_empty=False)
             if "\r" in value or "\n" in value:
                 raise ValueError(f"{field_name} must not contain newlines")
+
+
+def _require_nonnegative_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a nonnegative integer")
+    return value
+
+
+@dataclass(frozen=True)
+class TurnSummary:
+    """Cumulative end-of-turn usage derived from per-sample ``TurnMetadata``.
+
+    Ports the earlier autopythia/contradex ``AgentState`` accounting
+    (``output_tokens_sum``, ``cache_hit_*`` warm stats, ``non_cache_hit`` cold
+    stats, ``total_usage_tokens`` context, ``compaction_count``) to
+    ``pythia.interaction`` without changing ``TurnMetadata`` semantics.
+
+    ``TurnSummary`` is encoder-transparent (never sent to the provider) and
+    durable. It is derived via :func:`summarize_turn_usage`, which folds over
+    the raw log's ``TurnMetadata`` items and counts compaction markers.
+    Existing ``TurnSummary`` items are skipped by the fold so re-summarizing
+    a context that already contains summaries does not double-count.
+    """
+
+    input_tokens_sum: int = 0
+    output_tokens_sum: int = 0
+    cached_input_tokens_sum: int = 0
+    cached_input_tokens_max: int = 0
+    non_cached_input_tokens_sum: int = 0
+    context_tokens: int = 0
+    sample_count: int = 0
+    compaction_count: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "input_tokens_sum",
+            "output_tokens_sum",
+            "cached_input_tokens_sum",
+            "cached_input_tokens_max",
+            "non_cached_input_tokens_sum",
+            "context_tokens",
+            "sample_count",
+            "compaction_count",
+        ):
+            _require_nonnegative_int(getattr(self, field_name), field_name)
+
+    @property
+    def goal_accounting_tokens(self) -> int:
+        """Billable tokens: cold (non-cached) input + output."""
+        return self.non_cached_input_tokens_sum + self.output_tokens_sum
+
+    @property
+    def has_detailed_usage(self) -> bool:
+        """Whether any folded sample carried nonzero usage."""
+        return bool(
+            self.input_tokens_sum
+            or self.output_tokens_sum
+            or self.cached_input_tokens_sum
+            or self.cached_input_tokens_max
+            or self.non_cached_input_tokens_sum
+            or self.sample_count
+        )
+
+
+def summarize_turn_usage(items) -> "TurnSummary":
+    """Fold per-sample ``TurnMetadata`` into a cumulative ``TurnSummary``.
+
+    Mirrors ``contradex.kernel.AgentState.add_response_usage``:
+    warm per sample is ``min(cached, input)``, cold is ``max(0, input-warm)``.
+    ``context_tokens`` tracks the last sample's ``total_tokens`` (contradex
+    ``total_usage_tokens`` semantics: current window, not a sum).
+    ``compaction_count`` counts ``OpaqueCompaction``/``ContextCompaction``
+    markers. ``TurnSummary`` items in the input are skipped.
+
+    Pass the raw log (``context.items``) for session-cumulative stats, or a
+    slice after the last ``UserInteractionBoundary`` for per-turn stats.
+    """
+    input_tokens_sum = 0
+    output_tokens_sum = 0
+    cached_input_tokens_sum = 0
+    cached_input_tokens_max = 0
+    non_cached_input_tokens_sum = 0
+    context_tokens = 0
+    sample_count = 0
+    compaction_count = 0
+    for item in items:
+        if isinstance(item, TurnMetadata):
+            usage = item.usage
+            warm = min(usage.cached_input_tokens, usage.input_tokens)
+            cold = max(0, usage.input_tokens - warm)
+            input_tokens_sum += usage.input_tokens
+            output_tokens_sum += usage.output_tokens
+            cached_input_tokens_sum += warm
+            cached_input_tokens_max = max(cached_input_tokens_max, warm)
+            non_cached_input_tokens_sum += cold
+            context_tokens = usage.total_tokens
+            sample_count += 1
+        elif isinstance(item, (OpaqueCompaction, ContextCompaction)):
+            compaction_count += 1
+        elif isinstance(item, TurnSummary):
+            continue
+    return TurnSummary(
+        input_tokens_sum=input_tokens_sum,
+        output_tokens_sum=output_tokens_sum,
+        cached_input_tokens_sum=cached_input_tokens_sum,
+        cached_input_tokens_max=cached_input_tokens_max,
+        non_cached_input_tokens_sum=non_cached_input_tokens_sum,
+        context_tokens=context_tokens,
+        sample_count=sample_count,
+        compaction_count=compaction_count,
+    )
 
 
 @dataclass(frozen=True)
@@ -175,6 +292,7 @@ InteractionItem = Union[
     ToolResult,
     ModelSampleBoundary,
     TurnMetadata,
+    TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
     ContextCompaction,
@@ -188,6 +306,7 @@ INTERACTION_ITEM_TYPES = (
     ToolResult,
     ModelSampleBoundary,
     TurnMetadata,
+    TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
     ContextCompaction,
@@ -209,6 +328,8 @@ __all__ = [
     "ToolCall",
     "ToolResult",
     "TurnMetadata",
+    "TurnSummary",
     "UserInteractionBoundary",
     "is_interaction_item",
+    "summarize_turn_usage",
 ]

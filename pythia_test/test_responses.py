@@ -6,11 +6,13 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from pythia.interaction import CODEX_RESPONSES_API_URL
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import META_RESPONSES_API_URL
 from pythia.interaction import Message
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import ModelContext
@@ -291,6 +293,45 @@ class CodexResponsesConstructionTests(unittest.TestCase):
         overridden = CodexResponsesModel(endpoint)
         self.assertIs(overridden.endpoint, endpoint)
 
+    def test_muse_model_uses_meta_responses_endpoint_by_default(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"META_API_KEY": " meta-api-key "},
+            clear=True,
+        ):
+            model = CodexResponsesModel(model=" muse-spark-1.3 ")
+
+        self.assertEqual(model.endpoint.api_url, META_RESPONSES_API_URL)
+        self.assertEqual(
+            model.endpoint.url,
+            "https://api.meta.ai/v1/responses",
+        )
+        self.assertEqual(model.endpoint.model, "muse-spark-1.3")
+        self.assertEqual(model.endpoint.api_provider, "codex")
+        self.assertEqual(model.endpoint.bearer_token, "meta-api-key")
+        self.assertIsNone(model.endpoint.account_id)
+        self.assertNotIn("meta-api-key", repr(model.endpoint))
+
+    def test_muse_model_requires_meta_api_key_without_explicit_auth(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(
+                ModelConfigurationError,
+                "META_API_KEY",
+            ):
+                CodexResponsesModel(model="muse-spark-1.3-xhigh")
+
+    def test_explicit_api_url_overrides_muse_model_default(self):
+        model = CodexResponsesModel(
+            model="muse-spark-1.3",
+            auth=CodexAuth(access_token="codex-token"),
+            api_url="https://proxy.example.test/meta",
+        )
+
+        self.assertEqual(
+            model.endpoint.api_url,
+            "https://proxy.example.test/meta",
+        )
+
     def test_model_rejects_missing_or_conflicting_construction_options(self):
         with self.assertRaisesRegex(
             ModelConfigurationError,
@@ -491,6 +532,50 @@ class CodexResponsesModelTests(unittest.TestCase):
         payload = _request_payload(opener)
         self.assertEqual(payload["model"], "gpt-5.6-sol-max")
         self.assertNotIn("reasoning", payload)
+
+    def test_muse_models_route_to_contributor_model_and_reasoning(self):
+        cases = (
+            ("muse-spark-1.3", None),
+            ("muse-spark-1.3-xhigh", "xhigh"),
+        )
+        for requested_model, expected_effort in cases:
+            with self.subTest(model=requested_model):
+                opener = _ScriptedOpener(
+                    _FakeSSEResponse(
+                        _message_event(0, "done"),
+                        _completed_event(),
+                    )
+                )
+                model = CodexResponsesModel(
+                    model=requested_model,
+                    auth=CodexAuth(access_token="meta-api-key"),
+                    opener=opener,
+                    identifier_factory=(
+                        iter(("session-1", "turn-1")).__next__
+                    ),
+                )
+
+                model.sample(
+                    ModelContext([Message(role="user", text="hello")])
+                )
+
+                request, _ = opener.calls[0]
+                payload = _request_payload(opener)
+                self.assertEqual(
+                    request.full_url,
+                    "https://api.meta.ai/v1/responses",
+                )
+                self.assertEqual(
+                    payload["model"],
+                    "muse-spark-1.3-contributor",
+                )
+                if expected_effort is None:
+                    self.assertNotIn("reasoning", payload)
+                else:
+                    self.assertEqual(
+                        payload["reasoning"],
+                        {"effort": expected_effort},
+                    )
 
     def test_sample_encodes_request_and_collects_ordered_output_items(self):
         response = _FakeSSEResponse(
@@ -1097,6 +1182,28 @@ class DemoConfigurationTests(unittest.TestCase):
         self.assertEqual(model.endpoint.api_url, CODEX_RESPONSES_API_URL)
         self.assertEqual(model.endpoint.model, "codex-test")
         self.assertEqual(model.endpoint.account_id, "account-1")
+
+    def test_demo_builds_muse_model_from_meta_api_key(self):
+        args = _build_parser().parse_args(
+            [
+                "--model-api=codex",
+                "--model=muse-spark-1.3-xhigh",
+            ]
+        )
+
+        with mock.patch.dict(
+            "os.environ",
+            {"META_API_KEY": "meta-api-key"},
+            clear=True,
+        ):
+            model = _build_model(args)
+
+        self.assertIsInstance(model, CodexResponsesModel)
+        self.assertEqual(model.endpoint.api_url, META_RESPONSES_API_URL)
+        self.assertEqual(model.endpoint.model, "muse-spark-1.3-xhigh")
+        self.assertEqual(model.endpoint.bearer_token, "meta-api-key")
+        self.assertIsNone(model.endpoint.account_id)
+        self.assertNotIn("meta-api-key", repr(model.endpoint))
 
     def test_demo_rejects_ambiguous_auth_options(self):
         with self.assertRaisesRegex(ValueError, "required"):

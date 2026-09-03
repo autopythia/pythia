@@ -15,6 +15,7 @@ from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
+from .items import TurnSummary
 from .items import is_interaction_item
 
 
@@ -57,7 +58,7 @@ def _validate_tool_sequence(
 
         if isinstance(
             item,
-            (ModelSampleBoundary, TurnMetadata),
+            (ModelSampleBoundary, TurnMetadata, TurnSummary),
         ):
             if pending:
                 call_batch_closed = True

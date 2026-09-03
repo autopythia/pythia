@@ -23,6 +23,7 @@ from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
+from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .usage import TokenUsage
 
@@ -42,6 +43,7 @@ _ITEM_TYPES = {
     ToolResult: "tool_result",
     ModelSampleBoundary: "model_sample_boundary",
     TurnMetadata: "turn_metadata",
+    TurnSummary: "turn_summary",
     UserInteractionBoundary: "user_interaction_boundary",
     OpaqueCompaction: "opaque_compaction",
     ContextCompaction: "context_compaction",
@@ -106,6 +108,17 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             value = getattr(item, field_name)
             if value is not None:
                 encoded[field_name] = value
+    elif isinstance(item, TurnSummary):
+        encoded.update(
+            input_tokens_sum=item.input_tokens_sum,
+            output_tokens_sum=item.output_tokens_sum,
+            cached_input_tokens_sum=item.cached_input_tokens_sum,
+            cached_input_tokens_max=item.cached_input_tokens_max,
+            non_cached_input_tokens_sum=item.non_cached_input_tokens_sum,
+            context_tokens=item.context_tokens,
+            sample_count=item.sample_count,
+            compaction_count=item.compaction_count,
+        )
     elif isinstance(
         item,
         (ModelSampleBoundary, UserInteractionBoundary),
@@ -281,6 +294,41 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                 mapping,
                 "provider_turn_state",
                 "turn_metadata.provider_turn_state",
+            ),
+        )
+    if item_type == "turn_summary":
+        return TurnSummary(
+            input_tokens_sum=_require_nonnegative_int(
+                mapping.get("input_tokens_sum"),
+                "turn_summary.input_tokens_sum",
+            ),
+            output_tokens_sum=_require_nonnegative_int(
+                mapping.get("output_tokens_sum"),
+                "turn_summary.output_tokens_sum",
+            ),
+            cached_input_tokens_sum=_require_nonnegative_int(
+                mapping.get("cached_input_tokens_sum"),
+                "turn_summary.cached_input_tokens_sum",
+            ),
+            cached_input_tokens_max=_require_nonnegative_int(
+                mapping.get("cached_input_tokens_max"),
+                "turn_summary.cached_input_tokens_max",
+            ),
+            non_cached_input_tokens_sum=_require_nonnegative_int(
+                mapping.get("non_cached_input_tokens_sum"),
+                "turn_summary.non_cached_input_tokens_sum",
+            ),
+            context_tokens=_require_nonnegative_int(
+                mapping.get("context_tokens"),
+                "turn_summary.context_tokens",
+            ),
+            sample_count=_require_nonnegative_int(
+                mapping.get("sample_count"),
+                "turn_summary.sample_count",
+            ),
+            compaction_count=_require_nonnegative_int(
+                mapping.get("compaction_count"),
+                "turn_summary.compaction_count",
             ),
         )
     if item_type == "model_sample_boundary":

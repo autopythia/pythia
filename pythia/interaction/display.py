@@ -24,6 +24,7 @@ from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
+from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import is_interaction_item
 
@@ -160,6 +161,8 @@ class InteractionItemRenderer:
                 )
             elif isinstance(item, TurnMetadata):
                 blocks = _render_turn_metadata(item)
+            elif isinstance(item, TurnSummary):
+                blocks = _render_turn_summary(item)
             elif isinstance(
                 item,
                 (ModelSampleBoundary, SessionInit, UserInteractionBoundary),
@@ -323,6 +326,23 @@ def _render_turn_metadata(item: TurnMetadata) -> Tuple[str, ...]:
         f"output={usage.output_tokens} "
         f"total={usage.total_tokens} "
         f"cached={usage.cached_input_tokens}",
+    )
+
+
+def _render_turn_summary(item: TurnSummary) -> Tuple[str, ...]:
+    # Contradex-style end-of-turn aggregate: warm = cached, cold = non-cached.
+    # Keep field-order stable for tests: input/output sums, warm sum/max,
+    # cold sum, context window, sample/compaction counts.
+    return (
+        "[turn summary] "
+        f"input_sum={item.input_tokens_sum} "
+        f"output_sum={item.output_tokens_sum} "
+        f"cached_sum={item.cached_input_tokens_sum} "
+        f"cached_max={item.cached_input_tokens_max} "
+        f"cold_sum={item.non_cached_input_tokens_sum} "
+        f"context={item.context_tokens} "
+        f"samples={item.sample_count} "
+        f"compactions={item.compaction_count}",
     )
 
 

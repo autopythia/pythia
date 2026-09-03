@@ -29,6 +29,7 @@ from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
+from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
@@ -267,6 +268,7 @@ def _encode_context(
                     ModelSampleBoundary,
                     SessionInit,
                     TurnMetadata,
+                    TurnSummary,
                     UserInteractionBoundary,
                 ),
             ):
@@ -292,6 +294,7 @@ def _encode_context(
                 ModelSampleBoundary,
                 SessionInit,
                 TurnMetadata,
+                TurnSummary,
                 UserInteractionBoundary,
             ),
         ):

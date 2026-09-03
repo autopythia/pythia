@@ -18,6 +18,8 @@ from .items import Message
 from .items import ModelSampleBoundary
 from .items import SessionInit
 from .items import TurnMetadata
+from .items import TurnSummary
+from .items import summarize_turn_usage
 from .items import UserInteractionBoundary
 from .model import Model
 from .model import SamplingOptions
@@ -156,6 +158,15 @@ def run(
             final_text = sample.last_assistant_text
             if final_text is None or not final_text.strip():
                 raise RuntimeError("model returned no final assistant text")
+            # Derive the cumulative end-of-turn usage and make it visible.
+            # ``summarize_turn_usage`` skips existing ``TurnSummary`` items
+            # so re-entering this path never double-counts, and
+            # ``TurnSummary`` is encoder-transparent and durable.
+            turn_summary = summarize_turn_usage(context.items)
+            context.extend((turn_summary,))
+            _persist()
+            for display_item in render_interaction_items((turn_summary,)):
+                print(display_item)
             return final_text
 
         result = environment.execute_tool_calls(sample.tool_calls)
@@ -178,7 +189,12 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
     for item in reversed(context.model_items()):
         if isinstance(
             item,
-            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary),
+            (
+                ModelSampleBoundary,
+                TurnMetadata,
+                TurnSummary,
+                UserInteractionBoundary,
+            ),
         ):
             continue
         if isinstance(item, Message) and item.role == "assistant":
@@ -291,7 +307,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="model API (codex is shorthand for codex-responses)",
     )
     parser.add_argument("--api-url")
-    parser.add_argument("--model")
+    parser.add_argument(
+        "--model",
+        help=(
+            "model name; muse-spark-1.3 and muse-spark-1.3-xhigh use the "
+            "Meta Responses endpoint and META_API_KEY"
+        ),
+    )
     parser.add_argument(
         "--api-key",
         default=None,
