@@ -85,7 +85,7 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             success=item.success,
         )
     elif isinstance(item, OpaqueCompaction):
-        encoded["encrypted_content"] = item.encrypted_content
+        encoded.update(protocol=item.protocol, payload=item.payload)
     elif isinstance(item, ContextCompaction):
         encoded["replacement_items"] = [
             interaction_item_to_dict(nested)
@@ -216,11 +216,24 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
             success=success,
         )
     if item_type == "opaque_compaction":
+        # Existing session files stored only Responses encrypted content.
+        if "protocol" not in mapping and "payload" not in mapping:
+            return OpaqueCompaction.from_responses(
+                _require_string(
+                    mapping.get("encrypted_content"),
+                    "opaque_compaction.encrypted_content",
+                )
+            )
+        protocol = _require_string(
+            mapping.get("protocol"),
+            "opaque_compaction.protocol",
+        )
         return OpaqueCompaction(
-            encrypted_content=_require_string(
-                mapping.get("encrypted_content"),
-                "opaque_compaction.encrypted_content",
+            payload=_require_string(
+                mapping.get("payload"),
+                "opaque_compaction.payload",
             ),
+            protocol=protocol,
         )
     if item_type == "context_compaction":
         replacement = mapping.get("replacement_items")

@@ -50,8 +50,10 @@ from .model import SamplingOptions
 from .model import TokenUsage
 from .messages import ANTHROPIC_MESSAGES_API_URL
 from .messages import DEFAULT_ANTHROPIC_VERSION
+from .messages import MESSAGES_COMPACTION_BETA
 from .messages import MessagesEndpoint
 from .messages import MessagesModel
+from .messages import MessagesServerCompaction
 from .responses import CODEX_RESPONSES_API_URL
 from .responses import CodexResponsesModel
 from .responses import OPENAI_RESPONSES_API_URL
@@ -92,8 +94,10 @@ __all__ = [
     "InteractionItem",
     "InteractionItemRenderer",
     "Message",
+    "MESSAGES_COMPACTION_BETA",
     "MessagesEndpoint",
     "MessagesModel",
+    "MessagesServerCompaction",
     "Model",
     "ModelConfigurationError",
     "ModelContext",

@@ -24,6 +24,7 @@ from .model import SamplingOptions
 from .messages import ANTHROPIC_MESSAGES_API_URL
 from .messages import MessagesEndpoint
 from .messages import MessagesModel
+from .messages import MessagesServerCompaction
 from .responses import CodexResponsesModel
 from .session import load_interaction_session
 from .session import save_interaction_session
@@ -146,6 +147,11 @@ def run(
         _persist()
         for display_item in sample.display_items():
             print(display_item)
+        if sample.stop_reason == "compaction":
+            # A paused Messages server compaction contains a durable
+            # compaction block but no final assistant text. Replay it
+            # immediately so the provider can continue the turn.
+            continue
         if not sample.tool_calls:
             final_text = sample.last_assistant_text
             if final_text is None or not final_text.strip():
@@ -182,6 +188,19 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
 
 
 def _build_model(args: argparse.Namespace) -> Model:
+    messages_compaction_options_requested = any(
+        (
+            args.messages_server_compaction,
+            args.messages_compaction_trigger_tokens is not None,
+            args.messages_pause_after_compaction,
+            args.messages_compaction_instructions is not None,
+        )
+    )
+    if args.model_api != "messages" and messages_compaction_options_requested:
+        raise ValueError(
+            "Messages compaction options require --model-api messages"
+        )
+
     if args.model_api == "chat-completions":
         if args.codex_home is not None or args.codex_auth_file is not None:
             raise ValueError(
@@ -204,11 +223,36 @@ def _build_model(args: argparse.Namespace) -> Model:
             )
         if args.model is None or not args.model.strip():
             raise ValueError("--model is required with --model-api messages")
+        compaction_options = (
+            MessagesServerCompaction(
+                trigger_input_tokens=(
+                    args.messages_compaction_trigger_tokens
+                ),
+                pause_after_compaction=(
+                    args.messages_pause_after_compaction
+                ),
+                instructions=args.messages_compaction_instructions,
+            )
+            if args.messages_server_compaction
+            else None
+        )
+        if compaction_options is None and any(
+            (
+                args.messages_compaction_trigger_tokens is not None,
+                args.messages_pause_after_compaction,
+                args.messages_compaction_instructions is not None,
+            )
+        ):
+            raise ValueError(
+                "Messages compaction options require "
+                "--messages-server-compaction"
+            )
         endpoint = MessagesEndpoint(
             api_url=args.api_url or ANTHROPIC_MESSAGES_API_URL,
             model=args.model,
             request_timeout_seconds=args.request_timeout_seconds,
             api_key=args.api_key or os.environ.get("ANTHROPIC_API_KEY"),
+            server_compaction=compaction_options,
         )
         return MessagesModel(endpoint)
 
@@ -255,6 +299,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--codex-home")
     parser.add_argument("--codex-auth-file")
+    parser.add_argument(
+        "--messages-server-compaction",
+        action="store_true",
+        help="enable Anthropic Messages server-side compaction",
+    )
+    parser.add_argument(
+        "--messages-compaction-trigger-tokens",
+        type=int,
+        help="server compaction threshold (minimum 50000)",
+    )
+    parser.add_argument(
+        "--messages-pause-after-compaction",
+        action="store_true",
+        help="pause and resample after the server creates a compaction block",
+    )
+    parser.add_argument("--messages-compaction-instructions")
     parser.add_argument("--cwd", default=".")
     parser.add_argument(
         "--max-samples",

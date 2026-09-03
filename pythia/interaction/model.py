@@ -13,6 +13,7 @@ from .context import ModelContext
 from .items import InteractionItem
 from .items import Message
 from .items import ModelSampleBoundary
+from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import TurnMetadata
@@ -117,10 +118,14 @@ class ModelSample:
         if not items:
             raise ModelResponseError("model sample must contain at least one item")
         for index, item in enumerate(items):
-            if not isinstance(item, (Message, Reasoning, ToolCall)):
+            if not isinstance(
+                item,
+                (Message, Reasoning, ToolCall, OpaqueCompaction),
+            ):
                 raise ModelResponseError(
                     "model sample items must be assistant messages, reasoning, "
-                    f"or tool calls; item {index} is {type(item).__name__}"
+                    "tool calls, or opaque compactions; "
+                    f"item {index} is {type(item).__name__}"
                 )
             if isinstance(item, Message) and item.role != "assistant":
                 raise ModelResponseError(

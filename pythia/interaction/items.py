@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Literal
 from typing import Optional
 from typing import Tuple
 from typing import Union
@@ -133,14 +134,29 @@ class TurnMetadata:
 
 @dataclass(frozen=True)
 class OpaqueCompaction:
-    encrypted_content: str
+    payload: str = field(repr=False)
+    protocol: Literal["responses", "messages"] = "responses"
 
     def __post_init__(self) -> None:
         _require_string(
-            self.encrypted_content,
-            "encrypted_content",
+            self.payload,
+            "payload",
             allow_empty=False,
         )
+        if not isinstance(self.protocol, str):
+            raise TypeError("protocol must be a string")
+        if self.protocol not in {"responses", "messages"}:
+            raise ValueError(
+                "protocol must be 'responses' or 'messages'"
+            )
+
+    @classmethod
+    def from_responses(cls, encrypted_content: str) -> "OpaqueCompaction":
+        return cls(payload=encrypted_content, protocol="responses")
+
+    @classmethod
+    def from_messages(cls, content: str) -> "OpaqueCompaction":
+        return cls(payload=content, protocol="messages")
 
 
 @dataclass(frozen=True)

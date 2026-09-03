@@ -16,6 +16,7 @@ from pythia.interaction import ModelConfigurationError
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelTransportError
+from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
 from pythia.interaction import SessionInit
@@ -330,6 +331,66 @@ class CodexResponsesConstructionTests(unittest.TestCase):
 
 
 class CodexResponsesModelTests(unittest.TestCase):
+    def test_responses_opaque_compaction_subtype_is_enforced(self):
+        response = _FakeSSEResponse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "new-encrypted-summary",
+                },
+            },
+            _message_event(1, "continued"),
+            _completed_event(),
+        )
+        opener = _ScriptedOpener(response)
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="http://localhost:8000/v1",
+                model="model",
+                bearer_token="token",
+                api_provider="api",
+            ),
+            opener=opener,
+        )
+
+        sample = model.sample(
+            ModelContext(
+                (
+                    OpaqueCompaction.from_responses("encrypted-summary"),
+                    Message(role="user", text="continue"),
+                )
+            )
+        )
+
+        self.assertEqual(
+            _request_payload(opener)["input"][0],
+            {
+                "type": "compaction",
+                "encrypted_content": "encrypted-summary",
+            },
+        )
+        self.assertEqual(
+            sample.items,
+            (
+                OpaqueCompaction.from_responses("new-encrypted-summary"),
+                Message(role="assistant", text="continued"),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ModelConfigurationError,
+            "Messages opaque compaction",
+        ):
+            model.sample(
+                ModelContext(
+                    (
+                        OpaqueCompaction.from_messages("summary"),
+                        Message(role="user", text="continue"),
+                    )
+                )
+            )
+
     def test_session_init_owns_codex_session_and_prompt_cache_key(self):
         opener = _ScriptedOpener(
             _FakeSSEResponse(

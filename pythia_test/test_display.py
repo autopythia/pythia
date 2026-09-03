@@ -97,7 +97,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 ),
                 ModelSampleBoundary(),
                 UserInteractionBoundary(),
-                OpaqueCompaction(encrypted_content="secret"),
+                OpaqueCompaction.from_responses("secret"),
                 checkpoint,
             )
         )

@@ -42,6 +42,50 @@ from .usage import TokenUsage
 
 ANTHROPIC_MESSAGES_API_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
+
+
+@dataclass(frozen=True)
+class MessagesServerCompaction:
+    trigger_input_tokens: Optional[int] = None
+    pause_after_compaction: bool = False
+    instructions: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        trigger = self.trigger_input_tokens
+        if trigger is not None and (
+            isinstance(trigger, bool)
+            or not isinstance(trigger, int)
+            or trigger < 50_000
+        ):
+            raise ModelConfigurationError(
+                "trigger_input_tokens must be an integer of at least 50000 "
+                "or None"
+            )
+        if not isinstance(self.pause_after_compaction, bool):
+            raise TypeError("pause_after_compaction must be a bool")
+        if self.instructions is not None:
+            if not isinstance(self.instructions, str):
+                raise TypeError("instructions must be a string or None")
+            instructions = self.instructions.strip()
+            if not instructions:
+                raise ModelConfigurationError(
+                    "compaction instructions must not be empty"
+                )
+            object.__setattr__(self, "instructions", instructions)
+
+    def request_edit(self) -> Dict[str, Any]:
+        edit: Dict[str, Any] = {"type": "compact_20260112"}
+        if self.trigger_input_tokens is not None:
+            edit["trigger"] = {
+                "type": "input_tokens",
+                "value": self.trigger_input_tokens,
+            }
+        if self.pause_after_compaction:
+            edit["pause_after_compaction"] = True
+        if self.instructions is not None:
+            edit["instructions"] = self.instructions
+        return edit
 
 
 @dataclass(frozen=True)
@@ -52,6 +96,7 @@ class MessagesEndpoint:
     anthropic_version: str = DEFAULT_ANTHROPIC_VERSION
     default_max_tokens: int = 4096
     request_timeout_seconds: float = 60.0
+    server_compaction: Optional[MessagesServerCompaction] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.api_url, str):
@@ -156,6 +201,14 @@ class MessagesEndpoint:
             )
         object.__setattr__(self, "request_timeout_seconds", float(timeout))
 
+        if self.server_compaction is not None and not isinstance(
+            self.server_compaction,
+            MessagesServerCompaction,
+        ):
+            raise TypeError(
+                "server_compaction must be MessagesServerCompaction or None"
+            )
+
     @property
     def url(self) -> str:
         return f"{self.api_url}/v1/messages"
@@ -192,6 +245,35 @@ def _tool_input(arguments_json: str, index: int) -> Dict[str, Any]:
 def _encode_context(
     items: Sequence[InteractionItem],
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
+    # Anthropic ignores content before the latest Messages compaction block.
+    # Keep the append-only ModelContext intact while avoiding an ever-growing
+    # outbound HTTP body.
+    latest_compaction = -1
+    for index, item in enumerate(items):
+        if isinstance(item, OpaqueCompaction) and item.protocol == "messages":
+            latest_compaction = index
+    if latest_compaction >= 0:
+        instruction_prefix: List[InteractionItem] = []
+        for item in items[:latest_compaction]:
+            if isinstance(item, Message) and item.role in {
+                "system",
+                "developer",
+            }:
+                instruction_prefix.append(item)
+                continue
+            if isinstance(
+                item,
+                (
+                    ModelSampleBoundary,
+                    SessionInit,
+                    TurnMetadata,
+                    UserInteractionBoundary,
+                ),
+            ):
+                continue
+            break
+        items = (*instruction_prefix, *items[latest_compaction:])
+
     system: List[Dict[str, str]] = []
     messages: List[Dict[str, Any]] = []
     pending: Optional[Dict[str, Any]] = None
@@ -280,9 +362,18 @@ def _encode_context(
             continue
 
         if isinstance(item, OpaqueCompaction):
-            raise ModelConfigurationError(
-                "Messages cannot encode OpaqueCompaction"
+            if item.protocol != "messages":
+                raise ModelConfigurationError(
+                    "Messages cannot encode a Responses opaque compaction"
+                )
+            conversation_started = True
+            pending = _append_block(
+                messages,
+                pending,
+                "assistant",
+                {"type": "compaction", "content": item.payload},
             )
+            continue
         if isinstance(item, ContextCompaction):
             raise ModelConfigurationError(
                 "ContextCompaction must be projected before request encoding"
@@ -406,6 +497,17 @@ def _decode_content(value: Any) -> Tuple[InteractionItem, ...]:
                 )
             )
             continue
+        if block_type == "compaction":
+            items.append(
+                OpaqueCompaction.from_messages(
+                    _require_string(
+                        block.get("content"),
+                        f"message.content[{index}].content",
+                        allow_empty=False,
+                    )
+                )
+            )
+            continue
         if block_type == "tool_use":
             tool_input = block.get("input", {})
             if not isinstance(tool_input, Mapping):
@@ -455,18 +557,73 @@ def _nonnegative_int(value: Any) -> int:
     return max(0, parsed)
 
 
+def _usage_counts(value: Mapping[str, Any]) -> Tuple[int, int, int]:
+    cache_creation_tokens = _nonnegative_int(
+        value.get("cache_creation_input_tokens")
+    )
+    cache_read_tokens = _nonnegative_int(
+        value.get("cache_read_input_tokens")
+    )
+    return (
+        _nonnegative_int(value.get("input_tokens"))
+        + cache_creation_tokens
+        + cache_read_tokens,
+        _nonnegative_int(value.get("output_tokens")),
+        cache_read_tokens,
+    )
+
+
 def _decode_usage(value: Any) -> TokenUsage:
     if not isinstance(value, Mapping):
         return TokenUsage()
-    input_tokens = _nonnegative_int(value.get("input_tokens"))
-    output_tokens = _nonnegative_int(value.get("output_tokens"))
+    input_tokens, output_tokens, cached_input_tokens = _usage_counts(value)
+    iterations = value.get("iterations")
+    if isinstance(iterations, Sequence) and not isinstance(
+        iterations,
+        (str, bytes, bytearray),
+    ):
+        iteration_input_tokens = 0
+        iteration_output_tokens = 0
+        iteration_cached_input_tokens = 0
+        iteration_cache_creation_tokens = 0
+        iteration_count = 0
+        for iteration in iterations:
+            if not isinstance(iteration, Mapping):
+                continue
+            iteration_count += 1
+            iteration_input, iteration_output, iteration_cached = (
+                _usage_counts(iteration)
+            )
+            iteration_input_tokens += iteration_input
+            iteration_output_tokens += iteration_output
+            iteration_cached_input_tokens += iteration_cached
+            iteration_cache_creation_tokens += _nonnegative_int(
+                iteration.get("cache_creation_input_tokens")
+            )
+        if iteration_count:
+            # Some beta response versions report cache fields only at the
+            # top level, outside the per-iteration breakdown.
+            if (
+                iteration_cached_input_tokens == 0
+                and iteration_cache_creation_tokens == 0
+            ):
+                top_level_cache_creation = _nonnegative_int(
+                    value.get("cache_creation_input_tokens")
+                )
+                iteration_input_tokens += (
+                    cached_input_tokens + top_level_cache_creation
+                )
+            input_tokens = iteration_input_tokens
+            output_tokens = iteration_output_tokens
+            if iteration_cached_input_tokens:
+                cached_input_tokens = iteration_cached_input_tokens
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         cached_input_tokens=min(
             input_tokens,
-            _nonnegative_int(value.get("cache_read_input_tokens")),
+            cached_input_tokens,
         ),
     )
 
@@ -549,6 +706,12 @@ class MessagesModel:
         encoded_tools = _encode_tools(tools)
         if encoded_tools:
             payload["tools"] = encoded_tools
+        if self.endpoint.server_compaction is not None:
+            payload["context_management"] = {
+                "edits": [
+                    self.endpoint.server_compaction.request_edit()
+                ]
+            }
         _apply_sampling_options(payload, options)
         return payload
 
@@ -576,6 +739,8 @@ class MessagesModel:
             "Content-Type": "application/json",
             "User-Agent": "pythia-interaction/0.1",
         }
+        if self.endpoint.server_compaction is not None:
+            headers["Anthropic-Beta"] = MESSAGES_COMPACTION_BETA
         if self.endpoint.api_key is not None:
             headers["X-API-Key"] = self.endpoint.api_key
         request = urllib.request.Request(
@@ -591,7 +756,7 @@ class MessagesModel:
             )
         except urllib.error.HTTPError as exc:
             detail = _read_http_error_body(exc) or str(exc)
-            if _is_context_window_error(detail):
+            if exc.code == 413 or _is_context_window_error(detail):
                 raise ModelContextWindowError(detail) from exc
             raise ModelTransportError(
                 f"Messages HTTP {exc.code}: {detail}"
@@ -621,7 +786,7 @@ class MessagesModel:
             raise ModelResponseError("HTTP response body must be bytes")
         if isinstance(status, int) and not 200 <= status < 300:
             detail = bytes(raw).decode("utf-8", errors="replace")[:4096]
-            if _is_context_window_error(detail):
+            if status == 413 or _is_context_window_error(detail):
                 raise ModelContextWindowError(detail)
             raise ModelTransportError(f"Messages HTTP {status}: {detail}")
         try:
@@ -645,6 +810,8 @@ class MessagesModel:
 __all__ = [
     "ANTHROPIC_MESSAGES_API_URL",
     "DEFAULT_ANTHROPIC_VERSION",
+    "MESSAGES_COMPACTION_BETA",
     "MessagesEndpoint",
     "MessagesModel",
+    "MessagesServerCompaction",
 ]

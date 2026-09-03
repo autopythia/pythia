@@ -85,6 +85,15 @@ class SessionTests(unittest.TestCase):
             restored.items,
             (Message(role="user", text="hello"),),
         )
+        self.assertEqual(
+            interaction_item_from_dict(
+                {
+                    "type": "opaque_compaction",
+                    "encrypted_content": "legacy-encrypted",
+                }
+            ),
+            OpaqueCompaction.from_responses("legacy-encrypted"),
+        )
 
     def test_interaction_items_round_trip_through_jsonl(self):
         items = (
@@ -115,7 +124,8 @@ class SessionTests(unittest.TestCase):
                 provider_turn_id="turn-1",
                 provider_turn_state="turn-state-1",
             ),
-            OpaqueCompaction("opaque"),
+            OpaqueCompaction.from_responses("opaque"),
+            OpaqueCompaction.from_messages("summary"),
             ContextCompaction(
                 (
                     Message(role="user", text="summary"),
@@ -132,6 +142,14 @@ class SessionTests(unittest.TestCase):
             "thinking-signature",
         )
         self.assertNotIn("signature", encoded_reasoning)
+        self.assertEqual(
+            interaction_item_to_dict(items[9]),
+            {
+                "type": "opaque_compaction",
+                "protocol": "messages",
+                "payload": "summary",
+            },
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"

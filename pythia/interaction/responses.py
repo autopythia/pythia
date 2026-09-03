@@ -277,10 +277,14 @@ def _encode_context_items(
             continue
 
         if isinstance(item, OpaqueCompaction):
+            if item.protocol != "responses":
+                raise ModelConfigurationError(
+                    "Responses cannot encode a Messages opaque compaction"
+                )
             encoded.append(
                 {
                     "type": "compaction",
-                    "encrypted_content": item.encrypted_content,
+                    "encrypted_content": item.payload,
                 }
             )
             continue
@@ -627,6 +631,15 @@ def _decode_output_item(value: Any) -> InteractionItem:
             name=name,
             call_id=call_id,
             arguments_json=arguments,
+        )
+
+    if item_type == "compaction":
+        return OpaqueCompaction.from_responses(
+            _require_output_string(
+                value.get("encrypted_content"),
+                "compaction.encrypted_content",
+                allow_empty=False,
+            )
         )
 
     raise ModelResponseError(
