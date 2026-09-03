@@ -14,6 +14,7 @@ from .context import ContextValidationError
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .model import Model
 from .model import ModelContextWindowError
@@ -105,9 +106,17 @@ def _truncate_text_to_tokens(text: str, max_tokens: int) -> str:
 
 def _leading_instruction_prefix(
     items: Sequence[InteractionItem],
-) -> Tuple[Message, ...]:
+) -> Tuple[InteractionItem, ...]:
+    effective = None
+    for _item in items:
+        if isinstance(_item, Instructions):
+            effective = _item
     prefix = []
+    if effective is not None:
+        prefix.append(effective)
     for item in items:
+        if isinstance(item, Instructions):
+            continue
         if isinstance(item, Message) and item.role in {"system", "developer"}:
             prefix.append(item)
             continue
@@ -145,10 +154,12 @@ def _drop_oldest_non_instruction_item(
     compaction_prompt: Message,
 ) -> bool:
     index = 0
-    while (
-        index < len(items)
-        and isinstance(items[index], Message)
-        and items[index].role in {"system", "developer"}
+    while index < len(items) and (
+        isinstance(items[index], Instructions)
+        or (
+            isinstance(items[index], Message)
+            and items[index].role in {"system", "developer"}
+        )
     ):
         index += 1
     if index >= len(items):

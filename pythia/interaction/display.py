@@ -16,6 +16,7 @@ from typing import Tuple
 
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
@@ -143,7 +144,9 @@ class InteractionItemRenderer:
 
             blocks: Tuple[str, ...]
             diff_block_indices: Set[int] = set()
-            if isinstance(item, Message):
+            if isinstance(item, Instructions):
+                blocks = _render_instructions(item)
+            elif isinstance(item, Message):
                 blocks = _render_message(item)
             elif isinstance(item, Reasoning):
                 blocks = _render_reasoning(item)
@@ -316,6 +319,14 @@ def _render_message(item: Message) -> Tuple[str, ...]:
         return ()
     role = item.role.strip() or "message"
     return (f"[{role}] {item.text}",)
+
+
+def _render_instructions(item: Instructions) -> Tuple[str, ...]:
+    # Unlike Message, empty/whitespace-only instructions are still shown
+    # so the audit trail preserves presence vs absence.
+    if not item.text.strip():
+        return ("[instructions]",)
+    return (f"[instructions] {item.text}",)
 
 
 def _render_turn_metadata(item: TurnMetadata) -> Tuple[str, ...]:

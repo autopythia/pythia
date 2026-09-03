@@ -21,6 +21,7 @@ from .environment import ToolOutcome
 from .environment import ToolSpec
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
@@ -96,6 +97,7 @@ __all__ = [
     "EnvironmentResult",
     "InteractionItem",
     "InteractionItemRenderer",
+    "Instructions",
     "Message",
     "MESSAGES_COMPACTION_BETA",
     "META_RESPONSES_API_URL",

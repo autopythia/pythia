@@ -28,6 +28,7 @@ from .codex_auth import load_codex_auth
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
@@ -264,6 +265,25 @@ def _encode_context_items(
     items: Sequence[InteractionItem],
 ) -> List[Dict[str, Any]]:
     encoded: List[Dict[str, Any]] = []
+    # Last-wins Instructions -> leading system message (parity with
+    # Chat Completions system). Empty preserved; absence means none.
+    effective: Optional[Instructions] = None
+    for item in items:
+        if isinstance(item, Instructions):
+            effective = item
+    if effective is not None:
+        encoded.append(
+            {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": effective.text,
+                    }
+                ],
+            }
+        )
     for index, item in enumerate(items):
         if isinstance(
             item,
@@ -275,6 +295,9 @@ def _encode_context_items(
                 UserInteractionBoundary,
             ),
         ):
+            continue
+
+        if isinstance(item, Instructions):
             continue
 
         if isinstance(item, Message):

@@ -14,6 +14,7 @@ from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
 from .environment import Environment
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import SessionInit
@@ -51,6 +52,7 @@ def run(
     environment: Environment,
     *,
     prompt: Optional[str] = DEFAULT_PROMPT,
+    instructions: Optional[Union[str, Instructions]] = None,
     max_samples: Optional[int] = None,
     options: Optional[SamplingOptions] = None,
     session_path: Optional[Union[str, Path]] = None,
@@ -66,6 +68,17 @@ def run(
         not isinstance(prompt, str) or not prompt.strip()
     ):
         raise ValueError("prompt must be a non-empty string or None")
+    if instructions is not None and not isinstance(
+        instructions, (str, Instructions)
+    ):
+        raise TypeError("instructions must be a string, Instructions, or None")
+    # Empty/whitespace-only strings are supported; only absence (None)
+    # means "no instructions". Later items override earlier ones.
+    instructions_item: Optional[Instructions] = None
+    if isinstance(instructions, str):
+        instructions_item = Instructions(text=instructions)
+    elif isinstance(instructions, Instructions):
+        instructions_item = instructions
     if resume and session_path is None:
         raise ValueError("resume requires session_path")
     if max_samples is not None and (
@@ -96,12 +109,10 @@ def run(
                 prompt = DEFAULT_PROMPT
         if prompt is None:
             raise ValueError("prompt must not be None without resume")
-        context = ModelContext(
-            (
-                SessionInit(),
-                # Message(role="system", text=_SYSTEM_MESSAGE),
-            )
-        )
+        initial: list = [SessionInit()]
+        if instructions_item is not None:
+            initial.append(instructions_item)
+        context = ModelContext(tuple(initial))
 
     if session_path is not None:
         save_interaction_session(session_path, context)
@@ -120,11 +131,19 @@ def run(
         _persist()
         for display_item in result.display_items(source_calls=pending_calls):
             print(display_item)
-    elif resumed_existing_session and prompt is None:
+    elif resumed_existing_session and prompt is None and instructions_item is None:
         final_text = _final_assistant_text(context)
         if final_text is None or not final_text.strip():
             raise RuntimeError("resumed session has no final assistant text")
         return final_text
+
+    if instructions_item is not None and resumed_existing_session:
+        # Append override after pending batch is valid again. Strict
+        # tool-sequence validation requires no pending calls here.
+        context.extend((instructions_item,))
+        _persist()
+        for display_item in render_interaction_items((instructions_item,)):
+            print(display_item)
 
     if prompt is not None:
         # For a resumed session, add the follow-up only after any pending
@@ -352,6 +371,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--prompt")
     parser.add_argument(
+        "--instructions",
+        default=None,
+        help=(
+            "Optional system instructions (Chat Completions system message). "
+            "Empty string is preserved; omit to send none. "
+            "On --resume, appends an override."
+        ),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="resume interaction.jsonl instead of starting a new session",
@@ -383,6 +411,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model,
                 environment,
                 prompt=prompt,
+                instructions=args.instructions,
                 max_samples=args.max_samples,
                 options=options,
                 session_path=DEFAULT_SESSION_PATH,

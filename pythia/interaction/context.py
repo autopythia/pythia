@@ -4,12 +4,14 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Sequence
 from typing import List
+from typing import Optional
 from typing import Tuple
 from typing import Union
 from typing import overload
 
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import ModelSampleBoundary
 from .items import SessionInit
 from .items import ToolCall
@@ -141,6 +143,28 @@ def _validate_log(items: Sequence[InteractionItem]) -> None:
     _project_items(items)
 
 
+def _collapse_instructions(
+    items: Sequence[InteractionItem],
+) -> Tuple[InteractionItem, ...]:
+    """Collapse ``Instructions`` history to its effective item.
+
+    The raw log keeps every ``Instructions`` for audit, but the model view
+    exposes only the last one (later overrides earlier). ``No instructions``
+    is represented solely by absence. Empty and whitespace-only text remains
+    effective when it is the last item. The survivor is hoisted to the front
+    so all backends encode a single leading system prompt regardless of
+    where overrides were appended.
+    """
+    effective: Optional[InteractionItem] = None
+    for item in items:
+        if isinstance(item, Instructions):
+            effective = item
+    if effective is None:
+        return tuple(items)
+    remaining = tuple(item for item in items if not isinstance(item, Instructions))
+    return (effective, *remaining)
+
+
 class ModelContext(Sequence[InteractionItem]):
     def __init__(self, items: Iterable[InteractionItem] = ()) -> None:
         initial_items = list(items)
@@ -172,11 +196,12 @@ class ModelContext(Sequence[InteractionItem]):
         return tuple(self._items)
 
     def model_items(self) -> Tuple[InteractionItem, ...]:
-        return tuple(
+        projected = tuple(
             item
             for item in _project_items(self._items)
             if not isinstance(item, SessionInit)
         )
+        return _collapse_instructions(projected)
 
     def pending_tool_calls(self) -> Tuple[ToolCall, ...]:
         return _validate_tool_sequence(

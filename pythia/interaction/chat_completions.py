@@ -22,6 +22,7 @@ from .context import ContextValidationError
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
@@ -167,6 +168,17 @@ def _encode_context_messages(
         messages.append(assistant)
         assistant = None
 
+    # Last-wins Instructions: emit effective once at front (system role).
+    # Empty/whitespace-only text is preserved; absence means no system item.
+    # model_items() already collapses+hoists, this is defensive for direct
+    # encoder calls.
+    effective: Optional[Instructions] = None
+    for item in items:
+        if isinstance(item, Instructions):
+            effective = item
+    if effective is not None:
+        messages.append({"role": "system", "content": effective.text})
+
     for index, item in enumerate(items):
         if isinstance(
             item,
@@ -179,6 +191,10 @@ def _encode_context_messages(
             ),
         ):
             flush_assistant()
+            continue
+
+        if isinstance(item, Instructions):
+            # Superseded or already emitted above; invisible to encoding.
             continue
 
         if isinstance(item, Message):

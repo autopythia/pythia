@@ -46,6 +46,23 @@ class Message:
 
 
 @dataclass(frozen=True)
+class Instructions:
+    """Optional persistent system instructions.
+
+    Corresponds to a Chat Completions ``system`` message. Empty and
+    whitespace-only text is supported; ``no instructions`` is represented
+    only by the absence of an ``Instructions`` item. When several
+    ``Instructions`` items appear in a log, the last one overrides all
+    earlier ones (see ``ModelContext.model_items``).
+    """
+
+    text: str
+
+    def __post_init__(self) -> None:
+        _require_string(self.text, "text")
+
+
+@dataclass(frozen=True)
 class Reasoning:
     text: str
     summary: Tuple[str, ...] = ()
@@ -286,6 +303,7 @@ class ContextCompaction:
 
 InteractionItem = Union[
     SessionInit,
+    Instructions,
     Message,
     Reasoning,
     ToolCall,
@@ -300,6 +318,7 @@ InteractionItem = Union[
 
 INTERACTION_ITEM_TYPES = (
     SessionInit,
+    Instructions,
     Message,
     Reasoning,
     ToolCall,
@@ -319,6 +338,7 @@ def is_interaction_item(value: object) -> bool:
 
 __all__ = [
     "ContextCompaction",
+    "Instructions",
     "InteractionItem",
     "Message",
     "ModelSampleBoundary",

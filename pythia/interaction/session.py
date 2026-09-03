@@ -15,6 +15,7 @@ from typing import Union
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
@@ -37,6 +38,7 @@ class SessionError(ValueError):
 
 _ITEM_TYPES = {
     SessionInit: "session_init",
+    Instructions: "instructions",
     Message: "message",
     Reasoning: "reasoning",
     ToolCall: "tool_call",
@@ -64,7 +66,9 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     """Encode an interaction item as a JSON-compatible dictionary."""
     encoded: Dict[str, Any] = {"type": _item_type_name(item)}
 
-    if isinstance(item, Message):
+    if isinstance(item, Instructions):
+        encoded.update(text=item.text)
+    elif isinstance(item, Message):
         encoded.update(role=item.role, text=item.text)
     elif isinstance(item, SessionInit):
         encoded["session_id"] = item.session_id
@@ -168,6 +172,10 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if not isinstance(item_type, str) or item_type not in _ITEM_TYPE_NAMES:
         raise SessionError(f"unknown interaction item type: {item_type!r}")
 
+    if item_type == "instructions":
+        return Instructions(
+            text=_require_string(mapping.get("text"), "instructions.text"),
+        )
     if item_type == "message":
         return Message(
             role=_require_string(mapping.get("role"), "message.role"),

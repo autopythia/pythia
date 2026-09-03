@@ -21,6 +21,7 @@ from .context import ContextValidationError
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import InteractionItem
+from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
@@ -256,6 +257,9 @@ def _encode_context(
     if latest_compaction >= 0:
         instruction_prefix: List[InteractionItem] = []
         for item in items[:latest_compaction]:
+            if isinstance(item, Instructions):
+                instruction_prefix.append(item)
+                continue
             if isinstance(item, Message) and item.role in {
                 "system",
                 "developer",
@@ -287,6 +291,16 @@ def _encode_context(
             messages.append(pending)
             pending = None
 
+    # Last-wins Instructions: effective maps to system prompt. Empty text
+    # preserved; absence means no entry. model_items() already collapses,
+    # this is defensive for direct encoder calls.
+    effective: Optional[Instructions] = None
+    for item in items:
+        if isinstance(item, Instructions):
+            effective = item
+    if effective is not None:
+        system.append({"type": "text", "text": effective.text})
+
     for index, item in enumerate(items):
         if isinstance(
             item,
@@ -299,6 +313,9 @@ def _encode_context(
             ),
         ):
             flush()
+            continue
+
+        if isinstance(item, Instructions):
             continue
 
         if isinstance(item, Message):
