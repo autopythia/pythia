@@ -18,6 +18,8 @@ from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
 from .items import TurnSummary
+from .items import UserToolCall
+from .items import UserToolResult
 from .items import is_interaction_item
 
 
@@ -101,6 +103,8 @@ def _validate_compaction_replacement(
     replacement = tuple(replacement_items)
     for index, item in enumerate(replacement):
         _validate_item(item, f"replacement_items[{index}]")
+        if isinstance(item, (UserToolCall, UserToolResult)):
+            raise ContextValidationError("user tools cannot appear in compaction replacements")
         if isinstance(item, ContextCompaction):
             raise ContextValidationError(
                 "ContextCompaction replacement_items must not contain "
@@ -128,10 +132,29 @@ def _project_items(
         else:
             active.append(item)
     _validate_tool_sequence(active, allow_pending=True)
-    return tuple(active)
+    return tuple(i for i in active if not isinstance(i, (UserToolCall, UserToolResult)))
+
+
+def _pending_user_tools(items: Sequence[InteractionItem]) -> Tuple[UserToolCall, ...]:
+    pending = None
+    seen = set()
+    for item in items:
+        if isinstance(item, UserToolResult):
+            if pending is None or item.result.call_id != pending.call.call_id:
+                raise ContextValidationError("user tool result has no matching unresolved user call")
+            pending = None
+        elif pending is not None:
+            raise ContextValidationError("item appears before unresolved user tool result")
+        elif isinstance(item, UserToolCall):
+            if item.call.call_id in seen:
+                raise ContextValidationError("duplicate user tool call id")
+            seen.add(item.call.call_id)
+            pending = item
+    return (pending,) if pending is not None else ()
 
 
 def _validate_log(items: Sequence[InteractionItem]) -> None:
+    _pending_user_tools(items)
     for index, item in enumerate(items):
         _validate_item(item, f"items[{index}]")
         if isinstance(item, SessionInit) and index != 0:
@@ -210,12 +233,17 @@ class ModelContext(Sequence[InteractionItem]):
         )
 
     def assert_model_ready(self) -> None:
+        if self.pending_user_tool_calls():
+            raise ContextValidationError("cannot sample with unresolved user tool calls")
         pending = self.pending_tool_calls()
         if pending:
             call_ids = ", ".join(call.call_id for call in pending)
             raise ContextValidationError(
                 f"cannot sample with unresolved tool calls: {call_ids}"
             )
+
+    def pending_user_tool_calls(self) -> Tuple[UserToolCall, ...]:
+        return _pending_user_tools(self._items)
 
     def append(self, item: InteractionItem) -> None:
         self.extend((item,))

@@ -14,9 +14,24 @@ from .messages import MessagesModel
 from .messages import MessagesServerCompaction
 from .model import Model
 from .responses import CodexResponsesModel
+from .responses import CODEX_RESPONSES_API_URL
+from .responses import _CODEX_MODEL_ROUTES
+from .responses import _resolve_default_codex_api_url
 
 
 DEFAULT_SESSION_PATH = Path("interaction.jsonl")
+
+
+def supports_account_services(args: argparse.Namespace) -> bool:
+    """Only the official ChatGPT route supports the initial login/quota tools."""
+    if args.model_api not in {"codex", "codex-responses"} or not args.model:
+        return False
+    name = args.model.strip()
+    route = _CODEX_MODEL_ROUTES.get(name)
+    if route is not None and route.api_key_environment_variable is not None:
+        return False
+    url = args.api_url if args.api_url is not None else _resolve_default_codex_api_url(name)
+    return url.strip().rstrip("/") == CODEX_RESPONSES_API_URL
 
 
 def build_model(args: argparse.Namespace) -> Model:

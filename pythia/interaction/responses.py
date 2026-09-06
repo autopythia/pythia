@@ -117,6 +117,77 @@ _CODEX_MODEL_ROUTES = {
 }
 
 
+def _normalize_configuration(
+    api_url: str, model: str, request_timeout_seconds: float,
+) -> Tuple[str, str, float]:
+    """Validate non-secret endpoint options before attempting credential loading."""
+    if not isinstance(api_url, str):
+        raise TypeError("api_url must be a string")
+    api_url = api_url.strip()
+    if not api_url:
+        raise ModelConfigurationError("api_url must not be empty")
+    if any(character.isspace() for character in api_url):
+        raise ModelConfigurationError(
+            "api_url must not contain whitespace"
+        )
+
+    try:
+        parsed = urllib.parse.urlsplit(api_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ModelConfigurationError("api_url is invalid") from exc
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ModelConfigurationError(
+            "api_url scheme must be 'http' or 'https'"
+        )
+    if not parsed.netloc or hostname is None:
+        raise ModelConfigurationError(
+            "api_url must be an absolute URL with a host"
+        )
+    if port == 0:
+        raise ModelConfigurationError(
+            "api_url port must be from 1 through 65535"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ModelConfigurationError(
+            "api_url must not contain user information"
+        )
+    if parsed.query:
+        raise ModelConfigurationError("api_url must not contain a query")
+    if parsed.fragment:
+        raise ModelConfigurationError(
+            "api_url must not contain a fragment"
+        )
+    path_prefix = parsed.path.rstrip("/")
+    if path_prefix.endswith("/responses"):
+        raise ModelConfigurationError(
+            "api_url must not include the fixed /responses path"
+        )
+    api_url = urllib.parse.urlunsplit(
+        (scheme, parsed.netloc, path_prefix, "", "")
+    )
+
+    if not isinstance(model, str):
+        raise TypeError("model must be a string")
+    model = model.strip()
+    if not model:
+        raise ModelConfigurationError("model must not be empty")
+
+    timeout = request_timeout_seconds
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(float(timeout))
+        or float(timeout) <= 0
+    ):
+        raise ModelConfigurationError(
+            "request_timeout_seconds must be positive and finite"
+        )
+    return api_url, model, float(timeout)
+
+
 @dataclass(frozen=True)
 class StreamingResponsesEndpoint:
     api_url: str
@@ -127,61 +198,12 @@ class StreamingResponsesEndpoint:
     request_timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.api_url, str):
-            raise TypeError("api_url must be a string")
-        api_url = self.api_url.strip()
-        if not api_url:
-            raise ModelConfigurationError("api_url must not be empty")
-        if any(character.isspace() for character in api_url):
-            raise ModelConfigurationError(
-                "api_url must not contain whitespace"
-            )
-
-        try:
-            parsed = urllib.parse.urlsplit(api_url)
-            hostname = parsed.hostname
-            port = parsed.port
-        except ValueError as exc:
-            raise ModelConfigurationError("api_url is invalid") from exc
-        scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https"}:
-            raise ModelConfigurationError(
-                "api_url scheme must be 'http' or 'https'"
-            )
-        if not parsed.netloc or hostname is None:
-            raise ModelConfigurationError(
-                "api_url must be an absolute URL with a host"
-            )
-        if port == 0:
-            raise ModelConfigurationError(
-                "api_url port must be from 1 through 65535"
-            )
-        if parsed.username is not None or parsed.password is not None:
-            raise ModelConfigurationError(
-                "api_url must not contain user information"
-            )
-        if parsed.query:
-            raise ModelConfigurationError("api_url must not contain a query")
-        if parsed.fragment:
-            raise ModelConfigurationError(
-                "api_url must not contain a fragment"
-            )
-        path_prefix = parsed.path.rstrip("/")
-        if path_prefix.endswith("/responses"):
-            raise ModelConfigurationError(
-                "api_url must not include the fixed /responses path"
-            )
-        api_url = urllib.parse.urlunsplit(
-            (scheme, parsed.netloc, path_prefix, "", "")
+        api_url, model, timeout = _normalize_configuration(
+            self.api_url, self.model, self.request_timeout_seconds
         )
         object.__setattr__(self, "api_url", api_url)
-
-        if not isinstance(self.model, str):
-            raise TypeError("model must be a string")
-        model = self.model.strip()
-        if not model:
-            raise ModelConfigurationError("model must not be empty")
         object.__setattr__(self, "model", model)
+        object.__setattr__(self, "request_timeout_seconds", timeout)
 
         if not isinstance(self.bearer_token, str):
             raise TypeError("bearer_token must be a string")
@@ -218,18 +240,6 @@ class StreamingResponsesEndpoint:
                     "account_id requires api_provider='codex'"
                 )
             object.__setattr__(self, "account_id", account_id)
-
-        timeout = self.request_timeout_seconds
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(float(timeout))
-            or float(timeout) <= 0
-        ):
-            raise ModelConfigurationError(
-                "request_timeout_seconds must be positive and finite"
-            )
-        object.__setattr__(self, "request_timeout_seconds", float(timeout))
 
     @property
     def url(self) -> str:
@@ -1051,6 +1061,10 @@ class CodexResponsesModel:
             model = model.strip()
             if not model:
                 raise ModelConfigurationError("model must not be empty")
+            resolved_url, model, resolved_timeout = _normalize_configuration(
+                _resolve_default_codex_api_url(model) if api_url is None else api_url,
+                model, 300.0 if request_timeout_seconds is None else request_timeout_seconds,
+            )
             if auth is not None:
                 if not isinstance(auth, CodexAuth):
                     raise TypeError("auth must be CodexAuth or None")
@@ -1066,20 +1080,12 @@ class CodexResponsesModel:
                     auth_file=auth_file,
                 )
             resolved_endpoint = StreamingResponsesEndpoint(
-                api_url=(
-                    _resolve_default_codex_api_url(model)
-                    if api_url is None
-                    else api_url
-                ),
+                api_url=resolved_url,
                 model=model,
                 bearer_token=resolved_auth.access_token,
                 account_id=resolved_auth.account_id,
                 api_provider="codex",
-                request_timeout_seconds=(
-                    300.0
-                    if request_timeout_seconds is None
-                    else request_timeout_seconds
-                ),
+                request_timeout_seconds=resolved_timeout,
             )
 
         if identifier_factory is not None and not callable(identifier_factory):

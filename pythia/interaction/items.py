@@ -115,6 +115,28 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class UserToolCall:
+    """A user-authorized tool invocation, durable but never provider input."""
+
+    call: ToolCall
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.call, ToolCall):
+            raise TypeError("call must be ToolCall")
+
+
+@dataclass(frozen=True)
+class UserToolResult:
+    """The safe, log-only outcome of a user tool (not an assistant tool)."""
+
+    result: ToolResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, ToolResult):
+            raise TypeError("result must be ToolResult")
+
+
+@dataclass(frozen=True)
 class ModelSampleBoundary:
     """Marks the end of one model sample without emitting provider content."""
 
@@ -308,6 +330,8 @@ InteractionItem = Union[
     Reasoning,
     ToolCall,
     ToolResult,
+    UserToolCall,
+    UserToolResult,
     ModelSampleBoundary,
     TurnMetadata,
     TurnSummary,
@@ -323,6 +347,8 @@ INTERACTION_ITEM_TYPES = (
     Reasoning,
     ToolCall,
     ToolResult,
+    UserToolCall,
+    UserToolResult,
     ModelSampleBoundary,
     TurnMetadata,
     TurnSummary,
@@ -347,6 +373,8 @@ __all__ = [
     "SessionInit",
     "ToolCall",
     "ToolResult",
+    "UserToolCall",
+    "UserToolResult",
     "TurnMetadata",
     "TurnSummary",
     "UserInteractionBoundary",

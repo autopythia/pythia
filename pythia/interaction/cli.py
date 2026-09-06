@@ -14,14 +14,19 @@ from dataclasses import dataclass
 from dataclasses import field
 import os
 from pathlib import Path
+import queue
 import sys
+import threading
 import time
+import uuid
 from typing import Optional
 from typing import Sequence
+from typing import Union
 
 from ._cli_editor import Editor
 from ._cli_terminal import PosixTerminal
 from .context import ModelContext
+from .codex_auth import CodexAuthUnavailable
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
 from .display import render_interaction_items
@@ -32,20 +37,28 @@ from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
+from .items import Reasoning
 from .items import SessionInit
 from .items import ToolResult
+from .items import ToolCall
 from .items import TurnMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
+from .items import UserToolCall
+from .items import UserToolResult
 from .items import summarize_turn_usage
 from .model import SamplingOptions
 from .model import Model
 from .model_config import DEFAULT_SESSION_PATH
 from .model_config import build_model
 from .model_config import build_parser
+from .model_config import supports_account_services
 from .session import load_interaction_session
 from .session import save_interaction_session
 from .user import UserInteraction
+from .user_tools import UserToolIntent
+from .user_tools import create_user_environment
+from .user_tools import parse_user_tool
 
 
 FRAME_INTERVAL = 1 / 128
@@ -56,7 +69,7 @@ _MAX_PENDING_QUERIES = 8
 @dataclass
 class _UIState:
     editor: Editor = field(default_factory=Editor)
-    pending: deque[str] = field(default_factory=deque)
+    pending: deque[Union[str, UserToolIntent]] = field(default_factory=deque)
     displays: deque[DisplayItem] = field(default_factory=deque)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     closing: bool = False
@@ -65,6 +78,11 @@ class _UIState:
     phase: str = "starting"
     phase_started: float = field(default_factory=time.monotonic)
     exit_code: int = 0
+    auth_required: bool = False
+    bound_account_id: Optional[str] = None
+    login_cancel: threading.Event = field(default_factory=threading.Event)
+    transient: queue.Queue[tuple[str, str]] = field(default_factory=lambda: queue.Queue(maxsize=8))
+    active_user_call: Optional[str] = None
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -76,6 +94,7 @@ class _UIState:
     def request_exit(self) -> None:
         self.closing = True
         self.pending.clear()
+        self.login_cancel.set()
         self.changed.set()
 
     def handle_key(self, key: str, data: str) -> None:
@@ -89,17 +108,29 @@ class _UIState:
             head = text.split(maxsplit=1)[0] if text.strip() else ""
             if head in {"/quit", "/exit"}:
                 self.request_exit()
-            elif head.startswith("/"):
-                self.notice(f"Unsupported command: {head}. Use /quit or /exit.")
+                return
+            if not text.strip():
                 self.editor = Editor()
-            elif not text.strip():
-                self.editor = Editor()
-            elif self.persistence_failed:
+                return
+            if self.persistence_failed:
                 self.notice("Checkpoint failed; no further work will run. Use /quit.")
-            elif len(self.pending) >= _MAX_PENDING_QUERIES:
+                return
+            intent = text
+            if head.startswith("/"):
+                try:
+                    intent = parse_user_tool(text)
+                except ValueError as exc:
+                    # Never echo an arbitrary slash argument (possibly a secret).
+                    self.notice(str(exc))
+                    self.editor = Editor()
+                    return
+            elif self.auth_required:
+                self.notice("Model authentication needed; use /login. Draft was not submitted.")
+                return
+            if len(self.pending) >= _MAX_PENDING_QUERIES:
                 self.notice("Query queue is full; the draft has not been submitted.")
             else:
-                self.pending.append(text)
+                self.pending.append(intent)
                 self.editor = Editor()
                 self.changed.set()
 
@@ -157,6 +188,81 @@ async def _fail_pending_tools(
         )
 
 
+async def _fail_pending_user_tools(
+    context: ModelContext, state: _UIState, path: Path,
+) -> None:
+    for call in context.pending_user_tool_calls():
+        if state.closing:
+            return
+        result = UserToolResult(ToolResult(
+            call.call.call_id,
+            "User-tool outcome unavailable after interruption. The command was not rerun; "
+            "credential side effects may already have occurred.", success=False,
+        ))
+        await _append(context, (result,), state, path)
+        state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
+
+
+def _has_provider_history(context: ModelContext) -> bool:
+    return any(
+        (isinstance(i, TurnMetadata) and (i.provider_turn_id or i.provider_turn_state or i.provider_session_id))
+        or (isinstance(i, Reasoning) and i.encrypted_content)
+        or (isinstance(i, OpaqueCompaction) and i.protocol == "responses")
+        for i in (*context.items, *context.model_items())
+    )
+
+
+async def _user_tool(
+    intent: UserToolIntent, model: Optional[Model], context: ModelContext,
+    state: _UIState, path: Path, args: argparse.Namespace,
+) -> Optional[Model]:
+    expected_account = state.bound_account_id
+    call = UserToolCall(ToolCall(intent.name, "user_" + uuid.uuid4().hex, intent.arguments_json))
+    await _append(context, (call,), state, path)
+    state.displays.extend(render_interaction_items((call,)))
+    if state.closing:
+        return model
+    state.login_cancel.clear()
+    state.active_user_call = call.call.call_id
+
+    def notify(text):
+        try:
+            state.transient.put_nowait((call.call.call_id, text))
+        except queue.Full:
+            pass
+
+    try:
+        environment = create_user_environment(
+            args, notify=notify, cancel=state.login_cancel,
+            expected_account=expected_account,
+            provider_history=_has_provider_history(context),
+        )
+        state.set_phase(f"user tool: {intent.name}")
+        outcome = await asyncio.to_thread(environment.execute_tool_calls, (call.call,))
+        result = UserToolResult(outcome.items[0])
+        await _append(context, (result,), state, path)
+        state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
+    finally:
+        state.active_user_call = None
+    if intent.name == "login" and result.result.success and not state.closing:
+        state.set_phase("loading model")
+        try:
+            model = await asyncio.to_thread(build_model, args)
+            if (expected_account is not None and
+                    getattr(getattr(model, "endpoint", None), "account_id", None) != expected_account):
+                raise ValueError("credential account changed during activation")
+        except Exception:
+            model = None
+            state.exit_code = 1
+            state.pending.clear()
+            state.notice("Credentials were saved, but model activation failed. No model request was started.")
+        else:
+            state.bound_account_id = getattr(getattr(model, "endpoint", None), "account_id", None)
+            state.notice("Model ready. Submit a query; blocked drafts were not automatically submitted.")
+        state.auth_required = model is None
+    return model
+
+
 async def _turn(
     context: ModelContext,
     model: Model,
@@ -202,7 +308,7 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
     for item in reversed(context.items):
         if isinstance(
             item,
-            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary),
+            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary, UserToolCall, UserToolResult),
         ):
             continue
         if isinstance(item, (TurnSummary, SessionInit)):
@@ -228,7 +334,7 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
 
 
 async def _drive_session(
-    model: Model,
+    model: Optional[Model],
     environment: Environment,
     state: _UIState,
     args: argparse.Namespace,
@@ -260,6 +366,7 @@ async def _drive_session(
         try:
             if startup:
                 if existing:
+                    await _fail_pending_user_tools(context, state, path)
                     await _fail_pending_tools(
                         context, state, path, reason="session restart"
                     )
@@ -273,14 +380,18 @@ async def _drive_session(
                     await _append(context, (instructions,), state, path)
                     state.displays.extend(render_interaction_items((instructions,)))
                 query = initial_query
-                should_sample = query is not None or (
+                should_sample = model is not None and (query is not None or (
                     existing and args.instructions is not None
-                )
+                ))
                 if existing and not should_sample:
                     notice = _resume_notice(context)
                     if notice is not None:
                         state.notice(notice)
-                state.editor = Editor()
+                if model is None:
+                    query = None
+                    state.notice("Model authentication needed; use /login. No model query was submitted.")
+                else:
+                    state.editor = Editor()
                 state.ready = True
                 startup = False
             else:
@@ -291,6 +402,7 @@ async def _drive_session(
                 if not state.pending:
                     continue
                 query = state.pending.popleft()
+                await _fail_pending_user_tools(context, state, path)
                 if state.pending:
                     state.changed.set()
                 # An explicit new query after a failed effect is not permission
@@ -298,6 +410,17 @@ async def _drive_session(
                 await _fail_pending_tools(
                     context, state, path, reason="an interrupted operation"
                 )
+                if state.closing:
+                    return
+                if isinstance(query, UserToolIntent):
+                    model = await _user_tool(query, model, context, state, path, args)
+                    state.set_phase("auth needed" if state.auth_required else "idle")
+                    continue
+                if model is None:
+                    state.editor = Editor(query, len(query))
+                    state.notice("Model authentication needed; use /login. Draft was not submitted.")
+                    state.set_phase("auth needed")
+                    continue
                 should_sample = True
             if state.closing:
                 return
@@ -307,7 +430,7 @@ async def _drive_session(
                 state.displays.extend(user.display_items())
             if should_sample:
                 await _turn(context, model, environment, state, path, args, options)
-            state.set_phase("idle")
+            state.set_phase("auth needed" if state.auth_required else "idle")
         except Exception as exc:
             state.exit_code = 1
             state.ready = True
@@ -332,7 +455,7 @@ async def _drive_session(
 
 
 async def _run(
-    model: Model,
+    model: Optional[Model],
     environment: Environment,
     terminal: PosixTerminal,
     args: argparse.Namespace,
@@ -344,8 +467,11 @@ async def _run(
         if args.max_tokens is not None else None
     )
     prompt = args.prompt or ""
-    state = _UIState(editor=Editor(prompt, len(prompt)))
-    state.notice("pythia.interaction — /quit or /exit; Ctrl-C/Ctrl-D exit.")
+    state = _UIState(
+        editor=Editor(prompt, len(prompt)), auth_required=model is None,
+        bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
+    )
+    state.notice("pythia.interaction — /login, /quota; /quit or /exit; Ctrl-C/Ctrl-D exit.")
     state.notice(
         "exec_command runs without a sandbox; use a trusted model and workspace."
     )
@@ -364,7 +490,14 @@ async def _run(
                     state.handle_key(key.key, key.data or "")
                 if terminal.closed:
                     state.request_exit()
-                busy = state.phase not in {"idle", "failed"}
+                while True:
+                    try:
+                        call_id, text = state.transient.get_nowait()
+                    except queue.Empty:
+                        break
+                    if call_id == state.active_user_call:
+                        state.notice(text)
+                busy = state.phase not in {"idle", "failed", "auth needed"}
                 status = (
                     "closing — waiting for current operation"
                     if state.closing else state.phase
@@ -412,7 +545,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ValueError("max_samples must be a positive integer or None")
         if args.max_tokens is not None:
             SamplingOptions(max_tokens=args.max_tokens)
-        model = build_model(args)
+        try:
+            model = build_model(args)
+        except CodexAuthUnavailable:
+            if not supports_account_services(args):
+                raise
+            model = None
         cwd = Path(args.cwd).expanduser().resolve()
         with DefaultEnvironment(cwd=cwd) as environment:
             terminal = PosixTerminal(sys.stdin, sys.stdout)

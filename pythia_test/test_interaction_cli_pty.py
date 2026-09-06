@@ -22,6 +22,7 @@ from pythia.interaction import ModelContext
 from pythia.interaction import SessionInit
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
+from pythia.interaction import UserToolResult
 from pythia.interaction import TurnSummary
 from pythia.interaction import load_interaction_session
 from pythia.interaction import save_interaction_session
@@ -98,7 +99,23 @@ class Model:
         count = sum(isinstance(i, Message) and i.role == "user" for i in context)
         return ModelSample(items=(Message("assistant", f"answer-{count}"),))
 
-cli.build_model = lambda args: Model()
+if failure in {"auth", "auth-cancel"}:
+    from functools import partial
+    from pythia.interaction import user_tools
+    from pythia.interaction.codex_login import login
+    build = cli.build_model
+    def build_when_authenticated(args):
+        build(args)  # Real routing/validation/loading, but no provider sampling.
+        return Model()
+    cli.build_model = build_when_authenticated
+    if failure == "auth":
+        def fake_login(path, **kwargs):
+            path.write_text(json.dumps({"tokens": {"access_token": "FAKE_PTY_SECRET", "account_id": "account"}}))
+        user_tools.login = fake_login
+    else:
+        user_tools.login = partial(login, callback_port=0)
+else:
+    cli.build_model = lambda args: Model()
 raise SystemExit(cli.main())
 '''
 
@@ -312,6 +329,40 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.start(failure="attach")
         await self.wait_exit(expected=1, paste_enabled=False)
         self.assertFalse((self.root / "interaction.jsonl").exists())
+
+    async def test_missing_auth_shell_login_then_explicit_query(self):
+        self.start("--model-api", "codex", "--model", "test", "--codex-auth-file",
+                   str(self.root / "auth.json"), "--prompt", "blocked initial", failure="auth")
+        await self.wait_output(b"auth needed")
+        os.write(self.master, b"\r")
+        await self.wait_output(b"Draft was not submitted")
+        os.write(self.master, b"\x15\x0b/login\r")
+        await self.wait_output(b"Model ready")
+        saved = load_interaction_session(self.root / "interaction.jsonl")
+        self.assertTrue(saved.items[-1].result.success)
+        self.assertIsInstance(saved.items[-1], UserToolResult)
+        self.assertFalse(any(isinstance(i, Message) and i.role == "user" for i in saved))
+        self.assertNotIn(b"[assistant] answer", self.output)
+        os.write(self.master, b"explicit query\r")
+        await self.wait_output(b"[assistant] answer-1")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit()
+        self.assertNotIn(b"FAKE_PTY_SECRET", self.output)
+        self.assertNotIn("FAKE_PTY_SECRET", (self.root / "interaction.jsonl").read_text())
+
+    async def test_exit_during_real_login_callback_wait_restores_terminal(self):
+        self.start("--model-api", "codex", "--model", "test", "--codex-auth-file",
+                   str(self.root / "auth.json"), failure="auth-cancel")
+        await self.wait_output(b"auth needed")
+        os.write(self.master, b"/login\r")
+        await self.wait_output(b"https://auth.openai.com/oauth/authorize?")
+        os.write(self.master, b"\x03")
+        await self.wait_exit()
+        saved = load_interaction_session(self.root / "interaction.jsonl")
+        self.assertFalse(saved.items[-1].result.success)
+        self.assertFalse(saved.pending_user_tool_calls())
+        self.assertFalse((self.root / "auth.json").exists())
+        self.assertNotIn("code_challenge", (self.root / "interaction.jsonl").read_text())
 
 
 if __name__ == "__main__":

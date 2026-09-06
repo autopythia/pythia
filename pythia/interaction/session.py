@@ -26,6 +26,8 @@ from .items import ToolResult
 from .items import TurnMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
+from .items import UserToolCall
+from .items import UserToolResult
 from .usage import TokenUsage
 
 
@@ -43,6 +45,8 @@ _ITEM_TYPES = {
     Reasoning: "reasoning",
     ToolCall: "tool_call",
     ToolResult: "tool_result",
+    UserToolCall: "user_tool_call",
+    UserToolResult: "user_tool_result",
     ModelSampleBoundary: "model_sample_boundary",
     TurnMetadata: "turn_metadata",
     TurnSummary: "turn_summary",
@@ -66,7 +70,11 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     """Encode an interaction item as a JSON-compatible dictionary."""
     encoded: Dict[str, Any] = {"type": _item_type_name(item)}
 
-    if isinstance(item, Instructions):
+    if isinstance(item, UserToolCall):
+        encoded["call"] = interaction_item_to_dict(item.call)
+    elif isinstance(item, UserToolResult):
+        encoded["result"] = interaction_item_to_dict(item.result)
+    elif isinstance(item, Instructions):
         encoded.update(text=item.text)
     elif isinstance(item, Message):
         encoded.update(role=item.role, text=item.text)
@@ -172,6 +180,10 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if not isinstance(item_type, str) or item_type not in _ITEM_TYPE_NAMES:
         raise SessionError(f"unknown interaction item type: {item_type!r}")
 
+    if item_type == "user_tool_call":
+        return UserToolCall(interaction_item_from_dict(mapping.get("call")))
+    if item_type == "user_tool_result":
+        return UserToolResult(interaction_item_from_dict(mapping.get("result")))
     if item_type == "instructions":
         return Instructions(
             text=_require_string(mapping.get("text"), "instructions.text"),

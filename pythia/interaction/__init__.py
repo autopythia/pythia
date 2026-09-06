@@ -2,6 +2,7 @@ from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
 from .codex_auth import CodexAuth
 from .codex_auth import CodexAuthError
+from .codex_auth import CodexAuthUnavailable
 from .codex_auth import load_codex_auth
 from .compaction import CompactionError
 from .compaction import CompactionResult
@@ -33,6 +34,8 @@ from .items import TurnMetadata
 from .items import TurnSummary
 from .items import summarize_turn_usage
 from .items import UserInteractionBoundary
+from .items import UserToolCall
+from .items import UserToolResult
 from .local_tools import CommandRuntime
 from .local_tools import PlanState
 from .local_tools import PlanStep
@@ -79,6 +82,7 @@ __all__ = [
     "ChatCompletionsModel",
     "CodexAuth",
     "CodexAuthError",
+    "CodexAuthUnavailable",
     "CODEX_RESPONSES_API_URL",
     "CodexResponsesModel",
     "CommandRuntime",
@@ -131,6 +135,8 @@ __all__ = [
     "ToolHandler",
     "ToolOutcome",
     "ToolResult",
+    "UserToolCall",
+    "UserToolResult",
     "ToolSpec",
     "TurnMetadata",
     "TurnSummary",

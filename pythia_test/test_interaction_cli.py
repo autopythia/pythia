@@ -345,7 +345,7 @@ class CLIControllerTests(_ControllerTestCase):
         terminal = _Terminal(frame)
         self.assertEqual(await self._run(model, terminal), 0)
         self.assertEqual(model.calls, [])
-        self.assertTrue(any("Unsupported command: /model" in i.text for i in terminal.items))
+        self.assertTrue(any("Unsupported command." in i.text for i in terminal.items))
 
     async def test_tool_results_are_checkpointed_individually_before_follow_up(self):
         calls = (ToolCall("record", "one", "{}"), ToolCall("record", "two", "{}"))

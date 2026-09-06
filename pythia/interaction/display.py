@@ -27,6 +27,8 @@ from .items import ToolResult
 from .items import TurnMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
+from .items import UserToolCall
+from .items import UserToolResult
 from .items import is_interaction_item
 
 
@@ -131,8 +133,10 @@ class InteractionItemRenderer:
         items: Iterable[InteractionItem],
         *,
         source_calls: Iterable[ToolCall] = (),
+        source_user_calls: Iterable[UserToolCall] = (),
     ) -> Tuple[DisplayItem, ...]:
         call_by_id = self._source_call_map(source_calls)
+        user_call_by_id = self._source_call_map(i.call for i in source_user_calls)
         rendered: List[DisplayItem] = []
 
         for index, item in enumerate(tuple(items)):
@@ -144,7 +148,15 @@ class InteractionItemRenderer:
 
             blocks: Tuple[str, ...]
             diff_block_indices: Set[int] = set()
-            if isinstance(item, Instructions):
+            if isinstance(item, UserToolCall):
+                user_call_by_id[item.call.call_id] = item.call
+                blocks = self._render_tool_call(item.call, diff_block_indices, user=True)
+            elif isinstance(item, UserToolResult):
+                blocks = self._render_tool_result(
+                    item.result, user_call_by_id.get(item.result.call_id),
+                    diff_block_indices, user=True,
+                )
+            elif isinstance(item, Instructions):
                 blocks = _render_instructions(item)
             elif isinstance(item, Message):
                 blocks = _render_message(item)
@@ -220,8 +232,10 @@ class InteractionItemRenderer:
         self,
         item: ToolCall,
         diff_block_indices: Set[int],
+        *, user: bool = False,
     ) -> Tuple[str, ...]:
-        label = _format_tool_call_label(item.name, item.call_id)
+        label = (f"[user-tool-call] {item.name} ({item.call_id})" if user
+                 else _format_tool_call_label(item.name, item.call_id))
         parsed, raw_arguments = _parse_tool_arguments(item.arguments_json)
         payload = parsed if isinstance(parsed, Mapping) else {}
 
@@ -242,7 +256,11 @@ class InteractionItemRenderer:
         if item.name == "update_plan":
             return (label,)
 
-        if self.show_generic_arguments:
+        if self.show_generic_arguments or user:
+            # Elide only empty user-call objects, not model debug arguments or
+            # falsy non-object values that may be useful in diagnostics.
+            if user and isinstance(parsed, Mapping) and not parsed:
+                return (label,)
             generic_arguments = _format_generic_arguments(
                 parsed,
                 raw_arguments,
@@ -257,11 +275,12 @@ class InteractionItemRenderer:
         item: ToolResult,
         source_call: Optional[ToolCall],
         diff_block_indices: Set[int],
+        *, user: bool = False,
     ) -> Tuple[str, ...]:
         name = source_call.name if source_call is not None else "tool"
         status = "ok" if item.success else "error"
         lines = [
-            _format_tool_result_label(
+            f"[user-tool-ret]  {name} ({item.call_id}) [{status}]" if user else _format_tool_result_label(
                 name,
                 item.call_id,
                 status=status,
@@ -302,6 +321,7 @@ def render_interaction_items(
     items: Iterable[InteractionItem],
     *,
     source_calls: Iterable[ToolCall] = (),
+    source_user_calls: Iterable[UserToolCall] = (),
     color: bool = True,
     show_generic_arguments: bool = False,
 ) -> Tuple[DisplayItem, ...]:
@@ -311,6 +331,7 @@ def render_interaction_items(
     ).render_items(
         items,
         source_calls=source_calls,
+        source_user_calls=source_user_calls,
     )
 
 

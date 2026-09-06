@@ -18,6 +18,10 @@ class CodexAuthError(ValueError):
     pass
 
 
+class CodexAuthUnavailable(CodexAuthError):
+    """Credential loading failed, as distinct from invalid path/config options."""
+
+
 @dataclass(frozen=True)
 class CodexAuth:
     access_token: str = field(repr=False)
@@ -110,22 +114,31 @@ def load_codex_auth(
     try:
         raw = resolved_auth_file.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise CodexAuthError(
+        raise CodexAuthUnavailable(
             f"Codex auth file not found: {resolved_auth_file}; "
             "run `codex login` to create or refresh it"
         ) from exc
     except OSError as exc:
-        raise CodexAuthError(
+        raise CodexAuthUnavailable(
             f"could not read Codex auth file {resolved_auth_file}: {exc}"
         ) from exc
+    except UnicodeError:
+        raise CodexAuthUnavailable("Codex credentials are not valid UTF-8") from None
 
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise CodexAuthError(
+        raise CodexAuthUnavailable(
             f"could not parse Codex auth file {resolved_auth_file}: {exc}"
         ) from exc
 
+    try:
+        return _auth_from_payload(payload, resolved_auth_file)
+    except CodexAuthError as exc:
+        raise CodexAuthUnavailable(str(exc)) from None
+
+
+def _auth_from_payload(payload: Any, resolved_auth_file: Path) -> CodexAuth:
     root = _require_mapping(payload, str(resolved_auth_file))
     tokens = _require_mapping(
         root.get("tokens"),
@@ -153,5 +166,6 @@ def load_codex_auth(
 __all__ = [
     "CodexAuth",
     "CodexAuthError",
+    "CodexAuthUnavailable",
     "load_codex_auth",
 ]
