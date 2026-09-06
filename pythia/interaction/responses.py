@@ -60,17 +60,48 @@ class _CodexModelRoute:
     api_model: str
     api_url: str = CODEX_RESPONSES_API_URL
     reasoning_effort: Optional[str] = None
+    reasoning_summary: Optional[str] = None
+    text_verbosity: Optional[str] = None
     api_key_environment_variable: Optional[str] = None
+    # Catalog context capacities in tokens, not Responses request parameters.
+    default_context_tokens: Optional[int] = None
+    max_context_tokens: Optional[int] = None
 
 
+# Context capacities follow codex-latest-20260904's models-manager/models.json.
 _CODEX_MODEL_ROUTES = {
+    "gpt-5.6-sol": _CodexModelRoute(
+        api_model="gpt-5.6-sol",
+        default_context_tokens=272_000,
+        max_context_tokens=872_000,
+    ),
     "gpt-5.6-sol-medium": _CodexModelRoute(
         api_model="gpt-5.6-sol",
         reasoning_effort="medium",
+        default_context_tokens=272_000,
+        max_context_tokens=872_000,
     ),
     "gpt-5.6-sol-max": _CodexModelRoute(
         api_model="gpt-5.6-sol",
         reasoning_effort="max",
+        default_context_tokens=272_000,
+        max_context_tokens=872_000,
+    ),
+    "gpt-6-astra": _CodexModelRoute(
+        api_model="gpt-6-astra",
+        reasoning_summary="auto",
+        text_verbosity="low",
+        default_context_tokens=272_000,
+        max_context_tokens=872_000,
+    ),
+    "gpt-6-astra-max": _CodexModelRoute(
+        api_model="gpt-6-astra",
+        reasoning_effort="max",
+        # The catalog default is no summary; this alias deliberately opts in.
+        reasoning_summary="auto",
+        text_verbosity="low",
+        default_context_tokens=272_000,
+        max_context_tokens=872_000,
     ),
     "muse-spark-1.3": _CodexModelRoute(
         api_model="muse-spark-1.3-contributor",
@@ -213,15 +244,15 @@ class _ProviderState:
     persist_session_id: bool = False
 
 
-def _resolve_request_model(
+def _resolve_request_route(
     endpoint: StreamingResponsesEndpoint,
-) -> Tuple[str, Optional[str]]:
+) -> _CodexModelRoute:
     if endpoint.api_provider != "codex":
-        return endpoint.model, None
+        return _CodexModelRoute(api_model=endpoint.model)
     route = _CODEX_MODEL_ROUTES.get(endpoint.model)
     if route is None:
-        return endpoint.model, None
-    return route.api_model, route.reasoning_effort
+        return _CodexModelRoute(api_model=endpoint.model)
+    return route
 
 
 def _resolve_default_codex_api_url(model: str) -> str:
@@ -1057,6 +1088,16 @@ class CodexResponsesModel:
         self._opener = opener or urllib.request.urlopen
         self._identifier_factory = identifier_factory or uuid.uuid4
 
+    @property
+    def default_context_tokens(self) -> Optional[int]:
+        """Catalog default window in tokens, or None if unknown; not enforced."""
+        return _resolve_request_route(self.endpoint).default_context_tokens
+
+    @property
+    def max_context_tokens(self) -> Optional[int]:
+        """Catalog window override ceiling in tokens, or None; not enforced."""
+        return _resolve_request_route(self.endpoint).max_context_tokens
+
     def _build_request_payload(
         self,
         context: ModelContext,
@@ -1075,11 +1116,9 @@ class CodexResponsesModel:
         else:
             provider_state = _ProviderState()
 
-        request_model, reasoning_effort = _resolve_request_model(
-            self.endpoint
-        )
+        request_route = _resolve_request_route(self.endpoint)
         payload: Dict[str, Any] = {
-            "model": request_model,
+            "model": request_route.api_model,
             "input": _encode_context_items(context.model_items()),
             "tools": _encode_tools(tools),
             "tool_choice": "auto",
@@ -1088,8 +1127,15 @@ class CodexResponsesModel:
             "stream": True,
             "include": ["reasoning.encrypted_content"],
         }
-        if reasoning_effort is not None:
-            payload["reasoning"] = {"effort": reasoning_effort}
+        reasoning: Dict[str, str] = {}
+        if request_route.reasoning_effort is not None:
+            reasoning["effort"] = request_route.reasoning_effort
+        if request_route.reasoning_summary is not None:
+            reasoning["summary"] = request_route.reasoning_summary
+        if reasoning:
+            payload["reasoning"] = reasoning
+        if request_route.text_verbosity is not None:
+            payload["text"] = {"verbosity": request_route.text_verbosity}
         if provider_state.session_id is not None:
             payload["prompt_cache_key"] = provider_state.session_id
         _apply_sampling_options(payload, options)

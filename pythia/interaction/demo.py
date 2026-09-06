@@ -329,8 +329,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         help=(
-            "model name; muse-spark-1.3 and muse-spark-1.3-xhigh use the "
-            "Meta Responses endpoint and META_API_KEY"
+            "model name; gpt-6-astra uses default reasoning effort, "
+            "gpt-6-astra-max selects maximum single-agent reasoning; "
+            "both use low verbosity; muse-spark-1.3 and "
+            "muse-spark-1.3-xhigh use the Meta Responses endpoint and "
+            "META_API_KEY"
         ),
     )
     parser.add_argument(

@@ -293,6 +293,40 @@ class CodexResponsesConstructionTests(unittest.TestCase):
         overridden = CodexResponsesModel(endpoint)
         self.assertIs(overridden.endpoint, endpoint)
 
+    def test_context_token_metadata_respects_model_and_provider_routes(self):
+        cases = (
+            ("gpt-5.6-sol", (272_000, 872_000)),
+            ("gpt-5.6-sol-medium", (272_000, 872_000)),
+            ("gpt-5.6-sol-max", (272_000, 872_000)),
+            ("gpt-6-astra", (272_000, 872_000)),
+            ("gpt-6-astra-max", (272_000, 872_000)),
+            ("muse-spark-1.3", (None, None)),
+            ("gpt-5.6-sol-high", (None, None)),
+            ("unknown-model", (None, None)),
+        )
+        for api_provider in ("codex", "api"):
+            for requested_model, codex_limits in cases:
+                with self.subTest(
+                    model=requested_model,
+                    api_provider=api_provider,
+                ):
+                    model = CodexResponsesModel(
+                        StreamingResponsesEndpoint(
+                            api_url="https://api.example.test/v1",
+                            model=requested_model,
+                            bearer_token="token",
+                            api_provider=api_provider,
+                        ),
+                    )
+
+                    self.assertEqual(
+                        (
+                            model.default_context_tokens,
+                            model.max_context_tokens,
+                        ),
+                        codex_limits if api_provider == "codex" else (None, None),
+                    )
+
     def test_muse_model_uses_meta_responses_endpoint_by_default(self):
         with mock.patch.dict(
             "os.environ",
@@ -502,6 +536,8 @@ class CodexResponsesModelTests(unittest.TestCase):
 
                 payload = _request_payload(opener)
                 self.assertEqual(payload["model"], expected_model)
+                self.assertNotIn("default_context_tokens", payload)
+                self.assertNotIn("max_context_tokens", payload)
                 if expected_effort is None:
                     self.assertNotIn("reasoning", payload)
                 else:
@@ -510,28 +546,72 @@ class CodexResponsesModelTests(unittest.TestCase):
                         {"effort": expected_effort},
                     )
 
+    def test_astra_models_set_reasoning_and_low_verbosity(self):
+        cases = (
+            ("gpt-6-astra", {"summary": "auto"}),
+            ("gpt-6-astra-max", {"effort": "max", "summary": "auto"}),
+        )
+        for requested_model, expected_reasoning in cases:
+            with self.subTest(model=requested_model):
+                opener = _ScriptedOpener(
+                    _FakeSSEResponse(
+                        _message_event(0, "done"),
+                        _completed_event(),
+                    )
+                )
+                model = CodexResponsesModel(
+                    model=requested_model,
+                    auth=CodexAuth(access_token="token"),
+                    opener=opener,
+                )
+
+                model.sample(
+                    ModelContext([Message(role="user", text="hello")])
+                )
+
+                request, _ = opener.calls[0]
+                payload = _request_payload(opener)
+                self.assertEqual(
+                    request.full_url,
+                    f"{CODEX_RESPONSES_API_URL}/responses",
+                )
+                self.assertEqual(payload["model"], "gpt-6-astra")
+                self.assertEqual(payload["reasoning"], expected_reasoning)
+                self.assertEqual(payload["text"], {"verbosity": "low"})
+                self.assertNotIn("default_context_tokens", payload)
+                self.assertNotIn("max_context_tokens", payload)
+
     def test_reasoning_model_aliases_are_not_applied_to_generic_responses(self):
-        opener = _ScriptedOpener(
-            _FakeSSEResponse(
-                _message_event(0, "done"),
-                _completed_event(),
-            )
-        )
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
-                api_url="https://api.example.test/v1",
-                model="gpt-5.6-sol-max",
-                bearer_token="api-key",
-                api_provider="api",
-            ),
-            opener=opener,
-        )
+        for requested_model in (
+            "gpt-5.6-sol-max",
+            "gpt-6-astra",
+            "gpt-6-astra-max",
+        ):
+            with self.subTest(model=requested_model):
+                opener = _ScriptedOpener(
+                    _FakeSSEResponse(
+                        _message_event(0, "done"),
+                        _completed_event(),
+                    )
+                )
+                model = CodexResponsesModel(
+                    StreamingResponsesEndpoint(
+                        api_url="https://api.example.test/v1",
+                        model=requested_model,
+                        bearer_token="api-key",
+                        api_provider="api",
+                    ),
+                    opener=opener,
+                )
 
-        model.sample(ModelContext([Message(role="user", text="hello")]))
+                model.sample(
+                    ModelContext([Message(role="user", text="hello")])
+                )
 
-        payload = _request_payload(opener)
-        self.assertEqual(payload["model"], "gpt-5.6-sol-max")
-        self.assertNotIn("reasoning", payload)
+                payload = _request_payload(opener)
+                self.assertEqual(payload["model"], requested_model)
+                self.assertNotIn("reasoning", payload)
+                self.assertNotIn("text", payload)
 
     def test_muse_models_route_to_contributor_model_and_reasoning(self):
         cases = (
