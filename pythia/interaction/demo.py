@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Optional
 from typing import Sequence
 from typing import Union
 
-from .chat_completions import ChatCompletionsEndpoint
-from .chat_completions import ChatCompletionsModel
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
@@ -24,11 +21,9 @@ from .items import summarize_turn_usage
 from .items import UserInteractionBoundary
 from .model import Model
 from .model import SamplingOptions
-from .messages import ANTHROPIC_MESSAGES_API_URL
-from .messages import MessagesEndpoint
-from .messages import MessagesModel
-from .messages import MessagesServerCompaction
-from .responses import CodexResponsesModel
+from .model_config import DEFAULT_SESSION_PATH
+from .model_config import build_model
+from .model_config import build_parser
 from .session import load_interaction_session
 from .session import save_interaction_session
 from .user import UserInteraction
@@ -44,7 +39,6 @@ DEFAULT_PROMPT = "Summarize the repository in the current working directory."
 # DEFAULT_PROMPT = "Here is the log (demo.log.1) for a recent run of the pythia/interaction demo. Let's review the investigation of why there appears to be no interleaved assistant reasoning/response text but only tool calls, and implement a narrow fix for reasoning (no system message change). (Note that we should support both \"reasoning_content\" and \"reasoning\", as the former is still returned by some inference engines (although we might prioritize the latter if it exists and is non-null/non-empty)."
 # DEFAULT_PROMPT = "Here is the log (demo.log.1) for a recent run of the pythia/interaction demo. Notice that the blocks (`[user] ...`, `[assistant] ...`, etc.) are not left-indented/delimited like in the existing autopythia/contradex implementation. Let's investigate and plan to re-add the same left-indentation/decoration to pythia.interaction as part of the display item impl."
 # DEFAULT_PROMPT = "In pythia.interaction is the model context (list of interaction items) sufficient state for saving/resuming sessions? (Pending/interrupted tool calls/results might pose an issue, but we can ignore those for now so long as those interrupted calls can be swept over on resume.) Assuming sufficiency, let's implement initial support for saving the current session (in interaction.jsonl), and optionally resuming from it by passing --resume to the demo (let's also keep the working tree changes to the demo)."
-DEFAULT_SESSION_PATH = Path("interaction.jsonl")
 
 
 def run(
@@ -223,171 +217,14 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
 
 
 def _build_model(args: argparse.Namespace) -> Model:
-    messages_compaction_options_requested = any(
-        (
-            args.messages_server_compaction,
-            args.messages_compaction_trigger_tokens is not None,
-            args.messages_pause_after_compaction,
-            args.messages_compaction_instructions is not None,
-        )
-    )
-    if args.model_api != "messages" and messages_compaction_options_requested:
-        raise ValueError(
-            "Messages compaction options require --model-api messages"
-        )
-
-    if args.model_api == "chat-completions":
-        if args.codex_home is not None or args.codex_auth_file is not None:
-            raise ValueError(
-                "--codex-home and --codex-auth-file require "
-                "--model-api codex-responses"
-            )
-        endpoint = ChatCompletionsEndpoint(
-            api_url=args.api_url or "http://127.0.0.1:8000",
-            model=args.model,
-            request_timeout_seconds=args.request_timeout_seconds,
-            api_key=args.api_key,
-        )
-        return ChatCompletionsModel(endpoint)
-
-    if args.model_api == "messages":
-        if args.codex_home is not None or args.codex_auth_file is not None:
-            raise ValueError(
-                "--codex-home and --codex-auth-file require "
-                "--model-api codex-responses"
-            )
-        if args.model is None or not args.model.strip():
-            raise ValueError("--model is required with --model-api messages")
-        compaction_options = (
-            MessagesServerCompaction(
-                trigger_input_tokens=(
-                    args.messages_compaction_trigger_tokens
-                ),
-                pause_after_compaction=(
-                    args.messages_pause_after_compaction
-                ),
-                instructions=args.messages_compaction_instructions,
-            )
-            if args.messages_server_compaction
-            else None
-        )
-        if compaction_options is None and any(
-            (
-                args.messages_compaction_trigger_tokens is not None,
-                args.messages_pause_after_compaction,
-                args.messages_compaction_instructions is not None,
-            )
-        ):
-            raise ValueError(
-                "Messages compaction options require "
-                "--messages-server-compaction"
-            )
-        endpoint = MessagesEndpoint(
-            api_url=args.api_url or ANTHROPIC_MESSAGES_API_URL,
-            model=args.model,
-            request_timeout_seconds=args.request_timeout_seconds,
-            api_key=args.api_key or os.environ.get("ANTHROPIC_API_KEY"),
-            server_compaction=compaction_options,
-        )
-        return MessagesModel(endpoint)
-
-    if args.model_api in ("codex", "codex-responses"):
-        if args.api_key is not None:
-            raise ValueError(
-                "--api-key is not used with --model-api codex-responses; "
-                "use an existing Codex login"
-            )
-        if args.model is None or not args.model.strip():
-            raise ValueError(
-                "--model is required with --model-api codex-responses"
-            )
-        return CodexResponsesModel(
-            model=args.model,
-            api_url=args.api_url,
-            request_timeout_seconds=args.request_timeout_seconds,
-            codex_home=args.codex_home,
-            auth_file=args.codex_auth_file,
-        )
-
-    raise ValueError(f"unsupported model API: {args.model_api!r}")
+    return build_model(args)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Ask a Chat Completions, Messages, or Codex Responses model to "
-            "summarize a repository using Pythia's default local tools."
-        ),
+    return build_parser(
+        "Ask a Chat Completions, Messages, or Codex Responses model to "
+        "summarize a repository using Pythia's default local tools."
     )
-    parser.add_argument(
-        "--model-api",
-        choices=("chat-completions", "messages", "codex", "codex-responses"),
-        default="chat-completions",
-        help="model API (codex is shorthand for codex-responses)",
-    )
-    parser.add_argument("--api-url")
-    parser.add_argument(
-        "--model",
-        help=(
-            "model name; gpt-6-astra uses default reasoning effort, "
-            "gpt-6-astra-max selects maximum single-agent reasoning; "
-            "both use low verbosity; muse-spark-1.3 and "
-            "muse-spark-1.3-xhigh use the Meta Responses endpoint and "
-            "META_API_KEY"
-        ),
-    )
-    parser.add_argument(
-        "--api-key",
-        default=None,
-        help="API key (Messages defaults to ANTHROPIC_API_KEY)",
-    )
-    parser.add_argument("--codex-home")
-    parser.add_argument("--codex-auth-file")
-    parser.add_argument(
-        "--messages-server-compaction",
-        action="store_true",
-        help="enable Anthropic Messages server-side compaction",
-    )
-    parser.add_argument(
-        "--messages-compaction-trigger-tokens",
-        type=int,
-        help="server compaction threshold (minimum 50000)",
-    )
-    parser.add_argument(
-        "--messages-pause-after-compaction",
-        action="store_true",
-        help="pause and resample after the server creates a compaction block",
-    )
-    parser.add_argument("--messages-compaction-instructions")
-    parser.add_argument("--cwd", default=".")
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=None,
-        help="maximum model samples; unlimited when omitted",
-    )
-    parser.add_argument("--max-tokens", type=int)
-    parser.add_argument(
-        "--request-timeout-seconds",
-        type=float,
-        default=60.0,
-    )
-    parser.add_argument("--prompt")
-    parser.add_argument(
-        "--instructions",
-        default=None,
-        help=(
-            "Optional system instructions (Chat Completions system message). "
-            "Empty string is preserved; omit to send none. "
-            "On --resume, appends an override."
-        ),
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="resume interaction.jsonl instead of starting a new session",
-    )
-    return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

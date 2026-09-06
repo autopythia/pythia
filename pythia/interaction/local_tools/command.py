@@ -284,28 +284,37 @@ class CommandRuntime:
             text=False,
             start_new_session=os.name == "posix",
         )
-        if process.stdout is not None:
-            os.set_blocking(process.stdout.fileno(), False)
-
-        output = self._read_process_output(process, wait_seconds)
-        exit_code = process.poll()
         session_id = None
-        if exit_code is None:
-            session_id = self._next_session(process, workdir, cmd)
-        else:
-            self._close_process_pipes(process)
+        try:
+            if process.stdout is not None:
+                os.set_blocking(process.stdout.fileno(), False)
 
-        return ToolOutcome(
-            output=self._format_response(
-                chunk_id=self._next_chunk(),
-                wall_time_seconds=time.monotonic() - started_at,
-                exit_code=exit_code,
-                session_id=session_id,
-                output=output,
-                max_output_tokens=max_output_tokens,
-            ),
-            success=True,
-        )
+            output = self._read_process_output(process, wait_seconds)
+            exit_code = process.poll()
+            if exit_code is None:
+                session_id = self._next_session(process, workdir, cmd)
+            else:
+                self._close_process_pipes(process)
+
+            return ToolOutcome(
+                output=self._format_response(
+                    chunk_id=self._next_chunk(),
+                    wall_time_seconds=time.monotonic() - started_at,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    output=output,
+                    max_output_tokens=max_output_tokens,
+                ),
+                success=True,
+            )
+        except BaseException:
+            # A read/setup/formatting failure must not leave a child for which
+            # no usable handle was returned (possibly not registered yet).
+            if session_id is not None:
+                with self._lock:
+                    self._sessions.pop(session_id, None)
+            self._terminate_process(process)
+            raise
 
     def write_stdin(
         self,

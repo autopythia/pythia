@@ -15,11 +15,13 @@ from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
+from pythia.interaction import SessionError
 from pythia.interaction import SessionInit
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import TokenUsage
 from pythia.interaction import TurnMetadata
+from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import interaction_item_from_dict
 from pythia.interaction import interaction_item_to_dict
@@ -29,6 +31,21 @@ from pythia.interaction.demo import run_repository_summary
 
 
 class SessionTests(unittest.TestCase):
+    def test_atomic_save_failures_preserve_previous_log_and_remove_temporary_file(self):
+        for failure in ("tempfile.NamedTemporaryFile", "os.fsync", "os.replace"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "interaction.jsonl"
+                original = ModelContext((SessionInit("old"),))
+                save_interaction_session(path, original)
+                old_bytes = path.read_bytes()
+                with mock.patch("pythia.interaction.session." + failure,
+                                side_effect=OSError("injected disk failure")):
+                    with self.assertRaisesRegex(SessionError, "injected disk failure"):
+                        save_interaction_session(path, ModelContext((SessionInit("new"),)))
+                self.assertEqual(path.read_bytes(), old_bytes)
+                self.assertEqual(load_interaction_session(path).items, original.items)
+                self.assertEqual(tuple(path.parent.glob(".interaction.jsonl.*.tmp")), ())
+
     def test_session_init_is_first_and_round_trips(self):
         context = ModelContext(
             (
@@ -133,6 +150,16 @@ class SessionTests(unittest.TestCase):
                     Message(role="assistant", text="answer"),
                     ModelSampleBoundary(),
                 )
+            ),
+            TurnSummary(
+                input_tokens_sum=20,
+                output_tokens_sum=5,
+                cached_input_tokens_sum=4,
+                cached_input_tokens_max=4,
+                non_cached_input_tokens_sum=16,
+                context_tokens=25,
+                sample_count=1,
+                compaction_count=3,
             ),
         )
         context = ModelContext(items)
@@ -371,16 +398,22 @@ class SessionResumeTests(unittest.TestCase):
 
         self.assertEqual(summary, "resumed answer")
         self.assertEqual(len(model.contexts), 1)
+        tool_result = model.contexts[0].items[-1]
+        self.assertIsInstance(tool_result, ToolResult)
+        self.assertEqual(tool_result.call_id, call.call_id)
+        self.assertTrue(tool_result.success)
+        self.assertIn("swept", tool_result.output)
         self.assertEqual(
-            tuple(type(item) for item in resumed.items[-4:]),
+            resumed.items,
             (
-                ToolResult,
-                Message,
-                TurnMetadata,
-                ModelSampleBoundary,
+                *interrupted.items,
+                tool_result,
+                Message(role="assistant", text="resumed answer"),
+                TurnMetadata(usage=TokenUsage()),
+                ModelSampleBoundary(),
+                TurnSummary(sample_count=1),
             ),
         )
-        self.assertIn("swept", resumed.items[-4].output)
 
 
 if __name__ == "__main__":

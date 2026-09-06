@@ -183,6 +183,30 @@ class PlanToolTests(unittest.TestCase):
 
 
 class CommandToolTests(unittest.TestCase):
+    def test_exec_failure_cleans_up_child_before_and_after_session_registration(self):
+        for method in ("_read_process_output", "_format_response"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmpdir:
+                with CommandRuntime(tmpdir) as runtime:
+                    terminated = []
+                    terminate = runtime._terminate_process
+
+                    def cleanup(process):
+                        terminate(process)
+                        terminated.append(process)
+
+                    environment = Environment((create_exec_command_tool(runtime),))
+                    with mock.patch.object(runtime, method, side_effect=OSError("injected failure")):
+                        with mock.patch.object(runtime, "_terminate_process", side_effect=cleanup):
+                            result = _execute(environment, "exec_command", "one", {
+                                "cmd": "read line", "yield_time_ms": 0,
+                            })
+                    self.assertFalse(result.success)
+                    self.assertEqual(runtime.active_session_ids, ())
+                    self.assertEqual(len(terminated), 1)
+                    self.assertIsNotNone(terminated[0].poll())
+                    self.assertTrue(terminated[0].stdin.closed)
+                    self.assertTrue(terminated[0].stdout.closed)
+
     def test_default_shell_falls_back_to_bash(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {}, clear=True):
@@ -910,16 +934,15 @@ class DemoTests(unittest.TestCase):
             )
             self.assertIn("README.md", rendered[3])
             self.assertEqual(
-                rendered[4],
-                "[assistant] The repository contains a README and Python "
-                "source.",
+                rendered[4:],
+                (
+                    "[assistant] The repository contains a README and Python "
+                    "source.",
+                    "[turn] usage input=0 output=0 total=0 cached=0",
+                    "[turn summary] input_sum=0 output_sum=0 cached_sum=0 "
+                    "cached_max=0 cold_sum=0 context=0 samples=2 compactions=0",
+                ),
             )
-            self.assertEqual(
-                rendered[5],
-                "[turn] usage input=0 output=0 total=0 cached=0",
-            )
-            self.assertNotEqual(rendered[5], rendered[4])
-            self.assertEqual(len(rendered), 6)
 
     def test_repository_summary_demo_bounds_tool_loop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
