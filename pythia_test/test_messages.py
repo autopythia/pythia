@@ -29,6 +29,7 @@ from pythia.interaction import UserInteractionBoundary
 from pythia.interaction.demo import _build_model
 from pythia.interaction.demo import _build_parser
 from pythia.interaction.demo import run
+from pythia.interaction.experimental_tools import create_inject_user_message_tool
 
 
 class _FakeResponse:
@@ -326,6 +327,37 @@ class MessagesModelTests(unittest.TestCase):
         self.assertEqual(sample.usage.total_tokens, 36)
         self.assertEqual(sample.usage.cached_input_tokens, 4)
         self.assertTrue(response.closed)
+
+    def test_injected_message_is_user_text_after_tool_result_block(self):
+        tool = create_inject_user_message_tool()
+        call = ToolCall(tool.spec.name, "inject-1", "{}")
+        context = ModelContext((Message("user", "Run the experiment."),))
+        context.extend(ModelSample(items=(call,)).context_items())
+        environment = Environment((tool,))
+        context.extend(environment.execute_tool_calls((call,)).context_items())
+        opener = _Opener(_FakeResponse({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "received: hello world"}],
+            "stop_reason": "end_turn",
+        }))
+        model = MessagesModel(
+            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            opener=opener,
+        )
+        model.sample(context, tools=environment.tool_specs)
+        self.assertEqual(_payload(opener)["messages"][-1], {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call.call_id,
+                    "content": "Synthetic user message queued.",
+                    "is_error": False,
+                },
+                {"type": "text", "text": "hello world"},
+            ],
+        })
 
     def test_uses_default_tokens_and_omits_optional_fields(self):
         opener = _Opener(

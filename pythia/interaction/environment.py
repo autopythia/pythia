@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from typing import Tuple
 
 from .items import InteractionItem
+from .items import Message
 from .items import ToolCall
 from .items import ToolResult
 
@@ -51,16 +52,39 @@ class ToolSpec:
         object.__setattr__(self, "parameters", dict(self.parameters))
 
 
+def _validate_user_messages(messages: Iterable[Message]) -> Tuple[Message, ...]:
+    messages = tuple(messages)
+    for index, message in enumerate(messages):
+        if not isinstance(message, Message) or message.role != "user":
+            raise EnvironmentError(
+                f"user_messages[{index}] must be a user-role Message"
+            )
+    return messages
+
+
 @dataclass(frozen=True)
 class ToolOutcome:
+    """Tool output plus optional synthetic user messages for the caller to append.
+
+    Messages are explicit, trusted handler data, never parsed from output text.
+    They are permitted only on successful outcomes and do not start a new turn.
+    """
+
     output: str
     success: bool = True
+    user_messages: Tuple[Message, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.output, str):
             raise TypeError("tool output must be a string")
         if not isinstance(self.success, bool):
             raise TypeError("tool success must be a bool")
+        messages = _validate_user_messages(self.user_messages)
+        if messages and not self.success:
+            raise EnvironmentError(
+                "unsuccessful tool outcomes must not contain user messages"
+            )
+        object.__setattr__(self, "user_messages", messages)
 
 
 class ToolHandler(Protocol):
@@ -100,7 +124,16 @@ class Tool:
 
 @dataclass(frozen=True)
 class EnvironmentResult:
+    """A tool-result batch followed by optional synthetic user messages.
+
+    ``items`` remains tool-result-only. Append ``context_items()`` as one batch
+    and checkpoint it before sampling. When tools can return user messages,
+    execute the entire pending call batch, not one call at a time: messages
+    cannot be appended while other tool calls remain unresolved.
+    """
+
     items: Tuple[InteractionItem, ...]
+    user_messages: Tuple[Message, ...] = ()
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -111,9 +144,17 @@ class EnvironmentResult:
                     f"item {index} is {type(item).__name__}"
                 )
         object.__setattr__(self, "items", items)
+        messages = _validate_user_messages(self.user_messages)
+        if messages and not any(item.success for item in items):
+            raise EnvironmentError(
+                "user messages require a successful tool result"
+            )
+        object.__setattr__(self, "user_messages", messages)
 
     def context_items(self) -> Tuple[InteractionItem, ...]:
-        return self.items
+        # No UserInteractionBoundary: synthetic messages continue the current
+        # turn, including its provider continuity metadata.
+        return (*self.items, *self.user_messages)
 
     def display_items(
         self,
@@ -123,7 +164,7 @@ class EnvironmentResult:
         from .display import render_interaction_items
 
         return render_interaction_items(
-            self.items,
+            self.context_items(),
             source_calls=source_calls,
         )
 
@@ -169,6 +210,7 @@ class Environment:
             seen_call_ids.add(call.call_id)
 
         results = []
+        user_messages = []
         for call in ordered_calls:
             try:
                 parsed_arguments = json.loads(call.arguments_json)
@@ -234,8 +276,13 @@ class Environment:
                     success=outcome.success,
                 )
             )
+            if outcome.success:
+                user_messages.extend(outcome.user_messages)
 
-        return EnvironmentResult(items=tuple(results))
+        return EnvironmentResult(
+            items=tuple(results),
+            user_messages=tuple(user_messages),
+        )
 
 
 __all__ = [

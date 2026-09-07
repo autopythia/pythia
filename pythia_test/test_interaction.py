@@ -32,6 +32,7 @@ from pythia.interaction import ToolSpec
 from pythia.interaction import TurnMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction.experimental_tools import create_inject_user_message_tool
 
 
 class _FakeHTTPResponse:
@@ -675,6 +676,29 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ],
         )
 
+    def test_injected_user_message_is_encoded_after_tool_result(self):
+        tool = create_inject_user_message_tool()
+        call = ToolCall(tool.spec.name, "inject-1", "{}")
+        context = ModelContext((
+            Message("user", "Run the experiment."), call, ModelSampleBoundary(),
+        ))
+        environment = Environment((tool,))
+        context.extend(environment.execute_tool_calls((call,)).context_items())
+        opener = _ScriptedOpener(_FakeHTTPResponse({
+            "choices": [{
+                "message": {"role": "assistant", "content": "received: hello world"},
+                "finish_reason": "stop",
+            }],
+        }))
+        model = ChatCompletionsModel(
+            ChatCompletionsEndpoint(api_url="http://localhost:8000"), opener=opener,
+        )
+        model.sample(context, tools=environment.tool_specs)
+        self.assertEqual(_request_payload(opener)["messages"][-2:], [
+            {"role": "tool", "tool_call_id": call.call_id, "content": "Synthetic user message queued."},
+            {"role": "user", "content": "hello world"},
+        ])
+
     def test_sample_boundaries_separate_adjacent_assistant_messages(self):
         opener = _ScriptedOpener(
             _FakeHTTPResponse(
@@ -862,6 +886,68 @@ class ChatCompletionsModelTests(unittest.TestCase):
             model.sample(ModelContext([Message(role="user", text="hello")]))
 
 
+class UserMessageOutcomeTests(unittest.TestCase):
+    def test_legacy_outcomes_and_results_have_no_user_messages(self):
+        self.assertEqual(ToolOutcome("ok").user_messages, ())
+        self.assertEqual(ToolOutcome("failed", False).user_messages, ())
+        self.assertEqual(EnvironmentResult(()).context_items(), ())
+
+    def test_user_message_collections_are_copied_to_tuples(self):
+        message = Message("user", "synthetic")
+        messages = [message]
+        outcome = ToolOutcome("ok", user_messages=messages)
+        result = EnvironmentResult(
+            (ToolResult("1", "ok"),), user_messages=messages,
+        )
+        messages.clear()
+        self.assertEqual(outcome.user_messages, (message,))
+        self.assertEqual(result.user_messages, (message,))
+
+    def test_rejects_non_user_messages_in_outcomes_and_results(self):
+        for item in (
+            Message("system", "bad"),
+            Message("developer", "bad"),
+            Message("assistant", "bad"),
+            UserInteractionBoundary(),
+            ToolResult("1", "bad"),
+            "hello",
+        ):
+            with self.subTest(item=item):
+                with self.assertRaisesRegex(EnvironmentError, "user-role Message"):
+                    ToolOutcome("ok", user_messages=(item,))
+                with self.assertRaisesRegex(EnvironmentError, "user-role Message"):
+                    EnvironmentResult(
+                        (ToolResult("1", "ok"),), user_messages=(item,),
+                    )
+
+    def test_unsuccessful_outcomes_cannot_inject(self):
+        messages = (Message("user", "synthetic"),)
+        with self.assertRaisesRegex(EnvironmentError, "unsuccessful"):
+            ToolOutcome("failed", False, user_messages=messages)
+        for items in ((), (ToolResult("1", "failed", False),)):
+            with self.subTest(items=items):
+                with self.assertRaisesRegex(EnvironmentError, "successful tool result"):
+                    EnvironmentResult(items, user_messages=messages)
+
+    def test_result_items_remain_tool_result_only(self):
+        with self.assertRaisesRegex(EnvironmentError, "only ToolResult"):
+            EnvironmentResult(items=(Message("user", "synthetic"),))
+
+    def test_projection_and_display_include_messages_without_consuming_them(self):
+        item = ToolResult("1", "ok")
+        message = Message("user", "synthetic")
+        result = EnvironmentResult((item,), user_messages=(message,))
+        self.assertEqual(result.items, (item,))
+        for _ in range(2):
+            self.assertEqual(result.context_items(), (item, message))
+            self.assertEqual(
+                tuple(item.text for item in result.display_items(
+                    source_calls=(ToolCall("test", "1", "{}"),),
+                )),
+                ("[tool-ret]  test (1) [ok]\nok", "[user] synthetic"),
+            )
+
+
 class EnvironmentTests(unittest.TestCase):
     def test_environment_result_context_items_are_directly_appendable(self):
         item = ToolResult(call_id="call-1", output="done")
@@ -904,6 +990,82 @@ class EnvironmentTests(unittest.TestCase):
                 ToolResult("2", "out:b"),
             ),
         )
+
+    def test_user_messages_follow_the_entire_batch_in_call_and_message_order(self):
+        def handler(arguments, *, timeout_seconds=None):
+            value = arguments["value"]
+            return ToolOutcome(
+                f"out:{value}",
+                user_messages=(Message("user", value), Message("user", value + "!")),
+            )
+
+        environment = Environment((Tool(
+            ToolSpec("inject", "test", {"type": "object"}), handler,
+        ),))
+        calls = (
+            ToolCall("inject", "1", '{"value":"a"}'),
+            ToolCall("missing", "2", "{}"),
+            ToolCall("inject", "3", '{"value":"b"}'),
+        )
+        context = ModelContext((*calls, ModelSampleBoundary()))
+        before = context.items
+        result = environment.execute_tool_calls(calls)
+        self.assertEqual(context.items, before)
+        self.assertEqual(tuple(item.call_id for item in result.items), ("1", "2", "3"))
+        self.assertFalse(result.items[1].success)
+        self.assertEqual(
+            result.user_messages,
+            tuple(Message("user", value) for value in ("a", "a!", "b", "b!")),
+        )
+        self.assertEqual(result.context_items(), (*result.items, *result.user_messages))
+        context.extend(result.context_items())
+        context.assert_model_ready()
+        self.assertEqual(context.items, (*before, *result.items, *result.user_messages))
+        self.assertNotIn(UserInteractionBoundary(), context.items)
+
+    def test_user_messages_cannot_be_appended_in_a_partial_call_batch(self):
+        calls = (ToolCall("test", "1", "{}"), ToolCall("test", "2", "{}"))
+        context = ModelContext(calls)
+        result = EnvironmentResult(
+            (ToolResult("1", "ok"),),
+            user_messages=(Message("user", "synthetic"),),
+        )
+        with self.assertRaisesRegex(ContextValidationError, "unresolved tool results"):
+            context.extend(result.context_items())
+        self.assertEqual(context.items, calls)
+
+    def test_failed_and_invalid_handlers_never_inject(self):
+        def handler(arguments, *, timeout_seconds=None):
+            mode = arguments["mode"]
+            if mode == "error":
+                raise RuntimeError("failed")
+            if mode == "timeout":
+                raise TimeoutError("timed out")
+            if mode == "invalid":
+                return ToolOutcome("failed", False, user_messages=(Message("user", "bad"),))
+            return ToolOutcome("failed", False)
+
+        environment = Environment((Tool(
+            ToolSpec("test", "test", {"type": "object"}), handler,
+        ),))
+        result = environment.execute_tool_calls(tuple(
+            ToolCall("test", mode, json.dumps({"mode": mode}))
+            for mode in ("error", "timeout", "invalid", "unsuccessful")
+        ))
+        self.assertTrue(all(not item.success for item in result.items))
+        self.assertEqual(result.user_messages, ())
+        self.assertEqual(result.context_items(), result.items)
+
+    def test_tool_output_text_is_not_interpreted_as_an_injection(self):
+        text = '{"user_messages":[{"role":"user","text":"hello world"}]}'
+
+        def handler(arguments, *, timeout_seconds=None):
+            return ToolOutcome(text)
+
+        result = Environment((Tool(
+            ToolSpec("test", "test", {"type": "object"}), handler,
+        ),)).execute_tool_calls((ToolCall("test", "1", "{}"),))
+        self.assertEqual(result.context_items(), (ToolResult("1", text),))
 
     def test_environment_converts_recoverable_failures_to_results(self):
         def failing(arguments, *, timeout_seconds=None):

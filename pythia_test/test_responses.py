@@ -12,6 +12,7 @@ from pythia.interaction import CODEX_RESPONSES_API_URL
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import Environment
 from pythia.interaction import Init
 from pythia.interaction import META_RESPONSES_API_URL
 from pythia.interaction import Message
@@ -28,11 +29,15 @@ from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
 from pythia.interaction import TurnMetadata
 from pythia.interaction import UserInteraction
+from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import load_interaction_save
 from pythia.interaction import save_interaction_save
 from pythia.interaction.demo import DEFAULT_PROMPT
+from pythia.interaction.demo import EXPERIMENTAL_USER_MESSAGE_PROMPT
 from pythia.interaction.demo import _build_model
 from pythia.interaction.demo import _build_parser
+from pythia.interaction.demo import run
+from pythia.interaction.experimental_tools import create_inject_user_message_tool
 
 
 def _event_lines(payload, *, event_name=None, crlf=False):
@@ -811,6 +816,74 @@ class CodexResponsesModelTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_sol_medium_experiment_encodes_user_message_and_preserves_turn(self):
+        tool = create_inject_user_message_tool()
+        opener = _ScriptedOpener(
+            _FakeSSEResponse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "name": tool.spec.name,
+                        "call_id": "inject-1",
+                        "arguments": "{}",
+                    },
+                },
+                _completed_event(),
+                headers={"x-codex-turn-state": "sticky-state"},
+            ),
+            _FakeSSEResponse(
+                _message_event(0, "received: hello world"), _completed_event(),
+            ),
+        )
+        model = CodexResponsesModel(
+            model="gpt-5.6-sol-medium",
+            auth=CodexAuth(access_token="test-token"),
+            opener=opener,
+            # A second generated turn ID would exhaust the iterator.
+            identifier_factory=iter(("turn-1",)).__next__,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment.jsonl"
+            with mock.patch("builtins.print"):
+                answer = run(
+                    model, Environment((tool,)),
+                    prompt=EXPERIMENTAL_USER_MESSAGE_PROMPT,
+                    max_samples=2, save_path=path,
+                )
+            restored = load_interaction_save(path)
+        self.assertEqual(answer, "received: hello world")
+        self.assertEqual(len(opener.calls), 2)
+        for index in (0, 1):
+            payload = _request_payload(opener, index)
+            self.assertEqual(payload["model"], "gpt-5.6-sol")
+            self.assertEqual(payload["reasoning"], {"effort": "medium"})
+            self.assertEqual(payload["tool_choice"], "auto")
+            self.assertEqual(tuple(spec["name"] for spec in payload["tools"]), (tool.spec.name,))
+        self.assertNotIn("hello world", json.dumps(_request_payload(opener, 0)))
+        self.assertEqual(_request_payload(opener, 1)["input"][-2:], [
+            {
+                "type": "function_call_output",
+                "call_id": "inject-1",
+                "output": "Synthetic user message queued.",
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello world"}],
+            },
+        ])
+        first_headers = _request_headers(opener, 0)
+        second_headers = _request_headers(opener, 1)
+        self.assertEqual(second_headers["session_id"], first_headers["session_id"])
+        self.assertEqual(second_headers["x-codex-turn-state"], "sticky-state")
+        self.assertEqual(
+            json.loads(second_headers["x-codex-turn-metadata"])["turn_id"], "turn-1",
+        )
+        self.assertEqual(restored.items.count(Message("user", "hello world")), 1)
+        self.assertEqual(restored.items.count(UserInteractionBoundary()), 1)
 
     def test_context_owns_sticky_turn_state_and_resets_it_for_new_user_turn(self):
         first_response = _FakeSSEResponse(

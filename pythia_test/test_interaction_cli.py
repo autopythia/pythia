@@ -177,7 +177,7 @@ for module in (cli, demo):
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_parser_matches_demo_defaults_and_overrides(self):
+    def test_parser_matches_shared_demo_defaults_and_overrides(self):
         for argv in (
             [],
             ["--model-api", "codex", "--model", "gpt-6-astra", "--resume",
@@ -185,10 +185,15 @@ for module in (cli, demo):
              "--max-samples", "3", "--max-tokens", "77", "--cwd", "work",
              "--save", "chosen.jsonl"],
         ):
-            self.assertEqual(
-                vars(cli._build_parser().parse_args(argv)),
-                vars(demo._build_parser().parse_args(argv)),
-            )
+            demo_args = vars(demo._build_parser().parse_args(argv))
+            self.assertFalse(demo_args.pop("experimental_user_message_injection"))
+            self.assertEqual(vars(cli._build_parser().parse_args(argv)), demo_args)
+
+    def test_user_message_experiment_is_demo_only(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                cli._build_parser().parse_args(["--experimental-user-message-injection"])
+        self.assertEqual(raised.exception.code, 2)
 
     def test_non_tty_fails_before_model_environment_or_session_effects(self):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):

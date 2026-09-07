@@ -11,6 +11,7 @@ from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
 from .environment import Environment
+from .experimental_tools import create_inject_user_message_tool
 from .items import Init
 from .items import Instructions
 from .items import Message
@@ -41,6 +42,14 @@ DEFAULT_PROMPT = "Summarize the repository in the current working directory."
 # DEFAULT_PROMPT = "Here is the log (demo.log.1) for a recent run of the pythia/interaction demo. Let's review the investigation of why there appears to be no interleaved assistant reasoning/response text but only tool calls, and implement a narrow fix for reasoning (no system message change). (Note that we should support both \"reasoning_content\" and \"reasoning\", as the former is still returned by some inference engines (although we might prioritize the latter if it exists and is non-null/non-empty)."
 # DEFAULT_PROMPT = "Here is the log (demo.log.1) for a recent run of the pythia/interaction demo. Notice that the blocks (`[user] ...`, `[assistant] ...`, etc.) are not left-indented/delimited like in the existing autopythia/contradex implementation. Let's investigate and plan to re-add the same left-indentation/decoration to pythia.interaction as part of the display item impl."
 # DEFAULT_PROMPT = "In pythia.interaction is the model context (list of interaction items) sufficient state for saving/resuming sessions? (Pending/interrupted tool calls/results might pose an issue, but we can ignore those for now so long as those interrupted calls can be swept over on resume.) Assuming sufficiency, let's implement initial support for saving the current session (in interaction.jsonl), and optionally resuming from it by passing --resume to the demo (let's also keep the working tree changes to the demo)."
+
+EXPERIMENTAL_USER_MESSAGE_PROMPT = (
+    "Run the synthetic-user-message integration test. Call "
+    "`experimental_inject_user_message` exactly once with `{}` before answering. "
+    "Do not use other tools. After the host appends the synthetic user message, "
+    "reply with exactly `received: ` followed by that message's text, then stop. "
+    "Do not call the tool again."
+)
 
 
 def run(
@@ -223,18 +232,25 @@ def _build_model(args: argparse.Namespace) -> Model:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    return build_parser(
+    parser = build_parser(
         "Ask a Chat Completions, Messages, or Codex Responses model to "
         "summarize a repository using Pythia's default local tools."
     )
+    parser.add_argument(
+        "--experimental-user-message-injection",
+        action="store_true",
+        help=(
+            "include the experimental synthetic-user-message tool and use its "
+            "test prompt for fresh sessions unless --prompt is supplied"
+        ),
+    )
+    return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     cwd = Path(args.cwd).expanduser().resolve()
     prompt = args.prompt
-    if prompt is None and not args.resume:
-        prompt = DEFAULT_PROMPT
     options = (
         SamplingOptions(max_tokens=args.max_tokens)
         if args.max_tokens is not None
@@ -248,8 +264,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     try:
         save_path = resolve_save_path(args.save_path)
+        if prompt is None and (not args.resume or not save_path.exists()):
+            # A missing resume file is also a fresh session. Existing saves
+            # must not receive the seed prompt again just to enable the tool.
+            prompt = (
+                EXPERIMENTAL_USER_MESSAGE_PROMPT
+                if args.experimental_user_message_injection
+                else DEFAULT_PROMPT
+            )
         model = _build_model(args)
-        with DefaultEnvironment(cwd=cwd) as environment:
+        extra_tools = (
+            (create_inject_user_message_tool(),)
+            if args.experimental_user_message_injection
+            else ()
+        )
+        with DefaultEnvironment(cwd=cwd, extra_tools=extra_tools) as environment:
             run(
                 model,
                 environment,

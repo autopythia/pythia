@@ -50,6 +50,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "instructions": None,
     "save_path": Path("interaction.jsonl"),
     "resume": False,
+    "experimental_user_message_injection": False,
 }
 
 COMPLETED_SESSION_ITEMS = (
@@ -89,6 +90,13 @@ ANSWER = ModelSample(
     items=(Message(role="assistant", text="Done."),),
     stop_reason="end_turn",
 )
+INJECTION_CALL = ToolCall(
+    name="experimental_inject_user_message",
+    call_id="inject-1",
+    arguments_json="{}",
+)
+INJECTION_RESULT = ToolResult(INJECTION_CALL.call_id, "Synthetic user message queued.")
+INJECTED_MESSAGE = Message(role="user", text="hello world")
 
 
 class _CheckpointRecordingModel:
@@ -112,6 +120,19 @@ class DemoArgumentBaselineTests(unittest.TestCase):
             vars(demo._build_parser().parse_args([])),
             DEMO_ARGUMENT_DEFAULTS,
         )
+
+    def test_experimental_flag_does_not_change_provider_or_model_selection(self):
+        args = demo._build_parser().parse_args([
+            "--experimental-user-message-injection",
+            "--model-api", "codex",
+            "--model", "gpt-5.6-sol-medium",
+        ])
+        self.assertEqual(vars(args), {
+            **DEMO_ARGUMENT_DEFAULTS,
+            "experimental_user_message_injection": True,
+            "model_api": "codex",
+            "model": "gpt-5.6-sol-medium",
+        })
 
     def test_explicit_arguments_preserve_empty_instructions_and_query_text(self):
         query = " /quit\nTreat this as one user query.\n"
@@ -182,7 +203,10 @@ class DemoStartupBaselineTests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(len(model.calls), 1)
-        context, _tools, options = model.calls[0]
+        context, tools, options = model.calls[0]
+        self.assertEqual(tuple(spec.name for spec in tools), (
+            "exec_command", "write_stdin", "update_plan", "apply_patch",
+        ))
         self.assertIsInstance(context.items[0], Init)
         self.assertEqual(
             context.items[1:],
@@ -422,6 +446,121 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(model.calls, [])
                 self.assertEqual(self.path.read_bytes(), before)
+
+    def test_experiment_injects_after_entire_batch_and_checkpoints_before_sampling(self):
+        status, model, printed = self._run_demo(
+            ["--experimental-user-message-injection", "--max-samples", "2"],
+            (ModelSample(items=(INJECTION_CALL, PLAN_CALL)), ANSWER),
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(len(model.calls), 2)
+        initial, tools, _options = model.calls[0]
+        self.assertEqual(initial.items[1:], (
+            Message("user", demo.EXPERIMENTAL_USER_MESSAGE_PROMPT),
+            UserInteractionBoundary(),
+        ))
+        self.assertEqual(tuple(spec.name for spec in tools), (
+            "exec_command", "write_stdin", "update_plan", "apply_patch", INJECTION_CALL.name,
+        ))
+        following = model.calls[1][0]
+        following.assert_model_ready()
+        self.assertEqual(following.items[-3:], (
+            INJECTION_RESULT,
+            ToolResult(PLAN_CALL.call_id, "Plan updated"),
+            INJECTED_MESSAGE,
+        ))
+        self.assertEqual(following.items.count(UserInteractionBoundary()), 1)
+        displays = tuple(item.text for item in printed if isinstance(item, DisplayItem))
+        self.assertEqual(displays.count("[user] hello world"), 1)
+        self.assertLess(
+            next(i for i, text in enumerate(displays) if text.startswith("[tool-ret]  update_plan")),
+            displays.index("[user] hello world"),
+        )
+        restored = load_interaction_save(self.path)
+        self.assertEqual(restored.items[:len(following)], following.items)
+        self.assertEqual(restored.items.count(INJECTED_MESSAGE), 1)
+
+        before = self.path.read_bytes()
+        status, replay_model, replay = self._run_demo(
+            ["--resume", "--experimental-user-message-injection"], samples=(),
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(replay_model.calls, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(
+            tuple(item.text for item in replay if isinstance(item, DisplayItem)).count("[user] hello world"),
+            1,
+        )
+
+    def test_experimental_prompt_is_overridable_without_disabling_the_tool(self):
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                self.path.unlink(missing_ok=True)
+                argv = ["--experimental-user-message-injection", "--prompt", "Custom test."]
+                if resume:
+                    argv.append("--resume")
+                status, model, _printed = self._run_demo(argv)
+                self.assertEqual(status, 0)
+                context, tools, _options = model.calls[0]
+                self.assertEqual(context.items[1:], (
+                    Message("user", "Custom test."), UserInteractionBoundary(),
+                ))
+                self.assertIn(INJECTION_CALL.name, tuple(tool.name for tool in tools))
+                # Enabling the tool alone does not append the synthetic message.
+                self.assertNotIn(INJECTED_MESSAGE, load_interaction_save(self.path).items)
+
+    def test_missing_experimental_resume_uses_experimental_seed_prompt(self):
+        status, model, printed = self._run_demo(
+            ["--resume", "--experimental-user-message-injection"],
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(model.calls[0][0].items[1:], (
+            Message("user", demo.EXPERIMENTAL_USER_MESSAGE_PROMPT),
+            UserInteractionBoundary(),
+        ))
+        self.assertIn(
+            "Warning: no existing interaction.jsonl was found; a fresh one was created.",
+            printed,
+        )
+
+    def test_experimental_resume_does_not_append_seed_to_completed_save(self):
+        save_interaction_save(self.path, ModelContext(COMPLETED_SESSION_ITEMS))
+        before = self.path.read_bytes()
+        status, model, _printed = self._run_demo(
+            ["--resume", "--experimental-user-message-injection"], samples=(),
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_experimental_resume_sweeps_pending_call_without_reseeding(self):
+        interrupted = (
+            *COMPLETED_SESSION_ITEMS[:4], INJECTION_CALL, ModelSampleBoundary(),
+        )
+        save_interaction_save(self.path, ModelContext(interrupted))
+        status, model, _printed = self._run_demo(
+            ["--resume", "--experimental-user-message-injection"],
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(len(model.calls), 1)
+        expected = (*interrupted, INJECTION_RESULT, INJECTED_MESSAGE)
+        self.assertEqual(model.calls[0][0].items, expected)
+        restored = load_interaction_save(self.path)
+        self.assertEqual(restored.items[:len(expected)], expected)
+        self.assertEqual(restored.items.count(INJECTED_MESSAGE), 1)
+
+    def test_pending_experiment_without_opt_in_is_unknown_and_cannot_inject(self):
+        interrupted = (
+            *COMPLETED_SESSION_ITEMS[:4], INJECTION_CALL, ModelSampleBoundary(),
+        )
+        save_interaction_save(self.path, ModelContext(interrupted))
+        status, model, _printed = self._run_demo(["--resume"])
+        self.assertEqual(status, 0)
+        result = model.calls[0][0].items[-1]
+        self.assertIsInstance(result, ToolResult)
+        self.assertFalse(result.success)
+        self.assertIn("Unknown tool", result.output)
+        self.assertNotIn(INJECTED_MESSAGE, load_interaction_save(self.path).items)
 
 
 if __name__ == "__main__":

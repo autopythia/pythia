@@ -63,8 +63,10 @@ class SaveArgumentTests(_SavePathTestCase):
                 self.assertIn("--save PATH", help_text)
                 self.assertIn("default: interaction.jsonl", help_text)
                 self.assertIn("selected --save file", help_text)
-        self.assertEqual(vars(cli._build_parser().parse_args(["--save", "review", "--resume"])),
-                         vars(demo._build_parser().parse_args(["--save", "review", "--resume"])))
+        argv = ["--save", "review", "--resume"]
+        demo_args = vars(demo._build_parser().parse_args(argv))
+        self.assertFalse(demo_args.pop("experimental_user_message_injection"))
+        self.assertEqual(vars(cli._build_parser().parse_args(argv)), demo_args)
 
     def test_raw_validation_rejects_empty_nul_stream_and_old_flag(self):
         for frontend in (cli, demo):
@@ -127,6 +129,21 @@ class SaveEntrypointTests(_SavePathTestCase):
             self.assertTrue(terminal.exited)
             self.assertEqual(sum(i.text == f"[cli] Save log: {self.selected}" for i in terminal.items), 1)
         return code, model, terminal, tuple(call.args[0] for call in printed.call_args_list)
+
+    def test_missing_experimental_demo_resume_seeds_only_selected_log(self):
+        status, model, _terminal, _printed = self._main(
+            demo, ["--resume", "--experimental-user-message-injection"],
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(model.calls[0][0].items[1:], (
+            Message("user", demo.EXPERIMENTAL_USER_MESSAGE_PROMPT),
+            UserInteractionBoundary(),
+        ))
+        self.assertIn(
+            "experimental_inject_user_message",
+            tuple(spec.name for spec in model.calls[0][1]),
+        )
+        self.assert_default_untouched()
 
     def test_fresh_custom_file_replaces_only_selected_log_and_checkpoints_all_batches(self):
         for frontend in (cli, demo):
