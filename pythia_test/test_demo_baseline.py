@@ -13,22 +13,22 @@ from pathlib import Path
 from unittest import mock
 
 from pythia.interaction import DisplayItem
+from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import SamplingOptions
-from pythia.interaction import SessionInit
+from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
-from pythia.interaction import TokenUsage
 from pythia.interaction import TurnMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
-from pythia.interaction import load_interaction_session
-from pythia.interaction import save_interaction_session
 from pythia.interaction import demo
+from pythia.interaction import load_interaction_save
+from pythia.interaction import save_interaction_save
 
 
 DEMO_ARGUMENT_DEFAULTS = {
@@ -48,11 +48,12 @@ DEMO_ARGUMENT_DEFAULTS = {
     "request_timeout_seconds": 60.0,
     "prompt": None,
     "instructions": None,
+    "save_path": Path("interaction.jsonl"),
     "resume": False,
 }
 
 COMPLETED_SESSION_ITEMS = (
-    SessionInit("baseline-session"),
+    Init("baseline-session"),
     Instructions("Original instructions."),
     Message(role="user", text="Original request."),
     UserInteractionBoundary(),
@@ -98,7 +99,7 @@ class _CheckpointRecordingModel:
 
     def sample(self, context, *, tools=(), options=None):
         self.calls.append((context.copy(), tuple(tools), options))
-        self.checkpoints.append(load_interaction_session("interaction.jsonl"))
+        self.checkpoints.append(load_interaction_save("interaction.jsonl"))
         try:
             return next(self.samples)
         except StopIteration:
@@ -121,6 +122,7 @@ class DemoArgumentBaselineTests(unittest.TestCase):
                 "--api-url", "https://proxy.example.test/codex",
                 "--codex-auth-file", "auth.json",
                 "--cwd", "workspace",
+                "--save", "custom.jsonl",
                 "--max-samples", "2",
                 "--max-tokens", "77",
                 "--request-timeout-seconds", "9",
@@ -138,6 +140,7 @@ class DemoArgumentBaselineTests(unittest.TestCase):
                 "api_url": "https://proxy.example.test/codex",
                 "codex_auth_file": "auth.json",
                 "cwd": "workspace",
+                "save_path": Path("custom.jsonl"),
                 "max_samples": 2,
                 "max_tokens": 77,
                 "request_timeout_seconds": 9.0,
@@ -180,7 +183,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(model.calls), 1)
         context, _tools, options = model.calls[0]
-        self.assertIsInstance(context.items[0], SessionInit)
+        self.assertIsInstance(context.items[0], Init)
         self.assertEqual(
             context.items[1:],
             (
@@ -241,7 +244,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 "cached_max=10 cold_sum=35 context=36 samples=2 compactions=0",
             ),
         )
-        restored = load_interaction_session(self.path)
+        restored = load_interaction_save(self.path)
         self.assertEqual(
             restored.items.count(Message(role="user", text=query)), 1
         )
@@ -260,7 +263,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         )
 
     def test_fresh_start_replaces_launch_session_not_workspace_session(self):
-        save_interaction_session(
+        save_interaction_save(
             self.path, ModelContext(COMPLETED_SESSION_ITEMS)
         )
         workspace_path = self.workspace / "interaction.jsonl"
@@ -285,8 +288,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(model.calls), 2)
         self.assertEqual(Path.cwd(), self.launch)
-        restored = load_interaction_session(self.path)
-        self.assertIsInstance(restored.items[0], SessionInit)
+        restored = load_interaction_save(self.path)
+        self.assertIsInstance(restored.items[0], Init)
         self.assertNotEqual(restored.items[0], COMPLETED_SESSION_ITEMS[0])
         self.assertEqual(
             model.calls[0][0].items[1:],
@@ -302,7 +305,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertEqual(workspace_path.read_text(), "workspace sentinel\n")
 
     def test_completed_resume_replays_summary_without_sampling_or_appending(self):
-        save_interaction_session(
+        save_interaction_save(
             self.path, ModelContext(COMPLETED_SESSION_ITEMS)
         )
         before = self.path.read_bytes()
@@ -332,7 +335,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
             PLAN_CALL,
             ModelSampleBoundary(),
         )
-        save_interaction_session(self.path, ModelContext(interrupted))
+        save_interaction_save(self.path, ModelContext(interrupted))
 
         status, model, _printed = self._run_demo(
             ["--resume", "--instructions", "", "--prompt", "Follow-up."]
@@ -350,13 +353,13 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertEqual(model.calls[0][0].items, expected)
         self.assertEqual(model.calls[0][0].model_items()[0], Instructions(""))
         self.assertEqual(
-            load_interaction_session(self.path).items[:len(expected)], expected
+            load_interaction_save(self.path).items[:len(expected)], expected
         )
 
     def test_instructions_only_resume_appends_empty_or_nonempty_override(self):
         for instructions in ("", "New instructions."):
             with self.subTest(instructions=instructions):
-                save_interaction_session(
+                save_interaction_save(
                     self.path, ModelContext(COMPLETED_SESSION_ITEMS)
                 )
                 status, model, _printed = self._run_demo(
@@ -407,7 +410,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertTrue(any("invalid JSON" in str(item) for item in printed))
 
     def test_empty_initial_query_fails_before_replacing_session_or_sampling(self):
-        save_interaction_session(
+        save_interaction_save(
             self.path, ModelContext(COMPLETED_SESSION_ITEMS)
         )
         before = self.path.read_bytes()

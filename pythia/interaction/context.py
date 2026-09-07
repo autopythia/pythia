@@ -10,10 +10,10 @@ from typing import Union
 from typing import overload
 
 from .items import ContextCompaction
-from .items import InteractionItem
+from .items import Init
 from .items import Instructions
+from .items import InteractionItem
 from .items import ModelSampleBoundary
-from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -110,10 +110,10 @@ def _validate_compaction_replacement(
                 "ContextCompaction replacement_items must not contain "
                 "another ContextCompaction"
             )
-        if isinstance(item, SessionInit):
+        if isinstance(item, Init):
             raise ContextValidationError(
                 "ContextCompaction replacement_items must not contain "
-                "SessionInit"
+                "Init"
             )
     _validate_tool_sequence(replacement, allow_pending=False)
     return replacement
@@ -157,9 +157,9 @@ def _validate_log(items: Sequence[InteractionItem]) -> None:
     _pending_user_tools(items)
     for index, item in enumerate(items):
         _validate_item(item, f"items[{index}]")
-        if isinstance(item, SessionInit) and index != 0:
+        if isinstance(item, Init) and index != 0:
             raise ContextValidationError(
-                "SessionInit must be the first interaction item"
+                "Init must be the first interaction item"
             )
         if isinstance(item, ContextCompaction):
             _validate_compaction_replacement(item.replacement_items)
@@ -222,7 +222,7 @@ class ModelContext(Sequence[InteractionItem]):
         projected = tuple(
             item
             for item in _project_items(self._items)
-            if not isinstance(item, SessionInit)
+            if not isinstance(item, Init)
         )
         return _collapse_instructions(projected)
 

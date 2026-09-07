@@ -9,24 +9,24 @@ from unittest import mock
 
 from pythia.interaction import ContextCompaction
 from pythia.interaction import DefaultEnvironment
+from pythia.interaction import Init
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
-from pythia.interaction import SessionError
-from pythia.interaction import SessionInit
+from pythia.interaction import SaveError
+from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
-from pythia.interaction import TokenUsage
 from pythia.interaction import TurnMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import interaction_item_from_dict
 from pythia.interaction import interaction_item_to_dict
-from pythia.interaction import load_interaction_session
-from pythia.interaction import save_interaction_session
+from pythia.interaction import load_interaction_save
+from pythia.interaction import save_interaction_save
 from pythia.interaction.demo import run_repository_summary
 
 
@@ -35,21 +35,21 @@ class SessionTests(unittest.TestCase):
         for failure in ("tempfile.NamedTemporaryFile", "os.fsync", "os.replace"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmpdir:
                 path = Path(tmpdir) / "interaction.jsonl"
-                original = ModelContext((SessionInit("old"),))
-                save_interaction_session(path, original)
+                original = ModelContext((Init("old"),))
+                save_interaction_save(path, original)
                 old_bytes = path.read_bytes()
-                with mock.patch("pythia.interaction.session." + failure,
+                with mock.patch("pythia.interaction.save." + failure,
                                 side_effect=OSError("injected disk failure")):
-                    with self.assertRaisesRegex(SessionError, "injected disk failure"):
-                        save_interaction_session(path, ModelContext((SessionInit("new"),)))
+                    with self.assertRaisesRegex(SaveError, "injected disk failure"):
+                        save_interaction_save(path, ModelContext((Init("new"),)))
                 self.assertEqual(path.read_bytes(), old_bytes)
-                self.assertEqual(load_interaction_session(path).items, original.items)
+                self.assertEqual(load_interaction_save(path).items, original.items)
                 self.assertEqual(tuple(path.parent.glob(".interaction.jsonl.*.tmp")), ())
 
     def test_session_init_is_first_and_round_trips(self):
         context = ModelContext(
             (
-                SessionInit("session-test"),
+                Init("session-test", model="initial-model"),
                 Message(role="user", text="hello"),
                 UserInteractionBoundary(),
             )
@@ -57,30 +57,62 @@ class SessionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"
-            save_interaction_session(path, context)
+            save_interaction_save(path, context)
             first_record = json.loads(path.read_text().splitlines()[0])
-            restored = load_interaction_session(path)
+            restored = load_interaction_save(path)
 
         self.assertEqual(
             first_record,
-            {"type": "session_init", "session_id": "session-test"},
+            {"type": "init", "session_id": "session-test", "model": "initial-model"},
         )
         self.assertEqual(restored.items, context.items)
         self.assertNotIn(restored.items[0], restored.model_items())
+
+    def test_legacy_session_init_loads_and_saves_as_init(self):
+        records = [
+            {"type": "session_init", "session_id": "legacy-session"},
+            {"type": "message", "role": "user", "text": "hello"},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "interaction.jsonl"
+            original = "".join(json.dumps(record) + "\n" for record in records)
+            path.write_text(original, encoding="utf-8")
+
+            restored = load_interaction_save(path)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertEqual(
+                restored.items,
+                (Init("legacy-session"), Message(role="user", text="hello")),
+            )
+            save_interaction_save(path, restored)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8").splitlines()[0]),
+                {"type": "init", "session_id": "legacy-session"},
+            )
+            self.assertEqual(load_interaction_save(path).items, restored.items)
+
+    def test_legacy_session_init_validates_fields(self):
+        for session_id in (None, 123, True):
+            with self.subTest(session_id=session_id):
+                with self.assertRaisesRegex(SaveError, "session_id must be a string"):
+                    interaction_item_from_dict(
+                        {"type": "session_init", "session_id": session_id}
+                    )
 
     def test_session_init_must_be_first_and_not_compacted(self):
         with self.assertRaisesRegex(ValueError, "must be the first"):
             ModelContext(
                 (
                     Message(role="user", text="hello"),
-                    SessionInit("session-test"),
+                    Init("session-test"),
                 )
             )
         with self.assertRaisesRegex(ValueError, "must not contain"):
             ModelContext(
                 (
                     ContextCompaction(
-                        (SessionInit("session-test"),)
+                        (Init("session-test"),)
                     ),
                 )
             )
@@ -96,7 +128,7 @@ class SessionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            restored = load_interaction_session(path)
+            restored = load_interaction_save(path)
 
         self.assertEqual(
             restored.items,
@@ -180,8 +212,8 @@ class SessionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"
-            save_interaction_session(path, context)
-            restored = load_interaction_session(path)
+            save_interaction_save(path, context)
+            restored = load_interaction_save(path)
 
             self.assertEqual(restored.items, context.items)
             self.assertEqual(len(path.read_text().splitlines()), len(items))
@@ -221,15 +253,15 @@ class SessionResumeTests(unittest.TestCase):
                         environment,
                         prompt=None,
                         max_samples=1,
-                        session_path=path,
+                        save_path=path,
                         resume=True,
                     )
 
-            restored = load_interaction_session(path)
+            restored = load_interaction_save(path)
 
         self.assertEqual(summary, "fresh answer")
         self.assertEqual(len(model.contexts), 1)
-        self.assertIsInstance(restored.items[0], SessionInit)
+        self.assertIsInstance(restored.items[0], Init)
         self.assertEqual(
             tuple(
                 item.text
@@ -269,7 +301,7 @@ class SessionResumeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"
-            save_interaction_session(path, context)
+            save_interaction_save(path, context)
 
             with DefaultEnvironment(cwd=Path(tmpdir)) as environment:
                 with mock.patch("builtins.print") as print_mock:
@@ -278,7 +310,7 @@ class SessionResumeTests(unittest.TestCase):
                         environment,
                         prompt=None,
                         max_samples=1,
-                        session_path=path,
+                        save_path=path,
                         resume=True,
                     )
 
@@ -316,7 +348,7 @@ class SessionResumeTests(unittest.TestCase):
         model = Model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"
-            save_interaction_session(path, context)
+            save_interaction_save(path, context)
 
             with DefaultEnvironment(cwd=Path(tmpdir)) as environment:
                 with mock.patch("builtins.print"):
@@ -325,11 +357,11 @@ class SessionResumeTests(unittest.TestCase):
                         environment,
                         prompt="follow-up",
                         max_samples=1,
-                        session_path=path,
+                        save_path=path,
                         resume=True,
                     )
 
-                resumed = load_interaction_session(path)
+                resumed = load_interaction_save(path)
 
         self.assertEqual(summary, "new answer")
         self.assertEqual(len(model.contexts), 1)
@@ -382,7 +414,7 @@ class SessionResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             path = root / "interaction.jsonl"
-            save_interaction_session(path, interrupted)
+            save_interaction_save(path, interrupted)
             with DefaultEnvironment(cwd=root) as environment:
                 with mock.patch("builtins.print"):
                     summary = run_repository_summary(
@@ -390,11 +422,11 @@ class SessionResumeTests(unittest.TestCase):
                         environment,
                         prompt=None,
                         max_samples=1,
-                        session_path=path,
+                        save_path=path,
                         resume=True,
                     )
 
-                resumed = load_interaction_session(path)
+                resumed = load_interaction_save(path)
 
         self.assertEqual(summary, "resumed answer")
         self.assertEqual(len(model.contexts), 1)

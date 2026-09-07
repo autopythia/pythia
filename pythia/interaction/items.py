@@ -24,12 +24,15 @@ def _fresh_session_id() -> str:
 
 
 @dataclass(frozen=True)
-class SessionInit:
+class Init:
     """Durable identity established before an interaction begins."""
 
     session_id: str = field(default_factory=_fresh_session_id)
+    model: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.model is not None:
+            _require_string(self.model, "model", allow_empty=False)
         _require_string(self.session_id, "session_id", allow_empty=False)
         if "\r" in self.session_id or "\n" in self.session_id:
             raise ValueError("session_id must not contain newlines")
@@ -324,7 +327,7 @@ class ContextCompaction:
 
 
 InteractionItem = Union[
-    SessionInit,
+    Init,
     Instructions,
     Message,
     Reasoning,
@@ -341,7 +344,7 @@ InteractionItem = Union[
 ]
 
 INTERACTION_ITEM_TYPES = (
-    SessionInit,
+    Init,
     Instructions,
     Message,
     Reasoning,
@@ -370,7 +373,7 @@ __all__ = [
     "ModelSampleBoundary",
     "OpaqueCompaction",
     "Reasoning",
-    "SessionInit",
+    "Init",
     "ToolCall",
     "ToolResult",
     "UserToolCall",

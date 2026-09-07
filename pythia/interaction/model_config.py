@@ -13,13 +13,38 @@ from .messages import MessagesEndpoint
 from .messages import MessagesModel
 from .messages import MessagesServerCompaction
 from .model import Model
-from .responses import CodexResponsesModel
 from .responses import CODEX_RESPONSES_API_URL
+from .responses import CodexResponsesModel
 from .responses import _CODEX_MODEL_ROUTES
 from .responses import _resolve_default_codex_api_url
 
 
-DEFAULT_SESSION_PATH = Path("interaction.jsonl")
+DEFAULT_SAVE_PATH = Path("interaction.jsonl")
+
+
+def _save_path_argument(value: str) -> Path:
+    # Validate before Path("") can turn an empty argument into the current dir.
+    if not value.strip() or "\x00" in value or value == "-":
+        raise argparse.ArgumentTypeError(
+            "expected a non-empty file path (--save does not support stdin/stdout)"
+        )
+    return Path(value)
+
+
+def resolve_save_path(path: Path) -> Path:
+    """Anchor a frontend's log to its launch directory without resolving links."""
+    selected = path.expanduser().absolute()
+    if selected.exists() and not selected.is_file():
+        raise ValueError(f"save destination must be a regular file: {selected}")
+    if not selected.parent.is_dir():
+        raise ValueError(f"save parent must be an existing directory: {selected.parent}")
+    return selected
+
+
+def initial_model_name(model: Optional[Model]) -> Optional[str]:
+    """Return the configured model name when exposed by an adapter."""
+    name = getattr(getattr(model, "endpoint", None), "model", None)
+    return name if isinstance(name, str) and name.strip() else None
 
 
 def supports_account_services(args: argparse.Namespace) -> bool:
@@ -137,8 +162,9 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         "--model",
         help=(
             "model name; gpt-6-astra uses default reasoning effort, "
+            "gpt-6-astra-medium selects medium effort, "
             "gpt-6-astra-max selects maximum single-agent reasoning; "
-            "both use low verbosity; muse-spark-1.3 and "
+            "all Astra variants use low verbosity; muse-spark-1.3 and "
             "muse-spark-1.3-xhigh use the Meta Responses endpoint and "
             "META_API_KEY"
         ),
@@ -190,9 +216,21 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--save",
+        dest="save_path",
+        metavar="PATH",
+        type=_save_path_argument,
+        default=DEFAULT_SAVE_PATH,
+        help=(
+            "interaction JSONL file to read/write (default: %(default)s); "
+            "relative to the launch directory, not --cwd; parent must exist; "
+            "replaces the file unless --resume is used"
+        ),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
-        help="resume interaction.jsonl instead of starting a new session",
+        help="resume the selected --save file instead of starting a new save",
     )
     return parser
 

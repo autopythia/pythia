@@ -25,36 +25,38 @@ from typing import Union
 
 from ._cli_editor import Editor
 from ._cli_terminal import PosixTerminal
-from .context import ModelContext
 from .codex_auth import CodexAuthUnavailable
+from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
 from .display import render_interaction_items
 from .environment import Environment
 from .items import ContextCompaction
-from .items import InteractionItem
+from .items import Init
 from .items import Instructions
+from .items import InteractionItem
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
-from .items import SessionInit
-from .items import ToolResult
 from .items import ToolCall
+from .items import ToolResult
 from .items import TurnMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
 from .items import summarize_turn_usage
-from .model import SamplingOptions
 from .model import Model
-from .model_config import DEFAULT_SESSION_PATH
+from .model import SamplingOptions
+from .model_config import DEFAULT_SAVE_PATH
 from .model_config import build_model
 from .model_config import build_parser
+from .model_config import initial_model_name
+from .model_config import resolve_save_path
 from .model_config import supports_account_services
-from .session import load_interaction_session
-from .session import save_interaction_session
+from .save import load_interaction_save
+from .save import save_interaction_save
 from .user import UserInteraction
 from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
@@ -138,7 +140,7 @@ class _UIState:
 async def _checkpoint(context: ModelContext, state: _UIState, path: Path) -> None:
     state.set_phase("saving")
     try:
-        await asyncio.to_thread(save_interaction_session, path, context.copy())
+        await asyncio.to_thread(save_interaction_save, path, context.copy())
     except Exception:
         state.persistence_failed = True
         raise
@@ -311,7 +313,7 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
             (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary, UserToolCall, UserToolResult),
         ):
             continue
-        if isinstance(item, (TurnSummary, SessionInit)):
+        if isinstance(item, (TurnSummary, Init)):
             return None
         if isinstance(item, (OpaqueCompaction, ContextCompaction)):
             tail = "a compaction checkpoint"
@@ -326,14 +328,14 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
         else:
             tail = "incomplete model output"
         return (
-            f"Resumed session ends with {tail}, without recorded turn completion. "
+            f"Resumed save ends with {tail}, without recorded turn completion. "
             "The model stop reason is not saved. No model request was started; "
             "enter a query to continue."
         )
     return None
 
 
-async def _drive_session(
+async def _drive_interaction(
     model: Optional[Model],
     environment: Environment,
     state: _UIState,
@@ -343,7 +345,7 @@ async def _drive_session(
 ) -> None:
     existing = args.resume and await asyncio.to_thread(path.exists)
     if existing:
-        context = await asyncio.to_thread(load_interaction_session, path)
+        context = await asyncio.to_thread(load_interaction_save, path)
         state.displays.extend(render_interaction_items(context.items))
         state.notice(
             "Command sessions and plan state were not restored. "
@@ -354,7 +356,7 @@ async def _drive_session(
             state.notice(
                 f"Warning: no existing {path.name} was found; a fresh one was created."
             )
-        initial = [SessionInit()]
+        initial = [Init(model=args.model or initial_model_name(model))]
         if args.instructions is not None:
             initial.append(Instructions(args.instructions))
         context = ModelContext(initial)
@@ -459,7 +461,7 @@ async def _run(
     environment: Environment,
     terminal: PosixTerminal,
     args: argparse.Namespace,
-    path: Path = DEFAULT_SESSION_PATH,
+    path: Path = DEFAULT_SAVE_PATH,
 ) -> int:
     path = Path(path).absolute()
     options = (
@@ -472,8 +474,9 @@ async def _run(
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
     )
     state.notice("pythia.interaction — /login, /quota; /quit or /exit; Ctrl-C/Ctrl-D exit.")
+    state.notice(f"Save log: {path}")
     state.notice(
-        "exec_command runs without a sandbox; use a trusted model and workspace."
+        "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
     )
     worker = None
     frame = 0
@@ -483,7 +486,7 @@ async def _run(
             terminal.render(state.editor, "starting", tuple(state.displays))
             state.displays.clear()
             worker = asyncio.create_task(
-                _drive_session(model, environment, state, args, path, options)
+                _drive_interaction(model, environment, state, args, path, options)
             )
             while True:
                 for key in terminal.read_keys():
@@ -545,6 +548,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ValueError("max_samples must be a positive integer or None")
         if args.max_tokens is not None:
             SamplingOptions(max_tokens=args.max_tokens)
+        save_path = resolve_save_path(args.save_path)
         try:
             model = build_model(args)
         except CodexAuthUnavailable:
@@ -554,7 +558,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cwd = Path(args.cwd).expanduser().resolve()
         with DefaultEnvironment(cwd=cwd) as environment:
             terminal = PosixTerminal(sys.stdin, sys.stdout)
-            return asyncio.run(_run(model, environment, terminal, args))
+            return asyncio.run(_run(model, environment, terminal, args, path=save_path))
     except Exception as exc:
         print(f"interaction CLI failed: {exc}", file=sys.stderr)
         return 1

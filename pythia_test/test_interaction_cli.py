@@ -14,16 +14,10 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from pythia.interaction import cli
-from pythia.interaction import demo
-from pythia.interaction._cli_editor import Editor
-from pythia.interaction._cli_editor import Layout
-from pythia.interaction._cli_editor import cell_width
-from pythia.interaction._cli_editor import layout_editor
-from pythia.interaction._cli_terminal import PosixTerminal
 from pythia.interaction import DefaultEnvironment
 from pythia.interaction import DisplayItem
 from pythia.interaction import Environment
+from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
@@ -31,8 +25,7 @@ from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import SamplingOptions
-from pythia.interaction import SessionError
-from pythia.interaction import SessionInit
+from pythia.interaction import SaveError
 from pythia.interaction import Tool
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolOutcome
@@ -40,8 +33,15 @@ from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
-from pythia.interaction import load_interaction_session
-from pythia.interaction import save_interaction_session
+from pythia.interaction import cli
+from pythia.interaction import demo
+from pythia.interaction import load_interaction_save
+from pythia.interaction import save_interaction_save
+from pythia.interaction._cli_editor import Editor
+from pythia.interaction._cli_editor import Layout
+from pythia.interaction._cli_editor import cell_width
+from pythia.interaction._cli_editor import layout_editor
+from pythia.interaction._cli_terminal import PosixTerminal
 
 
 def _answer(text="done"):
@@ -93,7 +93,7 @@ class _Model:
 
     def sample(self, context, *, tools=(), options=None):
         self.calls.append((context.copy(), tuple(tools), options))
-        self.checkpoints.append(load_interaction_session(self.path).items)
+        self.checkpoints.append(load_interaction_save(self.path).items)
         self.threads.append(threading.get_ident())
         if not self.outcomes:
             raise AssertionError("unexpected sample")
@@ -182,7 +182,8 @@ for module in (cli, demo):
             [],
             ["--model-api", "codex", "--model", "gpt-6-astra", "--resume",
              "--prompt", "/quit\nA literal query", "--instructions", "",
-             "--max-samples", "3", "--max-tokens", "77", "--cwd", "work"],
+             "--max-samples", "3", "--max-tokens", "77", "--cwd", "work",
+             "--save", "chosen.jsonl"],
         ):
             self.assertEqual(
                 vars(cli._build_parser().parse_args(argv)),
@@ -193,7 +194,7 @@ for module in (cli, demo):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):
             with mock.patch.object(cli, "build_model") as model:
                 with mock.patch.object(cli, "DefaultEnvironment") as environment:
-                    with mock.patch.object(cli, "save_interaction_session") as save:
+                    with mock.patch.object(cli, "save_interaction_save") as save:
                         with mock.patch("builtins.print"):
                             self.assertEqual(cli.main(["--prompt", "hello"]), 1)
         model.assert_not_called()
@@ -208,6 +209,7 @@ for module in (cli, demo):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--resume", result.stdout)
         self.assertIn("--prompt", result.stdout)
+        self.assertIn("--save PATH", result.stdout)
 
     def test_invalid_initial_options_fail_before_effects_even_with_a_tty(self):
         for argv in (["--prompt", " "], ["--max-samples", "0"], ["--max-tokens", "0"]):
@@ -286,9 +288,9 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(model.calls, [])
         self.assertGreaterEqual(ticks, 4)
         self.assertTrue(all(not editor.text for editor, _, _ in terminal.frames))
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(len(saved.items), 1)
-        self.assertIsInstance(saved.items[0], SessionInit)
+        self.assertIsInstance(saved.items[0], Init)
 
     async def test_full_input_queue_preserves_unaccepted_draft(self):
         state = cli._UIState(ready=True)
@@ -320,7 +322,7 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(terminal.frames[0][0], Editor(query, len(query)))
         self.assertEqual(len(model.calls), 2)
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         users = tuple(i for i in saved if isinstance(i, Message) and i.role == "user")
         self.assertEqual(users, (Message("user", query), Message("user", "second")))
         self.assertEqual(saved.items.count(UserInteractionBoundary()), 2)
@@ -352,7 +354,7 @@ class CLIControllerTests(_ControllerTestCase):
         checkpoints = []
 
         def record(arguments, *, timeout_seconds=None):
-            checkpoints.append(load_interaction_session(self.path).items)
+            checkpoints.append(load_interaction_save(self.path).items)
             return ToolOutcome("recorded")
 
         environment = Environment((Tool(ToolSpec("record", "", {}), record),))
@@ -368,9 +370,9 @@ class CLIControllerTests(_ControllerTestCase):
 
     async def test_pending_resume_precedes_empty_override_and_follow_up(self):
         call = ToolCall("missing", "pending", "{}")
-        original = (SessionInit("resumed"), Instructions("old"), Message("user", "old"),
+        original = (Init("resumed"), Instructions("old"), Message("user", "old"),
                     UserInteractionBoundary(), call, ModelSampleBoundary())
-        save_interaction_session(self.path, ModelContext(original))
+        save_interaction_save(self.path, ModelContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/quit") if s == "idle" else None)
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(
@@ -389,13 +391,13 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(received.model_items()[0], Instructions(""))
 
     async def test_resume_without_query_marks_pending_calls_unrecoverable_and_waits(self):
-        original = (SessionInit("saved"), Message("user", "original"),
+        original = (Init("saved"), Message("user", "original"),
                     UserInteractionBoundary(), ToolCall("missing", "pending", "{}"))
-        save_interaction_session(self.path, ModelContext(original))
+        save_interaction_save(self.path, ModelContext(original))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:-1], original)
         self.assertEqual(saved.items[-1].call_id, "pending")
         self.assertFalse(saved.items[-1].success)
@@ -404,9 +406,9 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(model.calls, [])
 
     async def test_instructions_only_resume_samples_without_a_new_user_message(self):
-        original = (SessionInit("saved"), Instructions("old"),
+        original = (Init("saved"), Instructions("old"),
                     Message("assistant", "previous"), TurnSummary(sample_count=1))
-        save_interaction_session(self.path, ModelContext(original))
+        save_interaction_save(self.path, ModelContext(original))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(
@@ -420,25 +422,29 @@ class CLIControllerTests(_ControllerTestCase):
                 if resume:
                     self.path.unlink()
                 else:
-                    save_interaction_session(self.path, ModelContext((SessionInit("old"),)))
+                    save_interaction_save(self.path, ModelContext((Init("old"),)))
                 terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
                 model = _Model(self.path, _answer())
                 argv = ["--prompt", "fresh"] + (["--resume"] if resume else [])
                 self.assertEqual(await self._run(model, terminal, argv), 0)
+                self.assertIn(
+                    "[cli] Warning: exec_command runs without a sandbox; use a trusted model and workspace.",
+                    [item.text for item in terminal.items],
+                )
                 context = model.calls[0][0]
-                self.assertNotEqual(context.items[0], SessionInit("old"))
+                self.assertNotEqual(context.items[0], Init("old"))
                 self.assertEqual(context.items[1:], (
                     Message("user", "fresh"), UserInteractionBoundary(),
                 ))
 
     async def test_completed_resume_does_not_repeat_answer_or_summary(self):
-        original = (SessionInit("saved"), Message("assistant", "previous"),
+        original = (Init("saved"), Message("assistant", "previous"),
                     ModelSampleBoundary(), TurnSummary(sample_count=1))
-        save_interaction_session(self.path, ModelContext(original))
+        save_interaction_save(self.path, ModelContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/exit") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
-        self.assertEqual(load_interaction_session(self.path).items, original)
+        self.assertEqual(load_interaction_save(self.path).items, original)
         self.assertEqual([i.text for i in terminal.items].count("[assistant] previous"), 1)
         self.assertEqual(model.calls, [])
 
@@ -455,7 +461,7 @@ class CLIControllerTests(_ControllerTestCase):
         model = _Model(self.path, ModelSample(items=(checkpoint,), stop_reason="compaction"), _answer())
         self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
         self.assertIn(checkpoint, model.calls[1][0].items)
-        self.assertEqual(load_interaction_session(self.path).items[-1], TurnSummary(sample_count=2, compaction_count=1))
+        self.assertEqual(load_interaction_save(self.path).items[-1], TurnSummary(sample_count=2, compaction_count=1))
 
     async def test_failure_after_tool_keeps_checkpoint_and_tui_alive(self):
         called = []
@@ -469,7 +475,7 @@ class CLIControllerTests(_ControllerTestCase):
         model = _Model(self.path, ModelSample(items=(ToolCall("record", "one", "{}"),)), RuntimeError("sample failed\n"))
         self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"], environment), 1)
         self.assertEqual(called, [True])
-        self.assertEqual(load_interaction_session(self.path).items[-1], ToolResult("one", "effect done"))
+        self.assertEqual(load_interaction_save(self.path).items[-1], ToolResult("one", "effect done"))
         self.assertTrue(any("RuntimeError: sample failed" in i.text for i in terminal.items))
 
     async def test_queue_does_not_mutate_active_request(self):
@@ -525,7 +531,7 @@ class CLIControllerTests(_ControllerTestCase):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
         finally:
             release.set()
-        self.assertEqual(load_interaction_session(self.path).pending_tool_calls(), (call,))
+        self.assertEqual(load_interaction_save(self.path).pending_tool_calls(), (call,))
 
     async def test_quit_during_tool_checkpoints_its_result_and_skips_remaining_calls(self):
         entered, release = threading.Event(), threading.Event()
@@ -553,7 +559,7 @@ class CLIControllerTests(_ControllerTestCase):
             ), 0)
         finally:
             release.set()
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(executions, [True])
         self.assertEqual(saved.items[-1], ToolResult("one", "completed before exit"))
         self.assertEqual(saved.pending_tool_calls(), (calls[1],))
@@ -590,11 +596,11 @@ class CLIControllerTests(_ControllerTestCase):
             self.assertIn("persistent", result.output)
 
     async def test_failed_checkpoint_blocks_follow_up_and_new_queries(self):
-        real_save = save_interaction_session
+        real_save = save_interaction_save
 
         def fail_sample_save(path, context):
             if any(isinstance(i, ModelSampleBoundary) for i in context):
-                raise SessionError("disk unavailable")
+                raise SaveError("disk unavailable")
             real_save(path, context)
 
         step = 0
@@ -607,10 +613,10 @@ class CLIControllerTests(_ControllerTestCase):
 
         terminal = _Terminal(frame)
         model = _Model(self.path, _answer())
-        with mock.patch.object(cli, "save_interaction_session", side_effect=fail_sample_save):
+        with mock.patch.object(cli, "save_interaction_save", side_effect=fail_sample_save):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 1)
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(load_interaction_session(self.path).items[-1], UserInteractionBoundary())
+        self.assertEqual(load_interaction_save(self.path).items[-1], UserInteractionBoundary())
 
 
 if __name__ == "__main__":

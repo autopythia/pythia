@@ -11,21 +11,23 @@ from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
 from .environment import Environment
+from .items import Init
 from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
-from .items import SessionInit
 from .items import TurnMetadata
 from .items import TurnSummary
-from .items import summarize_turn_usage
 from .items import UserInteractionBoundary
+from .items import summarize_turn_usage
 from .model import Model
 from .model import SamplingOptions
-from .model_config import DEFAULT_SESSION_PATH
+from .model_config import DEFAULT_SAVE_PATH as DEFAULT_SAVE_PATH
 from .model_config import build_model
 from .model_config import build_parser
-from .session import load_interaction_session
-from .session import save_interaction_session
+from .model_config import initial_model_name
+from .model_config import resolve_save_path
+from .save import load_interaction_save
+from .save import save_interaction_save
 from .user import UserInteraction
 
 
@@ -49,7 +51,7 @@ def run(
     instructions: Optional[Union[str, Instructions]] = None,
     max_samples: Optional[int] = None,
     options: Optional[SamplingOptions] = None,
-    session_path: Optional[Union[str, Path]] = None,
+    save_path: Optional[Union[str, Path]] = None,
     resume: bool = False,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
@@ -73,8 +75,8 @@ def run(
         instructions_item = Instructions(text=instructions)
     elif isinstance(instructions, Instructions):
         instructions_item = instructions
-    if resume and session_path is None:
-        raise ValueError("resume requires session_path")
+    if resume and save_path is None:
+        raise ValueError("resume requires save_path")
     if max_samples is not None and (
         isinstance(max_samples, bool)
         or not isinstance(max_samples, int)
@@ -84,10 +86,10 @@ def run(
     if options is not None and not isinstance(options, SamplingOptions):
         raise TypeError("options must be SamplingOptions or None")
 
-    resumed_existing_session = False
-    if resume and Path(session_path).exists():
-        context = load_interaction_session(session_path)
-        resumed_existing_session = True
+    resumed_existing_save = False
+    if resume and Path(save_path).exists():
+        context = load_interaction_save(save_path)
+        resumed_existing_save = True
 
         # Restore the human-visible transcript as well as the model state.
         for display_item in render_interaction_items(context.items):
@@ -95,7 +97,7 @@ def run(
     else:
         if resume:
             print(
-                f"Warning: no existing {Path(session_path).name} was found; "
+                f"Warning: no existing {Path(save_path).name} was found; "
                 "a fresh one was created.",
                 file=sys.stderr,
             )
@@ -103,17 +105,17 @@ def run(
                 prompt = DEFAULT_PROMPT
         if prompt is None:
             raise ValueError("prompt must not be None without resume")
-        initial: list = [SessionInit()]
+        initial: list = [Init(model=initial_model_name(model))]
         if instructions_item is not None:
             initial.append(instructions_item)
         context = ModelContext(tuple(initial))
 
-    if session_path is not None:
-        save_interaction_session(session_path, context)
+    if save_path is not None:
+        save_interaction_save(save_path, context)
 
     def _persist() -> None:
-        if session_path is not None:
-            save_interaction_session(session_path, context)
+        if save_path is not None:
+            save_interaction_save(save_path, context)
 
     pending_calls = context.pending_tool_calls()
     if pending_calls:
@@ -125,13 +127,13 @@ def run(
         _persist()
         for display_item in result.display_items(source_calls=pending_calls):
             print(display_item)
-    elif resumed_existing_session and prompt is None and instructions_item is None:
+    elif resumed_existing_save and prompt is None and instructions_item is None:
         final_text = _final_assistant_text(context)
         if final_text is None or not final_text.strip():
-            raise RuntimeError("resumed session has no final assistant text")
+            raise RuntimeError("resumed save has no final assistant text")
         return final_text
 
-    if instructions_item is not None and resumed_existing_session:
+    if instructions_item is not None and resumed_existing_save:
         # Append override after pending batch is valid again. Strict
         # tool-sequence validation requires no pending calls here.
         context.extend((instructions_item,))
@@ -140,7 +142,7 @@ def run(
             print(display_item)
 
     if prompt is not None:
-        # For a resumed session, add the follow-up only after any pending
+        # For a resumed save, add the follow-up only after any pending
         # tool batch has been made valid again.
         user_interaction = UserInteraction(
             items=(Message(role="user", text=prompt),),
@@ -245,6 +247,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         file=sys.stderr,
     )
     try:
+        save_path = resolve_save_path(args.save_path)
         model = _build_model(args)
         with DefaultEnvironment(cwd=cwd) as environment:
             run(
@@ -254,7 +257,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 instructions=args.instructions,
                 max_samples=args.max_samples,
                 options=options,
-                session_path=DEFAULT_SESSION_PATH,
+                save_path=save_path,
                 resume=args.resume,
             )
     except Exception as exc:

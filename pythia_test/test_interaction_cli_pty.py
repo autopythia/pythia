@@ -17,22 +17,23 @@ if os.name == "posix":
     import struct
     import termios
 
+from pythia.interaction import Init
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
-from pythia.interaction import SessionInit
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
-from pythia.interaction import UserToolResult
 from pythia.interaction import TurnSummary
-from pythia.interaction import load_interaction_session
-from pythia.interaction import save_interaction_session
+from pythia.interaction import UserToolCall
+from pythia.interaction import UserToolResult
+from pythia.interaction import load_interaction_save
+from pythia.interaction import save_interaction_save
 
 
 _SCRIPT = '''
 import json
 import os
 from pathlib import Path
-from pythia.interaction import cli, Message, ModelSample, ToolCall, ToolResult
+from pythia.interaction import cli, Message, ModelSample, ToolCall, ToolResult, load_interaction_save
 
 failure = os.environ.get("PYTHIA_TEST_FAILURE")
 
@@ -50,12 +51,12 @@ class Environment(cli.DefaultEnvironment):
 cli.DefaultEnvironment = Environment
 
 if failure in {"initial-save", "save"}:
-    save = cli.save_interaction_session
+    save = cli.save_interaction_save
     def fail_save(path, context):
         if failure == "initial-save" or any(isinstance(i, ToolResult) for i in context):
             raise OSError("injected checkpoint failure")
         save(path, context)
-    cli.save_interaction_session = fail_save
+    cli.save_interaction_save = fail_save
 elif failure == "render":
     render = cli.PosixTerminal.render
     def fail_render(self, editor, status, items, prompt=":> "):
@@ -75,10 +76,12 @@ elif failure == "attach":
     term_input.create_input = fail_create
 
 class Model:
-    def __init__(self):
+    def __init__(self, save_path):
         self.tool_done = False
+        self.save_path = Path(save_path).expanduser().absolute()
 
     def sample(self, context, *, tools=(), options=None):
+        assert load_interaction_save(self.save_path).items == context.items
         if "PYTHIA_TEST_RELEASE_FD" in os.environ:
             os.read(int(os.environ["PYTHIA_TEST_RELEASE_FD"]), 1)
             return ModelSample(items=(ToolCall(
@@ -106,16 +109,17 @@ if failure in {"auth", "auth-cancel"}:
     build = cli.build_model
     def build_when_authenticated(args):
         build(args)  # Real routing/validation/loading, but no provider sampling.
-        return Model()
+        return Model(args.save_path)
     cli.build_model = build_when_authenticated
     if failure == "auth":
         def fake_login(path, **kwargs):
             path.write_text(json.dumps({"tokens": {"access_token": "FAKE_PTY_SECRET", "account_id": "account"}}))
         user_tools.login = fake_login
+        user_tools.query_quota = lambda auth, **kwargs: "offline quota snapshot"
     else:
         user_tools.login = partial(login, callback_port=0)
 else:
-    cli.build_model = lambda args: Model()
+    cli.build_model = lambda args: Model(args.save_path)
 raise SystemExit(cli.main())
 '''
 
@@ -221,7 +225,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         os.write(self.master, "\x1b[200~next\ncafé\x1b[201~".encode())
         await self.wait_output("café".encode())
         users_before_enter = [
-            i for i in load_interaction_session(self.root / "interaction.jsonl")
+            i for i in load_interaction_save(self.root / "interaction.jsonl")
             if isinstance(i, Message) and i.role == "user"
         ]
         self.assertEqual(users_before_enter, [Message("user", "initial")])
@@ -229,7 +233,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"[assistant] answer-2")
         os.write(self.master, b"/quit\r")
         await self.wait_exit()
-        saved = load_interaction_session(self.root / "interaction.jsonl")
+        saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual(
             [i for i in saved if isinstance(i, Message) and i.role == "user"],
             [Message("user", "initial"), Message("user", "next\ncaf!é")],
@@ -244,10 +248,10 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"idle")
         os.write(self.master, b"unfinished draft\x04")
         await self.wait_exit()
-        saved = load_interaction_session(self.root / "interaction.jsonl")
+        saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual(len(saved.items), 1)
 
-    async def test_session_path_stays_in_launch_directory_not_tool_workspace(self):
+    async def test_save_path_stays_in_launch_directory_not_tool_workspace(self):
         workspace = self.root / "tools"
         workspace.mkdir()
         self.start("--cwd", str(workspace))
@@ -257,6 +261,79 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((self.root / "interaction.jsonl").exists())
         self.assertFalse((workspace / "interaction.jsonl").exists())
 
+    async def test_custom_save_path_and_resume_preserve_default_and_workspace_logs(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        (self.root / "logs").mkdir()
+        selected = self.root / "logs" / "chosen file.jsonl"
+        selected.write_text("old selected log\n")
+        default = self.root / "interaction.jsonl"
+        default.write_bytes(b"default sentinel\n")
+        workspace_log = workspace / "interaction.jsonl"
+        workspace_log.write_bytes(b"workspace sentinel\n")
+        self.start("--save", "logs/chosen file.jsonl", "--cwd", str(workspace), "--prompt", "first")
+        await self.wait_output(b"[assistant] answer-1")
+        await self.wait_output(b"idle")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit()
+        before = selected.read_bytes()
+        self.assertEqual(default.read_bytes(), b"default sentinel\n")
+        self.assertEqual(workspace_log.read_bytes(), b"workspace sentinel\n")
+        self.assertIn(f"Save log: {selected}".encode(), self.output)
+        self.assertEqual([i for i in load_interaction_save(selected) if isinstance(i, Message) and i.role == "user"],
+                         [Message("user", "first")])
+
+        self.process.stderr.close()
+        self.output.clear()
+        self.start("--save", str(selected), "--resume", "--cwd", str(workspace))
+        await self.wait_output(b"[assistant] answer-1")
+        await self.wait_output(b"idle")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit()
+        self.assertEqual(self.output.count(b"[assistant] answer-1"), 1)
+        self.assertEqual(selected.read_bytes(), before)
+        self.assertEqual(default.read_bytes(), b"default sentinel\n")
+        self.assertEqual(workspace_log.read_bytes(), b"workspace sentinel\n")
+
+    async def test_custom_save_path_survives_auth_activation_and_quota(self):
+        selected = self.root / "auth session.jsonl"
+        auth = self.root / "credentials.json"
+        default = self.root / "interaction.jsonl"
+        default.write_bytes(b"default sentinel\n")
+        self.start("--model-api", "codex", "--model", "test", "--codex-auth-file", str(auth),
+                   "--save", "auth session.jsonl", "--prompt", "blocked initial", failure="auth")
+        await self.wait_output(b"auth needed")
+        self.assertEqual(len(load_interaction_save(selected).items), 1)
+        os.write(self.master, b"\x15\x0b/login\r")
+        await self.wait_output(b"Model ready")
+        os.write(self.master, b"/quota\r")
+        await self.wait_output(b"offline quota snapshot")
+        os.write(self.master, b"explicit query\r")
+        await self.wait_output(b"[assistant] answer-1")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit()
+        saved = load_interaction_save(selected)
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["login", "quota"])
+        self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
+                         [Message("user", "explicit query")])
+        self.assertEqual(default.read_bytes(), b"default sentinel\n")
+        self.assertEqual(json.loads(auth.read_text())["tokens"]["access_token"], "FAKE_PTY_SECRET")
+        self.assertNotIn("FAKE_PTY_SECRET", selected.read_text())
+
+    async def test_custom_save_path_checkpoints_inflight_result_on_exit(self):
+        selected = self.root / "stopped.jsonl"
+        default = self.root / "interaction.jsonl"
+        default.write_bytes(b"default sentinel\n")
+        self.start("--save", "stopped.jsonl", "--prompt", "initial", blocked=True)
+        await self.wait_output(b"sampling")
+        os.write(self.master, b"\x03")
+        await self.wait_output(b"closing")
+        os.write(self.release, b"x")
+        await self.wait_exit()
+        self.assertEqual([call.call_id for call in load_interaction_save(selected).pending_tool_calls()], ["pending"])
+        self.assertEqual(default.read_bytes(), b"default sentinel\n")
+        self.assertFalse((self.root / "must-not-run").exists())
+
     async def test_ctrl_c_during_sample_drains_worker_and_leaves_calls_pending(self):
         self.start("--prompt", "initial", blocked=True)
         await self.wait_output(b"sampling")
@@ -264,7 +341,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"closing")
         os.write(self.release, b"x")
         await self.wait_exit()
-        saved = load_interaction_session(self.root / "interaction.jsonl")
+        saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual(saved.pending_tool_calls(), (
             ToolCall("exec_command", "pending", '{"cmd":"touch must-not-run"}'),
         ))
@@ -279,15 +356,15 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_never_executes_unresolved_command_and_waits_for_input(self):
         path = self.root / "interaction.jsonl"
-        original = (SessionInit("old"), Message("user", "old query"),
+        original = (Init("old"), Message("user", "old query"),
                     ToolCall("exec_command", "pending", '{"cmd":"touch must-not-run"}'))
-        save_interaction_session(path, ModelContext(original))
+        save_interaction_save(path, ModelContext(original))
         self.start("--resume")
         await self.wait_output(b"was not rerun")
         await self.wait_output(b"idle")
         os.write(self.master, b"/quit\r")
         await self.wait_exit()
-        saved = load_interaction_session(path)
+        saved = load_interaction_save(path)
         self.assertEqual(saved.items[:-1], original)
         self.assertIsInstance(saved.items[-1], ToolResult)
         self.assertFalse(saved.items[-1].success)
@@ -317,7 +394,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         os.write(self.master, b"/exit\r")
         await self.wait_exit(expected=1)
         self.assertEqual(json.loads((self.root / "cleanup.json").read_text())["active_before"], 1)
-        saved = load_interaction_session(self.root / "interaction.jsonl")
+        saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual([call.call_id for call in saved.pending_tool_calls()], ["command-1"])
 
     async def test_render_failure_restores_terminal_and_closes_command(self):
@@ -338,7 +415,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"Draft was not submitted")
         os.write(self.master, b"\x15\x0b/login\r")
         await self.wait_output(b"Model ready")
-        saved = load_interaction_session(self.root / "interaction.jsonl")
+        saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertTrue(saved.items[-1].result.success)
         self.assertIsInstance(saved.items[-1], UserToolResult)
         self.assertFalse(any(isinstance(i, Message) and i.role == "user" for i in saved))
@@ -358,7 +435,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"https://auth.openai.com/oauth/authorize?")
         os.write(self.master, b"\x03")
         await self.wait_exit()
-        saved = load_interaction_session(self.root / "interaction.jsonl")
+        saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertFalse(saved.items[-1].result.success)
         self.assertFalse(saved.pending_user_tool_calls())
         self.assertFalse((self.root / "auth.json").exists())

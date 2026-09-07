@@ -14,10 +14,10 @@ from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
     CodexResponsesModel, ContextCompaction, ContextValidationError, Environment,
     Instructions, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
-    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, SessionInit,
+    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, Init,
     TokenUsage, ToolCall, ToolResult, TurnMetadata, TurnSummary, UserInteraction,
-    UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_session,
-    render_interaction_items, save_interaction_session,
+    UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_save,
+    render_interaction_items, save_interaction_save,
 )
 from pythia.interaction import cli, demo, user_tools
 from pythia.interaction._cli_editor import Editor
@@ -85,14 +85,14 @@ class UserToolValueTests(unittest.TestCase):
     def test_empty_arguments_round_trip_and_old_quota_result_replay_without_rewriting(self):
         raw_arguments = " {\n } "
         old_output = "Quota snapshot at earlier\nplan: unavailable"
-        original = (SessionInit("old"),
+        original = (Init("old"),
                     UserToolCall(ToolCall("quota", "user_one", raw_arguments)),
                     UserToolResult(ToolResult("user_one", old_output)))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interaction.jsonl"
-            save_interaction_session(path, ModelContext(original))
+            save_interaction_save(path, ModelContext(original))
             before = path.read_bytes()
-            restored = load_interaction_session(path)
+            restored = load_interaction_save(path)
             for _ in range(2):
                 self.assertEqual(tuple(i.text for i in render_interaction_items(restored.items)), (
                     "[user-tool-call] quota (user_one)",
@@ -102,16 +102,16 @@ class UserToolValueTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), before)
 
     def test_round_trip_projection_provider_payloads_and_turn_state(self):
-        base = (SessionInit("session"), Message("user", "hello"), UserInteractionBoundary(),
+        base = (Init("session"), Message("user", "hello"), UserInteractionBoundary(),
                 Message("assistant", "answer"),
                 TurnMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="opaque"),
                 ModelSampleBoundary(), TurnSummary(sample_count=1))
         context = ModelContext((*base, *_records()))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
-            save_interaction_session(path, context)
+            save_interaction_save(path, context)
             self.assertIn('"type": "user_tool_call"', path.read_text())
-            self.assertEqual(load_interaction_session(path).items, context.items)
+            self.assertEqual(load_interaction_save(path).items, context.items)
         self.assertEqual(context.model_items(), ModelContext(base).model_items())
         models = (
             ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost:8000")),
@@ -276,7 +276,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 }).encode())
 
                 def open_request(request, *, timeout):
-                    pending = load_interaction_session(self.path).pending_user_tool_calls()
+                    pending = load_interaction_save(self.path).pending_user_tool_calls()
                     self.assertEqual(len(pending), 1)
                     self.assertEqual(pending[0].call.name, "quota")
                     self.assertEqual(pending[0].call.arguments_json, "{}")
@@ -302,9 +302,9 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await self.run_cli(model, terminal), 0)
                     opener.assert_called_once()
                     self.assertTrue(response.closed)
-                    saved = load_interaction_session(self.path)
+                    saved = load_interaction_save(self.path)
                     self.assertEqual(tuple(type(i) for i in saved), (
-                        SessionInit, UserToolCall, UserToolResult,
+                        Init, UserToolCall, UserToolResult,
                     ))
                     self.assertEqual(saved.items[1].call.arguments_json, "{}")
                     self.assertTrue(saved.items[2].result.success)
@@ -318,7 +318,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     before = self.path.read_bytes()
                     self.args.resume = True
                     replay = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-                    with mock.patch.object(cli, "save_interaction_session") as save:
+                    with mock.patch.object(cli, "save_interaction_save") as save:
                         self.assertEqual(await self.run_cli(model, replay), 0)
                     save.assert_not_called()
                     opener.assert_called_once()
@@ -341,7 +341,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(editor.text, "initial draft")
                 t.submit("/quota")
                 step = 2
-            elif status == "auth needed" and step == 2 and any(isinstance(i, UserToolResult) for i in load_interaction_session(self.path)):
+            elif status == "auth needed" and step == 2 and any(isinstance(i, UserToolResult) for i in load_interaction_save(self.path)):
                 t.submit("/login")
                 step = 3
             elif status == "idle" and step == 3:
@@ -352,13 +352,13 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 t.submit("/quit")
 
         def login(path, **kwargs):
-            pending = load_interaction_session(self.path).pending_user_tool_calls()
+            pending = load_interaction_save(self.path).pending_user_tool_calls()
             self.assertEqual(pending[0].call.name, "login")
-            self.assertFalse(any(isinstance(i, UserInteractionBoundary) for i in load_interaction_session(self.path)))
+            self.assertFalse(any(isinstance(i, UserInteractionBoundary) for i in load_interaction_save(self.path)))
             path.write_text('{"tokens":{"access_token":"FAKE_SECRET","account_id":"account"}}')
 
         def activate(args):
-            saved = load_interaction_session(self.path)
+            saved = load_interaction_save(self.path)
             self.assertIsInstance(saved.items[-1], UserToolResult)
             self.assertTrue(saved.items[-1].result.success)
             return model
@@ -367,7 +367,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(user_tools, "login", side_effect=login):
             with mock.patch.object(cli, "build_model", side_effect=activate):
                 self.assertEqual(await self.run_cli(None, terminal), 0)
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"], [Message("user", "explicit query")])
         self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["quota", "login"])
         self.assertEqual(len(model.calls), 1)
@@ -376,15 +376,15 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.calls[0][0].items, model.checkpoints[0])
 
     async def test_resume_unfinished_user_tool_never_executes_and_preserves_model_tail(self):
-        original = (SessionInit("old"), Message("assistant", "answer"), TurnSummary(), _records("login")[0])
-        save_interaction_session(self.path, ModelContext(original))
+        original = (Init("old"), Message("assistant", "answer"), TurnSummary(), _records("login")[0])
+        save_interaction_save(self.path, ModelContext(original))
         self.args.resume = True
         model = _Model(self.path)
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         with mock.patch.object(user_tools, "login") as login:
             self.assertEqual(await self.run_cli(model, terminal), 0)
         login.assert_not_called()
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:-1], original)
         self.assertFalse(saved.items[-1].result.success)
         self.assertIsNone(cli._resume_notice(saved))
@@ -402,7 +402,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     target = UserToolResult if fail_result else UserToolCall
                     if any(isinstance(i, target) for i in context):
                         raise OSError("disk failed")
-                    save_interaction_session(path, context)
+                    save_interaction_save(path, context)
 
                 def login(path, **kwargs):
                     attempted.append(True)
@@ -413,13 +413,13 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     if status == "failed":
                         t.key("c-d")
 
-                with mock.patch.object(cli, "save_interaction_session", side_effect=save):
+                with mock.patch.object(cli, "save_interaction_save", side_effect=save):
                     with mock.patch.object(user_tools, "login", side_effect=login):
                         with mock.patch.object(cli, "build_model") as activate:
                             self.assertEqual(await self.run_cli(None, _Terminal(frame)), 1)
                 activate.assert_not_called()
                 self.assertEqual(len(attempted), int(fail_result))
-                saved = load_interaction_session(self.path)
+                saved = load_interaction_save(self.path)
                 self.assertEqual(bool(saved.pending_user_tool_calls()), fail_result)
 
     async def test_quit_during_login_cancels_wait_and_checkpoints_safe_result(self):
@@ -440,7 +440,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(user_tools, "login", side_effect=login):
             self.assertEqual(await self.run_cli(None, _Terminal(frame)), 0)
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertFalse(saved.pending_user_tool_calls())
         self.assertFalse(saved.items[-1].result.success)
         self.assertNotIn("fake transient challenge", self.path.read_text())
@@ -465,7 +465,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(await self.run_cli(None, terminal), int(activation))
                 self.assertNotIn("FAKE_SECRET", self.path.read_text())
                 self.assertNotIn("FAKE_SECRET", "\n".join(i.text for i in terminal.items))
-                self.assertFalse(any(isinstance(i, UserInteractionBoundary) for i in load_interaction_session(self.path)))
+                self.assertFalse(any(isinstance(i, UserInteractionBoundary) for i in load_interaction_save(self.path)))
 
     async def test_authenticated_prompt_starting_with_login_is_literal_text(self):
         self.args.prompt = "/login"
@@ -487,7 +487,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             return _answer("first")
 
         def quota(auth, **kwargs):
-            items = load_interaction_session(self.path).items
+            items = load_interaction_save(self.path).items
             self.assertIsInstance(items[-1], UserToolCall)
             self.assertIsInstance(items[-2], TurnSummary)
             self.assertNotIn(Message("user", "follow-up"), items)
@@ -513,13 +513,13 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             release.set()
         query.assert_called_once()
         self.assertEqual(len(model.calls), 2)
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(len([i for i in saved if isinstance(i, TurnSummary)]), 2)
 
     async def test_same_account_login_rebinds_without_sampling_or_changing_provider_state(self):
         metadata = TurnMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="state")
-        original = (SessionInit("old"), Message("assistant", "answer"), metadata, TurnSummary())
-        save_interaction_session(self.path, ModelContext(original))
+        original = (Init("old"), Message("assistant", "answer"), metadata, TurnSummary())
+        save_interaction_save(self.path, ModelContext(original))
         self.args.resume = True
         model = _Model(self.path)
         model.endpoint = SimpleNamespace(account_id="account")
@@ -549,19 +549,19 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
         self.assertEqual(len(rebuilt), 1)
         self.assertEqual(rebuilt[0].endpoint.bearer_token, "new-token")
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:len(original)], original)
         self.assertEqual(saved.model_items(), ModelContext(original).model_items())
         self.assertEqual(len(saved.items), len(original) + 2)
         self.assertEqual(model.calls, [])
 
     async def test_auth_needed_instructions_resume_does_not_sample_or_add_a_user_boundary(self):
-        original = (SessionInit("old"), Message("assistant", "answer"), TurnSummary())
-        save_interaction_session(self.path, ModelContext(original))
+        original = (Init("old"), Message("assistant", "answer"), TurnSummary())
+        save_interaction_save(self.path, ModelContext(original))
         self.args.resume, self.args.instructions = True, "new instructions"
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "auth needed" else None)
         self.assertEqual(await self.run_cli(None, terminal), 0)
-        saved = load_interaction_session(self.path)
+        saved = load_interaction_save(self.path)
         self.assertEqual(saved.items, (*original, Instructions("new instructions")))
 
 

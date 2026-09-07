@@ -12,6 +12,7 @@ from pythia.interaction import CODEX_RESPONSES_API_URL
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import Init
 from pythia.interaction import META_RESPONSES_API_URL
 from pythia.interaction import Message
 from pythia.interaction import ModelConfigurationError
@@ -21,15 +22,14 @@ from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
-from pythia.interaction import SessionInit
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
 from pythia.interaction import TurnMetadata
 from pythia.interaction import UserInteraction
-from pythia.interaction import load_interaction_session
-from pythia.interaction import save_interaction_session
+from pythia.interaction import load_interaction_save
+from pythia.interaction import save_interaction_save
 from pythia.interaction.demo import DEFAULT_PROMPT
 from pythia.interaction.demo import _build_model
 from pythia.interaction.demo import _build_parser
@@ -299,6 +299,7 @@ class CodexResponsesConstructionTests(unittest.TestCase):
             ("gpt-5.6-sol-medium", (272_000, 872_000)),
             ("gpt-5.6-sol-max", (272_000, 872_000)),
             ("gpt-6-astra", (272_000, 872_000)),
+            ("gpt-6-astra-medium", (272_000, 872_000)),
             ("gpt-6-astra-max", (272_000, 872_000)),
             ("muse-spark-1.3", (None, None)),
             ("gpt-5.6-sol-high", (None, None)),
@@ -487,7 +488,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             (
-                SessionInit("session-from-context"),
+                Init("session-from-context"),
                 Message(role="user", text="hello"),
             )
         )
@@ -549,6 +550,7 @@ class CodexResponsesModelTests(unittest.TestCase):
     def test_astra_models_set_reasoning_and_low_verbosity(self):
         cases = (
             ("gpt-6-astra", {"summary": "auto"}),
+            ("gpt-6-astra-medium", {"effort": "medium", "summary": "auto"}),
             ("gpt-6-astra-max", {"effort": "max", "summary": "auto"}),
         )
         for requested_model, expected_reasoning in cases:
@@ -585,6 +587,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         for requested_model in (
             "gpt-5.6-sol-max",
             "gpt-6-astra",
+            "gpt-6-astra-medium",
             "gpt-6-astra-max",
         ):
             with self.subTest(model=requested_model):
@@ -987,9 +990,9 @@ class CodexResponsesModelTests(unittest.TestCase):
         context.extend(first_sample.context_items())
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            session_path = Path(tmpdir) / "interaction.jsonl"
-            save_interaction_session(session_path, context)
-            resumed = load_interaction_session(session_path)
+            save_path = Path(tmpdir) / "interaction.jsonl"
+            save_interaction_save(save_path, context)
+            resumed = load_interaction_save(save_path)
 
         resumed.append(
             ToolResult(

@@ -27,13 +27,13 @@ from .codex_auth import CodexAuthPath
 from .codex_auth import load_codex_auth
 from .context import ModelContext
 from .items import ContextCompaction
-from .items import InteractionItem
+from .items import Init
 from .items import Instructions
+from .items import InteractionItem
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
-from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -89,6 +89,14 @@ _CODEX_MODEL_ROUTES = {
     ),
     "gpt-6-astra": _CodexModelRoute(
         api_model="gpt-6-astra",
+        reasoning_summary="auto",
+        text_verbosity="low",
+        default_context_tokens=272_000,
+        max_context_tokens=872_000,
+    ),
+    "gpt-6-astra-medium": _CodexModelRoute(
+        api_model="gpt-6-astra",
+        reasoning_effort="medium",
         reasoning_summary="auto",
         text_verbosity="low",
         default_context_tokens=272_000,
@@ -330,7 +338,7 @@ def _encode_context_items(
             item,
             (
                 ModelSampleBoundary,
-                SessionInit,
+                Init,
                 TurnMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
@@ -521,7 +529,7 @@ def _resolve_provider_state(
 ) -> _ProviderState:
     items = context.items
     session_init = items[0] if items else None
-    if isinstance(session_init, SessionInit):
+    if isinstance(session_init, Init):
         session_id = session_init.session_id
         persist_session_id = False
     else:

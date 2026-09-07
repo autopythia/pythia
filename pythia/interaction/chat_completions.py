@@ -21,13 +21,13 @@ from typing import Tuple
 from .context import ContextValidationError
 from .context import ModelContext
 from .items import ContextCompaction
-from .items import InteractionItem
+from .items import Init
 from .items import Instructions
+from .items import InteractionItem
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
-from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -184,7 +184,7 @@ def _encode_context_messages(
             item,
             (
                 ModelSampleBoundary,
-                SessionInit,
+                Init,
                 TurnMetadata,
                 TurnSummary,
                 UserInteractionBoundary,

@@ -15,13 +15,13 @@ from typing import Set
 from typing import Tuple
 
 from .items import ContextCompaction
-from .items import InteractionItem
+from .items import Init
 from .items import Instructions
+from .items import InteractionItem
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
-from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -180,7 +180,7 @@ class InteractionItemRenderer:
                 blocks = _render_turn_summary(item)
             elif isinstance(
                 item,
-                (ModelSampleBoundary, SessionInit, UserInteractionBoundary),
+                (ModelSampleBoundary, Init, UserInteractionBoundary),
             ):
                 blocks = ()
             elif isinstance(item, OpaqueCompaction):

@@ -14,13 +14,13 @@ from typing import Union
 
 from .context import ModelContext
 from .items import ContextCompaction
-from .items import InteractionItem
+from .items import Init
 from .items import Instructions
+from .items import InteractionItem
 from .items import Message
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
-from .items import SessionInit
 from .items import ToolCall
 from .items import ToolResult
 from .items import TurnMetadata
@@ -31,15 +31,15 @@ from .items import UserToolResult
 from .usage import TokenUsage
 
 
-SessionPath = Union[str, os.PathLike]
+SavePath = Union[str, os.PathLike]
 
 
-class SessionError(ValueError):
+class SaveError(ValueError):
     pass
 
 
 _ITEM_TYPES = {
-    SessionInit: "session_init",
+    Init: "init",
     Instructions: "instructions",
     Message: "message",
     Reasoning: "reasoning",
@@ -54,13 +54,14 @@ _ITEM_TYPES = {
     OpaqueCompaction: "opaque_compaction",
     ContextCompaction: "context_compaction",
 }
-_ITEM_TYPE_NAMES = frozenset(_ITEM_TYPES.values())
+# Accept legacy records on read; new saves use only the canonical types above.
+_ITEM_TYPE_NAMES = frozenset(_ITEM_TYPES.values()) | {"session_init"}
 
 
 def _item_type_name(item: InteractionItem) -> str:
     item_type = type(item)
     if item_type not in _ITEM_TYPES:
-        raise SessionError(
+        raise SaveError(
             f"cannot encode interaction item type {item_type.__name__}"
         )
     return _ITEM_TYPES[item_type]
@@ -78,8 +79,10 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
         encoded.update(text=item.text)
     elif isinstance(item, Message):
         encoded.update(role=item.role, text=item.text)
-    elif isinstance(item, SessionInit):
+    elif isinstance(item, Init):
         encoded["session_id"] = item.session_id
+        if item.model is not None:
+            encoded["model"] = item.model
     elif isinstance(item, Reasoning):
         encoded.update(text=item.text, summary=list(item.summary))
         if item.encrypted_content is not None:
@@ -137,7 +140,7 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     ):
         pass
     else:
-        raise SessionError(
+        raise SaveError(
             f"cannot encode interaction item type {type(item).__name__}"
         )
 
@@ -146,13 +149,13 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
 
 def _require_mapping(value: Any) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise SessionError("interaction item must be an object")
+        raise SaveError("interaction item must be an object")
     return value
 
 
 def _require_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str):
-        raise SessionError(f"{field_name} must be a string")
+        raise SaveError(f"{field_name} must be a string")
     return value
 
 
@@ -169,7 +172,7 @@ def _optional_string(
 
 def _require_nonnegative_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SessionError(f"{field_name} must be a nonnegative integer")
+        raise SaveError(f"{field_name} must be a nonnegative integer")
     return value
 
 
@@ -178,7 +181,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     mapping = _require_mapping(value)
     item_type = mapping.get("type")
     if not isinstance(item_type, str) or item_type not in _ITEM_TYPE_NAMES:
-        raise SessionError(f"unknown interaction item type: {item_type!r}")
+        raise SaveError(f"unknown interaction item type: {item_type!r}")
 
     if item_type == "user_tool_call":
         return UserToolCall(interaction_item_from_dict(mapping.get("call")))
@@ -193,17 +196,18 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
             role=_require_string(mapping.get("role"), "message.role"),
             text=_require_string(mapping.get("text"), "message.text"),
         )
-    if item_type == "session_init":
-        return SessionInit(
+    if item_type in {"init", "session_init"}:
+        return Init(
             session_id=_require_string(
                 mapping.get("session_id"),
-                "session_init.session_id",
-            )
+                "init.session_id",
+            ),
+            model=_optional_string(mapping, "model", "init.model"),
         )
     if item_type == "reasoning":
         summary_value = mapping.get("summary", ())
         if not isinstance(summary_value, list):
-            raise SessionError("reasoning.summary must be a list")
+            raise SaveError("reasoning.summary must be a list")
         return Reasoning(
             text=_require_string(mapping.get("text"), "reasoning.text"),
             summary=[
@@ -236,7 +240,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if item_type == "tool_result":
         success = mapping.get("success", True)
         if not isinstance(success, bool):
-            raise SessionError("tool_result.success must be a boolean")
+            raise SaveError("tool_result.success must be a boolean")
         return ToolResult(
             call_id=_require_string(
                 mapping.get("call_id"),
@@ -249,7 +253,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
             success=success,
         )
     if item_type == "opaque_compaction":
-        # Existing session files stored only Responses encrypted content.
+        # Existing save files stored only Responses encrypted content.
         if "protocol" not in mapping and "payload" not in mapping:
             return OpaqueCompaction.from_responses(
                 _require_string(
@@ -271,7 +275,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if item_type == "context_compaction":
         replacement = mapping.get("replacement_items")
         if not isinstance(replacement, list):
-            raise SessionError(
+            raise SaveError(
                 "context_compaction.replacement_items must be a list"
             )
         return ContextCompaction(
@@ -280,7 +284,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if item_type == "turn_metadata":
         usage = mapping.get("usage")
         if not isinstance(usage, Mapping):
-            raise SessionError("turn_metadata.usage must be an object")
+            raise SaveError("turn_metadata.usage must be an object")
         return TurnMetadata(
             usage=TokenUsage(
                 input_tokens=_require_nonnegative_int(
@@ -356,7 +360,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if item_type == "user_interaction_boundary":
         return UserInteractionBoundary()
 
-    raise SessionError(f"unknown interaction item type: {item_type!r}")
+    raise SaveError(f"unknown interaction item type: {item_type!r}")
 
 
 def iter_interaction_items(
@@ -366,7 +370,7 @@ def iter_interaction_items(
         yield interaction_item_to_dict(item)
 
 
-def save_interaction_session(path: SessionPath, context: ModelContext) -> None:
+def save_interaction_save(path: SavePath, context: ModelContext) -> None:
     """Atomically write a context as one JSON interaction item per line."""
     destination = Path(path)
     temporary_name: Optional[str] = None
@@ -394,8 +398,8 @@ def save_interaction_session(path: SessionPath, context: ModelContext) -> None:
         os.replace(temporary_name, destination)
         temporary_name = None
     except OSError as exc:
-        raise SessionError(
-            f"could not save session to {destination}: {exc}"
+        raise SaveError(
+            f"could not write save to {destination}: {exc}"
         ) from exc
     finally:
         if temporary_name is not None:
@@ -405,8 +409,8 @@ def save_interaction_session(path: SessionPath, context: ModelContext) -> None:
                 pass
 
 
-def load_interaction_session(path: SessionPath) -> ModelContext:
-    """Load and validate a JSONL interaction-session file."""
+def load_interaction_save(path: SavePath) -> ModelContext:
+    """Load and validate a JSONL interaction-save file."""
     source = Path(path)
     items: list[InteractionItem] = []
     try:
@@ -417,32 +421,32 @@ def load_interaction_session(path: SessionPath) -> ModelContext:
                 try:
                     value = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    raise SessionError(
-                        f"invalid JSON in session {source} at line "
+                    raise SaveError(
+                        f"invalid JSON in save {source} at line "
                         f"{line_number}: {exc}"
                     ) from exc
 
                 try:
                     items.append(interaction_item_from_dict(value))
-                except (SessionError, TypeError, ValueError) as exc:
-                    raise SessionError(
-                        f"invalid session item in {source} at line "
+                except (SaveError, TypeError, ValueError) as exc:
+                    raise SaveError(
+                        f"invalid save item in {source} at line "
                         f"{line_number}: {exc}"
                     ) from exc
     except OSError as exc:
-        raise SessionError(f"could not load session {source}: {exc}") from exc
+        raise SaveError(f"could not load save {source}: {exc}") from exc
 
     try:
         return ModelContext(items)
     except (TypeError, ValueError) as exc:
-        raise SessionError(f"invalid session {source}: {exc}") from exc
+        raise SaveError(f"invalid save {source}: {exc}") from exc
 
 
 __all__ = [
-    "SessionError",
+    "SaveError",
     "interaction_item_from_dict",
     "interaction_item_to_dict",
     "iter_interaction_items",
-    "load_interaction_session",
-    "save_interaction_session",
+    "load_interaction_save",
+    "save_interaction_save",
 ]

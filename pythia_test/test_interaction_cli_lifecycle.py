@@ -16,7 +16,7 @@ from pythia.interaction import ToolCall
 from pythia.interaction import ToolOutcome
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
-from pythia.interaction import load_interaction_session
+from pythia.interaction import load_interaction_save
 from pythia.interaction._cli_terminal import PosixTerminal
 from pythia_test.test_interaction_cli import _ControllerTestCase
 from pythia_test.test_interaction_cli import _Model
@@ -154,7 +154,7 @@ class CLIShutdownTests(_ControllerTestCase):
                 self.assertTrue(terminal.exited)
                 self.assertEqual(finished, [True])
                 self.assertEqual(len(model.calls), 1)
-                saved = load_interaction_session(self.path)
+                saved = load_interaction_save(self.path)
                 self.assertEqual(saved.items[-1], ToolResult("one", "drained result"))
                 self.assertEqual(saved.pending_tool_calls(), (calls[1],))
 
