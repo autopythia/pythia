@@ -200,7 +200,7 @@ class SaveEntrypointTests(_SavePathTestCase):
                     notices = "\n".join(str(i) for i in (*terminal.items, *printed))
                     self.assertIn("no existing chosen log.data was found", notices)
                     saved = load_interaction_save(self.selected)
-                    users = [i.text for i in saved if isinstance(i, Message) and i.role == "user"]
+                    users = [i.content for i in saved if isinstance(i, Message) and i.role == "user"]
                     expected = [] if not samples else [prompt if prompt is not None else demo.DEFAULT_PROMPT]
                     self.assertEqual(users, expected)
 

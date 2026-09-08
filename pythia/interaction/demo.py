@@ -154,7 +154,7 @@ def run(
         # For a resumed save, add the follow-up only after any pending
         # tool batch has been made valid again.
         user_interaction = UserInteraction(
-            items=(Message(role="user", text=prompt),),
+            items=(Message(role="user", content=prompt),),
         )
         context.extend(user_interaction.context_items())
         _persist()
@@ -222,7 +222,7 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
         ):
             continue
         if isinstance(item, Message) and item.role == "assistant":
-            return item.text
+            return item.content
         return None
     return None
 

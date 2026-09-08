@@ -440,7 +440,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             ModelContext(
                 (
                     OpaqueCompaction.from_responses("encrypted-summary"),
-                    Message(role="user", text="continue"),
+                    Message(role="user", content="continue"),
                 )
             )
         )
@@ -456,7 +456,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             sample.items,
             (
                 OpaqueCompaction.from_responses("new-encrypted-summary"),
-                Message(role="assistant", text="continued"),
+                Message(role="assistant", content="continued"),
             ),
         )
         with self.assertRaisesRegex(
@@ -467,7 +467,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 ModelContext(
                     (
                         OpaqueCompaction.from_messages("summary"),
-                        Message(role="user", text="continue"),
+                        Message(role="user", content="continue"),
                     )
                 )
             )
@@ -494,7 +494,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         context = ModelContext(
             (
                 Init("session-from-context"),
-                Message(role="user", text="hello"),
+                Message(role="user", content="hello"),
             )
         )
 
@@ -537,7 +537,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", text="hello")])
+                    ModelContext([Message(role="user", content="hello")])
                 )
 
                 payload = _request_payload(opener)
@@ -573,7 +573,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", text="hello")])
+                    ModelContext([Message(role="user", content="hello")])
                 )
 
                 request, _ = opener.calls[0]
@@ -613,7 +613,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", text="hello")])
+                    ModelContext([Message(role="user", content="hello")])
                 )
 
                 payload = _request_payload(opener)
@@ -644,7 +644,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", text="hello")])
+                    ModelContext([Message(role="user", content="hello")])
                 )
 
                 request, _ = opener.calls[0]
@@ -699,7 +699,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             UserInteraction(
-                items=(Message(role="user", text="Summarize this repo."),)
+                items=(Message(role="user", content="Summarize this repo."),)
             ).context_items()
         )
         before = context.items
@@ -725,11 +725,11 @@ class CodexResponsesModelTests(unittest.TestCase):
             sample.items,
             (
                 Reasoning(
-                    text="Need repository facts.",
+                    content="Need repository facts.",
                     summary=("Inspect the repository.",),
                     encrypted_content="encrypted-reasoning",
                 ),
-                Message(role="assistant", text="I will inspect it."),
+                Message(role="assistant", content="I will inspect it."),
                 ToolCall(
                     name="lookup",
                     call_id="call-1",
@@ -925,7 +925,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             UserInteraction(
-                items=(Message(role="user", text="First turn"),)
+                items=(Message(role="user", content="First turn"),)
             ).context_items()
         )
 
@@ -941,7 +941,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         context.extend(second.context_items())
         context.extend(
             UserInteraction(
-                items=(Message(role="user", text="Second turn"),)
+                items=(Message(role="user", content="Second turn"),)
             ).context_items()
         )
         third = model.sample(context)
@@ -1021,7 +1021,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", text="hello")])
+            ModelContext([Message(role="user", content="hello")])
         )
 
         headers = _request_headers(opener)
@@ -1056,7 +1056,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             UserInteraction(
-                items=(Message(role="user", text="Use the tool"),)
+                items=(Message(role="user", content="Use the tool"),)
             ).context_items()
         )
         first_sample = first_model.sample(context)
@@ -1130,7 +1130,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", text="hello")])
+            ModelContext([Message(role="user", content="hello")])
         )
 
         self.assertEqual(sample.last_assistant_text, "multiline")
@@ -1151,14 +1151,14 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", text="hello")])
+            ModelContext([Message(role="user", content="hello")])
         )
 
         self.assertEqual(
             sample.items,
             (
-                Message(role="assistant", text="first"),
-                Message(role="assistant", text="second"),
+                Message(role="assistant", content="first"),
+                Message(role="assistant", content="second"),
             ),
         )
 
@@ -1176,7 +1176,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             "temperature",
         ):
             model.sample(
-                ModelContext([Message(role="user", text="hello")]),
+                ModelContext([Message(role="user", content="hello")]),
                 options=SamplingOptions(temperature=0.5),
             )
 
@@ -1188,7 +1188,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 model.endpoint,
                 opener=_ScriptedOpener(incomplete_response),
             ).sample(
-                ModelContext([Message(role="user", text="hello")])
+                ModelContext([Message(role="user", content="hello")])
             )
         self.assertTrue(incomplete_response.closed)
 
@@ -1208,7 +1208,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 model.endpoint,
                 opener=_ScriptedOpener(unsupported_response),
             ).sample(
-                ModelContext([Message(role="user", text="hello")])
+                ModelContext([Message(role="user", content="hello")])
             )
 
         malformed_response = _FakeSSEResponse()
@@ -1218,7 +1218,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 model.endpoint,
                 opener=_ScriptedOpener(malformed_response),
             ).sample(
-                ModelContext([Message(role="user", text="hello")])
+                ModelContext([Message(role="user", content="hello")])
             )
 
     def test_codex_401_is_actionable_and_does_not_expose_token(self):
@@ -1245,7 +1245,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             "codex login",
         ) as raised:
             model.sample(
-                ModelContext([Message(role="user", text="hello")])
+                ModelContext([Message(role="user", content="hello")])
             )
 
         self.assertNotIn("secret-token", str(raised.exception))

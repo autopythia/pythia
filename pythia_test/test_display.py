@@ -70,25 +70,25 @@ class InteractionItemRendererTests(unittest.TestCase):
     def test_messages_reasoning_boundaries_and_compaction(self):
         checkpoint = ContextCompaction(
             replacement_items=(
-                Message(role="user", text="summary"),
+                Message(role="user", content="summary"),
                 UserInteractionBoundary(),
             )
         )
         rendered = render_interaction_items(
             (
-                Message(role="system", text="system"),
-                Message(role="developer", text="developer"),
-                Message(role="user", text="user"),
-                Message(role="assistant", text="assistant"),
-                Message(role="assistant", text="   "),
+                Message(role="system", content="system"),
+                Message(role="developer", content="developer"),
+                Message(role="user", content="user"),
+                Message(role="assistant", content="assistant"),
+                Message(role="assistant", content="   "),
                 Reasoning(
-                    text="hidden fallback",
+                    content="hidden fallback",
                     summary=("first", " ", "second"),
                 ),
-                Reasoning(text="fallback"),
-                Reasoning(text=" "),
+                Reasoning(content="fallback"),
+                Reasoning(content=" "),
                 Reasoning(
-                    text="",
+                    content="",
                     summary=(),
                     encrypted_content="provider-ciphertext",
                 ),
@@ -127,12 +127,12 @@ class InteractionItemRendererTests(unittest.TestCase):
 
     def test_producer_display_items_and_compaction_context_items(self):
         user = UserInteraction(
-            items=(Message(role="user", text="hello"),),
+            items=(Message(role="user", content="hello"),),
         )
         sample = ModelSample(
             items=(
-                Reasoning(text="inspect"),
-                Message(role="assistant", text="answer"),
+                Reasoning(content="inspect"),
+                Message(role="assistant", content="answer"),
             ),
             usage=TokenUsage(
                 input_tokens=20,
@@ -142,7 +142,7 @@ class InteractionItemRendererTests(unittest.TestCase):
             ),
         )
         checkpoint = ContextCompaction(
-            replacement_items=(Message(role="user", text="summary"),)
+            replacement_items=(Message(role="user", content="summary"),)
         )
         compaction = CompactionResult(items=(checkpoint,))
 

@@ -133,7 +133,7 @@ def _select_retained_user_messages(
     for message in reversed(messages):
         if remaining == 0:
             break
-        tokens = _approx_token_count(message.text)
+        tokens = _approx_token_count(message.content)
         if tokens <= remaining:
             selected_reversed.append(message)
             remaining -= tokens
@@ -141,7 +141,7 @@ def _select_retained_user_messages(
         selected_reversed.append(
             Message(
                 role="user",
-                text=_truncate_text_to_tokens(message.text, remaining),
+                content=_truncate_text_to_tokens(message.content, remaining),
             )
         )
         break
@@ -219,7 +219,7 @@ class PromptSummarizingCompactor:
     def _is_retained_user_message(self, message: Message) -> bool:
         if message.role != "user":
             return False
-        if message.text.startswith(f"{self._summary_prefix}\n"):
+        if message.content.startswith(f"{self._summary_prefix}\n"):
             return False
         if self._retain_user_message is not None:
             return bool(self._retain_user_message(message))
@@ -247,7 +247,7 @@ class PromptSummarizingCompactor:
             if isinstance(item, Message)
             and self._is_retained_user_message(item)
         )
-        compaction_prompt = Message(role="user", text=self._prompt)
+        compaction_prompt = Message(role="user", content=self._prompt)
         request_items = list(active_items)
 
         while True:
@@ -291,7 +291,7 @@ class PromptSummarizingCompactor:
         )
         summary_message = Message(
             role="user",
-            text=f"{self._summary_prefix}\n{summary_text.strip()}",
+            content=f"{self._summary_prefix}\n{summary_text.strip()}",
         )
         replacement_items = (
             *instruction_prefix,

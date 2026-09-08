@@ -30,7 +30,7 @@ def create_inject_user_message_tool() -> Tool:
             raise ValueError("experimental_inject_user_message takes no arguments")
         return ToolOutcome(
             output="Synthetic user message queued.",
-            user_messages=(Message(role="user", text="hello world"),),
+            user_messages=(Message(role="user", content="hello world"),),
         )
 
     return Tool(

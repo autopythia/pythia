@@ -46,7 +46,7 @@ from pythia.interaction._cli_terminal import PosixTerminal
 
 
 def _answer(text="done"):
-    return ModelSample(items=(Message(role="assistant", text=text),))
+    return ModelSample(items=(Message(role="assistant", content=text),))
 
 
 class _Terminal:
@@ -351,8 +351,8 @@ class CLIControllerTests(_ControllerTestCase):
             self.path,
             ModelSample(
                 items=(
-                    Reasoning(text="", encrypted_content=ciphertext),
-                    Message(role="assistant", text="done"),
+                    Reasoning(content="", encrypted_content=ciphertext),
+                    Message(role="assistant", content="done"),
                 ),
             ),
         )

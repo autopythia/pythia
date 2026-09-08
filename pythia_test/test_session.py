@@ -50,7 +50,7 @@ class SessionTests(unittest.TestCase):
         context = ModelContext(
             (
                 Init("session-test", model="initial-model"),
-                Message(role="user", text="hello"),
+                Message(role="user", content="hello"),
                 UserInteractionBoundary(),
             )
         )
@@ -83,7 +83,7 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertEqual(
                 restored.items,
-                (Init("legacy-session"), Message(role="user", text="hello")),
+                (Init("legacy-session"), Message(role="user", content="hello")),
             )
             save_interaction_save(path, restored)
             self.assertEqual(
@@ -104,7 +104,7 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be the first"):
             ModelContext(
                 (
-                    Message(role="user", text="hello"),
+                    Message(role="user", content="hello"),
                     Init("session-test"),
                 )
             )
@@ -132,7 +132,7 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(
             restored.items,
-            (Message(role="user", text="hello"),),
+            (Message(role="user", content="hello"),),
         )
         self.assertEqual(
             interaction_item_from_dict(
@@ -146,15 +146,15 @@ class SessionTests(unittest.TestCase):
 
     def test_interaction_items_round_trip_through_jsonl(self):
         items = (
-            Message(role="user", text="hello"),
+            Message(role="user", content="hello"),
             UserInteractionBoundary(),
             Reasoning(
-                text="thinking",
+                content="thinking",
                 summary=("short",),
                 encrypted_content="encrypted-reasoning",
                 content_signature="thinking-signature",
             ),
-            Message(role="assistant", text="calling tool"),
+            Message(role="assistant", content="calling tool"),
             ToolCall(
                 name="lookup",
                 call_id="call-1",
@@ -177,9 +177,9 @@ class SessionTests(unittest.TestCase):
             OpaqueCompaction.from_messages("summary"),
             ContextCompaction(
                 (
-                    Message(role="user", text="summary"),
+                    Message(role="user", content="summary"),
                     UserInteractionBoundary(),
-                    Message(role="assistant", text="answer"),
+                    Message(role="assistant", content="answer"),
                     ModelSampleBoundary(),
                 )
             ),
@@ -239,7 +239,7 @@ class SessionResumeTests(unittest.TestCase):
                 del tools, options
                 self.contexts.append(context.copy())
                 return ModelSample(
-                    items=(Message(role="assistant", text="fresh answer"),),
+                    items=(Message(role="assistant", content="fresh answer"),),
                     stop_reason="end_turn",
                 )
 
@@ -264,7 +264,7 @@ class SessionResumeTests(unittest.TestCase):
         self.assertIsInstance(restored.items[0], Init)
         self.assertEqual(
             tuple(
-                item.text
+                item.content
                 for item in restored.items
                 if isinstance(item, Message)
             ),
@@ -288,9 +288,9 @@ class SessionResumeTests(unittest.TestCase):
     def test_resume_replays_existing_items(self):
         context = ModelContext(
             (
-                Message(role="user", text="original request"),
+                Message(role="user", content="original request"),
                 UserInteractionBoundary(),
-                Message(role="assistant", text="resumed answer"),
+                Message(role="assistant", content="resumed answer"),
             )
         )
 
@@ -327,9 +327,9 @@ class SessionResumeTests(unittest.TestCase):
     def test_resume_appends_follow_up_prompt_once(self):
         context = ModelContext(
             (
-                Message(role="user", text="original request"),
+                Message(role="user", content="original request"),
                 UserInteractionBoundary(),
-                Message(role="assistant", text="previous answer"),
+                Message(role="assistant", content="previous answer"),
             )
         )
 
@@ -341,7 +341,7 @@ class SessionResumeTests(unittest.TestCase):
                 del tools, options
                 self.contexts.append(context.copy())
                 return ModelSample(
-                    items=(Message(role="assistant", text="new answer"),),
+                    items=(Message(role="assistant", content="new answer"),),
                     stop_reason="end_turn",
                 )
 
@@ -367,7 +367,7 @@ class SessionResumeTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             tuple(
-                item.text
+                item.content
                 for item in resumed.items
                 if isinstance(item, Message)
             ),
@@ -392,7 +392,7 @@ class SessionResumeTests(unittest.TestCase):
         )
         interrupted = ModelContext(
             (
-                Message(role="user", text="original request"),
+                Message(role="user", content="original request"),
                 UserInteractionBoundary(),
                 call,
             )
@@ -406,7 +406,7 @@ class SessionResumeTests(unittest.TestCase):
                 del tools, options
                 self.contexts.append(context.copy())
                 return ModelSample(
-                    items=(Message(role="assistant", text="resumed answer"),),
+                    items=(Message(role="assistant", content="resumed answer"),),
                     stop_reason="end_turn",
                 )
 
@@ -440,7 +440,7 @@ class SessionResumeTests(unittest.TestCase):
             (
                 *interrupted.items,
                 tool_result,
-                Message(role="assistant", text="resumed answer"),
+                Message(role="assistant", content="resumed answer"),
                 TurnMetadata(usage=TokenUsage()),
                 ModelSampleBoundary(),
                 TurnSummary(sample_count=1),

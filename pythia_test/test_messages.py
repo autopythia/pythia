@@ -201,16 +201,16 @@ class MessagesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             (
-                Message(role="system", text="system text"),
-                Message(role="developer", text="developer text"),
-                Message(role="user", text="question"),
+                Message(role="system", content="system text"),
+                Message(role="developer", content="developer text"),
+                Message(role="user", content="question"),
                 UserInteractionBoundary(),
                 Reasoning(
-                    text="prior thought",
+                    content="prior thought",
                     encrypted_content="responses-only-data",
                     content_signature="prior-signature",
                 ),
-                Message(role="assistant", text="calling"),
+                Message(role="assistant", content="calling"),
                 ToolCall(
                     name="lookup",
                     call_id="call-old",
@@ -310,10 +310,10 @@ class MessagesModelTests(unittest.TestCase):
             sample.items,
             (
                 Reasoning(
-                    text="Need the tool.",
+                    content="Need the tool.",
                     content_signature="new-signature",
                 ),
-                Message(role="assistant", text="Checking."),
+                Message(role="assistant", content="Checking."),
                 ToolCall(
                     name="lookup",
                     call_id="call-new",
@@ -379,7 +379,7 @@ class MessagesModelTests(unittest.TestCase):
             opener=opener,
         )
 
-        model.sample(ModelContext((Message(role="user", text="hello"),)))
+        model.sample(ModelContext((Message(role="user", content="hello"),)))
 
         payload = _payload(opener)
         self.assertEqual(payload["max_tokens"], 77)
@@ -399,8 +399,8 @@ class MessagesModelTests(unittest.TestCase):
             (
                 ModelContext(
                     (
-                        Message(role="user", text="hello"),
-                        Message(role="system", text="late"),
+                        Message(role="user", content="hello"),
+                        Message(role="system", content="late"),
                     )
                 ),
                 None,
@@ -409,7 +409,7 @@ class MessagesModelTests(unittest.TestCase):
             (
                 ModelContext(
                     (
-                        Message(role="user", text="hello"),
+                        Message(role="user", content="hello"),
                         ToolCall(
                             name="tool",
                             call_id="call",
@@ -422,7 +422,7 @@ class MessagesModelTests(unittest.TestCase):
                 "decode to an object",
             ),
             (
-                ModelContext((Message(role="user", text="hello"),)),
+                ModelContext((Message(role="user", content="hello"),)),
                 SamplingOptions(seed=1),
                 "seed",
             ),
@@ -446,7 +446,7 @@ class MessagesModelTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(ModelResponseError, "redacted_thinking"):
-            model.sample(ModelContext((Message(role="user", text="hello"),)))
+            model.sample(ModelContext((Message(role="user", content="hello"),)))
 
     def test_context_window_http_error_is_typed(self):
         error = urllib.error.HTTPError(
@@ -462,7 +462,7 @@ class MessagesModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelContextWindowError):
-            model.sample(ModelContext((Message(role="user", text="hello"),)))
+            model.sample(ModelContext((Message(role="user", content="hello"),)))
 
     def test_server_compaction_round_trips_and_projects_latest_block(self):
         first_response = _FakeResponse(
@@ -517,8 +517,8 @@ class MessagesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             (
-                Message(role="system", text="instructions"),
-                Message(role="user", text="old question"),
+                Message(role="system", content="instructions"),
+                Message(role="user", content="old question"),
             )
         )
 
@@ -538,7 +538,7 @@ class MessagesModelTests(unittest.TestCase):
             first.items,
             (
                 OpaqueCompaction.from_messages("Summary of old work."),
-                Message(role="assistant", text="First answer."),
+                Message(role="assistant", content="First answer."),
             ),
         )
         self.assertEqual(first.usage.input_tokens, 203_500)
@@ -549,7 +549,7 @@ class MessagesModelTests(unittest.TestCase):
         context.extend(first.context_items())
         context.extend(
             (
-                Message(role="user", text="new question"),
+                Message(role="user", content="new question"),
                 UserInteractionBoundary(),
             )
         )
@@ -602,7 +602,7 @@ class MessagesModelTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ModelResponseError, "content"):
             null_model.sample(
-                ModelContext((Message(role="user", text="hello"),))
+                ModelContext((Message(role="user", content="hello"),))
             )
 
         wrong_protocol_model = MessagesModel(
@@ -617,7 +617,7 @@ class MessagesModelTests(unittest.TestCase):
                 ModelContext(
                     (
                         OpaqueCompaction.from_responses("encrypted"),
-                        Message(role="user", text="hello"),
+                        Message(role="user", content="hello"),
                     )
                 )
             )
@@ -635,18 +635,18 @@ class MessagesModelTests(unittest.TestCase):
             opener=_Opener(error),
         )
         with self.assertRaises(ModelContextWindowError):
-            model.sample(ModelContext((Message(role="user", text="hello"),)))
+            model.sample(ModelContext((Message(role="user", content="hello"),)))
 
 
 class ReasoningSignatureTests(unittest.TestCase):
     def test_signature_is_validated_and_redacted(self):
         reasoning = Reasoning(
-            text="thought",
+            content="thought",
             content_signature="signature-value",
         )
         self.assertNotIn("signature-value", repr(reasoning))
         with self.assertRaisesRegex(ValueError, "content_signature"):
-            Reasoning(text="thought", content_signature="")
+            Reasoning(content="thought", content_signature="")
 
 
 class MessagesDemoTests(unittest.TestCase):
@@ -733,7 +733,7 @@ class MessagesDemoTests(unittest.TestCase):
                         stop_reason="compaction",
                     )
                 return ModelSample(
-                    items=(Message(role="assistant", text="done"),),
+                    items=(Message(role="assistant", content="done"),),
                     stop_reason="end_turn",
                 )
 

@@ -78,13 +78,13 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     elif isinstance(item, Instructions):
         encoded.update(text=item.text)
     elif isinstance(item, Message):
-        encoded.update(role=item.role, text=item.text)
+        encoded.update(role=item.role, content=item.content)
     elif isinstance(item, Init):
         encoded["session_id"] = item.session_id
         if item.model is not None:
             encoded["model"] = item.model
     elif isinstance(item, Reasoning):
-        encoded.update(text=item.text, summary=list(item.summary))
+        encoded.update(content=item.content, summary=list(item.summary))
         if item.encrypted_content is not None:
             encoded["encrypted_content"] = item.encrypted_content
         if item.content_signature is not None:
@@ -159,6 +159,21 @@ def _require_string(value: Any, field_name: str) -> str:
     return value
 
 
+def _require_content(mapping: Mapping[str, Any], item_type: str) -> str:
+    """Read content or legacy text, rejecting invalid or conflicting fields."""
+    if "content" not in mapping and "text" in mapping:
+        return _require_string(mapping["text"], f"{item_type}.text")
+
+    content = _require_string(mapping.get("content"), f"{item_type}.content")
+    if "text" in mapping:
+        legacy_text = _require_string(mapping["text"], f"{item_type}.text")
+        if content != legacy_text:
+            raise SaveError(
+                f"{item_type}.content and {item_type}.text must match"
+            )
+    return content
+
+
 def _optional_string(
     mapping: Mapping[str, Any],
     key: str,
@@ -194,7 +209,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     if item_type == "message":
         return Message(
             role=_require_string(mapping.get("role"), "message.role"),
-            text=_require_string(mapping.get("text"), "message.text"),
+            content=_require_content(mapping, "message"),
         )
     if item_type in {"init", "session_init"}:
         return Init(
@@ -209,7 +224,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         if not isinstance(summary_value, list):
             raise SaveError("reasoning.summary must be a list")
         return Reasoning(
-            text=_require_string(mapping.get("text"), "reasoning.text"),
+            content=_require_content(mapping, "reasoning"),
             summary=[
                 _require_string(value, f"reasoning.summary[{index}]")
                 for index, value in enumerate(summary_value)

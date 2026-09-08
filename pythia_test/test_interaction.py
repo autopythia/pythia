@@ -71,41 +71,41 @@ def _request_payload(opener, index=0):
 class ModelContextTests(unittest.TestCase):
     def test_context_is_append_only_and_projects_compaction(self):
         original = [
-            Message(role="user", text="old request"),
-            Message(role="assistant", text="old answer"),
+            Message(role="user", content="old request"),
+            Message(role="assistant", content="old answer"),
         ]
         context = ModelContext(original)
         checkpoint = ContextCompaction(
             replacement_items=(
-                Message(role="user", text="summary"),
+                Message(role="user", content="summary"),
             )
         )
 
         context.append(checkpoint)
-        context.append(Message(role="user", text="new request"))
+        context.append(Message(role="user", content="new request"))
 
         self.assertEqual(
             context.items,
             (
                 *original,
                 checkpoint,
-                Message(role="user", text="new request"),
+                Message(role="user", content="new request"),
             ),
         )
         self.assertEqual(
             context.model_items(),
             (
-                Message(role="user", text="summary"),
-                Message(role="user", text="new request"),
+                Message(role="user", content="summary"),
+                Message(role="user", content="new request"),
             ),
         )
 
     def test_nested_compaction_is_rejected_without_mutation(self):
-        context = ModelContext([Message(role="user", text="hello")])
+        context = ModelContext([Message(role="user", content="hello")])
         nested = ContextCompaction(
             replacement_items=(
                 ContextCompaction(
-                    replacement_items=(Message(role="user", text="summary"),)
+                    replacement_items=(Message(role="user", content="summary"),)
                 ),
             )
         )
@@ -118,7 +118,7 @@ class ModelContextTests(unittest.TestCase):
 
         self.assertEqual(
             context.items,
-            (Message(role="user", text="hello"),),
+            (Message(role="user", content="hello"),),
         )
 
     def test_new_interaction_is_rejected_before_tool_results(self):
@@ -138,7 +138,7 @@ class ModelContextTests(unittest.TestCase):
             ContextValidationError,
             "before unresolved tool results",
         ):
-            context.append(Message(role="user", text="continue"))
+            context.append(Message(role="user", content="continue"))
 
         self.assertEqual(
             context.items,
@@ -153,28 +153,28 @@ class ModelContextTests(unittest.TestCase):
         sample_boundary = ModelSampleBoundary()
         checkpoint = ContextCompaction(
             replacement_items=(
-                Message(role="user", text="retained request"),
+                Message(role="user", content="retained request"),
                 user_boundary,
-                Message(role="assistant", text="retained answer"),
+                Message(role="assistant", content="retained answer"),
                 sample_boundary,
             )
         )
         context = ModelContext(
             [
-                Message(role="user", text="old request"),
+                Message(role="user", content="old request"),
                 checkpoint,
-                Message(role="user", text="new request"),
+                Message(role="user", content="new request"),
             ]
         )
 
         self.assertEqual(
             context.model_items(),
             (
-                Message(role="user", text="retained request"),
+                Message(role="user", content="retained request"),
                 user_boundary,
-                Message(role="assistant", text="retained answer"),
+                Message(role="assistant", content="retained answer"),
                 sample_boundary,
-                Message(role="user", text="new request"),
+                Message(role="user", content="new request"),
             ),
         )
 
@@ -217,7 +217,7 @@ class ModelContextTests(unittest.TestCase):
         )
         context = ModelContext(
             [
-                Message(role="user", text="lookup"),
+                Message(role="user", content="lookup"),
                 UserInteractionBoundary(),
                 call,
                 metadata,
@@ -229,7 +229,7 @@ class ModelContextTests(unittest.TestCase):
         self.assertEqual(
             context.model_items(),
             (
-                Message(role="user", text="lookup"),
+                Message(role="user", content="lookup"),
                 UserInteractionBoundary(),
                 call,
                 metadata,
@@ -241,25 +241,25 @@ class ModelContextTests(unittest.TestCase):
         context.assert_model_ready()
 
     def test_unknown_tool_result_is_rejected_atomically(self):
-        context = ModelContext([Message(role="user", text="hello")])
+        context = ModelContext([Message(role="user", content="hello")])
 
         with self.assertRaisesRegex(ContextValidationError, "does not match"):
             context.extend(
                 [
-                    Message(role="assistant", text="answer"),
+                    Message(role="assistant", content="answer"),
                     ToolResult(call_id="missing", output="bad"),
                 ]
             )
 
         self.assertEqual(
             context.items,
-            (Message(role="user", text="hello"),),
+            (Message(role="user", content="hello"),),
         )
 
     def test_copy_branches_the_context(self):
-        context = ModelContext([Message(role="user", text="root")])
+        context = ModelContext([Message(role="user", content="root")])
         branch = context.copy()
-        branch.append(Message(role="assistant", text="branch"))
+        branch.append(Message(role="assistant", content="branch"))
 
         self.assertEqual(len(context), 1)
         self.assertEqual(len(branch), 2)
@@ -268,17 +268,17 @@ class ModelContextTests(unittest.TestCase):
 class UserInteractionTests(unittest.TestCase):
     def test_context_items_adds_non_emitting_boundary(self):
         interaction = UserInteraction(
-            items=[Message(role="user", text="hello")],
+            items=[Message(role="user", content="hello")],
         )
 
         self.assertEqual(
             interaction.items,
-            (Message(role="user", text="hello"),),
+            (Message(role="user", content="hello"),),
         )
         self.assertEqual(
             interaction.context_items(),
             (
-                Message(role="user", text="hello"),
+                Message(role="user", content="hello"),
                 UserInteractionBoundary(),
             ),
         )
@@ -286,8 +286,8 @@ class UserInteractionTests(unittest.TestCase):
     def test_rejects_empty_or_non_user_items(self):
         cases = (
             (),
-            (Message(role="assistant", text="answer"),),
-            (Reasoning(text="thought"),),
+            (Message(role="assistant", content="answer"),),
+            (Reasoning(content="thought"),),
         )
 
         for items in cases:
@@ -380,7 +380,7 @@ class EndpointTests(unittest.TestCase):
 class ChatCompletionsModelTests(unittest.TestCase):
     def test_sample_context_items_adds_non_emitting_boundary(self):
         sample = ModelSample(
-            items=(Message(role="assistant", text="answer"),),
+            items=(Message(role="assistant", content="answer"),),
         )
         usage = TokenUsage(
             input_tokens=20,
@@ -389,14 +389,14 @@ class ChatCompletionsModelTests(unittest.TestCase):
             cached_input_tokens=4,
         )
         sample_with_usage = ModelSample(
-            items=(Message(role="assistant", text="answer"),),
+            items=(Message(role="assistant", content="answer"),),
             usage=usage,
         )
 
         self.assertEqual(
             sample.context_items(),
             (
-                Message(role="assistant", text="answer"),
+                Message(role="assistant", content="answer"),
                 TurnMetadata(usage=TokenUsage()),
                 ModelSampleBoundary(),
             ),
@@ -404,14 +404,14 @@ class ChatCompletionsModelTests(unittest.TestCase):
         self.assertEqual(
             sample_with_usage.context_items(),
             (
-                Message(role="assistant", text="answer"),
+                Message(role="assistant", content="answer"),
                 TurnMetadata(usage=usage),
                 ModelSampleBoundary(),
             ),
         )
         self.assertEqual(
             sample.items,
-            (Message(role="assistant", text="answer"),),
+            (Message(role="assistant", content="answer"),),
         )
 
     def test_sample_encodes_request_and_decodes_tool_call(self):
@@ -455,8 +455,8 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         context = ModelContext(
             [
-                Message(role="system", text="Be concise."),
-                Message(role="user", text="Weather in Paris?"),
+                Message(role="system", content="Be concise."),
+                Message(role="user", content="Weather in Paris?"),
             ]
         )
         before = context.items
@@ -484,8 +484,8 @@ class ChatCompletionsModelTests(unittest.TestCase):
         self.assertEqual(
             sample.items,
             (
-                Reasoning(text="Need the tool."),
-                Message(role="assistant", text="I will check."),
+                Reasoning(content="Need the tool."),
+                Message(role="assistant", content="I will check."),
                 ToolCall(
                     name="lookup_weather",
                     call_id="call-weather",
@@ -550,7 +550,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", text="hello")])
+            ModelContext([Message(role="user", content="hello")])
         )
 
         request, _ = opener.calls[0]
@@ -626,7 +626,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         context = ModelContext()
         user_interaction = UserInteraction(
-            items=(Message(role="user", text="Use echo."),),
+            items=(Message(role="user", content="Use echo."),),
         )
         context.extend(user_interaction.context_items())
 
@@ -721,15 +721,15 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         context = ModelContext(
             [
-                Message(role="user", text="question"),
+                Message(role="user", content="question"),
                 UserInteractionBoundary(),
-                Reasoning(text="first reasoning"),
-                Message(role="assistant", text="first answer"),
+                Reasoning(content="first reasoning"),
+                Message(role="assistant", content="first answer"),
                 ModelSampleBoundary(),
-                Reasoning(text="second reasoning"),
-                Message(role="assistant", text="second answer"),
+                Reasoning(content="second reasoning"),
+                Message(role="assistant", content="second answer"),
                 ModelSampleBoundary(),
-                Message(role="user", text="continue"),
+                Message(role="user", content="continue"),
             ]
         )
 
@@ -775,9 +775,9 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         context = ModelContext(
             [
-                Message(role="user", text="question"),
+                Message(role="user", content="question"),
                 UserInteractionBoundary(),
-                Message(role="assistant", text="prior answer"),
+                Message(role="assistant", content="prior answer"),
                 TurnMetadata(
                     usage=TokenUsage(
                         input_tokens=20,
@@ -787,7 +787,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
                     )
                 ),
                 ModelSampleBoundary(),
-                Message(role="user", text="continue"),
+                Message(role="user", content="continue"),
             ]
         )
 
@@ -824,10 +824,10 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         context = ModelContext(
             [
-                Message(role="user", text="question"),
-                Message(role="assistant", text="first"),
-                Message(role="assistant", text="second"),
-                Message(role="user", text="continue"),
+                Message(role="user", content="question"),
+                Message(role="assistant", content="first"),
+                Message(role="assistant", content="second"),
+                Message(role="user", content="continue"),
             ]
         )
 
@@ -863,7 +863,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             opener=opener,
         )
 
-        model.sample(ModelContext([Message(role="user", text="hello")]))
+        model.sample(ModelContext([Message(role="user", content="hello")]))
 
         self.assertNotIn("model", _request_payload(opener))
 
@@ -883,7 +883,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelContextWindowError):
-            model.sample(ModelContext([Message(role="user", text="hello")]))
+            model.sample(ModelContext([Message(role="user", content="hello")]))
 
 
 class UserMessageOutcomeTests(unittest.TestCase):
@@ -1151,22 +1151,22 @@ class CompactionTests(unittest.TestCase):
         usage = TokenUsage(input_tokens=80, output_tokens=20, total_tokens=100)
         model = _ScriptedModel(
             ModelSample(
-                items=(Message(role="assistant", text="Condensed work."),),
+                items=(Message(role="assistant", content="Condensed work."),),
                 stop_reason="end_turn",
                 usage=usage,
             )
         )
         context = ModelContext(
             [
-                Message(role="system", text="Base instructions."),
-                Message(role="user", text="First request."),
-                Message(role="assistant", text="First answer."),
+                Message(role="system", content="Base instructions."),
+                Message(role="user", content="First request."),
+                Message(role="assistant", content="First answer."),
                 Message(
                     role="user",
-                    text=f"{DEFAULT_SUMMARY_PREFIX}\nOld summary.",
+                    content=f"{DEFAULT_SUMMARY_PREFIX}\nOld summary.",
                 ),
-                Message(role="user", text="Latest request."),
-                Message(role="assistant", text="Latest answer."),
+                Message(role="user", content="Latest request."),
+                Message(role="assistant", content="Latest answer."),
             ]
         )
         before = context.items
@@ -1183,12 +1183,12 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(
             checkpoint.replacement_items,
             (
-                Message(role="system", text="Base instructions."),
-                Message(role="user", text="First request."),
-                Message(role="user", text="Latest request."),
+                Message(role="system", content="Base instructions."),
+                Message(role="user", content="First request."),
+                Message(role="user", content="Latest request."),
                 Message(
                     role="user",
-                    text=f"{DEFAULT_SUMMARY_PREFIX}\nCondensed work.",
+                    content=f"{DEFAULT_SUMMARY_PREFIX}\nCondensed work.",
                 ),
             ),
         )
@@ -1196,7 +1196,7 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(tools, ())
         self.assertIsInstance(options, SamplingOptions)
         self.assertNotEqual(temporary_context.items, context.items)
-        self.assertIn("CONTEXT CHECKPOINT COMPACTION", temporary_context[-1].text)
+        self.assertIn("CONTEXT CHECKPOINT COMPACTION", temporary_context[-1].content)
 
         context.extend(result.items)
         self.assertEqual(context.model_items(), checkpoint.replacement_items)
@@ -1206,16 +1206,16 @@ class CompactionTests(unittest.TestCase):
         model = _ScriptedModel(
             ModelContextWindowError("too large"),
             ModelSample(
-                items=(Message(role="assistant", text="summary"),),
+                items=(Message(role="assistant", content="summary"),),
             ),
         )
         context = ModelContext(
             [
-                Message(role="system", text="instructions"),
-                Message(role="user", text="old"),
-                Message(role="assistant", text="old answer"),
-                Message(role="user", text="new"),
-                Message(role="assistant", text="new answer"),
+                Message(role="system", content="instructions"),
+                Message(role="user", content="old"),
+                Message(role="assistant", content="old answer"),
+                Message(role="user", content="new"),
+                Message(role="assistant", content="new answer"),
             ]
         )
         before = context.items
@@ -1244,7 +1244,7 @@ class CompactionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CompactionError, "must not contain tool calls"):
             compactor.compact(
-                ModelContext([Message(role="user", text="hello")])
+                ModelContext([Message(role="user", content="hello")])
             )
 
 

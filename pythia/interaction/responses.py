@@ -364,7 +364,7 @@ def _encode_context_items(
                     "content": [
                         {
                             "type": content_type,
-                            "text": item.text,
+                            "text": item.content,
                         }
                     ],
                 }
@@ -382,11 +382,11 @@ def _encode_context_items(
                     for text in item.summary
                 ],
             }
-            if item.text:
+            if item.content:
                 reasoning["content"] = [
                     {
                         "type": "reasoning_text",
-                        "text": item.text,
+                        "text": item.content,
                     }
                 ]
             if item.encrypted_content is not None:
@@ -714,7 +714,7 @@ def _decode_output_item(value: Any) -> InteractionItem:
                 expected_type="output_text",
             )
         )
-        return Message(role="assistant", text=text)
+        return Message(role="assistant", content=text)
 
     if item_type == "reasoning":
         summary = _decode_text_entries(
@@ -738,7 +738,7 @@ def _decode_output_item(value: Any) -> InteractionItem:
                 allow_empty=False,
             )
         return Reasoning(
-            text="\n".join(content),
+            content="\n".join(content),
             summary=summary,
             encrypted_content=encrypted_content,
         )

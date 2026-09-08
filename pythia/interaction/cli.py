@@ -427,7 +427,7 @@ async def _drive_interaction(
             if state.closing:
                 return
             if query is not None:
-                user = UserInteraction((Message(role="user", text=query),))
+                user = UserInteraction((Message(role="user", content=query),))
                 await _append(context, user.context_items(), state, path)
                 state.displays.extend(user.display_items())
             if should_sample:

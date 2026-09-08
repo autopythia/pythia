@@ -1018,7 +1018,7 @@ class _ScriptedRepositoryModel:
             items=(
                 Message(
                     role="assistant",
-                    text="The repository contains a README and Python source.",
+                    content="The repository contains a README and Python source.",
                 ),
             ),
             stop_reason="end_turn",

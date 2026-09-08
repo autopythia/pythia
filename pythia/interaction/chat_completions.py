@@ -202,7 +202,7 @@ def _encode_context_messages(
                 pending = ensure_assistant()
                 pending["content"] = _append_text(
                     pending.get("content"),
-                    item.text,
+                    item.content,
                 )
                 continue
             if item.role not in {"system", "developer", "user"}:
@@ -210,12 +210,12 @@ def _encode_context_messages(
                     f"unsupported message role at item {index}: {item.role!r}"
                 )
             flush_assistant()
-            messages.append({"role": item.role, "content": item.text})
+            messages.append({"role": item.role, "content": item.content})
             continue
 
         if isinstance(item, Reasoning):
             pending = ensure_assistant()
-            reasoning_text = item.text or "\n".join(item.summary)
+            reasoning_text = item.content or "\n".join(item.summary)
             pending["reasoning_content"] = _append_text(
                 pending.get("reasoning_content"),
                 reasoning_text,
@@ -494,9 +494,9 @@ def _decode_response(payload: Any) -> ModelSample:
     calls = _decode_tool_calls(message.get("tool_calls"))
     items: List[InteractionItem] = []
     if reasoning:
-        items.append(Reasoning(text=reasoning))
+        items.append(Reasoning(content=reasoning))
     if content or not calls:
-        items.append(Message(role="assistant", text=content))
+        items.append(Message(role="assistant", content=content))
     items.extend(calls)
 
     return ModelSample(

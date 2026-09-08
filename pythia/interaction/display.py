@@ -336,10 +336,10 @@ def render_interaction_items(
 
 
 def _render_message(item: Message) -> Tuple[str, ...]:
-    if not item.text.strip():
+    if not item.content.strip():
         return ()
     role = item.role.strip() or "message"
-    return (f"[{role}] {item.text}",)
+    return (f"[{role}] {item.content}",)
 
 
 def _render_instructions(item: Instructions) -> Tuple[str, ...]:
@@ -386,7 +386,7 @@ def _render_reasoning(item: Reasoning) -> Tuple[str, ...]:
     )
     if summaries:
         return tuple(f"[reasoning] {value}" for value in summaries)
-    fallback = item.text.strip()
+    fallback = item.content.strip()
     if fallback:
         return (f"[reasoning] {fallback}",)
     # Responses providers can return a valid reasoning item containing only

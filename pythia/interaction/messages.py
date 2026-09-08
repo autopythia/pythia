@@ -325,7 +325,7 @@ def _encode_context(
                         f"{item.role} message at item {index} appears after "
                         "Messages conversation content"
                     )
-                system.append({"type": "text", "text": item.text})
+                system.append({"type": "text", "text": item.content})
                 continue
             if item.role not in {"user", "assistant"}:
                 raise ModelConfigurationError(
@@ -336,7 +336,7 @@ def _encode_context(
                 messages,
                 pending,
                 item.role,
-                {"type": "text", "text": item.text},
+                {"type": "text", "text": item.content},
             )
             continue
 
@@ -344,7 +344,7 @@ def _encode_context(
             conversation_started = True
             block: Dict[str, Any] = {
                 "type": "thinking",
-                "thinking": item.text or "\n".join(item.summary),
+                "thinking": item.content or "\n".join(item.summary),
             }
             if item.content_signature is not None:
                 block["signature"] = item.content_signature
@@ -489,7 +489,7 @@ def _decode_content(value: Any) -> Tuple[InteractionItem, ...]:
             items.append(
                 Message(
                     role="assistant",
-                    text=_require_string(
+                    content=_require_string(
                         block.get("text"),
                         f"message.content[{index}].text",
                     ),
@@ -509,7 +509,7 @@ def _decode_content(value: Any) -> Tuple[InteractionItem, ...]:
             )
             items.append(
                 Reasoning(
-                    text=_require_string(
+                    content=_require_string(
                         block.get("thinking"),
                         f"message.content[{index}].thinking",
                     ),

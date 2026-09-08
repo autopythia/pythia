@@ -48,7 +48,7 @@ def _sample_message(message: dict[str, Any]):
     )
     endpoint = ChatCompletionsEndpoint(api_url="http://127.0.0.1:1")
     model = ChatCompletionsModel(endpoint, opener=opener)
-    context = ModelContext((Message(role="user", text="hello"),))
+    context = ModelContext((Message(role="user", content="hello"),))
     return model.sample(context)
 
 
@@ -71,7 +71,7 @@ class ReasoningFieldTests(unittest.TestCase):
 
         self.assertEqual(sample.stop_reason, "tool_use")
         self.assertEqual(
-            tuple(item.text for item in sample.items if isinstance(item, Reasoning)),
+            tuple(item.content for item in sample.items if isinstance(item, Reasoning)),
             ("new field reasoning",),
         )
         self.assertEqual(len(sample.tool_calls), 1)
@@ -93,7 +93,7 @@ class ReasoningFieldTests(unittest.TestCase):
 
         self.assertEqual(sample.stop_reason, "tool_use")
         self.assertEqual(
-            tuple(item.text for item in sample.items if isinstance(item, Reasoning)),
+            tuple(item.content for item in sample.items if isinstance(item, Reasoning)),
             ("legacy reasoning",),
         )
 
@@ -117,9 +117,9 @@ class ReasoningFieldTests(unittest.TestCase):
         )
         context = ModelContext(
             (
-                Message(role="user", text="hello"),
+                Message(role="user", content="hello"),
                 Reasoning(
-                    text="visible reasoning",
+                    content="visible reasoning",
                     encrypted_content="provider-ciphertext",
                 ),
             )

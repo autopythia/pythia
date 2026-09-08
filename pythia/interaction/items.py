@@ -41,11 +41,11 @@ class Init:
 @dataclass(frozen=True)
 class Message:
     role: str
-    text: str
+    content: str
 
     def __post_init__(self) -> None:
         _require_string(self.role, "role", allow_empty=False)
-        _require_string(self.text, "text")
+        _require_string(self.content, "content")
 
 
 @dataclass(frozen=True)
@@ -67,13 +67,13 @@ class Instructions:
 
 @dataclass(frozen=True)
 class Reasoning:
-    text: str
+    content: str
     summary: Tuple[str, ...] = ()
     encrypted_content: Optional[str] = field(default=None, repr=False)
     content_signature: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        _require_string(self.text, "text")
+        _require_string(self.content, "content")
         summary = tuple(self.summary)
         for index, value in enumerate(summary):
             _require_string(value, f"summary[{index}]")

@@ -27,12 +27,12 @@ def main() -> None:
         [
             Message(
                 role="system",
-                text="You are a concise and helpful assistant.",
+                content="You are a concise and helpful assistant.",
             ),
         ]
     )
     user_interaction = UserInteraction(
-        items=(Message(role="user", text=args.prompt),),
+        items=(Message(role="user", content=args.prompt),),
     )
     context.extend(user_interaction.context_items())
 

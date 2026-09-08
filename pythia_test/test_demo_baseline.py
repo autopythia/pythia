@@ -57,9 +57,9 @@ DEMO_ARGUMENT_DEFAULTS = {
 COMPLETED_SESSION_ITEMS = (
     Init("baseline-session"),
     Instructions("Original instructions."),
-    Message(role="user", text="Original request."),
+    Message(role="user", content="Original request."),
     UserInteractionBoundary(),
-    Message(role="assistant", text="Previous answer."),
+    Message(role="assistant", content="Previous answer."),
     TurnMetadata(
         usage=TokenUsage(
             input_tokens=10,
@@ -88,7 +88,7 @@ PLAN_CALL = ToolCall(
     arguments_json='{"plan":[{"step":"Inspect","status":"in_progress"}]}',
 )
 ANSWER = ModelSample(
-    items=(Message(role="assistant", text="Done."),),
+    items=(Message(role="assistant", content="Done."),),
     stop_reason="end_turn",
 )
 INJECTION_CALL = ToolCall(
@@ -97,7 +97,7 @@ INJECTION_CALL = ToolCall(
     arguments_json="{}",
 )
 INJECTION_RESULT = ToolResult(INJECTION_CALL.call_id, "Synthetic user message queued.")
-INJECTED_MESSAGE = Message(role="user", text="hello world")
+INJECTED_MESSAGE = Message(role="user", content="hello world")
 
 
 class _CheckpointRecordingModel:
@@ -212,7 +212,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertEqual(
             context.items[1:],
             (
-                Message(role="user", text=demo.DEFAULT_PROMPT),
+                Message(role="user", content=demo.DEFAULT_PROMPT),
                 UserInteractionBoundary(),
             ),
         )
@@ -250,7 +250,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         for context, _tools, options in model.calls:
             self.assertEqual(
                 tuple(item for item in context if isinstance(item, Message)),
-                (Message(role="user", text=query),),
+                (Message(role="user", content=query),),
             )
             self.assertEqual(options, SamplingOptions(max_tokens=77))
         self.assertEqual(
@@ -271,7 +271,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         )
         restored = load_interaction_save(self.path)
         self.assertEqual(
-            restored.items.count(Message(role="user", text=query)), 1
+            restored.items.count(Message(role="user", content=query)), 1
         )
         self.assertEqual(restored.items.count(UserInteractionBoundary()), 1)
         self.assertEqual(
@@ -293,8 +293,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
         ciphertext = "provider-ciphertext-must-not-be-displayed"
         sample = ModelSample(
             items=(
-                Reasoning(text="", encrypted_content=ciphertext),
-                Message(role="assistant", text="Done."),
+                Reasoning(content="", encrypted_content=ciphertext),
+                Message(role="assistant", content="Done."),
             ),
         )
 
@@ -361,7 +361,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         self.assertEqual(
             model.calls[0][0].items[1:],
             (
-                Message(role="user", text="Fresh query."),
+                Message(role="user", content="Fresh query."),
                 UserInteractionBoundary(),
             ),
         )
@@ -414,7 +414,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
             *interrupted,
             ToolResult(call_id=PLAN_CALL.call_id, output="Plan updated"),
             Instructions(""),
-            Message(role="user", text="Follow-up."),
+            Message(role="user", content="Follow-up."),
             UserInteractionBoundary(),
         )
         self.assertEqual(model.calls[0][0].items, expected)
@@ -458,7 +458,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 self.assertEqual(
                     model.calls[0][0].items[1:],
                     (
-                        Message(role="user", text=prompt or demo.DEFAULT_PROMPT),
+                        Message(role="user", content=prompt or demo.DEFAULT_PROMPT),
                         UserInteractionBoundary(),
                     ),
                 )
