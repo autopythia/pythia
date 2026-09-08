@@ -411,13 +411,11 @@ def _parse_patch(patch_text: str) -> Tuple[_PatchOperation, ...]:
 def _resolve_workspace_path(root: Path, raw_path: str) -> Path:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError("apply_patch path must not be empty")
-    relative = Path(raw_path)
-    if relative.is_absolute():
-        raise ValueError("apply_patch paths must be relative")
-    if ".." in relative.parts:
+    path = Path(raw_path)
+    if ".." in path.parts:
         raise ValueError(f"apply_patch path escapes workspace: {raw_path}")
 
-    candidate = root.joinpath(relative)
+    candidate = path if path.is_absolute() else root.joinpath(path)
     resolved = candidate.resolve(strict=False)
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"apply_patch path escapes workspace: {raw_path}")
@@ -689,9 +687,10 @@ def create_apply_patch_tool(
         spec=ToolSpec(
             name="apply_patch",
             description=(
-                "Apply file edits in the configured workspace. The patch may "
-                "use either the V4A (*** Begin Patch) format or a standard "
-                "unified diff produced by diff -u or git diff."
+                "Apply file edits in the configured workspace. File paths may "
+                "be workspace-relative or absolute paths within the workspace. "
+                "The patch may use either the V4A (*** Begin Patch) format or "
+                "a standard unified diff produced by diff -u or git diff."
             ),
             parameters={
                 "type": "object",

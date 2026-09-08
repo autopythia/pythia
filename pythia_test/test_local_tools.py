@@ -73,6 +73,10 @@ class LocalToolFactoryTests(unittest.TestCase):
                 "unified",
                 create_apply_patch_tool(tmpdir).spec.description,
             )
+            self.assertIn(
+                "absolute paths within the workspace",
+                create_apply_patch_tool(tmpdir).spec.description,
+            )
             runtime.close()
 
 
@@ -529,6 +533,60 @@ class ApplyPatchToolTests(unittest.TestCase):
                 "after\n",
             )
 
+    def test_apply_patch_accepts_absolute_paths_within_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            update = root / "update.txt"
+            delete = root / "delete.txt"
+            move = root / "move.txt"
+            added = root / "nested" / "added.txt"
+            moved = root / "nested" / "moved.txt"
+            update.write_text("old\n", encoding="utf-8")
+            delete.write_text("delete\n", encoding="utf-8")
+            move.write_text("before\n", encoding="utf-8")
+            environment = Environment((create_apply_patch_tool(root),))
+            patch = "\n".join(
+                (
+                    "*** Begin Patch",
+                    f"*** Update File: {update}",
+                    "@@",
+                    "-old",
+                    "+new",
+                    f"*** Add File: {added}",
+                    "+added",
+                    f"*** Delete File: {delete}",
+                    f"*** Update File: {move}",
+                    f"*** Move to: {moved}",
+                    "@@",
+                    "-before",
+                    "+after",
+                    "*** End Patch",
+                )
+            )
+
+            result = _execute(
+                environment,
+                "apply_patch",
+                "patch-absolute",
+                {"patch": patch},
+            )
+
+            self.assertTrue(result.success, result.output)
+            self.assertEqual(
+                result.output.splitlines(),
+                [
+                    f"M {update}",
+                    f"A {added}",
+                    f"D {delete}",
+                    f"R {move} -> {moved}",
+                ],
+            )
+            self.assertEqual(update.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(added.read_text(encoding="utf-8"), "added\n")
+            self.assertFalse(delete.exists())
+            self.assertFalse(move.exists())
+            self.assertEqual(moved.read_text(encoding="utf-8"), "after\n")
+
     def test_apply_patch_accepts_unified_diff(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -610,6 +668,42 @@ class ApplyPatchToolTests(unittest.TestCase):
                 (root / "renamed-only.txt").read_text(encoding="utf-8"),
                 "unchanged\n",
             )
+
+    def test_apply_patch_accepts_absolute_unified_diff_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            update = root / "update.txt"
+            added = root / "nested" / "added.txt"
+            update.write_text("old\n", encoding="utf-8")
+            environment = Environment((create_apply_patch_tool(root),))
+            patch = "\n".join(
+                (
+                    f"--- {update}",
+                    f"+++ {update}",
+                    "@@ -1 +1 @@",
+                    "-old",
+                    "+new",
+                    "--- /dev/null",
+                    f"+++ {added}",
+                    "@@ -0,0 +1 @@",
+                    "+added",
+                )
+            )
+
+            result = _execute(
+                environment,
+                "apply_patch",
+                "patch-absolute-unified",
+                {"patch": patch},
+            )
+
+            self.assertTrue(result.success, result.output)
+            self.assertEqual(
+                result.output.splitlines(),
+                [f"M {update}", f"A {added}"],
+            )
+            self.assertEqual(update.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(added.read_text(encoding="utf-8"), "added\n")
 
     def test_later_invalid_hunk_leaves_all_files_unchanged(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -733,6 +827,115 @@ class ApplyPatchToolTests(unittest.TestCase):
                 self.assertFalse(symlink_escape.success)
                 self.assertIn("escapes workspace", symlink_escape.output)
                 self.assertFalse((outside / "new.txt").exists())
+
+    def test_apply_patch_rejects_external_absolute_paths_and_prefix_collisions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            prefix_collision = Path(f"{workspace}-other")
+            prefix_collision.mkdir()
+            environment = Environment((create_apply_patch_tool(workspace),))
+
+            for index, target in enumerate(
+                (outside / "new.txt", prefix_collision / "new.txt"),
+                1,
+            ):
+                with self.subTest(target=target):
+                    result = _execute(
+                        environment,
+                        "apply_patch",
+                        f"patch-external-{index}",
+                        {
+                            "patch": "\n".join(
+                                (
+                                    "*** Begin Patch",
+                                    f"*** Add File: {target}",
+                                    "+bad",
+                                    "*** End Patch",
+                                )
+                            )
+                        },
+                    )
+
+                    self.assertFalse(result.success)
+                    self.assertIn("escapes workspace", result.output)
+                    self.assertFalse(target.exists())
+
+    def test_external_absolute_move_rejects_entire_patch_before_writes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            source = workspace / "source.txt"
+            source.write_text("unchanged\n", encoding="utf-8")
+            valid_add = workspace / "must-not-exist.txt"
+            external_move = outside / "moved.txt"
+            environment = Environment((create_apply_patch_tool(workspace),))
+            patch = "\n".join(
+                (
+                    "*** Begin Patch",
+                    f"*** Add File: {valid_add}",
+                    "+should not be written",
+                    f"*** Update File: {source}",
+                    f"*** Move to: {external_move}",
+                    "*** End Patch",
+                )
+            )
+
+            result = _execute(
+                environment,
+                "apply_patch",
+                "patch-external-move",
+                {"patch": patch},
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("escapes workspace", result.output)
+            self.assertFalse(valid_add.exists())
+            self.assertEqual(source.read_text(encoding="utf-8"), "unchanged\n")
+            self.assertFalse(external_move.exists())
+
+    def test_absolute_path_through_symlink_cannot_escape_workspace(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlinks are unavailable")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            link = workspace / "link"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+            target = link / "new.txt"
+            environment = Environment((create_apply_patch_tool(workspace),))
+
+            result = _execute(
+                environment,
+                "apply_patch",
+                "patch-absolute-symlink",
+                {
+                    "patch": "\n".join(
+                        (
+                            "*** Begin Patch",
+                            f"*** Add File: {target}",
+                            "+bad",
+                            "*** End Patch",
+                        )
+                    )
+                },
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("escapes workspace", result.output)
+            self.assertFalse((outside / "new.txt").exists())
 
 
 class DefaultEnvironmentTests(unittest.TestCase):
