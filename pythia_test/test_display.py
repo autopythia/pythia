@@ -87,6 +87,11 @@ class InteractionItemRendererTests(unittest.TestCase):
                 ),
                 Reasoning(text="fallback"),
                 Reasoning(text=" "),
+                Reasoning(
+                    text="",
+                    summary=(),
+                    encrypted_content="provider-ciphertext",
+                ),
                 TurnMetadata(
                     usage=TokenUsage(
                         input_tokens=20,
@@ -112,6 +117,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 "[reasoning] first",
                 "[reasoning] second",
                 "[reasoning] fallback",
+                "[reasoning] ...",
                 "[turn] usage input=20 output=5 total=25 cached=4",
                 "[compaction] opaque checkpoint",
                 "[compaction] context checkpoint (2 replacement items)",

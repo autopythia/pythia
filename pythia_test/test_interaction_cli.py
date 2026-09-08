@@ -24,6 +24,7 @@ from pythia.interaction import ModelContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
+from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
 from pythia.interaction import SaveError
 from pythia.interaction import Tool
@@ -338,6 +339,34 @@ class CLIControllerTests(_ControllerTestCase):
         texts = [item.text for item in terminal.items]
         self.assertEqual(texts.count("[assistant] first"), 1)
         self.assertEqual(texts.count("[assistant] second"), 1)
+
+    async def test_encrypted_only_reasoning_is_visible_but_redacted(self):
+        ciphertext = "provider-ciphertext-must-not-be-displayed"
+        terminal = _Terminal(
+            lambda terminal, _editor, status: (
+                terminal.key("c-d") if status == "idle" else None
+            )
+        )
+        model = _Model(
+            self.path,
+            ModelSample(
+                items=(
+                    Reasoning(text="", encrypted_content=ciphertext),
+                    Message(role="assistant", text="done"),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            await self._run(model, terminal, ["--prompt", "inspect"]),
+            0,
+        )
+        displayed = tuple(item.text for item in terminal.items)
+        self.assertEqual(
+            displayed.count("[reasoning] ..."),
+            1,
+        )
+        self.assertNotIn(ciphertext, "\n".join(displayed))
 
     async def test_unknown_slash_command_is_not_a_query(self):
         step = 0

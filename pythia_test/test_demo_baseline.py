@@ -19,6 +19,7 @@ from pythia.interaction import Message
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
+from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
@@ -285,6 +286,48 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 sample_count=2,
             ),
         )
+
+    def test_encrypted_only_reasoning_is_visible_but_redacted_live_and_on_resume(
+        self,
+    ):
+        ciphertext = "provider-ciphertext-must-not-be-displayed"
+        sample = ModelSample(
+            items=(
+                Reasoning(text="", encrypted_content=ciphertext),
+                Message(role="assistant", text="Done."),
+            ),
+        )
+
+        status, _model, printed = self._run_demo(
+            ["--prompt", "Inspect."],
+            (sample,),
+        )
+
+        self.assertEqual(status, 0)
+        display_text = tuple(
+            item.text for item in printed if isinstance(item, DisplayItem)
+        )
+        self.assertEqual(
+            display_text.count("[reasoning] ..."),
+            1,
+        )
+        self.assertNotIn(ciphertext, "\n".join(display_text))
+
+        status, replay_model, replayed = self._run_demo(
+            ["--resume"],
+            samples=(),
+        )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(replay_model.calls, [])
+        replayed_text = tuple(
+            item.text for item in replayed if isinstance(item, DisplayItem)
+        )
+        self.assertEqual(
+            replayed_text.count("[reasoning] ..."),
+            1,
+        )
+        self.assertNotIn(ciphertext, "\n".join(replayed_text))
 
     def test_fresh_start_replaces_launch_session_not_workspace_session(self):
         save_interaction_save(
