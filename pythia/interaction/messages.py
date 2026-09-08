@@ -14,6 +14,7 @@ from typing import Any
 from typing import Callable
 from typing import Dict
 from typing import List
+from typing import Literal
 from typing import Optional
 from typing import Tuple
 
@@ -45,6 +46,24 @@ from .usage import TokenUsage
 ANTHROPIC_MESSAGES_API_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
+
+
+@dataclass(frozen=True)
+class MessagesPromptCaching:
+    """Automatic prompt caching at the last cacheable block of each request."""
+
+    ttl: Literal["5m", "1h"] = "5m"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ttl, str):
+            raise TypeError("prompt caching ttl must be a string")
+        if self.ttl not in {"5m", "1h"}:
+            raise ModelConfigurationError(
+                "prompt caching ttl must be '5m' or '1h'"
+            )
+
+    def request_cache_control(self) -> Dict[str, str]:
+        return {"type": "ephemeral", "ttl": self.ttl}
 
 
 @dataclass(frozen=True)
@@ -99,6 +118,7 @@ class MessagesEndpoint:
     default_max_tokens: int = 4096
     request_timeout_seconds: float = 60.0
     server_compaction: Optional[MessagesServerCompaction] = None
+    prompt_caching: Optional[MessagesPromptCaching] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.api_url, str):
@@ -209,6 +229,13 @@ class MessagesEndpoint:
         ):
             raise TypeError(
                 "server_compaction must be MessagesServerCompaction or None"
+            )
+        if self.prompt_caching is not None and not isinstance(
+            self.prompt_caching,
+            MessagesPromptCaching,
+        ):
+            raise TypeError(
+                "prompt_caching must be MessagesPromptCaching or None"
             )
 
     @property
@@ -578,6 +605,8 @@ def _nonnegative_int(value: Any) -> int:
 
 
 def _usage_counts(value: Mapping[str, Any]) -> Tuple[int, int, int]:
+    # Anthropic input_tokens excludes cache writes and reads. The optional
+    # cache_creation TTL breakdown is already included in its aggregate below.
     cache_creation_tokens = _nonnegative_int(
         value.get("cache_creation_input_tokens")
     )
@@ -726,6 +755,12 @@ class MessagesModel:
         encoded_tools = _encode_tools(tools)
         if encoded_tools:
             payload["tools"] = encoded_tools
+        if self.endpoint.prompt_caching is not None:
+            # Let the API place and advance the breakpoint. In particular,
+            # do not attach explicit cache controls to thinking/empty blocks.
+            payload["cache_control"] = (
+                self.endpoint.prompt_caching.request_cache_control()
+            )
         if self.endpoint.server_compaction is not None:
             payload["context_management"] = {
                 "edits": [
@@ -833,5 +868,6 @@ __all__ = [
     "MESSAGES_COMPACTION_BETA",
     "MessagesEndpoint",
     "MessagesModel",
+    "MessagesPromptCaching",
     "MessagesServerCompaction",
 ]

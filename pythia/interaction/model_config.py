@@ -11,6 +11,7 @@ from .chat_completions import ChatCompletionsModel
 from .messages import ANTHROPIC_MESSAGES_API_URL
 from .messages import MessagesEndpoint
 from .messages import MessagesModel
+from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
 from .model import Model
 from .responses import CODEX_RESPONSES_API_URL
@@ -125,6 +126,7 @@ def build_model(args: argparse.Namespace) -> Model:
             request_timeout_seconds=args.request_timeout_seconds,
             api_key=args.api_key or os.environ.get("ANTHROPIC_API_KEY"),
             server_compaction=compaction_options,
+            prompt_caching=MessagesPromptCaching(),
         )
         return MessagesModel(endpoint)
 
@@ -155,7 +157,10 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         "--model-api",
         choices=("chat-completions", "messages", "codex", "codex-responses"),
         default="chat-completions",
-        help="model API (codex is shorthand for codex-responses)",
+        help=(
+            "model API (messages uses automatic 5m prompt caching; "
+            "codex is shorthand for codex-responses)"
+        ),
     )
     parser.add_argument("--api-url")
     parser.add_argument(

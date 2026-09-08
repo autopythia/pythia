@@ -52,6 +52,7 @@ from .messages import DEFAULT_ANTHROPIC_VERSION
 from .messages import MESSAGES_COMPACTION_BETA
 from .messages import MessagesEndpoint
 from .messages import MessagesModel
+from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
 from .model import Model
 from .model import ModelConfigurationError
@@ -107,6 +108,7 @@ __all__ = [
     "META_RESPONSES_API_URL",
     "MessagesEndpoint",
     "MessagesModel",
+    "MessagesPromptCaching",
     "MessagesServerCompaction",
     "Model",
     "ModelConfigurationError",
