@@ -30,7 +30,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
@@ -40,6 +40,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .model import _timed_sample
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
@@ -299,7 +300,7 @@ def _encode_context(
                 (
                     ModelSampleBoundary,
                     Init,
-                    TurnMetadata,
+                    SampleMetadata,
                     TurnSummary,
                     UserInteractionBoundary,
                 ),
@@ -335,7 +336,7 @@ def _encode_context(
             (
                 ModelSampleBoundary,
                 Init,
-                TurnMetadata,
+                SampleMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
             ),
@@ -771,6 +772,7 @@ class MessagesModel:
         _apply_sampling_options(payload, options)
         return payload
 
+    @_timed_sample
     def sample(
         self,
         context: ModelContext,

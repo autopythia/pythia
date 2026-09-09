@@ -20,7 +20,7 @@ from pythia.interaction import SaveError
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
-from pythia.interaction import TurnMetadata
+from pythia.interaction import SampleMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import interaction_item_from_dict
@@ -162,7 +162,7 @@ class SessionTests(unittest.TestCase):
             ),
             ModelSampleBoundary(),
             ToolResult(call_id="call-1", output="done", success=False),
-            TurnMetadata(
+            SampleMetadata(
                 usage=TokenUsage(
                     input_tokens=20,
                     output_tokens=5,
@@ -441,7 +441,7 @@ class SessionResumeTests(unittest.TestCase):
                 *interrupted.items,
                 tool_result,
                 Message(role="assistant", content="resumed answer"),
-                TurnMetadata(usage=TokenUsage()),
+                SampleMetadata(usage=TokenUsage()),
                 ModelSampleBoundary(),
                 TurnSummary(sample_count=1),
             ),

@@ -3,6 +3,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
+from functools import wraps
+from time import perf_counter
+from typing import Callable
 from typing import Optional
 from typing import Protocol
 from typing import Sequence
@@ -16,7 +20,8 @@ from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
-from .items import TurnMetadata
+from .items import SampleMetadata
+from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
 
 if TYPE_CHECKING:
@@ -112,6 +117,7 @@ class ModelSample:
     provider_session_id: Optional[str] = field(default=None, repr=False)
     provider_turn_id: Optional[str] = field(default=None, repr=False)
     provider_turn_state: Optional[str] = field(default=None, repr=False)
+    elapsed_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -137,6 +143,9 @@ class ModelSample:
             raise TypeError("stop_reason must be a string or None")
         if not isinstance(self.usage, TokenUsage):
             raise TypeError("usage must be TokenUsage")
+        object.__setattr__(
+            self, "elapsed_seconds", _validate_elapsed_seconds(self.elapsed_seconds)
+        )
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -157,23 +166,27 @@ class ModelSample:
         return tuple(item for item in self.items if isinstance(item, ToolCall))
 
     def context_items(self) -> Tuple[InteractionItem, ...]:
-        """Return this sample's output, turn metadata, and durable boundary."""
+        """Return this sample's output, sample metadata, and durable boundary."""
         return (
             *self.items,
-            TurnMetadata(
-                usage=self.usage,
-                provider_session_id=self.provider_session_id,
-                provider_turn_id=self.provider_turn_id,
-                provider_turn_state=self.provider_turn_state,
-            ),
+            self._metadata(),
             ModelSampleBoundary(),
+        )
+
+    def _metadata(self) -> SampleMetadata:
+        return SampleMetadata(
+            usage=self.usage,
+            provider_session_id=self.provider_session_id,
+            provider_turn_id=self.provider_turn_id,
+            provider_turn_state=self.provider_turn_state,
+            elapsed_seconds=self.elapsed_seconds,
         )
 
     def display_items(self) -> Tuple["DisplayItem", ...]:
         from .display import render_interaction_items
 
         return render_interaction_items(
-            (*self.items, TurnMetadata(usage=self.usage)),
+            (*self.items, self._metadata()),
         )
 
     @property
@@ -186,6 +199,21 @@ class ModelSample:
             if isinstance(item, Message) and item.content:
                 return item.content
         return None
+
+
+def _timed_sample(method: Callable[..., ModelSample]) -> Callable[..., ModelSample]:
+    """Measure a complete adapter call, including its response cleanup.
+
+    Timing starts inside the calling worker, not while waiting for one. Errors
+    propagate unchanged and do not produce a sample or fabricated usage data.
+    """
+    @wraps(method)
+    def measured(*args, **kwargs) -> ModelSample:
+        started = perf_counter()
+        sample = method(*args, **kwargs)
+        return replace(sample, elapsed_seconds=perf_counter() - started)
+
+    return measured
 
 
 class Model(Protocol):

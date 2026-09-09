@@ -15,7 +15,7 @@ from pythia.interaction import (
     CodexResponsesModel, ContextCompaction, ContextValidationError, Environment,
     Instructions, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
     ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, Init,
-    TokenUsage, ToolCall, ToolResult, TurnMetadata, TurnSummary, UserInteraction,
+    TokenUsage, ToolCall, ToolResult, SampleMetadata, TurnSummary, UserInteraction,
     UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_save,
     render_interaction_items, save_interaction_save,
 )
@@ -104,7 +104,7 @@ class UserToolValueTests(unittest.TestCase):
     def test_round_trip_projection_provider_payloads_and_turn_state(self):
         base = (Init("session"), Message("user", "hello"), UserInteractionBoundary(),
                 Message("assistant", "answer"),
-                TurnMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="opaque"),
+                SampleMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="opaque"),
                 ModelSampleBoundary(), TurnSummary(sample_count=1))
         context = ModelContext((*base, *_records()))
         with tempfile.TemporaryDirectory() as directory:
@@ -517,7 +517,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([i for i in saved if isinstance(i, TurnSummary)]), 2)
 
     async def test_same_account_login_rebinds_without_sampling_or_changing_provider_state(self):
-        metadata = TurnMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="state")
+        metadata = SampleMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="state")
         original = (Init("old"), Message("assistant", "answer"), metadata, TurnSummary())
         save_interaction_save(self.path, ModelContext(original))
         self.args.resume = True

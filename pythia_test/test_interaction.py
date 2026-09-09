@@ -30,7 +30,7 @@ from pythia.interaction import ToolCall
 from pythia.interaction import ToolOutcome
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
-from pythia.interaction import TurnMetadata
+from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction.experimental_tools import create_inject_user_message_tool
@@ -202,13 +202,13 @@ class ModelContextTests(unittest.TestCase):
         )
         context.assert_model_ready()
 
-    def test_turn_metadata_is_a_transparent_control_item(self):
+    def test_sample_metadata_is_a_transparent_control_item(self):
         call = ToolCall(
             name="lookup",
             call_id="call-1",
             arguments_json="{}",
         )
-        metadata = TurnMetadata(
+        metadata = SampleMetadata(
             usage=TokenUsage(
                 input_tokens=20,
                 output_tokens=5,
@@ -398,7 +398,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             sample.context_items(),
             (
                 Message(role="assistant", content="answer"),
-                TurnMetadata(usage=TokenUsage()),
+                SampleMetadata(usage=TokenUsage()),
                 ModelSampleBoundary(),
             ),
         )
@@ -406,7 +406,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             sample_with_usage.context_items(),
             (
                 Message(role="assistant", content="answer"),
-                TurnMetadata(usage=usage),
+                SampleMetadata(usage=usage),
                 ModelSampleBoundary(),
             ),
         )
@@ -497,16 +497,18 @@ class ChatCompletionsModelTests(unittest.TestCase):
         self.assertEqual(sample.stop_reason, "tool_use")
         self.assertEqual(sample.usage.total_tokens, 25)
         self.assertEqual(sample.usage.cached_input_tokens, 4)
+        self.assertIsNotNone(sample.elapsed_seconds)
         self.assertEqual(
             sample.context_items()[-2:],
             (
-                TurnMetadata(usage=sample.usage),
+                SampleMetadata(usage=sample.usage, elapsed_seconds=sample.elapsed_seconds),
                 ModelSampleBoundary(),
             ),
         )
         self.assertEqual(
             sample.display_items()[-1].text,
-            "[turn] usage input=20 output=5 total=25 cached=4",
+            "[sample] input=20 output=5 total=25 cached=4 "
+            f"elapsed={sample.elapsed_seconds:.2f}s",
         )
         self.assertTrue(response.closed)
 
@@ -754,7 +756,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ],
         )
 
-    def test_turn_metadata_is_not_sent_to_chat_completions(self):
+    def test_sample_metadata_is_not_sent_to_chat_completions(self):
         opener = _ScriptedOpener(
             _FakeHTTPResponse(
                 {
@@ -779,7 +781,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
                 Message(role="user", content="question"),
                 UserInteractionBoundary(),
                 Message(role="assistant", content="prior answer"),
-                TurnMetadata(
+                SampleMetadata(
                     usage=TokenUsage(
                         input_tokens=20,
                         output_tokens=5,

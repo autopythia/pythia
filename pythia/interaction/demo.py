@@ -16,7 +16,7 @@ from .items import Init
 from .items import Instructions
 from .items import Message
 from .items import ModelSampleBoundary
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import summarize_turn_usage
@@ -215,7 +215,7 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
             item,
             (
                 ModelSampleBoundary,
-                TurnMetadata,
+                SampleMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
             ),

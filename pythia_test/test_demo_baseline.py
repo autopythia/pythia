@@ -25,7 +25,7 @@ from pythia.interaction import SamplingOptions
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
-from pythia.interaction import TurnMetadata
+from pythia.interaction import SampleMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import demo
@@ -61,7 +61,7 @@ COMPLETED_SESSION_ITEMS = (
     Message(role="user", content="Original request."),
     UserInteractionBoundary(),
     Message(role="assistant", content="Previous answer."),
-    TurnMetadata(
+    SampleMetadata(
         usage=TokenUsage(
             input_tokens=10,
             output_tokens=2,
@@ -261,12 +261,12 @@ class DemoStartupBaselineTests(unittest.TestCase):
             (
                 f"[user] {query.rstrip()}",
                 "[tool-call] update_plan (plan-1)",
-                "[turn] usage input=20 output=4 total=24 cached=5",
+                "[sample] input=20 output=4 total=24 cached=5",
                 "[tool-ret]  update_plan (plan-1) [ok]\n"
                 "[plan] Updated plan\n[plan] [>] Inspect",
                 "[assistant] Done.",
-                "[turn] usage input=30 output=6 total=36 cached=10",
-                "[turn summary] input_sum=50 output_sum=10 cached_sum=15 "
+                "[sample] input=30 output=6 total=36 cached=10",
+                "[turn] input_sum=50 output_sum=10 cached_sum=15 "
                 "cached_max=10 cold_sum=35 context=36 samples=2 compactions=0",
             ),
         )
@@ -391,8 +391,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 "[instructions] Original instructions.",
                 "[user] Original request.",
                 "[assistant] Previous answer.",
-                "[turn] usage input=10 output=2 total=12 cached=4",
-                "[turn summary] input_sum=10 output_sum=2 cached_sum=4 "
+                "[sample] input=10 output=2 total=12 cached=4",
+                "[turn] input_sum=10 output_sum=2 cached_sum=4 "
                 "cached_max=4 cold_sum=6 context=12 samples=1 compactions=0",
             ),
         )

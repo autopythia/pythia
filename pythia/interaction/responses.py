@@ -36,7 +36,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
@@ -46,6 +46,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .model import _timed_sample
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
@@ -340,7 +341,7 @@ def _encode_context_items(
             (
                 ModelSampleBoundary,
                 Init,
-                TurnMetadata,
+                SampleMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
             ),
@@ -517,7 +518,7 @@ def _latest_metadata_value(
     start: int = 0,
 ) -> Optional[str]:
     for item in reversed(items[start:]):
-        if isinstance(item, TurnMetadata):
+        if isinstance(item, SampleMetadata):
             value = getattr(item, field_name)
             if value is not None:
                 return value
@@ -1190,6 +1191,7 @@ class CodexResponsesModel:
             headers[X_CODEX_TURN_STATE_HEADER] = provider_state.turn_state
         return headers
 
+    @_timed_sample
     def sample(
         self,
         context: ModelContext,

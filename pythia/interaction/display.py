@@ -24,7 +24,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
@@ -174,8 +174,8 @@ class InteractionItemRenderer:
                     call_by_id.get(item.call_id),
                     diff_block_indices,
                 )
-            elif isinstance(item, TurnMetadata):
-                blocks = _render_turn_metadata(item)
+            elif isinstance(item, SampleMetadata):
+                blocks = _render_sample_metadata(item)
             elif isinstance(item, TurnSummary):
                 blocks = _render_turn_summary(item)
             elif isinstance(
@@ -350,14 +350,17 @@ def _render_instructions(item: Instructions) -> Tuple[str, ...]:
     return (f"[instructions] {item.text}",)
 
 
-def _render_turn_metadata(item: TurnMetadata) -> Tuple[str, ...]:
+def _render_sample_metadata(item: SampleMetadata) -> Tuple[str, ...]:
     usage = item.usage
+    elapsed = (
+        "" if item.elapsed_seconds is None else f" elapsed={item.elapsed_seconds:.2f}s"
+    )
     return (
-        "[turn] usage "
+        "[sample] "
         f"input={usage.input_tokens} "
         f"output={usage.output_tokens} "
         f"total={usage.total_tokens} "
-        f"cached={usage.cached_input_tokens}",
+        f"cached={usage.cached_input_tokens}{elapsed}",
     )
 
 
@@ -366,7 +369,7 @@ def _render_turn_summary(item: TurnSummary) -> Tuple[str, ...]:
     # Keep field-order stable for tests: input/output sums, warm sum/max,
     # cold sum, context window, sample/compaction counts.
     return (
-        "[turn summary] "
+        "[turn] "
         f"input_sum={item.input_tokens_sum} "
         f"output_sum={item.output_tokens_sum} "
         f"cached_sum={item.cached_input_tokens_sum} "

@@ -41,7 +41,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
@@ -207,7 +207,7 @@ async def _fail_pending_user_tools(
 
 def _has_provider_history(context: ModelContext) -> bool:
     return any(
-        (isinstance(i, TurnMetadata) and (i.provider_turn_id or i.provider_turn_state or i.provider_session_id))
+        (isinstance(i, SampleMetadata) and (i.provider_turn_id or i.provider_turn_state or i.provider_session_id))
         or (isinstance(i, Reasoning) and i.encrypted_content)
         or (isinstance(i, OpaqueCompaction) and i.protocol == "responses")
         for i in (*context.items, *context.model_items())
@@ -310,7 +310,7 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
     for item in reversed(context.items):
         if isinstance(
             item,
-            (ModelSampleBoundary, TurnMetadata, UserInteractionBoundary, UserToolCall, UserToolResult),
+            (ModelSampleBoundary, SampleMetadata, UserInteractionBoundary, UserToolCall, UserToolResult),
         ):
             continue
         if isinstance(item, (TurnSummary, Init)):

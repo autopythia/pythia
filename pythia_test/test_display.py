@@ -16,7 +16,7 @@ from pythia.interaction import Reasoning
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import TokenUsage
-from pythia.interaction import TurnMetadata
+from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import render_interaction_items
@@ -92,7 +92,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                     summary=(),
                     encrypted_content="provider-ciphertext",
                 ),
-                TurnMetadata(
+                SampleMetadata(
                     usage=TokenUsage(
                         input_tokens=20,
                         output_tokens=5,
@@ -118,7 +118,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 "[reasoning] second",
                 "[reasoning] fallback",
                 "[reasoning] ...",
-                "[turn] usage input=20 output=5 total=25 cached=4",
+                "[sample] input=20 output=5 total=25 cached=4",
                 "[compaction] opaque checkpoint",
                 "[compaction] context checkpoint (2 replacement items)",
             ),
@@ -156,7 +156,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 DisplayItem("[reasoning] inspect"),
                 DisplayItem("[assistant] answer"),
                 DisplayItem(
-                    "[turn] usage input=20 output=5 total=25 cached=4"
+                    "[sample] input=20 output=5 total=25 cached=4"
                 ),
             ),
         )

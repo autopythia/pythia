@@ -23,11 +23,12 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
+from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
 
 
@@ -48,14 +49,14 @@ _ITEM_TYPES = {
     UserToolCall: "user_tool_call",
     UserToolResult: "user_tool_result",
     ModelSampleBoundary: "model_sample_boundary",
-    TurnMetadata: "turn_metadata",
+    SampleMetadata: "sample_metadata",
     TurnSummary: "turn_summary",
     UserInteractionBoundary: "user_interaction_boundary",
     OpaqueCompaction: "opaque_compaction",
     ContextCompaction: "context_compaction",
 }
 # Accept legacy records on read; new saves use only the canonical types above.
-_ITEM_TYPE_NAMES = frozenset(_ITEM_TYPES.values()) | {"session_init"}
+_ITEM_TYPE_NAMES = frozenset(_ITEM_TYPES.values()) | {"session_init", "turn_metadata"}
 
 
 def _item_type_name(item: InteractionItem) -> str:
@@ -108,13 +109,15 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             interaction_item_to_dict(nested)
             for nested in item.replacement_items
         ]
-    elif isinstance(item, TurnMetadata):
+    elif isinstance(item, SampleMetadata):
         encoded["usage"] = {
             "input_tokens": item.usage.input_tokens,
             "output_tokens": item.usage.output_tokens,
             "total_tokens": item.usage.total_tokens,
             "cached_input_tokens": item.usage.cached_input_tokens,
         }
+        if item.elapsed_seconds is not None:
+            encoded["elapsed_seconds"] = item.elapsed_seconds
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -296,44 +299,49 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         return ContextCompaction(
             tuple(interaction_item_from_dict(item) for item in replacement)
         )
-    if item_type == "turn_metadata":
+    if item_type in {"sample_metadata", "turn_metadata"}:
         usage = mapping.get("usage")
         if not isinstance(usage, Mapping):
-            raise SaveError("turn_metadata.usage must be an object")
-        return TurnMetadata(
+            raise SaveError(f"{item_type}.usage must be an object")
+        try:
+            elapsed = _validate_elapsed_seconds(mapping.get("elapsed_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise SaveError(f"{item_type}.{exc}") from exc
+        return SampleMetadata(
             usage=TokenUsage(
                 input_tokens=_require_nonnegative_int(
                     usage.get("input_tokens"),
-                    "turn_metadata.usage.input_tokens",
+                    f"{item_type}.usage.input_tokens",
                 ),
                 output_tokens=_require_nonnegative_int(
                     usage.get("output_tokens"),
-                    "turn_metadata.usage.output_tokens",
+                    f"{item_type}.usage.output_tokens",
                 ),
                 total_tokens=_require_nonnegative_int(
                     usage.get("total_tokens"),
-                    "turn_metadata.usage.total_tokens",
+                    f"{item_type}.usage.total_tokens",
                 ),
                 cached_input_tokens=_require_nonnegative_int(
                     usage.get("cached_input_tokens"),
-                    "turn_metadata.usage.cached_input_tokens",
+                    f"{item_type}.usage.cached_input_tokens",
                 ),
             ),
             provider_session_id=_optional_string(
                 mapping,
                 "provider_session_id",
-                "turn_metadata.provider_session_id",
+                f"{item_type}.provider_session_id",
             ),
             provider_turn_id=_optional_string(
                 mapping,
                 "provider_turn_id",
-                "turn_metadata.provider_turn_id",
+                f"{item_type}.provider_turn_id",
             ),
             provider_turn_state=_optional_string(
                 mapping,
                 "provider_turn_state",
-                "turn_metadata.provider_turn_state",
+                f"{item_type}.provider_turn_state",
             ),
+            elapsed_seconds=elapsed,
         )
     if item_type == "turn_summary":
         return TurnSummary(

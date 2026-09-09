@@ -33,7 +33,7 @@ from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
-from .items import TurnMetadata
+from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
@@ -144,7 +144,7 @@ __all__ = [
     "UserToolCall",
     "UserToolResult",
     "ToolSpec",
-    "TurnMetadata",
+    "SampleMetadata",
     "TurnSummary",
     "UserInteraction",
     "UserInteractionBoundary",

@@ -25,7 +25,7 @@ from pythia.interaction import ToolCall
 from pythia.interaction import ToolOutcome
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
-from pythia.interaction import TurnMetadata
+from pythia.interaction import SampleMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import cli
@@ -146,7 +146,7 @@ class CLIRecoveryTests(_ControllerTestCase):
 
     async def test_resume_preserves_provider_state_compaction_and_follow_up_once(self):
         reasoning = Reasoning("", encrypted_content="encrypted", content_signature="signature")
-        metadata = TurnMetadata(TokenUsage(input_tokens=12, output_tokens=3, total_tokens=15),
+        metadata = SampleMetadata(TokenUsage(input_tokens=12, output_tokens=3, total_tokens=15),
                                 provider_session_id="session-id", provider_turn_id="turn-id",
                                 provider_turn_state="opaque-turn-state")
         call = ToolCall("record", "call_codex_id", "{}")
@@ -165,7 +165,7 @@ class CLIRecoveryTests(_ControllerTestCase):
             Message("user", "follow-up\nunchanged"), UserInteractionBoundary(),
         ))
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual([i for i in received if isinstance(i, TurnMetadata)], [metadata])
+        self.assertEqual([i for i in received if isinstance(i, SampleMetadata)], [metadata])
         self.assertNotIn("[cli]", repr(received.items))
         self.assertNotIn("opaque-turn-state", "\n".join(i.text for i in terminal.items))
 

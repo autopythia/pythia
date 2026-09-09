@@ -1141,8 +1141,8 @@ class DemoTests(unittest.TestCase):
                 (
                     "[assistant] The repository contains a README and Python "
                     "source.",
-                    "[turn] usage input=0 output=0 total=0 cached=0",
-                    "[turn summary] input_sum=0 output_sum=0 cached_sum=0 "
+                    "[sample] input=0 output=0 total=0 cached=0",
+                    "[turn] input_sum=0 output_sum=0 cached_sum=0 "
                     "cached_max=0 cold_sum=0 context=0 samples=2 compactions=0",
                 ),
             )

@@ -28,7 +28,7 @@ from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
-from pythia.interaction import TurnMetadata
+from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import load_interaction_save
@@ -747,7 +747,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         self.assertEqual(sample.provider_turn_id, "turn-1")
         self.assertEqual(sample.provider_turn_state, "turn-state-1")
         metadata = sample.context_items()[-2]
-        self.assertIsInstance(metadata, TurnMetadata)
+        self.assertIsInstance(metadata, SampleMetadata)
         self.assertEqual(metadata.provider_session_id, "session-1")
         self.assertEqual(metadata.provider_turn_id, "turn-1")
         self.assertEqual(metadata.provider_turn_state, "turn-state-1")

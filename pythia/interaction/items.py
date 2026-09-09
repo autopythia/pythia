@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass
 from dataclasses import field
@@ -17,6 +18,20 @@ def _require_string(value: object, field_name: str, *, allow_empty: bool = True)
     if not allow_empty and not value.strip():
         raise ValueError(f"{field_name} must not be empty")
     return value
+
+
+def _validate_elapsed_seconds(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("elapsed_seconds must be numeric or None")
+    try:
+        elapsed = float(value)
+    except OverflowError:
+        raise ValueError("elapsed_seconds must be nonnegative and finite") from None
+    if not math.isfinite(elapsed) or elapsed < 0:
+        raise ValueError("elapsed_seconds must be nonnegative and finite")
+    return elapsed
 
 
 def _fresh_session_id() -> str:
@@ -150,12 +165,14 @@ class UserInteractionBoundary:
 
 
 @dataclass(frozen=True)
-class TurnMetadata:
-    """Durable per-sample provider usage result.
+class SampleMetadata:
+    """Durable per-sample usage, elapsed time, and provider continuity.
 
-    One ``TurnMetadata`` is recorded per completed model sample
+    One ``SampleMetadata`` is recorded per completed model sample
     (see ``ModelSample.context_items``). It preserves the provider's
     ``TokenUsage`` for that sample plus the provider continuity tokens.
+    ``elapsed_seconds`` is host-measured sample latency, not provider compute
+    time; ``None`` means it was not measured (including in legacy logs).
     It is *not* a cumulative end-of-turn aggregate; see ``TurnSummary``.
     """
 
@@ -163,10 +180,14 @@ class TurnMetadata:
     provider_session_id: Optional[str] = field(default=None, repr=False)
     provider_turn_id: Optional[str] = field(default=None, repr=False)
     provider_turn_state: Optional[str] = field(default=None, repr=False)
+    elapsed_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.usage, TokenUsage):
             raise TypeError("usage must be TokenUsage")
+        object.__setattr__(
+            self, "elapsed_seconds", _validate_elapsed_seconds(self.elapsed_seconds)
+        )
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -188,16 +209,16 @@ def _require_nonnegative_int(value: object, field_name: str) -> int:
 
 @dataclass(frozen=True)
 class TurnSummary:
-    """Cumulative end-of-turn usage derived from per-sample ``TurnMetadata``.
+    """Cumulative end-of-turn usage derived from per-sample ``SampleMetadata``.
 
     Ports the earlier autopythia/contradex ``AgentState`` accounting
     (``output_tokens_sum``, ``cache_hit_*`` warm stats, ``non_cache_hit`` cold
     stats, ``total_usage_tokens`` context, ``compaction_count``) to
-    ``pythia.interaction`` without changing ``TurnMetadata`` semantics.
+    ``pythia.interaction`` without changing ``SampleMetadata`` semantics.
 
     ``TurnSummary`` is encoder-transparent (never sent to the provider) and
     durable. It is derived via :func:`summarize_turn_usage`, which folds over
-    the raw log's ``TurnMetadata`` items and counts compaction markers.
+    the raw log's ``SampleMetadata`` items and counts compaction markers.
     Existing ``TurnSummary`` items are skipped by the fold so re-summarizing
     a context that already contains summaries does not double-count.
     """
@@ -243,7 +264,7 @@ class TurnSummary:
 
 
 def summarize_turn_usage(items) -> "TurnSummary":
-    """Fold per-sample ``TurnMetadata`` into a cumulative ``TurnSummary``.
+    """Fold per-sample ``SampleMetadata`` into a cumulative ``TurnSummary``.
 
     Mirrors ``contradex.kernel.AgentState.add_response_usage``:
     warm per sample is ``min(cached, input)``, cold is ``max(0, input-warm)``.
@@ -264,7 +285,7 @@ def summarize_turn_usage(items) -> "TurnSummary":
     sample_count = 0
     compaction_count = 0
     for item in items:
-        if isinstance(item, TurnMetadata):
+        if isinstance(item, SampleMetadata):
             usage = item.usage
             warm = min(usage.cached_input_tokens, usage.input_tokens)
             cold = max(0, usage.input_tokens - warm)
@@ -336,7 +357,7 @@ InteractionItem = Union[
     UserToolCall,
     UserToolResult,
     ModelSampleBoundary,
-    TurnMetadata,
+    SampleMetadata,
     TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
@@ -353,7 +374,7 @@ INTERACTION_ITEM_TYPES = (
     UserToolCall,
     UserToolResult,
     ModelSampleBoundary,
-    TurnMetadata,
+    SampleMetadata,
     TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
@@ -378,7 +399,7 @@ __all__ = [
     "ToolResult",
     "UserToolCall",
     "UserToolResult",
-    "TurnMetadata",
+    "SampleMetadata",
     "TurnSummary",
     "UserInteractionBoundary",
     "is_interaction_item",
