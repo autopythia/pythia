@@ -12,6 +12,7 @@ from pythia.interaction import CODEX_RESPONSES_API_URL
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Environment
 from pythia.interaction import Init
 from pythia.interaction import META_RESPONSES_API_URL
@@ -268,7 +269,7 @@ class CodexResponsesConstructionTests(unittest.TestCase):
         self.assertEqual(model.endpoint.api_provider, "codex")
         self.assertEqual(
             model.endpoint.request_timeout_seconds,
-            300.0,
+            DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
         self.assertNotIn("codex-token", repr(model.endpoint))
 
@@ -757,7 +758,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         request, timeout = opener.calls[0]
         payload = _request_payload(opener)
         headers = _request_headers(opener)
-        self.assertEqual(timeout, 300.0)
+        self.assertEqual(timeout, DEFAULT_REQUEST_TIMEOUT_SECONDS)
         self.assertEqual(
             request.full_url,
             f"{CODEX_RESPONSES_API_URL}/responses",

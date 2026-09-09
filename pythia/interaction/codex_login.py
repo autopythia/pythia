@@ -17,6 +17,7 @@ from urllib.request import Request
 
 from ._account_http import AccountServiceError, request_json
 from .codex_auth import CodexAuth
+from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 _ISSUER = "https://auth.openai.com"
@@ -80,7 +81,9 @@ def _save_credentials(path: Path, tokens: dict) -> None:
 
 def login(
     auth_file: Path, *, notify, cancel, workspace_id=None, expected_account=None,
-    timeout_seconds=120.0, request_timeout_seconds=60.0, callback_port=1457, opener=None,
+    timeout_seconds=DEFAULT_LOGIN_TIMEOUT_SECONDS,
+    request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    callback_port=1457, opener=None,
 ) -> None:
     """Write credentials after explicit login. Challenge text is transient only."""
     if cancel.is_set():

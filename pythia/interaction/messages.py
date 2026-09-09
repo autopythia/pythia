@@ -40,6 +40,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
 
@@ -116,7 +117,7 @@ class MessagesEndpoint:
     api_key: Optional[str] = field(default=None, repr=False)
     anthropic_version: str = DEFAULT_ANTHROPIC_VERSION
     default_max_tokens: int = 4096
-    request_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     server_compaction: Optional[MessagesServerCompaction] = None
     prompt_caching: Optional[MessagesPromptCaching] = None
 

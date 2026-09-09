@@ -8,6 +8,7 @@ from typing import Any
 from unittest import mock
 
 from pythia.interaction import ANTHROPIC_MESSAGES_API_URL
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Environment
 from pythia.interaction import MESSAGES_COMPACTION_BETA
 from pythia.interaction import Message
@@ -238,7 +239,7 @@ class MessagesModelTests(unittest.TestCase):
 
         request, timeout = opener.calls[0]
         payload = _payload(opener)
-        self.assertEqual(timeout, 60.0)
+        self.assertEqual(timeout, DEFAULT_REQUEST_TIMEOUT_SECONDS)
         self.assertEqual(
             request.full_url,
             "https://api.example.test/anthropic/v1/messages",

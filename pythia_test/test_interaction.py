@@ -10,6 +10,7 @@ from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CompactionError
 from pythia.interaction import ContextCompaction
 from pythia.interaction import ContextValidationError
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import DEFAULT_SUMMARY_PREFIX
 from pythia.interaction import Environment
 from pythia.interaction import EnvironmentError
@@ -511,7 +512,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
 
         request, timeout = opener.calls[0]
         payload = _request_payload(opener)
-        self.assertEqual(timeout, 60.0)
+        self.assertEqual(timeout, DEFAULT_REQUEST_TIMEOUT_SECONDS)
         self.assertEqual(
             request.full_url,
             "http://localhost:8000/v1/chat/completions",

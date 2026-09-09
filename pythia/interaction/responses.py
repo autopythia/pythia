@@ -46,6 +46,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
 
@@ -203,7 +204,7 @@ class StreamingResponsesEndpoint:
     bearer_token: str = field(repr=False)
     account_id: Optional[str] = None
     api_provider: str = "api"
-    request_timeout_seconds: float = 300.0
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         api_url, model, timeout = _normalize_configuration(
@@ -1071,7 +1072,12 @@ class CodexResponsesModel:
                 raise ModelConfigurationError("model must not be empty")
             resolved_url, model, resolved_timeout = _normalize_configuration(
                 _resolve_default_codex_api_url(model) if api_url is None else api_url,
-                model, 300.0 if request_timeout_seconds is None else request_timeout_seconds,
+                model,
+                (
+                    DEFAULT_REQUEST_TIMEOUT_SECONDS
+                    if request_timeout_seconds is None
+                    else request_timeout_seconds
+                ),
             )
             if auth is not None:
                 if not isinstance(auth, CodexAuth):

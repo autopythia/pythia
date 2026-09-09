@@ -75,6 +75,8 @@ from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
 from .save import load_interaction_save
 from .save import save_interaction_save
+from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .user import UserInteraction
 
 __all__ = [
@@ -95,6 +97,8 @@ __all__ = [
     "DefaultEnvironment",
     "DEFAULT_ANTHROPIC_VERSION",
     "DEFAULT_COMPACTION_PROMPT",
+    "DEFAULT_LOGIN_TIMEOUT_SECONDS",
+    "DEFAULT_REQUEST_TIMEOUT_SECONDS",
     "DEFAULT_SUMMARY_PREFIX",
     "DisplayItem",
     "Environment",

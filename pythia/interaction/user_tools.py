@@ -12,6 +12,7 @@ from .codex_login import login
 from .codex_quota import query_quota
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
 from .model_config import supports_account_services
+from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -86,7 +87,7 @@ def create_user_environment(args, *, notify, cancel, expected_account=None, prov
         Tool(ToolSpec("login", "Sign in to the selected ChatGPT/Codex account.", {
             "type": "object", "properties": {"workspace_id": {"type": "string"}},
             "additionalProperties": False,
-        }), guard(sign_in), timeout_seconds=120.0),
+        }), guard(sign_in), timeout_seconds=DEFAULT_LOGIN_TIMEOUT_SECONDS),
         Tool(ToolSpec("quota", "Query a historical Codex account quota snapshot.", {
             "type": "object", "properties": {}, "additionalProperties": False,
         }), guard(quota), timeout_seconds=args.request_timeout_seconds),

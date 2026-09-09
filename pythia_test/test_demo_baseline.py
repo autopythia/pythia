@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from pythia.interaction import DisplayItem
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
@@ -46,7 +47,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "cwd": ".",
     "max_samples": None,
     "max_tokens": None,
-    "request_timeout_seconds": 60.0,
+    "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
     "prompt": None,
     "instructions": None,
     "save_path": Path("interaction.jsonl"),

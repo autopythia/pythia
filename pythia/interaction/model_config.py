@@ -18,6 +18,7 @@ from .responses import CODEX_RESPONSES_API_URL
 from .responses import CodexResponsesModel
 from .responses import _CODEX_MODEL_ROUTES
 from .responses import _resolve_default_codex_api_url
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 DEFAULT_SAVE_PATH = Path("interaction.jsonl")
@@ -208,7 +209,11 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--request-timeout-seconds",
         type=float,
-        default=60.0,
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        help=(
+            "HTTP blocking-I/O timeout for model and account requests "
+            "(default: %(default)s seconds; not an overall deadline)"
+        ),
     )
     parser.add_argument("--prompt")
     parser.add_argument(

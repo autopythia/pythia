@@ -20,6 +20,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pythia.interaction import cli, CodexAuth, load_codex_auth, ToolCall
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import codex_login, codex_quota, user_tools
 from pythia.interaction._account_http import AccountServiceError
 
@@ -60,7 +61,8 @@ class LoginServiceTests(unittest.TestCase):
             connection.close()
 
     def _run(self, *, complete=True, denial=False, cancel_exchange=False, tokens=None,
-             expected_account=None, fail_save=False, timeout_seconds=2):
+             expected_account=None, fail_save=False, timeout_seconds=2,
+             request_timeout_seconds=None):
         notices = queue.Queue()
         cancel = threading.Event()
         exchange_entered, exchange_release = threading.Event(), threading.Event()
@@ -69,6 +71,12 @@ class LoginServiceTests(unittest.TestCase):
 
         def opener(request, *, timeout):
             self.assertEqual(request.full_url, "https://auth.openai.com/oauth/token")
+            http_timeout = (
+                DEFAULT_REQUEST_TIMEOUT_SECONDS
+                if request_timeout_seconds is None else request_timeout_seconds
+            )
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, min(http_timeout, timeout_seconds))
             values = parse_qs(request.data.decode())
             request_values.append(values)
             if cancel_exchange:
@@ -79,10 +87,15 @@ class LoginServiceTests(unittest.TestCase):
             responses.append(result)
             return result
 
+        request_options = (
+            {} if request_timeout_seconds is None
+            else {"request_timeout_seconds": request_timeout_seconds}
+        )
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(codex_login.login, self.path, notify=notices.put,
                                  cancel=cancel, callback_port=0, opener=opener,
-                                 timeout_seconds=timeout_seconds, expected_account=expected_account)
+                                 timeout_seconds=timeout_seconds, expected_account=expected_account,
+                                 **request_options)
             try:
                 notice = notices.get(timeout=2)
                 query = parse_qs(urlsplit(notice.splitlines()[-1]).query)
@@ -139,6 +152,9 @@ class LoginServiceTests(unittest.TestCase):
         self.assertEqual(load_codex_auth(auth_file=self.path), CodexAuth("FAKE_ACCESS_SECRET", "account-one"))
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(self.path.parent.glob(".auth.*.tmp")), [])
+
+    def test_token_exchange_honors_explicit_http_timeout(self):
+        self.assertEqual(len(self._run(request_timeout_seconds=0.25)), 1)
 
     def test_denial_cancel_timeout_account_mismatch_and_save_failure_preserve_old_file(self):
         cases = (

@@ -10,6 +10,7 @@ from typing import Optional
 from urllib.request import Request
 
 from ._account_http import AccountServiceError, request_json
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 def _number(value):
@@ -102,7 +103,7 @@ def format_quota(payload, *, queried_at=None):
     return "\n".join(lines)
 
 
-def query_quota(auth, *, timeout_seconds=60.0, opener=None):
+def query_quota(auth, *, timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS, opener=None):
     headers = {"Authorization": f"Bearer {auth.access_token}", "Accept": "application/json"}
     if auth.account_id is not None:
         headers["ChatGPT-Account-ID"] = auth.account_id

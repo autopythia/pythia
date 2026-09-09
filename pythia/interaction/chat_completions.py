@@ -41,6 +41,7 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import TokenUsage
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -50,7 +51,7 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 class ChatCompletionsEndpoint:
     api_url: str
     model: Optional[str] = None
-    request_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     api_key: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
