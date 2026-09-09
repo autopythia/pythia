@@ -241,6 +241,34 @@ class QuotaServiceTests(unittest.TestCase):
         self.assertNotIn("FAKE_SECRET", text)
         self.assertIn("unavailable", codex_quota.format_quota({}))
 
+    def test_absent_null_and_empty_additional_limits_are_equivalent(self):
+        payload = {
+            "plan_type": "plus",
+            "rate_limit": {"primary_window": {"used_percent": 25}},
+            "credits": {"has_credits": True, "unlimited": False, "balance": "12.5"},
+        }
+        expected = codex_quota.format_quota(payload, queried_at="fixed")
+        for fields in ({}, {"additional_rate_limits": None}, {"additional_rate_limits": []}):
+            with self.subTest(fields=fields):
+                value = {**payload, **fields}
+                self.assertEqual(codex_quota.format_quota(value, queried_at="fixed"), expected)
+                response = Response(value)
+                output = codex_quota.query_quota(
+                    CodexAuth("FAKE_SECRET"), opener=mock.Mock(return_value=response),
+                )
+                self.assertEqual(output.splitlines()[1:], expected.splitlines()[1:])
+                self.assertTrue(response.closed)
+
+    def test_invalid_additional_limits_remain_rejected(self):
+        for value in (False, 0, "", "FAKE_SECRET", {}, {"metered_feature": "spark"}):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(AccountServiceError, "invalid additional limits"):
+                    codex_quota.format_quota({"additional_rate_limits": value})
+        for value in (None, False, 0, "FAKE_SECRET"):
+            with self.subTest(entry=value):
+                with self.assertRaisesRegex(AccountServiceError, "an invalid additional limit"):
+                    codex_quota.format_quota({"additional_rate_limits": [value]})
+
     def test_invalid_fields_and_http_errors_are_safe_and_closed(self):
         for value in (-1, 101, True, float("nan"), "FAKE_SECRET"):
             with self.subTest(value=value), self.assertRaises(AccountServiceError):

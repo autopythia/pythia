@@ -85,7 +85,9 @@ def format_quota(payload, *, queried_at=None):
             lines.append("credits.balance: unavailable")
     else:
         lines.append("credits: unavailable")
-    additional = payload.get("additional_rate_limits", [])
+    additional = payload.get("additional_rate_limits")
+    if additional is None:
+        additional = []
     if not isinstance(additional, list):
         raise AccountServiceError("Quota response contained invalid additional limits.")
     for index, limit in enumerate(additional[:64]):
