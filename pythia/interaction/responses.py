@@ -47,84 +47,17 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import _timed_sample
+from .model_catalog import CODEX_RESPONSES_API_URL
+from .model_catalog import META_RESPONSES_API_URL
+from .model_catalog import OPENAI_RESPONSES_API_URL
+from .model_catalog import ModelSpec
+from .model_catalog import get_model_route
+from .model_catalog import get_model_spec
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
 
-OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1"
-CODEX_RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex"
-META_RESPONSES_API_URL = "https://api.meta.ai/v1"
 X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
-
-
-@dataclass(frozen=True)
-class _CodexModelRoute:
-    api_model: str
-    api_url: str = CODEX_RESPONSES_API_URL
-    reasoning_effort: Optional[str] = None
-    reasoning_summary: Optional[str] = None
-    text_verbosity: Optional[str] = None
-    api_key_environment_variable: Optional[str] = None
-    # Catalog context capacities in tokens, not Responses request parameters.
-    default_context_tokens: Optional[int] = None
-    max_context_tokens: Optional[int] = None
-
-
-# Context capacities follow codex-latest-20260904's models-manager/models.json.
-_CODEX_MODEL_ROUTES = {
-    "gpt-5.6-sol": _CodexModelRoute(
-        api_model="gpt-5.6-sol",
-        default_context_tokens=272_000,
-        max_context_tokens=872_000,
-    ),
-    "gpt-5.6-sol-medium": _CodexModelRoute(
-        api_model="gpt-5.6-sol",
-        reasoning_effort="medium",
-        default_context_tokens=272_000,
-        max_context_tokens=872_000,
-    ),
-    "gpt-5.6-sol-max": _CodexModelRoute(
-        api_model="gpt-5.6-sol",
-        reasoning_effort="max",
-        default_context_tokens=272_000,
-        max_context_tokens=872_000,
-    ),
-    "gpt-6-astra": _CodexModelRoute(
-        api_model="gpt-6-astra",
-        reasoning_summary="auto",
-        text_verbosity="low",
-        default_context_tokens=272_000,
-        max_context_tokens=872_000,
-    ),
-    "gpt-6-astra-medium": _CodexModelRoute(
-        api_model="gpt-6-astra",
-        reasoning_effort="medium",
-        reasoning_summary="auto",
-        text_verbosity="low",
-        default_context_tokens=272_000,
-        max_context_tokens=872_000,
-    ),
-    "gpt-6-astra-max": _CodexModelRoute(
-        api_model="gpt-6-astra",
-        reasoning_effort="max",
-        # The catalog default is no summary; this alias deliberately opts in.
-        reasoning_summary="auto",
-        text_verbosity="low",
-        default_context_tokens=272_000,
-        max_context_tokens=872_000,
-    ),
-    "muse-spark-1.3": _CodexModelRoute(
-        api_model="muse-spark-1.3-contributor",
-        api_url=META_RESPONSES_API_URL,
-        api_key_environment_variable="META_API_KEY",
-    ),
-    "muse-spark-1.3-xhigh": _CodexModelRoute(
-        api_model="muse-spark-1.3-contributor",
-        api_url=META_RESPONSES_API_URL,
-        reasoning_effort="xhigh",
-        api_key_environment_variable="META_API_KEY",
-    ),
-}
 
 
 def _normalize_configuration(
@@ -264,22 +197,9 @@ class _ProviderState:
     persist_session_id: bool = False
 
 
-def _resolve_request_route(
-    endpoint: StreamingResponsesEndpoint,
-) -> _CodexModelRoute:
-    if endpoint.api_provider != "codex":
-        return _CodexModelRoute(api_model=endpoint.model)
-    route = _CODEX_MODEL_ROUTES.get(endpoint.model)
-    if route is None:
-        return _CodexModelRoute(api_model=endpoint.model)
-    return route
-
-
-def _resolve_default_codex_api_url(model: str) -> str:
-    route = _CODEX_MODEL_ROUTES.get(model)
-    if route is None:
-        return CODEX_RESPONSES_API_URL
-    return route.api_url
+def _resolve_model_spec(endpoint: StreamingResponsesEndpoint) -> Optional[ModelSpec]:
+    profile = "codex" if endpoint.api_provider == "codex" else "responses"
+    return get_model_spec(profile, endpoint.model)
 
 
 def _load_default_model_auth(
@@ -288,12 +208,8 @@ def _load_default_model_auth(
     codex_home: Optional[CodexAuthPath],
     auth_file: Optional[CodexAuthPath],
 ) -> CodexAuth:
-    route = _CODEX_MODEL_ROUTES.get(model)
-    api_key_environment_variable = (
-        route.api_key_environment_variable
-        if route is not None
-        else None
-    )
+    route = get_model_route("codex", model)
+    api_key_environment_variable = route.api_key_environment_variable
     if (
         api_key_environment_variable is not None
         and codex_home is None
@@ -1072,7 +988,7 @@ class CodexResponsesModel:
             if not model:
                 raise ModelConfigurationError("model must not be empty")
             resolved_url, model, resolved_timeout = _normalize_configuration(
-                _resolve_default_codex_api_url(model) if api_url is None else api_url,
+                get_model_route("codex", model).api_url if api_url is None else api_url,
                 model,
                 (
                     DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -1112,12 +1028,14 @@ class CodexResponsesModel:
     @property
     def default_context_tokens(self) -> Optional[int]:
         """Catalog default window in tokens, or None if unknown; not enforced."""
-        return _resolve_request_route(self.endpoint).default_context_tokens
+        spec = _resolve_model_spec(self.endpoint)
+        return None if spec is None else spec.limits.default_context_tokens
 
     @property
     def max_context_tokens(self) -> Optional[int]:
         """Catalog window override ceiling in tokens, or None; not enforced."""
-        return _resolve_request_route(self.endpoint).max_context_tokens
+        spec = _resolve_model_spec(self.endpoint)
+        return None if spec is None else spec.limits.max_context_tokens
 
     def _build_request_payload(
         self,
@@ -1137,9 +1055,9 @@ class CodexResponsesModel:
         else:
             provider_state = _ProviderState()
 
-        request_route = _resolve_request_route(self.endpoint)
+        spec = _resolve_model_spec(self.endpoint)
         payload: Dict[str, Any] = {
-            "model": request_route.api_model,
+            "model": self.endpoint.model if spec is None else spec.api_model,
             "input": _encode_context_items(context.model_items()),
             "tools": _encode_tools(tools),
             "tool_choice": "auto",
@@ -1149,14 +1067,16 @@ class CodexResponsesModel:
             "include": ["reasoning.encrypted_content"],
         }
         reasoning: Dict[str, str] = {}
-        if request_route.reasoning_effort is not None:
-            reasoning["effort"] = request_route.reasoning_effort
-        if request_route.reasoning_summary is not None:
-            reasoning["summary"] = request_route.reasoning_summary
+        defaults = None if spec is None else spec.responses
+        if defaults is not None:
+            if defaults.reasoning_effort is not None:
+                reasoning["effort"] = defaults.reasoning_effort
+            if defaults.reasoning_summary is not None:
+                reasoning["summary"] = defaults.reasoning_summary
         if reasoning:
             payload["reasoning"] = reasoning
-        if request_route.text_verbosity is not None:
-            payload["text"] = {"verbosity": request_route.text_verbosity}
+        if defaults is not None and defaults.text_verbosity is not None:
+            payload["text"] = {"verbosity": defaults.text_verbosity}
         if provider_state.session_id is not None:
             payload["prompt_cache_key"] = provider_state.session_id
         _apply_sampling_options(payload, options)

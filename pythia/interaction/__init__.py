@@ -64,6 +64,13 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import TokenUsage
+from .model_catalog import ModelLimits
+from .model_catalog import ModelRoute
+from .model_catalog import ModelSpec
+from .model_catalog import ResponsesDefaults
+from .model_catalog import get_model_route
+from .model_catalog import get_model_spec
+from .model_catalog import list_model_specs
 from .responses import CODEX_RESPONSES_API_URL
 from .responses import CodexResponsesModel
 from .responses import META_RESPONSES_API_URL
@@ -119,9 +126,12 @@ __all__ = [
     "ModelContext",
     "ModelContextWindowError",
     "ModelError",
+    "ModelLimits",
     "ModelResponseError",
+    "ModelRoute",
     "ModelSample",
     "ModelSampleBoundary",
+    "ModelSpec",
     "ModelTimeoutError",
     "ModelTransportError",
     "OpaqueCompaction",
@@ -131,6 +141,7 @@ __all__ = [
     "PlanStore",
     "PromptSummarizingCompactor",
     "Reasoning",
+    "ResponsesDefaults",
     "StreamingResponsesEndpoint",
     "SamplingOptions",
     "Init",
@@ -153,6 +164,9 @@ __all__ = [
     "create_exec_command_tool",
     "create_update_plan_tool",
     "create_write_stdin_tool",
+    "get_model_route",
+    "get_model_spec",
+    "list_model_specs",
     "render_interaction_items",
     "interaction_item_from_dict",
     "interaction_item_to_dict",

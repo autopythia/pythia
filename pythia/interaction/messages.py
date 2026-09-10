@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from typing import Any
 from typing import Callable
 from typing import Dict
@@ -41,11 +42,12 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import _timed_sample
+from .model_catalog import ANTHROPIC_MESSAGES_API_URL
+from .model_catalog import get_model_spec
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
 
-ANTHROPIC_MESSAGES_API_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
 
@@ -70,6 +72,12 @@ class MessagesPromptCaching:
 
 @dataclass(frozen=True)
 class MessagesServerCompaction:
+    """An unset trigger uses the known model context maximum when encoding.
+
+    Without model-specific limits, omit the trigger to use the server default.
+    Explicit thresholds always take precedence.
+    """
+
     trigger_input_tokens: Optional[int] = None
     pause_after_compaction: bool = False
     instructions: Optional[str] = None
@@ -736,6 +744,18 @@ class MessagesModel:
         self.endpoint = endpoint
         self._opener = opener or urllib.request.urlopen
 
+    @property
+    def max_context_tokens(self) -> Optional[int]:
+        """Known context ceiling and implicit compaction trigger, or None."""
+        spec = get_model_spec("messages", self.endpoint.model)
+        return None if spec is None else spec.limits.max_context_tokens
+
+    @property
+    def max_output_tokens(self) -> Optional[int]:
+        """Known output ceiling, or None; does not change request max_tokens."""
+        spec = get_model_spec("messages", self.endpoint.model)
+        return None if spec is None else spec.limits.max_output_tokens
+
     def _build_request_payload(
         self,
         context: ModelContext,
@@ -746,8 +766,11 @@ class MessagesModel:
             raise TypeError("context must be ModelContext")
         context.assert_model_ready()
         system, messages = _encode_context(context.model_items())
+        spec = get_model_spec("messages", self.endpoint.model)
         payload: Dict[str, Any] = {
-            "model": self.endpoint.model,
+            "model": (
+                self.endpoint.model if spec is None else spec.api_model
+            ),
             "max_tokens": self.endpoint.default_max_tokens,
             "messages": messages,
             "stream": False,
@@ -763,11 +786,15 @@ class MessagesModel:
             payload["cache_control"] = (
                 self.endpoint.prompt_caching.request_cache_control()
             )
-        if self.endpoint.server_compaction is not None:
+        compaction = self.endpoint.server_compaction
+        if compaction is not None:
+            max_context = None if spec is None else spec.limits.max_context_tokens
+            if compaction.trigger_input_tokens is None and max_context is not None:
+                compaction = replace(
+                    compaction, trigger_input_tokens=max_context,
+                )
             payload["context_management"] = {
-                "edits": [
-                    self.endpoint.server_compaction.request_edit()
-                ]
+                "edits": [compaction.request_edit()]
             }
         _apply_sampling_options(payload, options)
         return payload

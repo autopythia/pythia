@@ -8,16 +8,16 @@ from pathlib import Path
 
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
-from .messages import ANTHROPIC_MESSAGES_API_URL
 from .messages import MessagesEndpoint
 from .messages import MessagesModel
 from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
 from .model import Model
-from .responses import CODEX_RESPONSES_API_URL
+from .model_catalog import ANTHROPIC_MESSAGES_API_URL as ANTHROPIC_MESSAGES_API_URL
+from .model_catalog import CODEX_RESPONSES_API_URL
+from .model_catalog import get_model_route
+from .model_catalog import list_model_specs
 from .responses import CodexResponsesModel
-from .responses import _CODEX_MODEL_ROUTES
-from .responses import _resolve_default_codex_api_url
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
@@ -54,10 +54,10 @@ def supports_account_services(args: argparse.Namespace) -> bool:
     if args.model_api not in {"codex", "codex-responses"} or not args.model:
         return False
     name = args.model.strip()
-    route = _CODEX_MODEL_ROUTES.get(name)
-    if route is not None and route.api_key_environment_variable is not None:
+    route = get_model_route("codex", name)
+    if route.provider != "chatgpt" or route.auth_source != "codex-login":
         return False
-    url = args.api_url if args.api_url is not None else _resolve_default_codex_api_url(name)
+    url = args.api_url if args.api_url is not None else route.api_url
     return url.strip().rstrip("/") == CODEX_RESPONSES_API_URL
 
 
@@ -82,7 +82,7 @@ def build_model(args: argparse.Namespace) -> Model:
                 "--model-api codex-responses"
             )
         endpoint = ChatCompletionsEndpoint(
-            api_url=args.api_url or "http://127.0.0.1:8000",
+            api_url=args.api_url or get_model_route("chat-completions", args.model).api_url,
             model=args.model,
             request_timeout_seconds=args.request_timeout_seconds,
             api_key=args.api_key,
@@ -121,11 +121,15 @@ def build_model(args: argparse.Namespace) -> Model:
                 "Messages compaction options require "
                 "--messages-server-compaction"
             )
+        route = get_model_route("messages", args.model)
         endpoint = MessagesEndpoint(
-            api_url=args.api_url or ANTHROPIC_MESSAGES_API_URL,
+            api_url=args.api_url or route.api_url,
             model=args.model,
             request_timeout_seconds=args.request_timeout_seconds,
-            api_key=args.api_key or os.environ.get("ANTHROPIC_API_KEY"),
+            api_key=args.api_key or (
+                os.environ.get(route.api_key_environment_variable)
+                if route.api_key_environment_variable is not None else None
+            ),
             server_compaction=compaction_options,
             prompt_caching=MessagesPromptCaching(),
         )
@@ -152,6 +156,26 @@ def build_model(args: argparse.Namespace) -> Model:
     raise ValueError(f"unsupported model API: {args.model_api!r}")
 
 
+def _model_argument_help() -> str:
+    entries = []
+    for spec in list_model_specs():
+        details = [f"{spec.profile}/{spec.route.provider}"]
+        if spec.responses is not None:
+            for label, value in (
+                ("effort", spec.responses.reasoning_effort),
+                ("summary", spec.responses.reasoning_summary),
+                ("verbosity", spec.responses.text_verbosity),
+            ):
+                if value is not None:
+                    details.append(f"{label}={value}")
+        if spec.route.api_key_environment_variable is not None:
+            details.append(spec.route.api_key_environment_variable)
+        if spec.aliases:
+            details.append("aliases: " + ", ".join(spec.aliases))
+        entries.append(f"{spec.name} ({', '.join(details)})")
+    return "model name; uncatalogued names pass through. Catalog presets: " + "; ".join(entries)
+
+
 def build_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
@@ -166,14 +190,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--api-url")
     parser.add_argument(
         "--model",
-        help=(
-            "model name; gpt-6-astra uses default reasoning effort, "
-            "gpt-6-astra-medium selects medium effort, "
-            "gpt-6-astra-max selects maximum single-agent reasoning; "
-            "all Astra variants use low verbosity; muse-spark-1.3 and "
-            "muse-spark-1.3-xhigh use the Meta Responses endpoint and "
-            "META_API_KEY"
-        ),
+        help=_model_argument_help(),
     )
     parser.add_argument(
         "--api-key",
@@ -190,7 +207,10 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--messages-compaction-trigger-tokens",
         type=int,
-        help="server compaction threshold (minimum 50000)",
+        help=(
+            "server compaction threshold (minimum 50000; defaults to the known "
+            "model context maximum, otherwise the server default)"
+        ),
     )
     parser.add_argument(
         "--messages-pause-after-compaction",
