@@ -19,6 +19,7 @@ from .items import Init
 from .items import Instructions
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -176,6 +177,8 @@ class InteractionItemRenderer:
                 )
             elif isinstance(item, SampleMetadata):
                 blocks = _render_sample_metadata(item)
+            elif isinstance(item, ModelFailure):
+                blocks = _render_model_failure(item)
             elif isinstance(item, TurnSummary):
                 blocks = _render_turn_summary(item)
             elif isinstance(
@@ -355,13 +358,51 @@ def _render_sample_metadata(item: SampleMetadata) -> Tuple[str, ...]:
     elapsed = (
         "" if item.elapsed_seconds is None else f" elapsed={item.elapsed_seconds:.2f}s"
     )
+    attempts = (
+        "" if item.request_attempts == 1 else f" attempts={item.request_attempts}"
+    )
+    recovery = (
+        "" if not item.recovery else f" recovery={','.join(item.recovery)}"
+    )
     return (
         "[sample] "
         f"input={usage.input_tokens} "
         f"output={usage.output_tokens} "
         f"total={usage.total_tokens} "
-        f"cached={usage.cached_input_tokens}{elapsed}",
+        f"cached={usage.cached_input_tokens}{elapsed}{attempts}{recovery}",
     )
+
+
+def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
+    fields = [f"[model failure] {item.message}", f"kind={item.category}"]
+    for name, value in (
+        ("provider", item.provider),
+        ("model", item.model),
+        ("auth_source", item.auth_source),
+        ("status", item.http_status),
+        ("attempts", item.attempt_count),
+        ("request_id", item.request_id),
+        ("response_id", item.response_id),
+        ("cf_ray", item.cf_ray),
+        ("auth_error", item.authorization_error),
+        ("auth_code", item.auth_error_code),
+        ("error_code", item.error_code),
+        ("events", item.event_count or None),
+        ("completed_items", item.completed_item_count or None),
+        ("last_event", item.last_event_type),
+        ("last_sequence", item.last_sequence_number),
+        (
+            "elapsed",
+            None if item.elapsed_seconds is None else f"{item.elapsed_seconds:.2f}s",
+        ),
+    ):
+        if value is not None:
+            fields.append(f"{name}={value}")
+    if item.recovery:
+        fields.append(f"recovery={','.join(item.recovery)}")
+    if item.event_types:
+        fields.append(f"event_types={','.join(item.event_types)}")
+    return (" ".join(fields),)
 
 
 def _render_turn_summary(item: TurnSummary) -> Tuple[str, ...]:

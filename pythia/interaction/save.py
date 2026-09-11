@@ -18,6 +18,7 @@ from .items import Init
 from .items import Instructions
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -50,6 +51,7 @@ _ITEM_TYPES = {
     UserToolResult: "user_tool_result",
     ModelSampleBoundary: "model_sample_boundary",
     SampleMetadata: "sample_metadata",
+    ModelFailure: "model_failure",
     TurnSummary: "turn_summary",
     UserInteractionBoundary: "user_interaction_boundary",
     OpaqueCompaction: "opaque_compaction",
@@ -118,6 +120,10 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
         }
         if item.elapsed_seconds is not None:
             encoded["elapsed_seconds"] = item.elapsed_seconds
+        if item.request_attempts != 1:
+            encoded["request_attempts"] = item.request_attempts
+        if item.recovery:
+            encoded["recovery"] = list(item.recovery)
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -126,6 +132,34 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             value = getattr(item, field_name)
             if value is not None:
                 encoded[field_name] = value
+    elif isinstance(item, ModelFailure):
+        for field_name in (
+            "category",
+            "message",
+            "provider",
+            "model",
+            "auth_source",
+            "http_status",
+            "request_id",
+            "response_id",
+            "cf_ray",
+            "authorization_error",
+            "auth_error_code",
+            "error_code",
+            "attempt_count",
+            "event_count",
+            "completed_item_count",
+            "last_event_type",
+            "last_sequence_number",
+            "elapsed_seconds",
+        ):
+            value = getattr(item, field_name)
+            if value is not None:
+                encoded[field_name] = value
+        if item.recovery:
+            encoded["recovery"] = list(item.recovery)
+        if item.event_types:
+            encoded["event_types"] = list(item.event_types)
     elif isinstance(item, TurnSummary):
         encoded.update(
             input_tokens_sum=item.input_tokens_sum,
@@ -192,6 +226,26 @@ def _require_nonnegative_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise SaveError(f"{field_name} must be a nonnegative integer")
     return value
+
+
+def _require_positive_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SaveError(f"{field_name} must be a positive integer")
+    return value
+
+
+def _optional_http_status(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
+        raise SaveError("model_failure.http_status must be from 100 through 599")
+    return value
+
+
+def _optional_nonnegative_int(value: Any, field_name: str) -> Optional[int]:
+    if value is None:
+        return None
+    return _require_nonnegative_int(value, field_name)
 
 
 def interaction_item_from_dict(value: Any) -> InteractionItem:
@@ -307,6 +361,9 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
             elapsed = _validate_elapsed_seconds(mapping.get("elapsed_seconds"))
         except (TypeError, ValueError) as exc:
             raise SaveError(f"{item_type}.{exc}") from exc
+        recovery = mapping.get("recovery", [])
+        if not isinstance(recovery, list):
+            raise SaveError(f"{item_type}.recovery must be a list")
         return SampleMetadata(
             usage=TokenUsage(
                 input_tokens=_require_nonnegative_int(
@@ -342,7 +399,109 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                 f"{item_type}.provider_turn_state",
             ),
             elapsed_seconds=elapsed,
+            request_attempts=_require_positive_int(
+                mapping.get("request_attempts", 1),
+                f"{item_type}.request_attempts",
+            ),
+            recovery=tuple(
+                _require_string(value, f"{item_type}.recovery[{index}]")
+                for index, value in enumerate(recovery)
+            ),
         )
+    if item_type == "model_failure":
+        recovery = mapping.get("recovery", [])
+        if not isinstance(recovery, list):
+            raise SaveError("model_failure.recovery must be a list")
+        event_types = mapping.get("event_types", [])
+        if not isinstance(event_types, list):
+            raise SaveError("model_failure.event_types must be a list")
+        try:
+            elapsed = _validate_elapsed_seconds(mapping.get("elapsed_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise SaveError(f"model_failure.{exc}") from exc
+        try:
+            return ModelFailure(
+                category=_require_string(
+                    mapping.get("category"), "model_failure.category",
+                ),
+                message=_require_string(
+                    mapping.get("message"), "model_failure.message",
+                ),
+                provider=_optional_string(
+                    mapping, "provider", "model_failure.provider",
+                ),
+                model=_optional_string(
+                    mapping, "model", "model_failure.model",
+                ),
+                auth_source=_optional_string(
+                    mapping,
+                    "auth_source",
+                    "model_failure.auth_source",
+                ),
+                http_status=_optional_http_status(mapping.get("http_status")),
+                request_id=_optional_string(
+                    mapping, "request_id", "model_failure.request_id",
+                ),
+                response_id=_optional_string(
+                    mapping, "response_id", "model_failure.response_id",
+                ),
+                cf_ray=_optional_string(
+                    mapping, "cf_ray", "model_failure.cf_ray",
+                ),
+                authorization_error=_optional_string(
+                    mapping,
+                    "authorization_error",
+                    "model_failure.authorization_error",
+                ),
+                auth_error_code=_optional_string(
+                    mapping,
+                    "auth_error_code",
+                    "model_failure.auth_error_code",
+                ),
+                error_code=_optional_string(
+                    mapping,
+                    "error_code",
+                    "model_failure.error_code",
+                ),
+                attempt_count=_require_positive_int(
+                    mapping.get("attempt_count", 1),
+                    "model_failure.attempt_count",
+                ),
+                event_count=_require_nonnegative_int(
+                    mapping.get("event_count", 0),
+                    "model_failure.event_count",
+                ),
+                event_types=tuple(
+                    _require_string(
+                        value,
+                        f"model_failure.event_types[{index}]",
+                    )
+                    for index, value in enumerate(event_types)
+                ),
+                completed_item_count=_require_nonnegative_int(
+                    mapping.get("completed_item_count", 0),
+                    "model_failure.completed_item_count",
+                ),
+                last_event_type=_optional_string(
+                    mapping,
+                    "last_event_type",
+                    "model_failure.last_event_type",
+                ),
+                last_sequence_number=_optional_nonnegative_int(
+                    mapping.get("last_sequence_number"),
+                    "model_failure.last_sequence_number",
+                ),
+                recovery=tuple(
+                    _require_string(
+                        value,
+                        f"model_failure.recovery[{index}]",
+                    )
+                    for index, value in enumerate(recovery)
+                ),
+                elapsed_seconds=elapsed,
+            )
+        except (TypeError, ValueError) as exc:
+            raise SaveError(f"model_failure.{exc}") from exc
     if item_type == "turn_summary":
         return TurnSummary(
             input_tokens_sum=_require_nonnegative_int(

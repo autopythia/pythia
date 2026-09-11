@@ -1,9 +1,11 @@
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
 from .codex_auth import CodexAuth
+from .codex_auth import CodexCredentials
 from .codex_auth import CodexAuthError
 from .codex_auth import CodexAuthUnavailable
 from .codex_auth import load_codex_auth
+from .codex_auth import load_codex_credentials
 from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import Compactor
@@ -28,6 +30,7 @@ from .items import Init
 from .items import Instructions
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -55,6 +58,7 @@ from .messages import MessagesModel
 from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
 from .model import Model
+from .model import ModelAuthenticationError
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
 from .model import ModelError
@@ -91,6 +95,7 @@ __all__ = [
     "ChatCompletionsEndpoint",
     "ChatCompletionsModel",
     "CodexAuth",
+    "CodexCredentials",
     "CodexAuthError",
     "CodexAuthUnavailable",
     "CODEX_RESPONSES_API_URL",
@@ -122,10 +127,12 @@ __all__ = [
     "MessagesPromptCaching",
     "MessagesServerCompaction",
     "Model",
+    "ModelAuthenticationError",
     "ModelConfigurationError",
     "ModelContext",
     "ModelContextWindowError",
     "ModelError",
+    "ModelFailure",
     "ModelLimits",
     "ModelResponseError",
     "ModelRoute",
@@ -171,6 +178,7 @@ __all__ = [
     "interaction_item_from_dict",
     "interaction_item_to_dict",
     "load_codex_auth",
+    "load_codex_credentials",
     "load_interaction_save",
     "save_interaction_save",
     "summarize_turn_usage",

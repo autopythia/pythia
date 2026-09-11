@@ -17,6 +17,8 @@ from urllib.request import Request
 
 from ._account_http import AccountServiceError, request_json
 from .codex_auth import CodexAuth
+from .codex_auth import CodexCredentials
+from .codex_auth import load_codex_credentials
 from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
@@ -29,6 +31,13 @@ def _token(payload, key):
     if not isinstance(value, str) or not value or any(c.isspace() for c in value):
         raise AccountServiceError("Login token response was incomplete or invalid.")
     return value
+
+
+def _optional_token(payload, key, fallback):
+    value = payload.get(key)
+    if value is None:
+        return fallback
+    return _token(payload, key)
 
 
 def _account_id(id_token):
@@ -188,3 +197,107 @@ def login(
     if cancel.is_set():
         raise AccountServiceError("Login cancelled; credentials were not saved.")
     _save_credentials(auth_file, tokens)
+
+
+def refresh_codex_credentials(
+    credentials: CodexCredentials,
+    *,
+    timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    opener=None,
+) -> CodexCredentials:
+    """Refresh one same-account ChatGPT credential snapshot and persist it."""
+    if not isinstance(credentials, CodexCredentials):
+        raise TypeError("credentials must be CodexCredentials")
+    current = load_codex_credentials(auth_file=credentials.auth_file)
+    if current != credentials:
+        if (
+            credentials.auth.account_id is not None
+            and current.auth.account_id != credentials.auth.account_id
+        ):
+            raise AccountServiceError(
+                "Codex credential account changed before token refresh."
+            )
+        return current
+    if credentials.refresh_token is None:
+        raise AccountServiceError(
+            "Codex credentials do not contain a refresh token; use /login."
+        )
+    request_body = json.dumps(
+        {
+            "client_id": _CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": credentials.refresh_token,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    response = request_json(
+        Request(
+            f"{_ISSUER}/oauth/token",
+            data=request_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        ),
+        timeout_seconds,
+        opener=opener,
+    )
+    access_token = _optional_token(
+        response,
+        "access_token",
+        credentials.auth.access_token,
+    )
+    refresh_token = _optional_token(
+        response,
+        "refresh_token",
+        credentials.refresh_token,
+    )
+    returned_id_token = response.get("id_token")
+    id_token = _optional_token(response, "id_token", credentials.id_token)
+    if returned_id_token is not None:
+        account_id = _account_id(id_token)
+    elif credentials.auth.account_id is not None:
+        account_id = credentials.auth.account_id
+    else:
+        account_id = _account_id(id_token) if id_token is not None else None
+    if (
+        credentials.auth.account_id is not None
+        and account_id != credentials.auth.account_id
+    ):
+        raise AccountServiceError(
+            "Refreshed credentials identified a different Codex account."
+        )
+    CodexAuth(access_token, account_id)
+    latest = load_codex_credentials(auth_file=credentials.auth_file)
+    if latest != credentials:
+        if (
+            credentials.auth.account_id is not None
+            and latest.auth.account_id != credentials.auth.account_id
+        ):
+            raise AccountServiceError(
+                "Codex credential account changed during token refresh."
+            )
+        return latest
+    try:
+        current_payload = json.loads(
+            credentials.auth_file.read_text(encoding="utf-8")
+        )
+        current_tokens = current_payload.get("tokens", {})
+        if not isinstance(current_tokens, dict):
+            current_tokens = {}
+    except Exception:
+        current_tokens = {}
+    tokens = {
+        **current_tokens,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "account_id": account_id,
+    }
+    if id_token is not None:
+        tokens["id_token"] = id_token
+    _save_credentials(credentials.auth_file, tokens)
+    return load_codex_credentials(auth_file=credentials.auth_file)
+
+
+__all__ = [
+    "login",
+    "refresh_codex_credentials",
+]

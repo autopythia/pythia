@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -12,25 +13,31 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
+from threading import Lock
 from typing import Any
 from typing import Callable
 from typing import Dict
 from typing import Iterable
 from typing import Iterator
 from typing import List
-from typing import NoReturn
 from typing import Optional
 from typing import Tuple
 
 from .codex_auth import CodexAuth
 from .codex_auth import CodexAuthPath
+from .codex_auth import CodexCredentials
+from .codex_auth import _resolve_auth_file
 from .codex_auth import load_codex_auth
+from .codex_auth import load_codex_credentials
+from .codex_login import refresh_codex_credentials
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -40,7 +47,9 @@ from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
+from .model import ModelAuthenticationError
 from .model import ModelContextWindowError
+from .model import ModelError
 from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
@@ -58,6 +67,10 @@ from .usage import TokenUsage
 
 
 X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_MAX_TRANSIENT_HTTP_RETRIES = 1
+_MAX_DIAGNOSTIC_VALUE_CHARS = 256
+_MAX_DIAGNOSTIC_EVENT_TYPES = 32
 
 
 def _normalize_configuration(
@@ -202,6 +215,87 @@ def _resolve_model_spec(endpoint: StreamingResponsesEndpoint) -> Optional[ModelS
     return get_model_spec(profile, endpoint.model)
 
 
+@dataclass(frozen=True)
+class _CredentialSnapshot:
+    auth: CodexAuth
+    credentials: Optional[CodexCredentials] = field(default=None, repr=False)
+
+
+class _StaticCredentialSource:
+    kind = "static"
+
+    def __init__(self, auth: CodexAuth) -> None:
+        self._snapshot = _CredentialSnapshot(auth)
+
+    def load(self) -> _CredentialSnapshot:
+        return self._snapshot
+
+    def refresh(
+        self,
+        snapshot: _CredentialSnapshot,
+        *,
+        timeout_seconds: float,
+        opener: Optional[Callable[..., Any]],
+    ) -> Optional[_CredentialSnapshot]:
+        del snapshot, timeout_seconds, opener
+        return None
+
+
+class _EnvironmentCredentialSource:
+    kind = "environment"
+
+    def __init__(self, variable: str) -> None:
+        self.variable = variable
+
+    def load(self) -> _CredentialSnapshot:
+        value = os.environ.get(self.variable)
+        if value is None or not value.strip():
+            raise ModelConfigurationError(
+                f"{self.variable} is required for this Responses model"
+            )
+        return _CredentialSnapshot(CodexAuth(access_token=value))
+
+    def refresh(
+        self,
+        snapshot: _CredentialSnapshot,
+        *,
+        timeout_seconds: float,
+        opener: Optional[Callable[..., Any]],
+    ) -> Optional[_CredentialSnapshot]:
+        del timeout_seconds, opener
+        current = self.load()
+        return current if current.auth != snapshot.auth else None
+
+
+class _FileCredentialSource:
+    kind = "codex_file"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> _CredentialSnapshot:
+        credentials = load_codex_credentials(auth_file=self.path)
+        return _CredentialSnapshot(credentials.auth, credentials)
+
+    def refresh(
+        self,
+        snapshot: _CredentialSnapshot,
+        *,
+        timeout_seconds: float,
+        opener: Optional[Callable[..., Any]],
+    ) -> Optional[_CredentialSnapshot]:
+        if snapshot.credentials is None:
+            return None
+        if snapshot.credentials.auth_mode not in {None, "chatgpt"}:
+            return None
+        refreshed = refresh_codex_credentials(
+            snapshot.credentials,
+            timeout_seconds=timeout_seconds,
+            opener=opener,
+        )
+        return _CredentialSnapshot(refreshed.auth, refreshed)
+
+
 def _load_default_model_auth(
     model: str,
     *,
@@ -226,6 +320,23 @@ def _load_default_model_auth(
         codex_home=codex_home,
         auth_file=auth_file,
     )
+
+
+def _default_credential_source(
+    model: str,
+    *,
+    codex_home: Optional[CodexAuthPath],
+    auth_file: Optional[CodexAuthPath],
+):
+    route = get_model_route("codex", model)
+    variable = route.api_key_environment_variable
+    if variable is not None and codex_home is None and auth_file is None:
+        return _EnvironmentCredentialSource(variable)
+    path = _resolve_auth_file(
+        codex_home=codex_home,
+        auth_file=auth_file,
+    ).resolve()
+    return _FileCredentialSource(path)
 
 
 def _encode_context_items(
@@ -256,6 +367,7 @@ def _encode_context_items(
             item,
             (
                 ModelSampleBoundary,
+                ModelFailure,
                 Init,
                 SampleMetadata,
                 TurnSummary,
@@ -752,27 +864,211 @@ def _optional_output_index(value: Any) -> Optional[int]:
     return value
 
 
-def _failed_response_message(payload: Mapping[str, Any]) -> str:
-    response_object = payload.get("response")
-    if isinstance(response_object, Mapping):
-        error = response_object.get("error")
-        if isinstance(error, Mapping):
-            message = error.get("message")
-            if isinstance(message, str) and message.strip():
-                return message
-    return "response.failed event received"
+@dataclass
+class _StreamTrace:
+    event_count: int = 0
+    last_event_type: Optional[str] = None
+    last_sequence_number: Optional[int] = None
+    response_id: Optional[str] = None
+    error_code: Optional[str] = None
+    event_type_counts: Dict[str, int] = field(default_factory=dict)
+    forbidden_values: Tuple[str, ...] = ()
+
+    def observe(self, payload: Mapping[str, Any]) -> None:
+        self.event_count += 1
+        event_type = payload.get("type")
+        self.last_event_type = _safe_diagnostic_value(
+            event_type,
+            self.forbidden_values,
+        )
+        if self.last_event_type is not None and (
+            self.last_event_type in self.event_type_counts
+            or len(self.event_type_counts) < _MAX_DIAGNOSTIC_EVENT_TYPES
+        ):
+            self.event_type_counts[self.last_event_type] = (
+                self.event_type_counts.get(self.last_event_type, 0) + 1
+            )
+        sequence = payload.get("sequence_number")
+        if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
+            self.last_sequence_number = sequence
+        if event_type == "response.created":
+            response = payload.get("response")
+            if isinstance(response, Mapping):
+                self.response_id = _safe_diagnostic_value(
+                    response.get("id"),
+                    self.forbidden_values,
+                )
+        if event_type == "response.incomplete":
+            response = payload.get("response")
+            if isinstance(response, Mapping):
+                details = response.get("incomplete_details")
+                if isinstance(details, Mapping):
+                    self.error_code = _safe_diagnostic_value(
+                        details.get("reason"),
+                        self.forbidden_values,
+                    )
+        elif event_type in {"response.failed", "error"}:
+            response = payload.get("response")
+            error = (
+                response.get("error")
+                if isinstance(response, Mapping)
+                else payload.get("error")
+            )
+            if isinstance(error, Mapping):
+                self.error_code = _safe_diagnostic_value(
+                    error.get("code"),
+                    self.forbidden_values,
+                )
 
 
-def _incomplete_response_message(payload: Mapping[str, Any]) -> str:
-    reason: Optional[str] = None
-    response_object = payload.get("response")
-    if isinstance(response_object, Mapping):
-        details = response_object.get("incomplete_details")
-        if isinstance(details, Mapping):
-            candidate = details.get("reason")
-            if isinstance(candidate, str) and candidate.strip():
-                reason = candidate
-    return f"incomplete Responses result: {reason or 'unknown reason'}"
+def _safe_diagnostic_value(
+    value: Any,
+    forbidden_values: Tuple[str, ...] = (),
+) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+        return None
+    if any(secret and secret in normalized for secret in forbidden_values):
+        return None
+    return normalized[:_MAX_DIAGNOSTIC_VALUE_CHARS]
+
+
+def _safe_header(
+    headers: Any,
+    name: str,
+    forbidden_values: Tuple[str, ...] = (),
+) -> Optional[str]:
+    if headers is None:
+        return None
+    try:
+        return _safe_diagnostic_value(headers.get(name), forbidden_values)
+    except Exception:
+        return None
+
+
+def _error_code_from_json(value: Any) -> Optional[str]:
+    if not isinstance(value, Mapping):
+        return None
+    error = value.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    return _safe_diagnostic_value(error.get("code"))
+
+
+def _http_auth_error_code(
+    headers: Any,
+    forbidden_values: Tuple[str, ...],
+) -> Optional[str]:
+    encoded = _safe_header(headers, "x-error-json", forbidden_values)
+    if encoded is not None and len(encoded) <= 4096:
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+            code = _error_code_from_json(json.loads(decoded))
+            if code is not None:
+                return code
+        except Exception:
+            pass
+    return None
+
+
+def _http_body_error_code(
+    detail: str,
+    forbidden_values: Tuple[str, ...],
+) -> Optional[str]:
+    try:
+        code = _error_code_from_json(json.loads(detail))
+        if code is not None and any(
+            secret and secret in code for secret in forbidden_values
+        ):
+            return None
+        return code
+    except Exception:
+        return None
+
+
+def _diagnostic_request_id(
+    headers: Any,
+    forbidden_values: Tuple[str, ...] = (),
+) -> Optional[str]:
+    return _safe_header(headers, "x-request-id", forbidden_values) or _safe_header(
+        headers,
+        "x-oai-request-id",
+        forbidden_values,
+    )
+
+
+def _ordered_output_items(
+    output_items: List[Tuple[Optional[int], InteractionItem]],
+) -> Tuple[InteractionItem, ...]:
+    if all(index is not None for index, _ in output_items):
+        return tuple(
+            item
+            for _, item in sorted(
+                output_items,
+                key=lambda indexed_item: (
+                    indexed_item[0]
+                    if indexed_item[0] is not None
+                    else -1
+                ),
+            )
+        )
+    # Codex streams commonly omit output_index. In that form, completed item
+    # events are already emitted in provider order.
+    return tuple(item for _, item in output_items)
+
+
+def _stream_failure(
+    message: str,
+    *,
+    exception_message: Optional[str] = None,
+    category: str,
+    trace: _StreamTrace,
+    output_items: List[Tuple[Optional[int], InteractionItem]],
+    provider: str,
+    model: str,
+    auth_source: str,
+    attempt_count: int,
+    recovery: Tuple[str, ...],
+    headers: Any,
+) -> ModelResponseError:
+    completed = _ordered_output_items(output_items)
+    failure = ModelFailure(
+        category=category,
+        message=message,
+        provider=provider,
+        model=model,
+        auth_source=auth_source,
+        request_id=_diagnostic_request_id(headers, trace.forbidden_values),
+        response_id=trace.response_id,
+        cf_ray=_safe_header(headers, "cf-ray", trace.forbidden_values),
+        authorization_error=_safe_header(
+            headers,
+            "x-openai-authorization-error",
+            trace.forbidden_values,
+        ),
+        auth_error_code=_http_auth_error_code(
+            headers,
+            trace.forbidden_values,
+        ),
+        error_code=trace.error_code,
+        attempt_count=attempt_count,
+        event_count=trace.event_count,
+        event_types=tuple(
+            f"{name}:{count}"
+            for name, count in sorted(trace.event_type_counts.items())
+        ),
+        completed_item_count=len(completed),
+        last_event_type=trace.last_event_type,
+        last_sequence_number=trace.last_sequence_number,
+        recovery=recovery,
+    )
+    return ModelResponseError(
+        exception_message or message,
+        failure=failure,
+        completed_items=completed,
+    )
 
 
 def _collect_sample(
@@ -780,26 +1076,113 @@ def _collect_sample(
     *,
     provider_state: _ProviderState,
     captured_turn_state: Optional[str],
+    provider: str = "responses",
+    model: str = "unknown",
+    auth_source: str = "static",
+    attempt_count: int = 1,
+    recovery: Tuple[str, ...] = (),
+    response_headers: Any = None,
+    forbidden_values: Tuple[str, ...] = (),
 ) -> ModelSample:
     output_items: List[Tuple[Optional[int], InteractionItem]] = []
     indexed_output_items: Dict[int, InteractionItem] = {}
     usage = TokenUsage()
     completed = False
+    trace = _StreamTrace(forbidden_values=forbidden_values)
+    iterator = _iter_sse_payloads(response)
 
-    for payload in _iter_sse_payloads(response):
+    while True:
+        try:
+            payload = next(iterator)
+        except StopIteration:
+            break
+        except (TimeoutError, socket.timeout) as exc:
+            partial = _stream_failure(
+                "Responses stream timed out before response.completed",
+                category="stream_timeout",
+                trace=trace,
+                output_items=output_items,
+                provider=provider,
+                model=model,
+                auth_source=auth_source,
+                attempt_count=attempt_count,
+                recovery=recovery,
+                headers=response_headers,
+            )
+            raise ModelTimeoutError(
+                str(partial),
+                failure=partial.failure,
+                completed_items=partial.completed_items,
+            ) from exc
+        except OSError as exc:
+            partial = _stream_failure(
+                "Responses stream failed before response.completed",
+                category="stream_transport",
+                trace=trace,
+                output_items=output_items,
+                provider=provider,
+                model=model,
+                auth_source=auth_source,
+                attempt_count=attempt_count,
+                recovery=recovery,
+                headers=response_headers,
+            )
+            raise ModelTransportError(
+                str(partial),
+                failure=partial.failure,
+                completed_items=partial.completed_items,
+            ) from exc
+        except ModelResponseError as exc:
+            raise _stream_failure(
+                "Responses stream contained an invalid event",
+                exception_message=str(exc),
+                category="invalid_sse",
+                trace=trace,
+                output_items=output_items,
+                provider=provider,
+                model=model,
+                auth_source=auth_source,
+                attempt_count=attempt_count,
+                recovery=recovery,
+                headers=response_headers,
+            ) from exc
+        trace.observe(payload)
         event_type = payload.get("type")
         if event_type == "response.output_item.done":
-            output_index = _optional_output_index(
-                payload.get("output_index")
-            )
-            decoded = _decode_output_item(payload.get("item"))
+            try:
+                output_index = _optional_output_index(
+                    payload.get("output_index")
+                )
+                decoded = _decode_output_item(payload.get("item"))
+            except ModelResponseError as exc:
+                raise _stream_failure(
+                    "Responses stream contained an invalid completed item",
+                    exception_message=str(exc),
+                    category="invalid_output_item",
+                    trace=trace,
+                    output_items=output_items,
+                    provider=provider,
+                    model=model,
+                    auth_source=auth_source,
+                    attempt_count=attempt_count,
+                    recovery=recovery,
+                    headers=response_headers,
+                ) from exc
             if output_index is not None:
                 existing = indexed_output_items.get(output_index)
                 if existing is not None:
                     if existing != decoded:
-                        raise ModelResponseError(
-                            "Responses stream contains conflicting completed "
-                            f"output items at index {output_index}"
+                        raise _stream_failure(
+                            "Responses stream contained conflicting completed items",
+                            category="conflicting_output_items",
+                            trace=trace,
+                            output_items=output_items,
+                            provider=provider,
+                            model=model,
+                            auth_source=auth_source,
+                            attempt_count=attempt_count,
+                            recovery=recovery,
+                            headers=response_headers,
                         )
                     continue
                 indexed_output_items[output_index] = decoded
@@ -812,38 +1195,73 @@ def _collect_sample(
             break
 
         if event_type == "response.failed":
-            raise ModelResponseError(_failed_response_message(payload))
+            raise _stream_failure(
+                "Responses reported a failed response",
+                category="response_failed",
+                trace=trace,
+                output_items=output_items,
+                provider=provider,
+                model=model,
+                auth_source=auth_source,
+                attempt_count=attempt_count,
+                recovery=recovery,
+                headers=response_headers,
+            )
         if event_type == "response.incomplete":
-            raise ModelResponseError(_incomplete_response_message(payload))
+            raise _stream_failure(
+                "Responses reported an incomplete response",
+                category="response_incomplete",
+                trace=trace,
+                output_items=output_items,
+                provider=provider,
+                model=model,
+                auth_source=auth_source,
+                attempt_count=attempt_count,
+                recovery=recovery,
+                headers=response_headers,
+            )
         if event_type == "error":
-            message = payload.get("message")
-            raise ModelResponseError(
-                str(message or "Responses error event received")
+            raise _stream_failure(
+                "Responses error event received",
+                category="response_error_event",
+                trace=trace,
+                output_items=output_items,
+                provider=provider,
+                model=model,
+                auth_source=auth_source,
+                attempt_count=attempt_count,
+                recovery=recovery,
+                headers=response_headers,
             )
 
     if not completed:
-        raise ModelResponseError(
-            "Responses stream closed before response.completed"
+        raise _stream_failure(
+            "Responses stream closed before response.completed",
+            category="stream_closed",
+            trace=trace,
+            output_items=output_items,
+            provider=provider,
+            model=model,
+            auth_source=auth_source,
+            attempt_count=attempt_count,
+            recovery=recovery,
+            headers=response_headers,
         )
     if not output_items:
-        raise ModelResponseError("Responses result contains no output items")
-
-    if all(index is not None for index, _ in output_items):
-        items = tuple(
-            item
-            for _, item in sorted(
-                output_items,
-                key=lambda indexed_item: (
-                    indexed_item[0]
-                    if indexed_item[0] is not None
-                    else -1
-                ),
-            )
+        raise _stream_failure(
+            "Responses result contains no output items",
+            category="empty_response",
+            trace=trace,
+            output_items=output_items,
+            provider=provider,
+            model=model,
+            auth_source=auth_source,
+            attempt_count=attempt_count,
+            recovery=recovery,
+            headers=response_headers,
         )
-    else:
-        # Codex streams commonly omit output_index. In that form, completed
-        # item events are already emitted in provider order.
-        items = tuple(item for _, item in output_items)
+
+    items = _ordered_output_items(output_items)
     stop_reason = (
         "tool_use"
         if any(isinstance(item, ToolCall) for item in items)
@@ -860,6 +1278,8 @@ def _collect_sample(
         ),
         provider_turn_id=provider_state.turn_id,
         provider_turn_state=captured_turn_state,
+        request_attempts=attempt_count,
+        recovery=recovery,
     )
 
 
@@ -870,14 +1290,24 @@ def _bounded_text(value: str, limit: int = 4096) -> str:
     return f"{text[:limit]}..."
 
 
-def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+def _read_http_body(stream: Any) -> str:
     try:
-        payload = exc.read()
+        try:
+            payload = stream.read(1_048_577)
+        except TypeError:
+            # Keep compatibility with small injectable response fakes.
+            payload = stream.read()
     except Exception:
         return ""
     if not isinstance(payload, (bytes, bytearray)):
         return ""
+    if len(payload) > 1_048_576:
+        return ""
     return _bounded_text(bytes(payload).decode("utf-8", errors="replace"))
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    return _read_http_body(exc)
 
 
 def _is_context_window_error(text: str) -> bool:
@@ -893,23 +1323,67 @@ def _is_context_window_error(text: str) -> bool:
     )
 
 
-def _raise_http_error(
+def _http_failure(
     status: int,
     detail: str,
     *,
     api_provider: str,
-) -> NoReturn:
-    if _is_context_window_error(detail):
-        raise ModelContextWindowError(detail)
-    if status == 401 and api_provider == "codex":
-        raise ModelTransportError(
-            "Codex Responses HTTP 401: authentication failed; "
-            "run `codex login` to create or refresh the Codex credentials"
-        )
+    model: str,
+    auth_source: str,
+    headers: Any,
+    attempt_count: int,
+    recovery: Tuple[str, ...],
+    forbidden_values: Tuple[str, ...] = (),
+) -> ModelError:
     label = "Codex Responses" if api_provider == "codex" else "Responses"
-    raise ModelTransportError(
-        f"{label} HTTP {status}: {detail or 'request failed'}"
+    request_id = _diagnostic_request_id(headers, forbidden_values)
+    cf_ray = _safe_header(headers, "cf-ray", forbidden_values)
+    authorization_error = _safe_header(
+        headers,
+        "x-openai-authorization-error",
+        forbidden_values,
     )
+    auth_error_code = _http_auth_error_code(headers, forbidden_values)
+    error_code = _http_body_error_code(detail, forbidden_values)
+    message = f"{label} HTTP {status}: request failed"
+    category = "http_error"
+    error_type = ModelTransportError
+    if _is_context_window_error(detail):
+        message = f"{label} HTTP {status}: context window exceeded"
+        category = "context_window"
+        error_type = ModelContextWindowError
+    if status == 401:
+        if api_provider == "codex" and auth_source != "environment":
+            message = (
+                "Codex Responses HTTP 401: authentication failed after "
+                "credential recovery; run `codex login` to refresh the "
+                "Codex credentials"
+            )
+        elif auth_source == "environment":
+            message = (
+                f"{label} HTTP 401: the environment credential was rejected; "
+                "update it and restart the process"
+            )
+        else:
+            message = f"{label} HTTP 401: authentication failed"
+        category = "authentication"
+        error_type = ModelAuthenticationError
+    failure = ModelFailure(
+        category=category,
+        message=message,
+        provider=api_provider,
+        model=model,
+        auth_source=auth_source,
+        http_status=status,
+        request_id=request_id,
+        cf_ray=cf_ray,
+        authorization_error=authorization_error,
+        auth_error_code=auth_error_code,
+        error_code=error_code,
+        attempt_count=attempt_count,
+        recovery=recovery,
+    )
+    return error_type(message, failure=failure)
 
 
 def _response_header(response: Any, name: str) -> Optional[str]:
@@ -948,6 +1422,7 @@ class CodexResponsesModel:
         codex_home: Optional[CodexAuthPath] = None,
         auth_file: Optional[CodexAuthPath] = None,
         opener: Optional[Callable[..., Any]] = None,
+        auth_opener: Optional[Callable[..., Any]] = None,
         identifier_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
         if endpoint is not None:
@@ -977,6 +1452,9 @@ class CodexResponsesModel:
                     + ", ".join(conflicting_options)
                 )
             resolved_endpoint = endpoint
+            credential_source = _StaticCredentialSource(
+                CodexAuth(endpoint.bearer_token, endpoint.account_id)
+            )
         else:
             if model is None:
                 raise ModelConfigurationError(
@@ -1004,7 +1482,13 @@ class CodexResponsesModel:
                         "auth cannot be combined with codex_home or auth_file"
                     )
                 resolved_auth = auth
+                credential_source = _StaticCredentialSource(auth)
             else:
+                credential_source = _default_credential_source(
+                    model,
+                    codex_home=codex_home,
+                    auth_file=auth_file,
+                )
                 resolved_auth = _load_default_model_auth(
                     model,
                     codex_home=codex_home,
@@ -1021,9 +1505,15 @@ class CodexResponsesModel:
 
         if identifier_factory is not None and not callable(identifier_factory):
             raise TypeError("identifier_factory must be callable or None")
+        if auth_opener is not None and not callable(auth_opener):
+            raise TypeError("auth_opener must be callable or None")
         self.endpoint = resolved_endpoint
         self._opener = opener or urllib.request.urlopen
+        self._auth_opener = auth_opener
         self._identifier_factory = identifier_factory or uuid.uuid4
+        self._credential_source = credential_source
+        self._expected_account_id = resolved_endpoint.account_id
+        self._credential_lock = Lock()
 
     @property
     def default_context_tokens(self) -> Optional[int]:
@@ -1085,18 +1575,23 @@ class CodexResponsesModel:
     def _build_headers(
         self,
         provider_state: _ProviderState,
+        auth: Optional[CodexAuth] = None,
     ) -> Dict[str, str]:
+        auth = auth or CodexAuth(
+            self.endpoint.bearer_token,
+            self.endpoint.account_id,
+        )
         headers = {
             "Accept": "text/event-stream",
-            "Authorization": f"Bearer {self.endpoint.bearer_token}",
+            "Authorization": f"Bearer {auth.access_token}",
             "Content-Type": "application/json",
             "User-Agent": "pythia-interaction/0.1",
         }
         if self.endpoint.api_provider != "codex":
             return headers
 
-        if self.endpoint.account_id is not None:
-            headers["ChatGPT-Account-ID"] = self.endpoint.account_id
+        if auth.account_id is not None:
+            headers["ChatGPT-Account-ID"] = auth.account_id
         if provider_state.session_id is not None:
             headers["session_id"] = provider_state.session_id
         if provider_state.turn_id is not None:
@@ -1111,6 +1606,75 @@ class CodexResponsesModel:
             headers[X_CODEX_TURN_STATE_HEADER] = provider_state.turn_state
         return headers
 
+    def _checked_credential(self) -> _CredentialSnapshot:
+        try:
+            snapshot = self._credential_source.load()
+        except Exception as exc:
+            message = "Responses credentials could not be loaded"
+            failure = ModelFailure(
+                category="authentication",
+                message=message,
+                provider=self.endpoint.api_provider,
+                model=self.endpoint.model,
+                auth_source=self._credential_source.kind,
+            )
+            raise ModelAuthenticationError(message, failure=failure) from exc
+        account_id = snapshot.auth.account_id
+        if self._expected_account_id is None and account_id is not None:
+            self._expected_account_id = account_id
+        if (
+            self._expected_account_id is not None
+            and account_id != self._expected_account_id
+        ):
+            message = "Responses credential account changed; start a fresh session"
+            failure = ModelFailure(
+                category="authentication",
+                message=message,
+                provider=self.endpoint.api_provider,
+                model=self.endpoint.model,
+                auth_source=self._credential_source.kind,
+            )
+            raise ModelAuthenticationError(message, failure=failure)
+        self.endpoint = replace(
+            self.endpoint,
+            bearer_token=snapshot.auth.access_token,
+            account_id=account_id,
+        )
+        return snapshot
+
+    def _reload_after_unauthorized(
+        self,
+        snapshot: _CredentialSnapshot,
+    ) -> Optional[_CredentialSnapshot]:
+        current = self._checked_credential()
+        return current if current != snapshot else None
+
+    def _refresh_after_unauthorized(
+        self,
+        snapshot: _CredentialSnapshot,
+    ) -> Optional[_CredentialSnapshot]:
+        try:
+            refreshed = self._credential_source.refresh(
+                snapshot,
+                timeout_seconds=self.endpoint.request_timeout_seconds,
+                opener=self._auth_opener,
+            )
+        except Exception:
+            return None
+        if refreshed is None:
+            return None
+        if (
+            self._expected_account_id is not None
+            and refreshed.auth.account_id != self._expected_account_id
+        ):
+            return None
+        self.endpoint = replace(
+            self.endpoint,
+            bearer_token=refreshed.auth.access_token,
+            account_id=refreshed.auth.account_id,
+        )
+        return refreshed
+
     @_timed_sample
     def sample(
         self,
@@ -1119,95 +1683,163 @@ class CodexResponsesModel:
         tools: Sequence[Any] = (),
         options: Optional[SamplingOptions] = None,
     ) -> ModelSample:
+        with self._credential_lock:
+            return self._sample_locked(context, tools, options)
+
+    def _sample_locked(
+        self,
+        context: ModelContext,
+        tools: Sequence[Any],
+        options: Optional[SamplingOptions],
+    ) -> ModelSample:
         if options is not None and not isinstance(options, SamplingOptions):
             raise TypeError("options must be SamplingOptions or None")
-        payload, provider_state = self._build_request_payload(
-            context,
-            tools,
-            options,
-        )
+        payload, provider_state = self._build_request_payload(context, tools, options)
         try:
-            request_data = json.dumps(
-                payload,
-                ensure_ascii=False,
-            ).encode("utf-8")
+            request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise ModelConfigurationError(
                 "Responses request is not JSON-serializable"
             ) from exc
 
-        request = urllib.request.Request(
-            self.endpoint.url,
-            data=request_data,
-            headers=self._build_headers(provider_state),
-            method="POST",
-        )
-        try:
-            response = self._opener(
-                request,
-                timeout=self.endpoint.request_timeout_seconds,
-            )
-        except urllib.error.HTTPError as exc:
-            detail = _read_http_error_body(exc) or _bounded_text(str(exc))
-            _raise_http_error(
-                exc.code,
-                detail,
-                api_provider=self.endpoint.api_provider,
-            )
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise ModelTimeoutError(str(exc)) from exc
-            raise ModelTransportError(str(exc)) from exc
-        except (TimeoutError, socket.timeout) as exc:
-            raise ModelTimeoutError(str(exc)) from exc
-        except OSError as exc:
-            raise ModelTransportError(str(exc)) from exc
+        snapshot = self._checked_credential()
+        recovery: List[str] = []
+        attempts = 0
+        transient_retries = 0
+        reloaded = False
+        refreshed = False
 
-        try:
-            status = getattr(response, "status", None)
-            if isinstance(status, int) and not 200 <= status < 300:
+        while True:
+            attempts += 1
+            request = urllib.request.Request(
+                self.endpoint.url,
+                data=request_data,
+                headers=self._build_headers(provider_state, snapshot.auth),
+                method="POST",
+            )
+            response = None
+            try:
                 try:
-                    raw = response.read()
+                    response = self._opener(
+                        request,
+                        timeout=self.endpoint.request_timeout_seconds,
+                    )
+                except urllib.error.HTTPError as exc:
+                    detail = _read_http_error_body(exc) or _bounded_text(str(exc))
+                    status = exc.code
+                    headers = exc.headers
+                    exc.close()
+                else:
+                    status = getattr(response, "status", None)
+                    headers = getattr(response, "headers", None)
+                    detail = ""
+                    if isinstance(status, int) and not 200 <= status < 300:
+                        try:
+                            raw = response.read(1_048_577)
+                        except TypeError:
+                            raw = response.read()
+                        if not isinstance(raw, (bytes, bytearray)):
+                            raise ModelResponseError("HTTP response body must be bytes")
+                        detail = (
+                            ""
+                            if len(raw) > 1_048_576
+                            else _bounded_text(
+                                bytes(raw).decode("utf-8", errors="replace")
+                            )
+                        )
+
+                if isinstance(status, int) and not 200 <= status < 300:
+                    if status == 401 and self.endpoint.api_provider == "codex":
+                        if not reloaded and self._credential_source.kind != "static":
+                            reloaded = True
+                            try:
+                                loaded = self._reload_after_unauthorized(snapshot)
+                            except ModelAuthenticationError:
+                                recovery.append("credential_reload_rejected")
+                                raise _http_failure(
+                                    status,
+                                    detail,
+                                    api_provider=self.endpoint.api_provider,
+                                    model=self.endpoint.model,
+                                    auth_source=self._credential_source.kind,
+                                    headers=headers,
+                                    attempt_count=attempts,
+                                    recovery=tuple(recovery),
+                                    forbidden_values=(snapshot.auth.access_token,),
+                                )
+                            if loaded is not None:
+                                snapshot = loaded
+                                recovery.append("credential_reload")
+                                continue
+                            recovery.append("credential_reload_unchanged")
+                        if not refreshed and self._credential_source.kind == "codex_file":
+                            refreshed = True
+                            loaded = self._refresh_after_unauthorized(snapshot)
+                            if loaded is not None:
+                                snapshot = loaded
+                                recovery.append("oauth_refresh")
+                                continue
+                            recovery.append("oauth_refresh_failed")
+                    if (
+                        status in _RETRYABLE_HTTP_STATUSES
+                        and not _is_context_window_error(detail)
+                        and transient_retries < _MAX_TRANSIENT_HTTP_RETRIES
+                    ):
+                        transient_retries += 1
+                        recovery.append(f"http_{status}_retry")
+                        continue
+                    raise _http_failure(
+                        status,
+                        detail,
+                        api_provider=self.endpoint.api_provider,
+                        model=self.endpoint.model,
+                        auth_source=self._credential_source.kind,
+                        headers=headers,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                        forbidden_values=(snapshot.auth.access_token,),
+                    )
+
+                assert response is not None
+                captured_turn_state = provider_state.turn_state
+                if (
+                    self.endpoint.api_provider == "codex"
+                    and captured_turn_state is None
+                ):
+                    captured_turn_state = _response_header(
+                        response,
+                        X_CODEX_TURN_STATE_HEADER,
+                    )
+                try:
+                    return _collect_sample(
+                        response,
+                        provider_state=provider_state,
+                        captured_turn_state=captured_turn_state,
+                        provider=self.endpoint.api_provider,
+                        model=self.endpoint.model,
+                        auth_source=self._credential_source.kind,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                        response_headers=headers,
+                        forbidden_values=(snapshot.auth.access_token,),
+                    )
                 except (TimeoutError, socket.timeout) as exc:
                     raise ModelTimeoutError(str(exc)) from exc
                 except OSError as exc:
                     raise ModelTransportError(str(exc)) from exc
-                if not isinstance(raw, (bytes, bytearray)):
-                    raise ModelResponseError(
-                        "HTTP response body must be bytes"
-                    )
-                detail = _bounded_text(
-                    bytes(raw).decode("utf-8", errors="replace")
-                )
-                _raise_http_error(
-                    status,
-                    detail,
-                    api_provider=self.endpoint.api_provider,
-                )
-
-            captured_turn_state = provider_state.turn_state
-            if (
-                self.endpoint.api_provider == "codex"
-                and captured_turn_state is None
-            ):
-                captured_turn_state = _response_header(
-                    response,
-                    X_CODEX_TURN_STATE_HEADER,
-                )
-            try:
-                return _collect_sample(
-                    response,
-                    provider_state=provider_state,
-                    captured_turn_state=captured_turn_state,
-                )
+            except urllib.error.URLError as exc:
+                if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                    raise ModelTimeoutError(str(exc)) from exc
+                raise ModelTransportError(str(exc)) from exc
             except (TimeoutError, socket.timeout) as exc:
                 raise ModelTimeoutError(str(exc)) from exc
             except OSError as exc:
                 raise ModelTransportError(str(exc)) from exc
-        finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+            finally:
+                if response is not None:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
 
 
 __all__ = [

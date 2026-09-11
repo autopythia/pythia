@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -17,6 +19,7 @@ from pythia.interaction import Environment
 from pythia.interaction import Init
 from pythia.interaction import META_RESPONSES_API_URL
 from pythia.interaction import Message
+from pythia.interaction import ModelAuthenticationError
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelResponseError
@@ -152,8 +155,8 @@ class _FakeSSEResponse:
     def __iter__(self):
         return iter(self._lines)
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        return self._body if size < 0 else self._body[:size]
 
     def close(self):
         self.closed = True
@@ -171,6 +174,8 @@ class _ScriptedOpener:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
+        if callable(outcome):
+            return outcome(request, timeout=timeout)
         return outcome
 
 
@@ -185,6 +190,29 @@ def _request_headers(opener, index=0):
         name.lower(): value
         for name, value in request.header_items()
     }
+
+
+def _account_id_token(account_id):
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                }
+            }
+        ).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    return f"header.{payload}.signature"
+
+
+def _http_error(status, *, body=b"", headers=None):
+    return urllib.error.HTTPError(
+        CODEX_RESPONSES_API_URL,
+        status,
+        "HTTP failure",
+        dict(headers or {}),
+        io.BytesIO(body),
+    )
 
 
 class StreamingResponsesEndpointTests(unittest.TestCase):
@@ -1181,16 +1209,45 @@ class CodexResponsesModelTests(unittest.TestCase):
                 options=SamplingOptions(temperature=0.5),
             )
 
+        partial_message = _message_event(0, "partial")
+        partial_message["sequence_number"] = 2
         incomplete_response = _FakeSSEResponse(
-            _message_event(0, "partial"),
+            {
+                "type": "response.created",
+                "sequence_number": 1,
+                "response": {"id": "response-partial"},
+            },
+            partial_message,
+            headers={
+                "x-request-id": "request-partial",
+                "cf-ray": "ray-partial",
+            },
         )
-        with self.assertRaisesRegex(ModelResponseError, "before"):
+        with self.assertRaisesRegex(ModelResponseError, "before") as raised:
             CodexResponsesModel(
                 model.endpoint,
                 opener=_ScriptedOpener(incomplete_response),
             ).sample(
                 ModelContext([Message(role="user", content="hello")])
             )
+        self.assertEqual(
+            raised.exception.completed_items,
+            (Message(role="assistant", content="partial"),),
+        )
+        failure = raised.exception.failure
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.category, "stream_closed")
+        self.assertEqual(failure.event_count, 2)
+        self.assertEqual(
+            failure.event_types,
+            ("response.created:1", "response.output_item.done:1"),
+        )
+        self.assertEqual(failure.completed_item_count, 1)
+        self.assertEqual(failure.last_event_type, "response.output_item.done")
+        self.assertEqual(failure.last_sequence_number, 2)
+        self.assertEqual(failure.response_id, "response-partial")
+        self.assertEqual(failure.request_id, "request-partial")
+        self.assertEqual(failure.cf_ray, "ray-partial")
         self.assertTrue(incomplete_response.closed)
 
         unsupported_response = _FakeSSEResponse(
@@ -1250,6 +1307,346 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
 
         self.assertNotIn("secret-token", str(raised.exception))
+
+    def test_codex_401_reloads_changed_auth_file_before_retry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+
+            def write(token):
+                auth_file.write_text(
+                    json.dumps(
+                        {
+                            "auth_mode": "chatgpt",
+                            "tokens": {
+                                "access_token": token,
+                                "account_id": "account-1",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            write("old-token")
+            response = _FakeSSEResponse(
+                _message_event(0, "recovered"),
+                _completed_event(),
+            )
+
+            def first(request, *, timeout):
+                del request, timeout
+                write("new-token")
+                raise _http_error(401)
+
+            opener = _ScriptedOpener(first, response)
+            model = CodexResponsesModel(
+                model="codex-test",
+                auth_file=auth_file,
+                opener=opener,
+            )
+            sample = model.sample(
+                ModelContext([Message(role="user", content="hello")])
+            )
+
+        self.assertEqual(sample.last_assistant_text, "recovered")
+        self.assertEqual(sample.request_attempts, 2)
+        self.assertEqual(sample.recovery, ("credential_reload",))
+        self.assertEqual(_request_headers(opener, 0)["authorization"], "Bearer old-token")
+        self.assertEqual(_request_headers(opener, 1)["authorization"], "Bearer new-token")
+
+    def test_codex_401_refreshes_oauth_token_and_persists_rotation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "auth_mode": "chatgpt",
+                        "unrelated": "preserved",
+                        "tokens": {
+                            "access_token": "old-token",
+                            "refresh_token": "old-refresh",
+                            "id_token": _account_id_token("account-1"),
+                            "account_id": "account-1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            opener = _ScriptedOpener(
+                _http_error(401),
+                _FakeSSEResponse(
+                    _message_event(0, "refreshed"),
+                    _completed_event(),
+                ),
+            )
+            auth_opener = _ScriptedOpener(
+                _FakeSSEResponse(
+                    status=200,
+                    body=json.dumps(
+                        {
+                            "access_token": "new-token",
+                            "refresh_token": "new-refresh",
+                            "id_token": _account_id_token("account-1"),
+                        }
+                    ).encode("utf-8"),
+                )
+            )
+            model = CodexResponsesModel(
+                model="codex-test",
+                auth_file=auth_file,
+                opener=opener,
+                auth_opener=auth_opener,
+            )
+
+            sample = model.sample(
+                ModelContext([Message(role="user", content="hello")])
+            )
+            saved = json.loads(auth_file.read_text(encoding="utf-8"))
+            saved_mode = auth_file.stat().st_mode & 0o777
+
+        self.assertEqual(sample.last_assistant_text, "refreshed")
+        self.assertEqual(sample.request_attempts, 2)
+        self.assertEqual(
+            sample.recovery,
+            ("credential_reload_unchanged", "oauth_refresh"),
+        )
+        self.assertEqual(_request_headers(opener, 0)["authorization"], "Bearer old-token")
+        self.assertEqual(_request_headers(opener, 1)["authorization"], "Bearer new-token")
+        refresh_request = json.loads(auth_opener.calls[0][0].data.decode("utf-8"))
+        self.assertEqual(refresh_request["grant_type"], "refresh_token")
+        self.assertEqual(refresh_request["refresh_token"], "old-refresh")
+        self.assertEqual(saved["tokens"]["access_token"], "new-token")
+        self.assertEqual(saved["tokens"]["refresh_token"], "new-refresh")
+        self.assertEqual(saved["unrelated"], "preserved")
+        if os.name == "posix":
+            self.assertEqual(saved_mode, 0o600)
+
+    def test_environment_credential_is_reloaded_after_401(self):
+        response = _FakeSSEResponse(
+            _message_event(0, "recovered"),
+            _completed_event(),
+        )
+        calls = []
+
+        def opener(request, *, timeout):
+            calls.append((request, timeout))
+            if len(calls) == 1:
+                os.environ["META_API_KEY"] = "new-meta-key"
+                raise _http_error(401)
+            return response
+
+        with mock.patch.dict(os.environ, {"META_API_KEY": "old-meta-key"}, clear=True):
+            model = CodexResponsesModel(
+                model="muse-spark-1.3",
+                opener=opener,
+            )
+            sample = model.sample(
+                ModelContext([Message(role="user", content="hello")])
+            )
+
+        headers = [
+            {name.lower(): value for name, value in request.header_items()}
+            for request, _ in calls
+        ]
+        self.assertEqual(sample.request_attempts, 2)
+        self.assertEqual(sample.recovery, ("credential_reload",))
+        self.assertEqual(headers[0]["authorization"], "Bearer old-meta-key")
+        self.assertEqual(headers[1]["authorization"], "Bearer new-meta-key")
+
+    def test_unchanged_environment_credential_does_not_loop_on_401(self):
+        opener = _ScriptedOpener(
+            _http_error(401, headers={"x-request-id": "request-env"})
+        )
+        with mock.patch.dict(os.environ, {"META_API_KEY": "meta-key"}, clear=True):
+            model = CodexResponsesModel(
+                model="muse-spark-1.3",
+                opener=opener,
+            )
+            with self.assertRaises(ModelAuthenticationError) as raised:
+                model.sample(
+                    ModelContext([Message(role="user", content="hello")])
+                )
+
+        self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("credential_reload_unchanged",),
+        )
+        self.assertEqual(raised.exception.failure.request_id, "request-env")
+        self.assertIn("restart", str(raised.exception))
+
+    def test_auth_file_account_change_is_rejected_without_refresh(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+
+            def write(account, token):
+                auth_file.write_text(
+                    json.dumps(
+                        {
+                            "auth_mode": "chatgpt",
+                            "tokens": {
+                                "access_token": token,
+                                "refresh_token": "refresh-secret",
+                                "id_token": _account_id_token(account),
+                                "account_id": account,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            write("account-1", "old-token")
+            calls = []
+
+            def opener(request, *, timeout):
+                calls.append((request, timeout))
+                write("account-2", "other-account-token")
+                raise _http_error(401)
+
+            auth_opener = mock.Mock(
+                side_effect=AssertionError("refresh must not be attempted")
+            )
+            model = CodexResponsesModel(
+                model="codex-test",
+                auth_file=auth_file,
+                opener=opener,
+                auth_opener=auth_opener,
+            )
+            with self.assertRaises(ModelAuthenticationError) as raised:
+                model.sample(
+                    ModelContext([Message(role="user", content="hello")])
+                )
+
+            saved = json.loads(auth_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(calls), 1)
+        auth_opener.assert_not_called()
+        self.assertEqual(saved["tokens"]["account_id"], "account-2")
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("credential_reload_rejected",),
+        )
+
+    def test_repeated_401_is_bounded_and_has_safe_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "auth_mode": "chatgpt",
+                        "tokens": {
+                            "access_token": "FAKE_OLD_SECRET",
+                            "refresh_token": "FAKE_REFRESH_SECRET",
+                            "id_token": _account_id_token("account-1"),
+                            "account_id": "account-1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            error_json = base64.b64encode(
+                b'{"error":{"code":"token_expired"}}'
+            ).decode("ascii")
+            opener = _ScriptedOpener(
+                _http_error(401),
+                _http_error(
+                    401,
+                    body=b'{"error":{"message":"FAKE_BODY_SECRET"}}',
+                    headers={
+                        "x-oai-request-id": "request-final",
+                        "cf-ray": "ray-final",
+                        "x-openai-authorization-error": "expired_token",
+                        "x-error-json": error_json,
+                    },
+                ),
+            )
+            auth_opener = _ScriptedOpener(
+                _FakeSSEResponse(
+                    status=200,
+                    body=json.dumps(
+                        {
+                            "access_token": "FAKE_NEW_SECRET",
+                            "id_token": _account_id_token("account-1"),
+                        }
+                    ).encode("utf-8"),
+                )
+            )
+            model = CodexResponsesModel(
+                model="codex-test",
+                auth_file=auth_file,
+                opener=opener,
+                auth_opener=auth_opener,
+            )
+
+            with self.assertRaises(ModelAuthenticationError) as raised:
+                model.sample(
+                    ModelContext([Message(role="user", content="hello")])
+                )
+
+        self.assertEqual(len(opener.calls), 2)
+        failure = raised.exception.failure
+        self.assertEqual(failure.http_status, 401)
+        self.assertEqual(failure.attempt_count, 2)
+        self.assertEqual(failure.request_id, "request-final")
+        self.assertEqual(failure.cf_ray, "ray-final")
+        self.assertEqual(failure.authorization_error, "expired_token")
+        self.assertEqual(failure.auth_error_code, "token_expired")
+        self.assertEqual(
+            failure.recovery,
+            ("credential_reload_unchanged", "oauth_refresh"),
+        )
+        rendered = f"{raised.exception!r}\n{raised.exception}\n{failure!r}"
+        for secret in (
+            "FAKE_OLD_SECRET",
+            "FAKE_NEW_SECRET",
+            "FAKE_REFRESH_SECRET",
+            "FAKE_BODY_SECRET",
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_retryable_and_terminal_http_errors_have_diagnostics(self):
+        recovered_opener = _ScriptedOpener(
+            _http_error(503, headers={"x-request-id": "request-overload"}),
+            _FakeSSEResponse(
+                _message_event(0, "recovered"),
+                _completed_event(),
+            ),
+        )
+        recovered = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://api.example.test/v1",
+                model="generic-model",
+                bearer_token="api-key",
+            ),
+            opener=recovered_opener,
+        ).sample(ModelContext([Message(role="user", content="hello")]))
+        self.assertEqual(recovered.request_attempts, 2)
+        self.assertEqual(recovered.recovery, ("http_503_retry",))
+
+        terminal_opener = _ScriptedOpener(
+            _http_error(
+                400,
+                body=b'{"error":{"code":"invalid_request","message":"FAKE_SECRET"}}',
+                headers={
+                    "x-request-id": "request-invalid",
+                    "x-openai-authorization-error": "reflected-api-key",
+                },
+            )
+        )
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://api.example.test/v1",
+                model="generic-model",
+                bearer_token="api-key",
+            ),
+            opener=terminal_opener,
+        )
+        with self.assertRaises(ModelTransportError) as raised:
+            model.sample(ModelContext([Message(role="user", content="hello")]))
+        self.assertEqual(raised.exception.failure.http_status, 400)
+        self.assertEqual(raised.exception.failure.request_id, "request-invalid")
+        self.assertEqual(raised.exception.failure.error_code, "invalid_request")
+        self.assertIsNone(raised.exception.failure.authorization_error)
+        self.assertNotIn("FAKE_SECRET", str(raised.exception))
 
 
 class DemoConfigurationTests(unittest.TestCase):

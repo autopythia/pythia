@@ -16,6 +16,37 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _safe_header(headers, name):
+    try:
+        value = headers.get(name)
+    except Exception:
+        return None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if (
+        not value
+        or len(value) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return None
+    return value
+
+
+def _http_diagnostic_suffix(headers):
+    request_id = _safe_header(headers, "x-request-id") or _safe_header(
+        headers,
+        "x-oai-request-id",
+    )
+    cf_ray = _safe_header(headers, "cf-ray")
+    fields = []
+    if request_id is not None:
+        fields.append(f"request_id={request_id}")
+    if cf_ray is not None:
+        fields.append(f"cf_ray={cf_ray}")
+    return "" if not fields else f" ({' '.join(fields)})"
+
+
 def request_json(request, timeout_seconds, *, opener=None):
     open_request = opener or urllib.request.build_opener(_NoRedirect()).open
     try:
@@ -33,8 +64,11 @@ def request_json(request, timeout_seconds, *, opener=None):
             raise AccountServiceError("Account service returned invalid data.")
         return value
     except urllib.error.HTTPError as exc:
+        suffix = _http_diagnostic_suffix(exc.headers)
         exc.close()
-        raise AccountServiceError(f"Account service HTTP {exc.code}.") from None
+        raise AccountServiceError(
+            f"Account service HTTP {exc.code}{suffix}."
+        ) from None
     except AccountServiceError:
         raise
     except Exception:

@@ -36,6 +36,7 @@ from .items import Init
 from .items import Instructions
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -48,6 +49,8 @@ from .items import UserToolCall
 from .items import UserToolResult
 from .items import summarize_turn_usage
 from .model import Model
+from .model import ModelAuthenticationError
+from .model import ModelError
 from .model import SamplingOptions
 from .model_config import DEFAULT_SAVE_PATH
 from .model_config import build_model
@@ -81,6 +84,7 @@ class _UIState:
     phase_started: float = field(default_factory=time.monotonic)
     exit_code: int = 0
     auth_required: bool = False
+    auth_notice: str = "Model authentication needed; use /login."
     bound_account_id: Optional[str] = None
     login_cancel: threading.Event = field(default_factory=threading.Event)
     transient: queue.Queue[tuple[str, str]] = field(default_factory=lambda: queue.Queue(maxsize=8))
@@ -127,7 +131,7 @@ class _UIState:
                     self.editor = Editor()
                     return
             elif self.auth_required:
-                self.notice("Model authentication needed; use /login. Draft was not submitted.")
+                self.notice(f"{self.auth_notice} Draft was not submitted.")
                 return
             if len(self.pending) >= _MAX_PENDING_QUERIES:
                 self.notice("Query queue is full; the draft has not been submitted.")
@@ -260,8 +264,14 @@ async def _user_tool(
             state.notice("Credentials were saved, but model activation failed. No model request was started.")
         else:
             state.bound_account_id = getattr(getattr(model, "endpoint", None), "account_id", None)
-            state.notice("Model ready. Submit a query; blocked drafts were not automatically submitted.")
+            state.notice(
+                "Model ready with reloaded credentials. Backend authorization "
+                "will be verified by the next model request; blocked drafts were not "
+                "automatically submitted."
+            )
         state.auth_required = model is None
+        if model is not None:
+            state.auth_notice = "Model authentication needed; use /login."
     return model
 
 
@@ -282,13 +292,54 @@ async def _turn(
                 f"{args.max_samples} samples"
             )
         state.set_phase("sampling")
-        sample = await asyncio.to_thread(
-            model.sample,
-            context.copy(),
-            tools=environment.tool_specs,
-            options=options,
-        )
+        try:
+            sample = await asyncio.to_thread(
+                model.sample,
+                context.copy(),
+                tools=environment.tool_specs,
+                options=options,
+            )
+        except ModelError as exc:
+            contribution = (
+                *exc.completed_items,
+                *((exc.failure,) if exc.failure is not None else ()),
+            )
+            if contribution:
+                recovered = (*contribution, ModelSampleBoundary())
+                await _append(context, recovered, state, path)
+                state.displays.extend(render_interaction_items(contribution))
+                recovered_calls = tuple(
+                    item for item in exc.completed_items
+                    if isinstance(item, ToolCall)
+                )
+                if recovered_calls:
+                    results = tuple(
+                        ToolResult(
+                            call_id=call.call_id,
+                            output=(
+                                "Not executed because the model response did "
+                                "not complete."
+                            ),
+                            success=False,
+                        )
+                        for call in recovered_calls
+                    )
+                    await _append(context, results, state, path)
+                    state.displays.extend(
+                        render_interaction_items(
+                            results,
+                            source_calls=recovered_calls,
+                        )
+                    )
+            raise
         samples += 1
+        model_account_id = getattr(
+            getattr(model, "endpoint", None),
+            "account_id",
+            None,
+        )
+        if state.bound_account_id is None and model_account_id is not None:
+            state.bound_account_id = model_account_id
         await _append(context, sample.context_items(), state, path)
         state.displays.extend(sample.display_items())
         if sample.stop_reason == "compaction":
@@ -325,6 +376,8 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
             tail = "assistant output"
         elif isinstance(item, Instructions):
             tail = "an instructions update"
+        elif isinstance(item, ModelFailure):
+            tail = "a failed model attempt"
         else:
             tail = "incomplete model output"
         return (
@@ -391,7 +444,9 @@ async def _drive_interaction(
                         state.notice(notice)
                 if model is None:
                     query = None
-                    state.notice("Model authentication needed; use /login. No model query was submitted.")
+                    state.notice(
+                        f"{state.auth_notice} No model query was submitted."
+                    )
                 else:
                     state.editor = Editor()
                 state.ready = True
@@ -420,7 +475,7 @@ async def _drive_interaction(
                     continue
                 if model is None:
                     state.editor = Editor(query, len(query))
-                    state.notice("Model authentication needed; use /login. Draft was not submitted.")
+                    state.notice(f"{state.auth_notice} Draft was not submitted.")
                     state.set_phase("auth needed")
                     continue
                 should_sample = True
@@ -438,6 +493,25 @@ async def _drive_interaction(
             state.ready = True
             startup = False
             state.set_phase("failed")
+            if isinstance(exc, ModelAuthenticationError):
+                model = None
+                state.auth_required = True
+                if (
+                    exc.failure is not None
+                    and exc.failure.auth_source == "environment"
+                ):
+                    state.auth_notice = (
+                        "Environment credential rejected; update it and restart "
+                        "the process."
+                    )
+                elif (
+                    exc.failure is not None
+                    and exc.failure.auth_source == "static"
+                ):
+                    state.auth_notice = (
+                        "Configured static credential rejected; restart with "
+                        "updated credentials."
+                    )
             state.notice(f"{type(exc).__name__}: {exc}")
             if state.pending:
                 state.notice(

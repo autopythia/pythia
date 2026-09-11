@@ -48,6 +48,27 @@ class CodexAuth:
             object.__setattr__(self, "account_id", account_id)
 
 
+@dataclass(frozen=True)
+class CodexCredentials:
+    """A complete auth-file snapshot; all token material is repr-redacted."""
+
+    auth: CodexAuth
+    auth_file: Path
+    refresh_token: Optional[str] = field(default=None, repr=False)
+    id_token: Optional[str] = field(default=None, repr=False)
+    auth_mode: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.auth, CodexAuth):
+            raise TypeError("auth must be CodexAuth")
+        if not isinstance(self.auth_file, Path):
+            raise TypeError("auth_file must be Path")
+        for field_name in ("refresh_token", "id_token", "auth_mode"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _optional_nonempty_string(value, field_name)
+
+
 def _normalize_path(value: CodexAuthPath, field_name: str) -> Path:
     if isinstance(value, os.PathLike):
         path = Path(value)
@@ -101,12 +122,34 @@ def _optional_nonempty_string(value: Any, field_name: str) -> Optional[str]:
     return normalized
 
 
+def _optional_credential_string(value: Any) -> Optional[str]:
+    """Ignore malformed optional refresh metadata without hiding valid access auth."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or any(character.isspace() for character in normalized):
+        return None
+    return normalized
+
+
 def load_codex_auth(
     *,
     codex_home: Optional[CodexAuthPath] = None,
     auth_file: Optional[CodexAuthPath] = None,
 ) -> CodexAuth:
     """Load an existing Codex CLI login without modifying credential state."""
+    return load_codex_credentials(
+        codex_home=codex_home,
+        auth_file=auth_file,
+    ).auth
+
+
+def load_codex_credentials(
+    *,
+    codex_home: Optional[CodexAuthPath] = None,
+    auth_file: Optional[CodexAuthPath] = None,
+) -> CodexCredentials:
+    """Load access and refresh material from an existing Codex auth file."""
     resolved_auth_file = _resolve_auth_file(
         codex_home=codex_home,
         auth_file=auth_file,
@@ -133,12 +176,19 @@ def load_codex_auth(
         ) from exc
 
     try:
-        return _auth_from_payload(payload, resolved_auth_file)
+        return _credentials_from_payload(payload, resolved_auth_file)
     except CodexAuthError as exc:
         raise CodexAuthUnavailable(str(exc)) from None
 
 
 def _auth_from_payload(payload: Any, resolved_auth_file: Path) -> CodexAuth:
+    return _credentials_from_payload(payload, resolved_auth_file).auth
+
+
+def _credentials_from_payload(
+    payload: Any,
+    resolved_auth_file: Path,
+) -> CodexCredentials:
     root = _require_mapping(payload, str(resolved_auth_file))
     tokens = _require_mapping(
         root.get("tokens"),
@@ -157,15 +207,23 @@ def _auth_from_payload(payload: Any, resolved_auth_file: Path) -> CodexAuth:
         tokens.get("account_id"),
         f"{resolved_auth_file}:tokens.account_id",
     )
-    return CodexAuth(
-        access_token=access_token,
-        account_id=account_id,
+    return CodexCredentials(
+        auth=CodexAuth(
+            access_token=access_token,
+            account_id=account_id,
+        ),
+        auth_file=resolved_auth_file,
+        refresh_token=_optional_credential_string(tokens.get("refresh_token")),
+        id_token=_optional_credential_string(tokens.get("id_token")),
+        auth_mode=_optional_credential_string(root.get("auth_mode")),
     )
 
 
 __all__ = [
     "CodexAuth",
+    "CodexCredentials",
     "CodexAuthError",
     "CodexAuthUnavailable",
     "load_codex_auth",
+    "load_codex_credentials",
 ]

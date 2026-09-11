@@ -10,6 +10,7 @@ from unittest import mock
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexAuthError
 from pythia.interaction import load_codex_auth
+from pythia.interaction import load_codex_credentials
 
 
 def _write_auth(path: Path, *, token: str, account_id: str = "account-1") -> None:
@@ -42,6 +43,37 @@ class CodexAuthTests(unittest.TestCase):
         self.assertEqual(auth.access_token, "secret-token")
         self.assertEqual(auth.account_id, "account-42")
         self.assertNotIn("secret-token", repr(auth))
+
+    def test_complete_credential_snapshot_keeps_refresh_material_redacted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "auth_mode": "chatgpt",
+                        "tokens": {
+                            "access_token": "access-secret",
+                            "refresh_token": "refresh-secret",
+                            "id_token": "id-secret",
+                            "account_id": "account-1",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            credentials = load_codex_credentials(auth_file=auth_file)
+
+        self.assertEqual(
+            credentials.auth,
+            CodexAuth("access-secret", "account-1"),
+        )
+        self.assertEqual(credentials.refresh_token, "refresh-secret")
+        self.assertEqual(credentials.id_token, "id-secret")
+        self.assertEqual(credentials.auth_mode, "chatgpt")
+        rendered = repr(credentials)
+        for secret in ("access-secret", "refresh-secret", "id-secret"):
+            self.assertNotIn(secret, rendered)
 
     def test_resolution_supports_codex_home_environment_and_home_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:

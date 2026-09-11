@@ -13,6 +13,7 @@ from .items import ContextCompaction
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import ToolCall
 from .items import ToolResult
@@ -62,7 +63,7 @@ def _validate_tool_sequence(
 
         if isinstance(
             item,
-            (ModelSampleBoundary, SampleMetadata, TurnSummary),
+            (ModelSampleBoundary, SampleMetadata, ModelFailure, TurnSummary),
         ):
             if pending:
                 call_batch_closed = True
@@ -105,6 +106,10 @@ def _validate_compaction_replacement(
         _validate_item(item, f"replacement_items[{index}]")
         if isinstance(item, (UserToolCall, UserToolResult)):
             raise ContextValidationError("user tools cannot appear in compaction replacements")
+        if isinstance(item, ModelFailure):
+            raise ContextValidationError(
+                "model failures cannot appear in compaction replacements"
+            )
         if isinstance(item, ContextCompaction):
             raise ContextValidationError(
                 "ContextCompaction replacement_items must not contain "

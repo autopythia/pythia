@@ -12,6 +12,7 @@ from pythia.interaction import DefaultEnvironment
 from pythia.interaction import Init
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
+from pythia.interaction import ModelFailure
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
@@ -172,6 +173,29 @@ class SessionTests(unittest.TestCase):
                 provider_session_id="session-1",
                 provider_turn_id="turn-1",
                 provider_turn_state="turn-state-1",
+                request_attempts=2,
+                recovery=("oauth_refresh",),
+            ),
+            ModelFailure(
+                category="http_error",
+                message="Responses HTTP 503: request failed",
+                provider="responses",
+                model="model",
+                auth_source="static",
+                http_status=503,
+                request_id="request-1",
+                response_id="response-1",
+                cf_ray="ray-1",
+                authorization_error="none",
+                auth_error_code="server_overloaded",
+                attempt_count=2,
+                event_count=3,
+                event_types=("response.output_item.done:1",),
+                completed_item_count=1,
+                last_event_type="response.output_item.done",
+                last_sequence_number=7,
+                recovery=("http_503_retry",),
+                elapsed_seconds=1.25,
             ),
             OpaqueCompaction.from_responses("opaque"),
             OpaqueCompaction.from_messages("summary"),
@@ -202,7 +226,7 @@ class SessionTests(unittest.TestCase):
         )
         self.assertNotIn("signature", encoded_reasoning)
         self.assertEqual(
-            interaction_item_to_dict(items[9]),
+            interaction_item_to_dict(items[10]),
             {
                 "type": "opaque_compaction",
                 "protocol": "messages",

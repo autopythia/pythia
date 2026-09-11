@@ -16,6 +16,7 @@ from typing import Tuple
 from .context import ModelContext
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -30,7 +31,26 @@ if TYPE_CHECKING:
 
 
 class ModelError(RuntimeError):
-    pass
+    """Base model failure with optional safe diagnostics and completed output."""
+
+    def __init__(
+        self,
+        *args,
+        failure: Optional[ModelFailure] = None,
+        completed_items: Sequence[InteractionItem] = (),
+    ) -> None:
+        super().__init__(*args)
+        if failure is not None and not isinstance(failure, ModelFailure):
+            raise TypeError("failure must be ModelFailure or None")
+        items = tuple(completed_items)
+        for index, item in enumerate(items):
+            if not isinstance(item, (Message, Reasoning, ToolCall, OpaqueCompaction)):
+                raise TypeError(
+                    "completed_items must contain model output items; "
+                    f"item {index} is {type(item).__name__}"
+                )
+        self.failure = failure
+        self.completed_items = items
 
 
 class ModelConfigurationError(ModelError, ValueError):
@@ -38,6 +58,10 @@ class ModelConfigurationError(ModelError, ValueError):
 
 
 class ModelTransportError(ModelError):
+    pass
+
+
+class ModelAuthenticationError(ModelTransportError):
     pass
 
 
@@ -118,6 +142,8 @@ class ModelSample:
     provider_turn_id: Optional[str] = field(default=None, repr=False)
     provider_turn_state: Optional[str] = field(default=None, repr=False)
     elapsed_seconds: Optional[float] = None
+    request_attempts: int = 1
+    recovery: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -146,6 +172,19 @@ class ModelSample:
         object.__setattr__(
             self, "elapsed_seconds", _validate_elapsed_seconds(self.elapsed_seconds)
         )
+        if (
+            isinstance(self.request_attempts, bool)
+            or not isinstance(self.request_attempts, int)
+            or self.request_attempts <= 0
+        ):
+            raise ValueError("request_attempts must be a positive integer")
+        recovery = tuple(self.recovery)
+        for index, value in enumerate(recovery):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"recovery[{index}] must be a non-empty string")
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"recovery[{index}] must not contain newlines")
+        object.__setattr__(self, "recovery", recovery)
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -180,6 +219,8 @@ class ModelSample:
             provider_turn_id=self.provider_turn_id,
             provider_turn_state=self.provider_turn_state,
             elapsed_seconds=self.elapsed_seconds,
+            request_attempts=self.request_attempts,
+            recovery=self.recovery,
         )
 
     def display_items(self) -> Tuple["DisplayItem", ...]:
@@ -229,6 +270,7 @@ class Model(Protocol):
 
 __all__ = [
     "Model",
+    "ModelAuthenticationError",
     "ModelConfigurationError",
     "ModelContextWindowError",
     "ModelError",

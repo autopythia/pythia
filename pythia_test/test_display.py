@@ -9,6 +9,7 @@ from pythia.interaction import DisplayItem
 from pythia.interaction import EnvironmentResult
 from pythia.interaction import InteractionItemRenderer
 from pythia.interaction import Message
+from pythia.interaction import ModelFailure
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
@@ -92,6 +93,21 @@ class InteractionItemRendererTests(unittest.TestCase):
                     summary=(),
                     encrypted_content="provider-ciphertext",
                 ),
+                ModelFailure(
+                    category="stream_closed",
+                    message="Responses stream closed before response.completed",
+                    provider="codex",
+                    model="model",
+                    auth_source="codex_file",
+                    request_id="request-1",
+                    attempt_count=2,
+                    event_count=3,
+                    completed_item_count=1,
+                    last_event_type="response.output_item.done",
+                    last_sequence_number=4,
+                    recovery=("credential_reload",),
+                    elapsed_seconds=1.25,
+                ),
                 SampleMetadata(
                     usage=TokenUsage(
                         input_tokens=20,
@@ -118,6 +134,12 @@ class InteractionItemRendererTests(unittest.TestCase):
                 "[reasoning] second",
                 "[reasoning] fallback",
                 "[reasoning] ...",
+                "[model failure] Responses stream closed before "
+                "response.completed kind=stream_closed provider=codex "
+                "model=model auth_source=codex_file attempts=2 "
+                "request_id=request-1 events=3 completed_items=1 "
+                "last_event=response.output_item.done last_sequence=4 "
+                "elapsed=1.25s recovery=credential_reload",
                 "[sample] input=20 output=5 total=25 cached=4",
                 "[compaction] opaque checkpoint",
                 "[compaction] context checkpoint (2 replacement items)",

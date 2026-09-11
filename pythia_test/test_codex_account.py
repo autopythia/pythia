@@ -20,6 +20,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pythia.interaction import cli, CodexAuth, load_codex_auth, ToolCall
+from pythia.interaction import load_codex_credentials
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import codex_login, codex_quota, user_tools
 from pythia.interaction._account_http import AccountServiceError
@@ -156,6 +157,54 @@ class LoginServiceTests(unittest.TestCase):
     def test_token_exchange_honors_explicit_http_timeout(self):
         self.assertEqual(len(self._run(request_timeout_seconds=0.25)), 1)
 
+    def test_refresh_retains_omitted_tokens_and_rejects_account_switch(self):
+        original_tokens = _tokens("account-one")
+        self.path.write_text(
+            json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "unrelated": "preserved",
+                    "tokens": {**original_tokens, "account_id": "account-one"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        credentials = load_codex_credentials(auth_file=self.path)
+        requests = []
+
+        def successful(request, *, timeout):
+            requests.append((json.loads(request.data), timeout))
+            return Response({"access_token": "NEW_ACCESS_SECRET"})
+
+        refreshed = codex_login.refresh_codex_credentials(
+            credentials,
+            opener=successful,
+            timeout_seconds=0.25,
+        )
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed.auth.access_token, "NEW_ACCESS_SECRET")
+        self.assertEqual(refreshed.refresh_token, original_tokens["refresh_token"])
+        self.assertEqual(refreshed.id_token, original_tokens["id_token"])
+        self.assertEqual(saved["unrelated"], "preserved")
+        self.assertEqual(requests[0][0]["grant_type"], "refresh_token")
+        self.assertEqual(requests[0][0]["refresh_token"], "FAKE_REFRESH_SECRET")
+        self.assertEqual(requests[0][1], 0.25)
+
+        before = self.path.read_bytes()
+        switched = _tokens("account-two")
+        current = load_codex_credentials(auth_file=self.path)
+
+        def different_account(request, *, timeout):
+            del request, timeout
+            return Response(switched)
+
+        with self.assertRaisesRegex(AccountServiceError, "different"):
+            codex_login.refresh_codex_credentials(
+                current,
+                opener=different_account,
+            )
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_denial_cancel_timeout_account_mismatch_and_save_failure_preserve_old_file(self):
         cases = (
             ({"denial": True}, "declined"),
@@ -291,11 +340,25 @@ class QuotaServiceTests(unittest.TestCase):
                 codex_quota.format_quota({"rate_limit": {"primary_window": {"used_percent": value}}})
         for code in (302, 401, 403):
             body = io.BytesIO(b"FAKE_SECRET in provider response")
-            error = HTTPError("https://example.invalid/FAKE_SECRET", code, "FAKE_SECRET", {}, body)
+            headers = (
+                {"x-oai-request-id": "request-auth", "cf-ray": "ray-auth"}
+                if code == 401
+                else {}
+            )
+            error = HTTPError(
+                "https://example.invalid/FAKE_SECRET",
+                code,
+                "FAKE_SECRET",
+                headers,
+                body,
+            )
             with self.subTest(code=code):
                 with self.assertRaises(AccountServiceError) as raised:
                     codex_quota.query_quota(CodexAuth("FAKE_SECRET"), opener=mock.Mock(side_effect=error))
                 self.assertNotIn("FAKE_SECRET", str(raised.exception))
+                if code == 401:
+                    self.assertIn("request_id=request-auth", str(raised.exception))
+                    self.assertIn("cf_ray=ray-auth", str(raised.exception))
                 self.assertTrue(body.closed)
 
     def test_unsupported_routes_unknown_account_and_exception_guard_do_not_expose_secrets(self):

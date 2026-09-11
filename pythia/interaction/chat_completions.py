@@ -25,6 +25,7 @@ from .items import Init
 from .items import Instructions
 from .items import InteractionItem
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -186,6 +187,7 @@ def _encode_context_messages(
             item,
             (
                 ModelSampleBoundary,
+                ModelFailure,
                 Init,
                 SampleMetadata,
                 TurnSummary,

@@ -13,7 +13,10 @@ from pythia.interaction import Environment
 from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
+from pythia.interaction import ModelAuthenticationError
 from pythia.interaction import ModelContext
+from pythia.interaction import ModelFailure
+from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
@@ -94,6 +97,131 @@ class CLIRecoveryTests(_ControllerTestCase):
                 if notice:
                     self.assertIn(notice, notices)
                 self.assertNotIn("secret", "\n".join(i.text for i in terminal.items))
+
+    async def test_incomplete_response_contributes_completed_items_and_diagnostics(self):
+        failure = ModelFailure(
+            category="stream_closed",
+            message="Responses stream closed before response.completed",
+            provider="codex",
+            model="model",
+            auth_source="codex_file",
+            request_id="request-1",
+            event_count=2,
+            completed_item_count=1,
+        )
+        error = ModelResponseError(
+            failure.message,
+            failure=failure,
+            completed_items=(Message("assistant", "partial but complete item"),),
+        )
+        terminal = _Terminal(
+            lambda terminal, _editor, status: (
+                terminal.key("c-d") if status == "failed" else None
+            )
+        )
+        model = _Model(self.path, error)
+
+        self.assertEqual(
+            await self._run(model, terminal, ["--prompt", "hello"]),
+            1,
+        )
+
+        saved = load_interaction_save(self.path)
+        self.assertEqual(
+            saved.items[-3:],
+            (
+                Message("assistant", "partial but complete item"),
+                failure,
+                ModelSampleBoundary(),
+            ),
+        )
+        self.assertFalse(any(isinstance(i, SampleMetadata) for i in saved))
+        self.assertFalse(any(isinstance(i, TurnSummary) for i in saved))
+        displayed = tuple(item.text for item in terminal.items)
+        self.assertIn("[assistant] partial but complete item", displayed)
+        self.assertTrue(any(text.startswith("[model failure]") for text in displayed))
+
+    async def test_unauthorized_failure_blocks_more_model_queries_until_login(self):
+        failure = ModelFailure(
+            category="authentication",
+            message="Codex Responses HTTP 401: authentication failed",
+            provider="codex",
+            model="model",
+            auth_source="codex_file",
+            http_status=401,
+        )
+        error = ModelAuthenticationError(failure.message, failure=failure)
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if status == "failed" and step == 0:
+                terminal.submit("must remain a draft")
+                step = 1
+            elif status == "failed" and step == 1:
+                self.assertEqual(editor.text, "must remain a draft")
+                terminal.key("c-d")
+
+        model = _Model(self.path, error)
+        terminal = _Terminal(frame)
+
+        self.assertEqual(
+            await self._run(model, terminal, ["--prompt", "hello"]),
+            1,
+        )
+        self.assertEqual(len(model.calls), 1)
+        self.assertTrue(
+            any("authentication needed" in item.text.lower() for item in terminal.items)
+        )
+
+    async def test_tool_call_recovered_from_failed_stream_is_not_executed(self):
+        call = ToolCall("record", "partial-call", "{}")
+        failure = ModelFailure(
+            category="stream_closed",
+            message="Responses stream closed before response.completed",
+            completed_item_count=1,
+        )
+        error = ModelResponseError(
+            failure.message,
+            failure=failure,
+            completed_items=(call,),
+        )
+        executed = []
+
+        def record(arguments, *, timeout_seconds=None):
+            del arguments, timeout_seconds
+            executed.append(True)
+            return ToolOutcome("executed")
+
+        environment = Environment(
+            (Tool(ToolSpec("record", "", {}), record),)
+        )
+        terminal = _Terminal(
+            lambda terminal, _editor, status: (
+                terminal.key("c-d") if status == "failed" else None
+            )
+        )
+
+        self.assertEqual(
+            await self._run(
+                _Model(self.path, error),
+                terminal,
+                ["--prompt", "hello"],
+                environment,
+            ),
+            1,
+        )
+
+        self.assertEqual(executed, [])
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.pending_tool_calls(), ())
+        result = next(
+            item for item in reversed(saved.items)
+            if isinstance(item, ToolResult)
+        )
+        self.assertEqual(result.call_id, call.call_id)
+        self.assertFalse(result.success)
+        self.assertIn("Not executed", result.output)
 
     async def test_partial_batch_recovery_is_durable_per_call_and_idempotent(self):
         calls = tuple(ToolCall("record", name, "{}") for name in ("one", "two", "three"))

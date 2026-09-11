@@ -173,6 +173,8 @@ class SampleMetadata:
     ``TokenUsage`` for that sample plus the provider continuity tokens.
     ``elapsed_seconds`` is host-measured sample latency, not provider compute
     time; ``None`` means it was not measured (including in legacy logs).
+    ``request_attempts`` and ``recovery`` record bounded transport/auth recovery
+    without retaining credentials or provider response bodies.
     It is *not* a cumulative end-of-turn aggregate; see ``TurnSummary``.
     """
 
@@ -181,6 +183,8 @@ class SampleMetadata:
     provider_turn_id: Optional[str] = field(default=None, repr=False)
     provider_turn_state: Optional[str] = field(default=None, repr=False)
     elapsed_seconds: Optional[float] = None
+    request_attempts: int = 1
+    recovery: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.usage, TokenUsage):
@@ -188,6 +192,18 @@ class SampleMetadata:
         object.__setattr__(
             self, "elapsed_seconds", _validate_elapsed_seconds(self.elapsed_seconds)
         )
+        if (
+            isinstance(self.request_attempts, bool)
+            or not isinstance(self.request_attempts, int)
+            or self.request_attempts <= 0
+        ):
+            raise ValueError("request_attempts must be a positive integer")
+        recovery = tuple(self.recovery)
+        for index, value in enumerate(recovery):
+            _require_string(value, f"recovery[{index}]", allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"recovery[{index}] must not contain newlines")
+        object.__setattr__(self, "recovery", recovery)
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -205,6 +221,113 @@ def _require_nonnegative_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field_name} must be a nonnegative integer")
     return value
+
+
+@dataclass(frozen=True)
+class ModelFailure:
+    """Safe, durable diagnostics for a model attempt that did not complete.
+
+    These fields are deliberately bounded to metadata. Request/response bodies,
+    credentials, user content, and provider continuity tokens do not belong in
+    this item. Model adapters never encode it back to a provider.
+    """
+
+    category: str
+    message: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    auth_source: Optional[str] = None
+    http_status: Optional[int] = None
+    request_id: Optional[str] = None
+    response_id: Optional[str] = None
+    cf_ray: Optional[str] = None
+    authorization_error: Optional[str] = None
+    auth_error_code: Optional[str] = None
+    error_code: Optional[str] = None
+    attempt_count: int = 1
+    event_count: int = 0
+    event_types: Tuple[str, ...] = ()
+    completed_item_count: int = 0
+    last_event_type: Optional[str] = None
+    last_sequence_number: Optional[int] = None
+    recovery: Tuple[str, ...] = ()
+    elapsed_seconds: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("category", "message"):
+            value = _require_string(
+                getattr(self, field_name), field_name, allow_empty=False,
+            )
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"{field_name} must not contain newlines")
+            limit = 128 if field_name == "category" else 1024
+            if len(value) > limit:
+                raise ValueError(f"{field_name} must not exceed {limit} characters")
+        for field_name in (
+            "provider",
+            "model",
+            "auth_source",
+            "request_id",
+            "response_id",
+            "cf_ray",
+            "authorization_error",
+            "auth_error_code",
+            "error_code",
+            "last_event_type",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            _require_string(value, field_name, allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"{field_name} must not contain newlines")
+            if len(value) > 256:
+                raise ValueError(f"{field_name} must not exceed 256 characters")
+        if self.http_status is not None and (
+            isinstance(self.http_status, bool)
+            or not isinstance(self.http_status, int)
+            or not 100 <= self.http_status <= 599
+        ):
+            raise ValueError("http_status must be from 100 through 599 or None")
+        if (
+            isinstance(self.attempt_count, bool)
+            or not isinstance(self.attempt_count, int)
+            or self.attempt_count <= 0
+        ):
+            raise ValueError("attempt_count must be a positive integer")
+        _require_nonnegative_int(self.event_count, "event_count")
+        event_types = tuple(self.event_types)
+        for index, value in enumerate(event_types):
+            _require_string(value, f"event_types[{index}]", allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"event_types[{index}] must not contain newlines")
+            if len(value) > 320:
+                raise ValueError(
+                    f"event_types[{index}] must not exceed 320 characters"
+                )
+        object.__setattr__(self, "event_types", event_types)
+        _require_nonnegative_int(
+            self.completed_item_count,
+            "completed_item_count",
+        )
+        if self.last_sequence_number is not None:
+            _require_nonnegative_int(
+                self.last_sequence_number,
+                "last_sequence_number",
+            )
+        recovery = tuple(self.recovery)
+        for index, value in enumerate(recovery):
+            _require_string(value, f"recovery[{index}]", allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"recovery[{index}] must not contain newlines")
+            if len(value) > 256:
+                raise ValueError(f"recovery[{index}] must not exceed 256 characters")
+        object.__setattr__(self, "recovery", recovery)
+        object.__setattr__(
+            self,
+            "elapsed_seconds",
+            _validate_elapsed_seconds(self.elapsed_seconds),
+        )
 
 
 @dataclass(frozen=True)
@@ -358,6 +481,7 @@ InteractionItem = Union[
     UserToolResult,
     ModelSampleBoundary,
     SampleMetadata,
+    ModelFailure,
     TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
@@ -375,6 +499,7 @@ INTERACTION_ITEM_TYPES = (
     UserToolResult,
     ModelSampleBoundary,
     SampleMetadata,
+    ModelFailure,
     TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
@@ -392,6 +517,7 @@ __all__ = [
     "InteractionItem",
     "Message",
     "ModelSampleBoundary",
+    "ModelFailure",
     "OpaqueCompaction",
     "Reasoning",
     "Init",

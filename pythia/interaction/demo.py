@@ -15,12 +15,16 @@ from .experimental_tools import create_inject_user_message_tool
 from .items import Init
 from .items import Instructions
 from .items import Message
+from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import SampleMetadata
+from .items import ToolCall
+from .items import ToolResult
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import summarize_turn_usage
 from .model import Model
+from .model import ModelError
 from .model import SamplingOptions
 from .model_config import DEFAULT_SAVE_PATH as DEFAULT_SAVE_PATH
 from .model_config import build_model
@@ -164,11 +168,46 @@ def run(
     sample_count = 0
     while max_samples is None or sample_count < max_samples:
         sample_count += 1
-        sample = model.sample(
-            context,
-            tools=environment.tool_specs,
-            options=options,
-        )
+        try:
+            sample = model.sample(
+                context,
+                tools=environment.tool_specs,
+                options=options,
+            )
+        except ModelError as exc:
+            contribution = (
+                *exc.completed_items,
+                *((exc.failure,) if exc.failure is not None else ()),
+            )
+            if contribution:
+                context.extend((*contribution, ModelSampleBoundary()))
+                _persist()
+                for display_item in render_interaction_items(contribution):
+                    print(display_item)
+                recovered_calls = tuple(
+                    item for item in exc.completed_items
+                    if isinstance(item, ToolCall)
+                )
+                if recovered_calls:
+                    results = tuple(
+                        ToolResult(
+                            call_id=call.call_id,
+                            output=(
+                                "Not executed because the model response did "
+                                "not complete."
+                            ),
+                            success=False,
+                        )
+                        for call in recovered_calls
+                    )
+                    context.extend(results)
+                    _persist()
+                    for display_item in render_interaction_items(
+                        results,
+                        source_calls=recovered_calls,
+                    ):
+                        print(display_item)
+            raise
         context.extend(sample.context_items())
         _persist()
         for display_item in sample.display_items():
@@ -221,6 +260,8 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
             ),
         ):
             continue
+        if isinstance(item, ModelFailure):
+            return None
         if isinstance(item, Message) and item.role == "assistant":
             return item.content
         return None
