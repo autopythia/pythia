@@ -91,6 +91,34 @@ class Compactor(Protocol):
         ...
 
 
+def create_default_compactor(model: Model) -> Compactor:
+    """Select the interaction default without probing a provider at runtime.
+
+    The built-in ChatGPT/Codex Responses route advertises remote compaction and
+    therefore uses an opaque server checkpoint. Other adapters use the portable
+    prompt summarizer. A Codex-compatible third-party endpoint is not assumed to
+    implement private remote-compaction controls merely because it speaks the
+    Responses wire format.
+    """
+    # Keep the generic compaction module independent of the Responses adapter at
+    # import time. ``responses`` itself imports the result and retention helpers
+    # below for its concrete compactor.
+    from .responses import CodexResponsesModel
+    from .responses import ResponsesOpaqueCompactor
+
+    if isinstance(model, CodexResponsesModel):
+        if model.supports_remote_compaction:
+            return ResponsesOpaqueCompactor(model)
+        # Responses intentionally supports only max_tokens from the generic
+        # SamplingOptions surface. Do not give its local fallback the prompt
+        # compactor's temperature=0 default.
+        return PromptSummarizingCompactor(
+            model,
+            options=SamplingOptions(max_tokens=2_000),
+        )
+    return PromptSummarizingCompactor(model)
+
+
 def _approx_token_count(text: str) -> int:
     return max(1, len(text) // 4)
 
@@ -314,4 +342,5 @@ __all__ = [
     "DEFAULT_COMPACTION_PROMPT",
     "DEFAULT_SUMMARY_PREFIX",
     "PromptSummarizingCompactor",
+    "create_default_compactor",
 ]

@@ -26,6 +26,9 @@ from typing import Union
 from ._cli_editor import Editor
 from ._cli_terminal import PosixTerminal
 from .codex_auth import CodexAuthUnavailable
+from .compaction import CompactionError
+from .compaction import CompactionResult
+from .compaction import create_default_compactor
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
@@ -200,10 +203,20 @@ async def _fail_pending_user_tools(
     for call in context.pending_user_tool_calls():
         if state.closing:
             return
+        if call.call.name == "compact":
+            output = (
+                "Compaction outcome unavailable after interruption. The command "
+                "was not rerun; no durable compaction checkpoint was installed."
+            )
+        else:
+            output = (
+                "User-tool outcome unavailable after interruption. The command "
+                "was not rerun; credential side effects may already have occurred."
+            )
         result = UserToolResult(ToolResult(
             call.call.call_id,
-            "User-tool outcome unavailable after interruption. The command was not rerun; "
-            "credential side effects may already have occurred.", success=False,
+            output,
+            success=False,
         ))
         await _append(context, (result,), state, path)
         state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
@@ -218,10 +231,182 @@ def _has_provider_history(context: ModelContext) -> bool:
     )
 
 
+def _mark_auth_required(
+    state: _UIState,
+    exc: ModelAuthenticationError,
+) -> None:
+    state.auth_required = True
+    if exc.failure is not None and exc.failure.auth_source == "environment":
+        state.auth_notice = (
+            "Environment credential rejected; update it and restart the process."
+        )
+    elif exc.failure is not None and exc.failure.auth_source == "static":
+        state.auth_notice = (
+            "Configured static credential rejected; restart with updated credentials."
+        )
+    else:
+        state.auth_notice = "Model authentication needed; use /login."
+
+
+def _compaction_failure_output(exc: BaseException) -> str:
+    if isinstance(exc, ModelAuthenticationError):
+        if exc.failure is not None:
+            return f"Compaction failed: {exc.failure.message}"
+        return "Model authentication needed; use /login."
+    if isinstance(exc, CompactionError):
+        detail = str(exc).replace("\r", " ").replace("\n", " ").strip()
+        if detail:
+            return f"Compaction failed: {detail[:512]}"
+    if isinstance(exc, ModelError) and exc.failure is not None:
+        return f"Compaction failed: {exc.failure.message}"
+    return "Compaction failed; provider and response details were withheld."
+
+
+def _compaction_success_output(result: CompactionResult) -> str:
+    checkpoint = result.items[0]
+    assert isinstance(checkpoint, ContextCompaction)
+    opaque = any(
+        isinstance(item, OpaqueCompaction)
+        for item in checkpoint.replacement_items
+    )
+    mode = "a remote opaque checkpoint" if opaque else "a prompt summary checkpoint"
+    output = f"Context compacted using {mode}."
+    usage = result.usage
+    if any(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.cached_input_tokens,
+        )
+    ):
+        output += (
+            "\nusage: "
+            f"input={usage.input_tokens} "
+            f"output={usage.output_tokens} "
+            f"total={usage.total_tokens} "
+            f"cached={usage.cached_input_tokens}"
+        )
+    return output
+
+
+async def _compact_user_tool(
+    intent: UserToolIntent,
+    model: Optional[Model],
+    context: ModelContext,
+    model_environment: Environment,
+    state: _UIState,
+    path: Path,
+) -> Optional[Model]:
+    # A pending UserToolCall deliberately makes a context non-sampleable. Take
+    # the immutable compaction source first, then durably record authorization
+    # for the effect before starting it.
+    source_context = context.copy()
+    call = UserToolCall(
+        ToolCall(
+            intent.name,
+            "user_" + uuid.uuid4().hex,
+            intent.arguments_json,
+        )
+    )
+    await _append(context, (call,), state, path)
+    state.displays.extend(render_interaction_items((call,)))
+    state.active_user_call = call.call.call_id
+
+    if state.closing:
+        result_item = UserToolResult(
+            ToolResult(
+                call.call.call_id,
+                "Compaction cancelled before execution.",
+                success=False,
+            )
+        )
+        await _append(context, (result_item,), state, path)
+        state.displays.extend(
+            render_interaction_items(
+                (result_item,),
+                source_user_calls=(call,),
+            )
+        )
+        state.active_user_call = None
+        return model
+
+    state.set_phase("user tool: compact")
+    try:
+        if model is None:
+            result_item = UserToolResult(
+                ToolResult(
+                    call.call.call_id,
+                    state.auth_notice,
+                    success=False,
+                )
+            )
+            contribution: tuple[InteractionItem, ...] = (result_item,)
+        else:
+            try:
+                compactor = create_default_compactor(model)
+                compaction = await asyncio.to_thread(
+                    compactor.compact,
+                    source_context,
+                    tools=model_environment.tool_specs,
+                )
+                if not isinstance(compaction, CompactionResult):
+                    raise TypeError(
+                        "compactor must return CompactionResult, got "
+                        f"{type(compaction).__name__}"
+                    )
+            except Exception as exc:
+                if isinstance(exc, ModelAuthenticationError):
+                    _mark_auth_required(state, exc)
+                    model = None
+                result_item = UserToolResult(
+                    ToolResult(
+                        call.call.call_id,
+                        _compaction_failure_output(exc),
+                        success=False,
+                    )
+                )
+                contribution = (result_item,)
+            else:
+                result_item = UserToolResult(
+                    ToolResult(
+                        call.call.call_id,
+                        _compaction_success_output(compaction),
+                    )
+                )
+                # Validate and save these together: a durable success result
+                # must never exist without the checkpoint it describes.
+                contribution = (
+                    result_item,
+                    *compaction.context_items(),
+                )
+
+        await _append(context, contribution, state, path)
+        state.displays.extend(
+            render_interaction_items(
+                contribution,
+                source_user_calls=(call,),
+            )
+        )
+    finally:
+        state.active_user_call = None
+    return model
+
+
 async def _user_tool(
     intent: UserToolIntent, model: Optional[Model], context: ModelContext,
     state: _UIState, path: Path, args: argparse.Namespace,
+    model_environment: Environment,
 ) -> Optional[Model]:
+    if intent.name == "compact":
+        return await _compact_user_tool(
+            intent,
+            model,
+            context,
+            model_environment,
+            state,
+            path,
+        )
     expected_account = state.bound_account_id
     call = UserToolCall(ToolCall(intent.name, "user_" + uuid.uuid4().hex, intent.arguments_json))
     await _append(context, (call,), state, path)
@@ -355,9 +540,26 @@ async def _turn(
         await _sweep_tools(context, environment, state, path)
 
 
+def _ends_with_completed_manual_compaction(context: ModelContext) -> bool:
+    items = context.items
+    if len(items) < 3 or not isinstance(items[-1], ContextCompaction):
+        return False
+    result = items[-2]
+    call = items[-3]
+    return (
+        isinstance(result, UserToolResult)
+        and result.result.success
+        and isinstance(call, UserToolCall)
+        and call.call.name == "compact"
+        and result.result.call_id == call.call.call_id
+    )
+
+
 def _resume_notice(context: ModelContext) -> Optional[str]:
     # Inspect the raw tail, not a compaction's replacement model context.
     # A sample boundary does not record stop_reason or turn completion.
+    if _ends_with_completed_manual_compaction(context):
+        return None
     for item in reversed(context.items):
         if isinstance(
             item,
@@ -470,7 +672,15 @@ async def _drive_interaction(
                 if state.closing:
                     return
                 if isinstance(query, UserToolIntent):
-                    model = await _user_tool(query, model, context, state, path, args)
+                    model = await _user_tool(
+                        query,
+                        model,
+                        context,
+                        state,
+                        path,
+                        args,
+                        environment,
+                    )
                     state.set_phase("auth needed" if state.auth_required else "idle")
                     continue
                 if model is None:
@@ -495,23 +705,7 @@ async def _drive_interaction(
             state.set_phase("failed")
             if isinstance(exc, ModelAuthenticationError):
                 model = None
-                state.auth_required = True
-                if (
-                    exc.failure is not None
-                    and exc.failure.auth_source == "environment"
-                ):
-                    state.auth_notice = (
-                        "Environment credential rejected; update it and restart "
-                        "the process."
-                    )
-                elif (
-                    exc.failure is not None
-                    and exc.failure.auth_source == "static"
-                ):
-                    state.auth_notice = (
-                        "Configured static credential rejected; restart with "
-                        "updated credentials."
-                    )
+                _mark_auth_required(state, exc)
             state.notice(f"{type(exc).__name__}: {exc}")
             if state.pending:
                 state.notice(
@@ -547,7 +741,10 @@ async def _run(
         editor=Editor(prompt, len(prompt)), auth_required=model is None,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
     )
-    state.notice("pythia.interaction — /login, /quota; /quit or /exit; Ctrl-C/Ctrl-D exit.")
+    state.notice(
+        "pythia.interaction — /compact, /login, /quota; "
+        "/quit or /exit; Ctrl-C/Ctrl-D exit."
+    )
     state.notice(f"Save log: {path}")
     state.notice(
         "Warning: exec_command runs without a sandbox; use a trusted model and workspace."

@@ -23,14 +23,16 @@ class UserToolIntent:
 
 def parse_user_tool(text: str) -> UserToolIntent:
     words = text.split()
-    if not words or words[0] not in {"/login", "/quota"}:
-        raise ValueError("Unsupported command. Use /login, /quota, /quit, or /exit.")
+    if not words or words[0] not in {"/compact", "/login", "/quota"}:
+        raise ValueError(
+            "Unsupported command. Use /compact, /login, /quota, /quit, or /exit."
+        )
     name = words[0][1:]
     if "\n" in text or "\r" in text:
         raise ValueError("User-tool commands must be a single line.")
-    if name == "quota":
+    if name in {"compact", "quota"}:
         if len(words) != 1:
-            raise ValueError("Usage: /quota (no arguments).")
+            raise ValueError(f"Usage: /{name} (no arguments).")
         arguments = {}
     else:
         if len(words) > 2 or (len(words) == 2 and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", words[1])):

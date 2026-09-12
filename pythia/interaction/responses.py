@@ -31,6 +31,12 @@ from .codex_auth import _resolve_auth_file
 from .codex_auth import load_codex_auth
 from .codex_auth import load_codex_credentials
 from .codex_login import refresh_codex_credentials
+from .compaction import CompactionError
+from .compaction import CompactionResult
+from .compaction import DEFAULT_SUMMARY_PREFIX
+from .compaction import _leading_instruction_prefix
+from .compaction import _select_retained_user_messages
+from .context import ContextValidationError
 from .context import ModelContext
 from .items import ContextCompaction
 from .items import Init
@@ -67,6 +73,7 @@ from .usage import TokenUsage
 
 
 X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
+REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS = 64_000
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _MAX_TRANSIENT_HTTP_RETRIES = 1
 _MAX_DIAGNOSTIC_VALUE_CHARS = 256
@@ -208,6 +215,12 @@ class _ProviderState:
     turn_id: Optional[str] = None
     turn_state: Optional[str] = None
     persist_session_id: bool = False
+
+
+@dataclass(frozen=True)
+class _RemoteCompactionResponse:
+    item: OpaqueCompaction
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 def _resolve_model_spec(endpoint: StreamingResponsesEndpoint) -> Optional[ModelSpec]:
@@ -1283,6 +1296,157 @@ def _collect_sample(
     )
 
 
+def _collect_remote_compaction_v2(
+    response: Iterable[Any],
+    *,
+    provider_state: _ProviderState,
+    captured_turn_state: Optional[str],
+    provider: str = "responses",
+    model: str = "unknown",
+    auth_source: str = "static",
+    attempt_count: int = 1,
+    recovery: Tuple[str, ...] = (),
+    response_headers: Any = None,
+    forbidden_values: Tuple[str, ...] = (),
+) -> _RemoteCompactionResponse:
+    """Collect one opaque V2 checkpoint without treating output as a sample.
+
+    Remote compaction can emit unrelated output items. They are deliberately
+    ignored: in particular, a function call produced during compaction is never
+    returned to the interaction controller and can therefore never execute.
+    """
+    del provider_state, captured_turn_state
+    compaction_items: List[Tuple[Optional[int], InteractionItem]] = []
+    indexed_compactions: Dict[int, InteractionItem] = {}
+    usage = TokenUsage()
+    completed = False
+    trace = _StreamTrace(forbidden_values=forbidden_values)
+    iterator = _iter_sse_payloads(response)
+
+    def failure(
+        message: str,
+        *,
+        category: str,
+        exception_message: Optional[str] = None,
+    ) -> ModelResponseError:
+        return _stream_failure(
+            message,
+            exception_message=exception_message,
+            category=category,
+            trace=trace,
+            output_items=compaction_items,
+            provider=provider,
+            model=model,
+            auth_source=auth_source,
+            attempt_count=attempt_count,
+            recovery=recovery,
+            headers=response_headers,
+        )
+
+    while True:
+        try:
+            payload = next(iterator)
+        except StopIteration:
+            break
+        except (TimeoutError, socket.timeout) as exc:
+            partial = failure(
+                "Remote Responses compaction timed out before response.completed",
+                category="stream_timeout",
+            )
+            raise ModelTimeoutError(
+                str(partial),
+                failure=partial.failure,
+                completed_items=partial.completed_items,
+            ) from exc
+        except OSError as exc:
+            partial = failure(
+                "Remote Responses compaction failed before response.completed",
+                category="stream_transport",
+            )
+            raise ModelTransportError(
+                str(partial),
+                failure=partial.failure,
+                completed_items=partial.completed_items,
+            ) from exc
+        except ModelResponseError as exc:
+            raise failure(
+                "Remote Responses compaction stream contained an invalid event",
+                exception_message=str(exc),
+                category="invalid_sse",
+            ) from exc
+
+        trace.observe(payload)
+        event_type = payload.get("type")
+        if event_type == "response.output_item.done":
+            raw_item = payload.get("item")
+            # Unknown and unrelated output is not part of the compaction
+            # contract. Avoid decoding it through normal sample handling.
+            if not isinstance(raw_item, Mapping) or raw_item.get("type") != "compaction":
+                continue
+            try:
+                output_index = _optional_output_index(payload.get("output_index"))
+                decoded = _decode_output_item(raw_item)
+            except ModelResponseError as exc:
+                raise failure(
+                    "Remote Responses compaction contained an invalid checkpoint",
+                    exception_message=str(exc),
+                    category="invalid_output_item",
+                ) from exc
+            if not isinstance(decoded, OpaqueCompaction):
+                raise failure(
+                    "Remote Responses compaction returned a non-opaque checkpoint",
+                    category="invalid_output_item",
+                )
+            if output_index is not None:
+                existing = indexed_compactions.get(output_index)
+                if existing is not None:
+                    if existing != decoded:
+                        raise failure(
+                            "Remote Responses compaction contained conflicting checkpoints",
+                            category="conflicting_output_items",
+                        )
+                    continue
+                indexed_compactions[output_index] = decoded
+            compaction_items.append((output_index, decoded))
+            continue
+
+        if event_type == "response.completed":
+            usage = _decode_usage(payload.get("response"))
+            completed = True
+            break
+        if event_type == "response.failed":
+            raise failure(
+                "Remote Responses compaction reported a failed response",
+                category="response_failed",
+            )
+        if event_type == "response.incomplete":
+            raise failure(
+                "Remote Responses compaction reported an incomplete response",
+                category="response_incomplete",
+            )
+        if event_type == "error":
+            raise failure(
+                "Remote Responses compaction error event received",
+                category="response_error_event",
+            )
+
+    if not completed:
+        raise failure(
+            "Remote Responses compaction stream closed before response.completed",
+            category="stream_closed",
+        )
+    ordered = _ordered_output_items(compaction_items)
+    if len(ordered) != 1:
+        raise failure(
+            "Remote Responses compaction expected exactly one opaque checkpoint, "
+            f"got {len(ordered)}",
+            category="invalid_compaction_count",
+        )
+    item = ordered[0]
+    assert isinstance(item, OpaqueCompaction)
+    return _RemoteCompactionResponse(item=item, usage=usage)
+
+
 def _bounded_text(value: str, limit: int = 4096) -> str:
     text = value.strip()
     if len(text) <= limit:
@@ -1527,6 +1691,22 @@ class CodexResponsesModel:
         spec = _resolve_model_spec(self.endpoint)
         return None if spec is None else spec.limits.max_context_tokens
 
+    @property
+    def supports_remote_compaction(self) -> bool:
+        """Whether this resolved route has the known Codex V2 capability.
+
+        Responses wire compatibility alone is not capability advertisement.
+        In particular, the Meta preset and arbitrary endpoint overrides must
+        not receive a private compaction trigger by default.
+        """
+        if self.endpoint.api_provider != "codex":
+            return False
+        route = get_model_route("codex", self.endpoint.model)
+        return (
+            route.provider == "chatgpt"
+            and self.endpoint.api_url == CODEX_RESPONSES_API_URL
+        )
+
     def _build_request_payload(
         self,
         context: ModelContext,
@@ -1576,6 +1756,8 @@ class CodexResponsesModel:
         self,
         provider_state: _ProviderState,
         auth: Optional[CodexAuth] = None,
+        *,
+        beta_features: Sequence[str] = (),
     ) -> Dict[str, str]:
         auth = auth or CodexAuth(
             self.endpoint.bearer_token,
@@ -1587,6 +1769,15 @@ class CodexResponsesModel:
             "Content-Type": "application/json",
             "User-Agent": "pythia-interaction/0.1",
         }
+        normalized_beta_features = tuple(
+            feature.strip()
+            for feature in beta_features
+            if isinstance(feature, str) and feature.strip()
+        )
+        if normalized_beta_features:
+            headers["x-codex-beta-features"] = ",".join(
+                normalized_beta_features
+            )
         if self.endpoint.api_provider != "codex":
             return headers
 
@@ -1695,6 +1886,39 @@ class CodexResponsesModel:
         if options is not None and not isinstance(options, SamplingOptions):
             raise TypeError("options must be SamplingOptions or None")
         payload, provider_state = self._build_request_payload(context, tools, options)
+        return self._execute_request_locked(
+            payload,
+            provider_state,
+            collector=_collect_sample,
+        )
+
+    def _compact_responses_v2(
+        self,
+        context: ModelContext,
+        tools: Sequence[Any],
+    ) -> _RemoteCompactionResponse:
+        with self._credential_lock:
+            payload, provider_state = self._build_request_payload(
+                context,
+                tools,
+                None,
+            )
+            payload["input"].append({"type": "compaction_trigger"})
+            return self._execute_request_locked(
+                payload,
+                provider_state,
+                collector=_collect_remote_compaction_v2,
+                beta_features=("remote_compaction_v2",),
+            )
+
+    def _execute_request_locked(
+        self,
+        payload: Mapping[str, Any],
+        provider_state: _ProviderState,
+        *,
+        collector: Callable[..., Any],
+        beta_features: Sequence[str] = (),
+    ) -> Any:
         try:
             request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         except (TypeError, ValueError) as exc:
@@ -1714,7 +1938,11 @@ class CodexResponsesModel:
             request = urllib.request.Request(
                 self.endpoint.url,
                 data=request_data,
-                headers=self._build_headers(provider_state, snapshot.auth),
+                headers=self._build_headers(
+                    provider_state,
+                    snapshot.auth,
+                    beta_features=beta_features,
+                ),
                 method="POST",
             )
             response = None
@@ -1811,7 +2039,7 @@ class CodexResponsesModel:
                         X_CODEX_TURN_STATE_HEADER,
                     )
                 try:
-                    return _collect_sample(
+                    return collector(
                         response,
                         provider_state=provider_state,
                         captured_turn_state=captured_turn_state,
@@ -1842,11 +2070,86 @@ class CodexResponsesModel:
                         close()
 
 
+class ResponsesOpaqueCompactor:
+    """Remote Responses V2 compactor with client-built replacement history."""
+
+    def __init__(
+        self,
+        model: CodexResponsesModel,
+        *,
+        retained_user_message_tokens: int = (
+            REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
+        ),
+        retain_user_message: Optional[Callable[[Message], bool]] = None,
+    ) -> None:
+        if not isinstance(model, CodexResponsesModel):
+            raise TypeError("model must be CodexResponsesModel")
+        if (
+            isinstance(retained_user_message_tokens, bool)
+            or not isinstance(retained_user_message_tokens, int)
+            or retained_user_message_tokens < 0
+        ):
+            raise ValueError(
+                "retained_user_message_tokens must be a nonnegative integer"
+            )
+        if retain_user_message is not None and not callable(retain_user_message):
+            raise TypeError("retain_user_message must be callable or None")
+        self._model = model
+        self._retained_user_message_tokens = retained_user_message_tokens
+        self._retain_user_message = retain_user_message
+
+    def _is_retained_user_message(self, message: Message) -> bool:
+        if message.role != "user":
+            return False
+        if message.content.startswith(f"{DEFAULT_SUMMARY_PREFIX}\n"):
+            return False
+        if self._retain_user_message is not None:
+            return bool(self._retain_user_message(message))
+        return True
+
+    def compact(
+        self,
+        context: ModelContext,
+        *,
+        tools: Sequence[Any] = (),
+    ) -> CompactionResult:
+        if not isinstance(context, ModelContext):
+            raise TypeError("context must be ModelContext")
+        try:
+            context.assert_model_ready()
+        except ContextValidationError as exc:
+            raise CompactionError(str(exc)) from exc
+
+        active_items = context.model_items()
+        instruction_prefix = _leading_instruction_prefix(active_items)
+        user_messages = tuple(
+            item
+            for item in active_items
+            if isinstance(item, Message)
+            and self._is_retained_user_message(item)
+        )
+        remote = self._model._compact_responses_v2(context, tools)
+        retained_users = _select_retained_user_messages(
+            user_messages,
+            self._retained_user_message_tokens,
+        )
+        checkpoint = ContextCompaction(
+            replacement_items=(
+                *instruction_prefix,
+                *retained_users,
+                remote.item,
+            )
+        )
+        return CompactionResult(items=(checkpoint,), usage=remote.usage)
+
+
 __all__ = [
     "CODEX_RESPONSES_API_URL",
     "CodexResponsesModel",
     "META_RESPONSES_API_URL",
     "OPENAI_RESPONSES_API_URL",
+    "REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS",
+    "ResponsesOpaqueCompactor",
     "StreamingResponsesEndpoint",
     "X_CODEX_TURN_STATE_HEADER",
 ]

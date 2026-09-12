@@ -12,7 +12,8 @@ from unittest import mock
 
 from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
-    CodexResponsesModel, ContextCompaction, ContextValidationError, Environment,
+    CodexResponsesModel, CompactionError, CompactionResult, ContextCompaction,
+    ContextValidationError, Environment,
     Instructions, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
     ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, Init,
     TokenUsage, ToolCall, ToolResult, SampleMetadata, TurnSummary, UserInteraction,
@@ -167,11 +168,13 @@ class UserToolValueTests(unittest.TestCase):
     def test_syntax_no_secret_echo_and_model_dispatch_cannot_call_user_tools(self):
         self.assertEqual(user_tools.parse_user_tool("/login workspace").arguments_json,
                          '{"workspace_id": "workspace"}')
-        for text in ("/login secret.code", "/quota secret-token", "/login\ncode", "/unknown-secret"):
+        self.assertEqual(user_tools.parse_user_tool("/compact").arguments_json, "{}")
+        for text in ("/login secret.code", "/quota secret-token",
+                     "/compact secret-token", "/login\ncode", "/unknown-secret"):
             with self.subTest(text=text), self.assertRaises(ValueError) as error:
                 user_tools.parse_user_tool(text)
             self.assertNotIn("secret", str(error.exception))
-        for name in ("login", "quota"):
+        for name in ("compact", "login", "quota"):
             result = Environment().execute_tool_calls((ToolCall(name, "model", "{}"),))
             self.assertFalse(result.items[0].success)
             self.assertIn("Unknown tool", result.items[0].output)
@@ -554,6 +557,371 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.model_items(), ModelContext(original).model_items())
         self.assertEqual(len(saved.items), len(original) + 2)
         self.assertEqual(model.calls, [])
+
+    async def test_compact_records_audit_pair_and_installs_checkpoint_atomically(self):
+        original = (
+            Init("old"),
+            Message("assistant", "previous answer"),
+            TurnSummary(sample_count=1),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        model = _Model(self.path)
+        observations = []
+
+        class FakeCompactor:
+            def compact(inner_self, source, *, tools=()):
+                persisted = load_interaction_save(self.path)
+                observations.append((source.items, tuple(tools), persisted.items))
+                return CompactionResult(
+                    items=(ContextCompaction((
+                        Message("user", "retained request"),
+                        OpaqueCompaction.from_responses("private checkpoint"),
+                    )),),
+                    usage=TokenUsage(100, 8, 108, 75),
+                )
+
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "idle" and not submitted:
+                submitted = True
+                t.submit("/compact")
+            elif status == "idle" and submitted and self.path.exists():
+                if isinstance(load_interaction_save(self.path).items[-1], ContextCompaction):
+                    t.key("c-d")
+
+        terminal = _Terminal(frame)
+        compactor = FakeCompactor()
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor) as create:
+            self.assertEqual(await self.run_cli(model, terminal), 0)
+        create.assert_called_once_with(model)
+        self.assertEqual(len(observations), 1)
+        source_items, tools, persisted_items = observations[0]
+        self.assertEqual(source_items, original)
+        self.assertEqual(tools, ())
+        self.assertIsInstance(persisted_items[-1], UserToolCall)
+        self.assertEqual(persisted_items[-1].call.name, "compact")
+        self.assertEqual(persisted_items[-1].call.arguments_json, "{}")
+        self.assertEqual(ModelContext(source_items).pending_user_tool_calls(), ())
+
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.items[:len(original)], original)
+        call, result, checkpoint = saved.items[-3:]
+        self.assertIsInstance(call, UserToolCall)
+        self.assertIsInstance(result, UserToolResult)
+        self.assertTrue(result.result.success)
+        self.assertEqual(result.result.call_id, call.call.call_id)
+        self.assertIsInstance(checkpoint, ContextCompaction)
+        self.assertIn("remote opaque checkpoint", result.result.output)
+        self.assertIn("input=100", result.result.output)
+        self.assertEqual(saved.model_items(), checkpoint.replacement_items)
+        self.assertFalse(any(
+            isinstance(item, (UserToolCall, UserToolResult))
+            for item in saved.model_items()
+        ))
+        self.assertNotIn("input=100", repr(saved.model_items()))
+        self.assertEqual(model.calls, [])
+        self.assertEqual(
+            len([item for item in saved if isinstance(item, TurnSummary)]),
+            1,
+        )
+        transcript = "\n".join(item.text for item in terminal.items)
+        self.assertIn("[user-tool-call] compact", transcript)
+        self.assertIn("[user-tool-ret]  compact", transcript)
+        self.assertIn("[compaction] context checkpoint", transcript)
+        self.assertNotIn("private checkpoint", transcript)
+        self.assertIsNone(cli._resume_notice(saved))
+
+        # Replaying a completed manual checkpoint neither reruns compaction nor
+        # emits the incomplete-model-turn warning used for provider pauses.
+        before = self.path.read_bytes()
+        replay = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        with mock.patch.object(cli, "create_default_compactor") as replay_create:
+            with mock.patch.object(cli, "save_interaction_save") as save:
+                self.assertEqual(await self.run_cli(model, replay), 0)
+        replay_create.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(any(
+            "without recorded turn completion" in item.text
+            for item in replay.items
+        ))
+
+    async def test_compact_uses_remote_v2_by_default_for_codex_responses(self):
+        original = (
+            Init("session"),
+            Message("user", "retain this request"),
+            Message("assistant", "old answer"),
+            TurnSummary(sample_count=1),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        observed = []
+
+        class Response:
+            status = 200
+            headers = {}
+
+            def __init__(inner_self):
+                payloads = (
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "type": "compaction",
+                            "encrypted_content": "server checkpoint",
+                        },
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "usage": {
+                                "input_tokens": 20,
+                                "output_tokens": 3,
+                                "total_tokens": 23,
+                            },
+                        },
+                    },
+                )
+                inner_self.lines = []
+                for payload in payloads:
+                    inner_self.lines.extend((
+                        f"data: {json.dumps(payload)}\n".encode(),
+                        b"\n",
+                    ))
+                inner_self.closed = False
+
+            def __iter__(inner_self):
+                return iter(inner_self.lines)
+
+            def close(inner_self):
+                inner_self.closed = True
+
+        response = Response()
+
+        def open_request(request, *, timeout):
+            saved = load_interaction_save(self.path)
+            payload = json.loads(request.data)
+            observed.append((saved.items, payload, dict(request.header_items()), timeout))
+            return response
+
+        model = CodexResponsesModel(
+            model="test",
+            auth=CodexAuth("token", "account"),
+            opener=open_request,
+        )
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "idle" and not submitted:
+                submitted = True
+                t.submit("/compact")
+            elif status == "idle" and submitted and observed:
+                if isinstance(load_interaction_save(self.path).items[-1], ContextCompaction):
+                    t.key("c-d")
+
+        self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
+        self.assertEqual(len(observed), 1)
+        request_items, payload, headers, timeout = observed[0]
+        self.assertIsInstance(request_items[-1], UserToolCall)
+        self.assertEqual(payload["input"][-1], {"type": "compaction_trigger"})
+        self.assertNotIn("user_tool", json.dumps(payload))
+        self.assertEqual(
+            {name.lower(): value for name, value in headers.items()}[
+                "x-codex-beta-features"
+            ],
+            "remote_compaction_v2",
+        )
+        saved = load_interaction_save(self.path)
+        self.assertEqual(tuple(type(item) for item in saved.items[-3:]), (
+            UserToolCall, UserToolResult, ContextCompaction,
+        ))
+        self.assertEqual(saved.model_items(), (
+            Message("user", "retain this request"),
+            OpaqueCompaction.from_responses("server checkpoint"),
+        ))
+        self.assertNotIn("server checkpoint", "\n".join(
+            item.text for item in render_interaction_items(saved.items)
+        ))
+        self.assertTrue(response.closed)
+
+    async def test_failed_compact_records_result_and_keeps_effective_context(self):
+        original = (
+            Init("old"),
+            Message("assistant", "previous answer"),
+            TurnSummary(sample_count=1),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        model = _Model(self.path)
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "idle" and not submitted:
+                submitted = True
+                t.submit("/compact")
+            elif status == "idle" and submitted:
+                saved = load_interaction_save(self.path)
+                if isinstance(saved.items[-1], UserToolResult):
+                    t.key("c-d")
+
+        compactor = mock.Mock()
+        compactor.compact.side_effect = CompactionError("invalid remote checkpoint")
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+            self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
+        saved = load_interaction_save(self.path)
+        self.assertIsInstance(saved.items[-2], UserToolCall)
+        self.assertIsInstance(saved.items[-1], UserToolResult)
+        self.assertFalse(saved.items[-1].result.success)
+        self.assertIn("invalid remote checkpoint", saved.items[-1].result.output)
+        self.assertFalse(any(isinstance(item, ContextCompaction) for item in saved))
+        self.assertEqual(saved.model_items(), ModelContext(original).model_items())
+        self.assertEqual(model.calls, [])
+
+    async def test_resume_never_reruns_an_unfinished_compact(self):
+        call = UserToolCall(ToolCall("compact", "user_pending", "{}"))
+        original = (
+            Init("old"),
+            Message("assistant", "previous answer"),
+            TurnSummary(sample_count=1),
+            call,
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        with mock.patch.object(cli, "create_default_compactor") as create:
+            self.assertEqual(await self.run_cli(_Model(self.path), terminal), 0)
+        create.assert_not_called()
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.items[:-1], original)
+        self.assertIsInstance(saved.items[-1], UserToolResult)
+        self.assertFalse(saved.items[-1].result.success)
+        self.assertIn("was not rerun", saved.items[-1].result.output)
+        self.assertIn("no durable compaction checkpoint", saved.items[-1].result.output)
+        self.assertFalse(any(isinstance(item, ContextCompaction) for item in saved))
+
+    async def test_compact_result_checkpoint_save_failure_is_not_rerun(self):
+        original = (
+            Init("old"),
+            Message("assistant", "previous answer"),
+            TurnSummary(sample_count=1),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        model = _Model(self.path)
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult((ContextCompaction((
+            Message("user", "summary"),
+        )),))
+        real_save = save_interaction_save
+
+        def fail_checkpoint(path, context):
+            if any(isinstance(item, ContextCompaction) for item in context):
+                raise OSError("disk failed")
+            real_save(path, context)
+
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "idle" and not submitted:
+                submitted = True
+                t.submit("/compact")
+            elif status == "failed":
+                t.key("c-d")
+
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+            with mock.patch.object(cli, "save_interaction_save", side_effect=fail_checkpoint):
+                self.assertEqual(await self.run_cli(model, _Terminal(frame)), 1)
+        compactor.compact.assert_called_once()
+        interrupted = load_interaction_save(self.path)
+        self.assertEqual(interrupted.items[:-1], original)
+        self.assertIsInstance(interrupted.items[-1], UserToolCall)
+        self.assertEqual(interrupted.pending_user_tool_calls(), (interrupted.items[-1],))
+        self.assertFalse(any(isinstance(item, ContextCompaction) for item in interrupted))
+
+        # Startup closes the pending audit record but cannot infer or recreate
+        # the checkpoint that failed to persist.
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        with mock.patch.object(cli, "create_default_compactor") as create:
+            self.assertEqual(await self.run_cli(model, terminal), 0)
+        create.assert_not_called()
+        recovered = load_interaction_save(self.path)
+        self.assertIsInstance(recovered.items[-1], UserToolResult)
+        self.assertFalse(recovered.items[-1].result.success)
+        self.assertFalse(any(isinstance(item, ContextCompaction) for item in recovered))
+
+    async def test_compact_without_an_active_model_is_a_recorded_failure(self):
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "auth needed" and not submitted:
+                submitted = True
+                t.submit("/compact")
+            elif status == "auth needed" and submitted and self.path.exists():
+                if isinstance(load_interaction_save(self.path).items[-1], UserToolResult):
+                    t.key("c-d")
+
+        with mock.patch.object(cli, "create_default_compactor") as create:
+            self.assertEqual(await self.run_cli(None, _Terminal(frame)), 0)
+        create.assert_not_called()
+        saved = load_interaction_save(self.path)
+        self.assertEqual(tuple(type(item) for item in saved), (
+            Init, UserToolCall, UserToolResult,
+        ))
+        self.assertFalse(saved.items[-1].result.success)
+        self.assertIn("authentication needed", saved.items[-1].result.output.lower())
+        self.assertEqual(saved.model_items(), ())
+
+    async def test_follow_up_queued_after_compact_uses_only_replacement_context(self):
+        original = (
+            Init("old"),
+            Message("assistant", "discarded old answer"),
+            TurnSummary(sample_count=1),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        model = _Model(self.path, _answer("answer after compact"))
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult((ContextCompaction((
+            Message("user", "compacted state"),
+        )),))
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "idle" and not submitted:
+                submitted = True
+                t.submit("/compact")
+                t.submit("follow up")
+            elif status == "idle" and submitted and model.calls:
+                t.key("c-d")
+
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+            self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
+        self.assertEqual(len(model.calls), 1)
+        materialized = model.calls[0][0].model_items()
+        self.assertIn(Message("user", "compacted state"), materialized)
+        self.assertIn(Message("user", "follow up"), materialized)
+        self.assertNotIn(Message("assistant", "discarded old answer"), materialized)
+        self.assertFalse(any(
+            isinstance(item, (UserToolCall, UserToolResult, ContextCompaction))
+            for item in materialized
+        ))
+        saved = load_interaction_save(self.path)
+        self.assertEqual(
+            [item.call.name for item in saved if isinstance(item, UserToolCall)],
+            ["compact"],
+        )
+        self.assertEqual(
+            len([item for item in saved if isinstance(item, TurnSummary)]),
+            2,
+        )
 
     async def test_auth_needed_instructions_resume_does_not_sample_or_add_a_user_boundary(self):
         original = (Init("old"), Message("assistant", "answer"), TurnSummary())

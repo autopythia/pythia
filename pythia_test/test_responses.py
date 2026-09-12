@@ -14,9 +14,13 @@ from pythia.interaction import CODEX_RESPONSES_API_URL
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import CompactionError
+from pythia.interaction import ContextCompaction
+from pythia.interaction import DEFAULT_SUMMARY_PREFIX
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Environment
 from pythia.interaction import Init
+from pythia.interaction import Instructions
 from pythia.interaction import META_RESPONSES_API_URL
 from pythia.interaction import Message
 from pythia.interaction import ModelAuthenticationError
@@ -25,15 +29,20 @@ from pythia.interaction import ModelContext
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
+from pythia.interaction import PromptSummarizingCompactor
 from pythia.interaction import Reasoning
+from pythia.interaction import REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
+from pythia.interaction import ResponsesOpaqueCompactor
 from pythia.interaction import SamplingOptions
 from pythia.interaction import StreamingResponsesEndpoint
+from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
 from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import create_default_compactor
 from pythia.interaction import load_interaction_save
 from pythia.interaction import save_interaction_save
 from pythia.interaction.demo import DEFAULT_PROMPT
@@ -133,6 +142,19 @@ def _tool_call_event(index, *, call_id="call-1"):
             "arguments": '{"query":"pythia"}',
         },
     }
+
+
+def _compaction_event(index, encrypted_content="encrypted-checkpoint"):
+    event = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "compaction",
+            "encrypted_content": encrypted_content,
+        },
+    }
+    if index is not None:
+        event["output_index"] = index
+    return event
 
 
 class _FakeSSEResponse:
@@ -500,6 +522,226 @@ class CodexResponsesModelTests(unittest.TestCase):
                     )
                 )
             )
+
+    def test_remote_v2_compaction_builds_client_replacement_and_preserves_state(self):
+        response = _FakeSSEResponse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "future_unrelated_output", "secret": "ignored"},
+            },
+            _tool_call_event(1, call_id="must-not-execute"),
+            _compaction_event(2, "new-encrypted-checkpoint"),
+            _completed_event(
+                input_tokens=120,
+                output_tokens=9,
+                total_tokens=129,
+                cached_tokens=80,
+            ),
+            headers={"x-codex-turn-state": "replacement-state"},
+        )
+        opener = _ScriptedOpener(response)
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="secret-token",
+                account_id="account-1",
+                api_provider="codex",
+            ),
+            opener=opener,
+            identifier_factory=lambda: "unexpected-new-identifier",
+        )
+        metadata = SampleMetadata(
+            TokenUsage(),
+            provider_turn_id="turn-1",
+            provider_turn_state="sticky-state",
+        )
+        context = ModelContext((
+            Init("session-1"),
+            Instructions("Keep these instructions."),
+            Message("user", "First request."),
+            UserInteractionBoundary(),
+            Message("assistant", "Old answer."),
+            metadata,
+            Message("user", "Latest request."),
+        ))
+        before = context.items
+        tool = ToolSpec("lookup", "Look things up.", {
+            "type": "object", "properties": {},
+        })
+
+        result = ResponsesOpaqueCompactor(model).compact(
+            context,
+            tools=(tool,),
+        )
+
+        self.assertEqual(context.items, before)
+        self.assertEqual(
+            result.usage,
+            TokenUsage(120, 9, 129, 80),
+        )
+        checkpoint = result.items[0]
+        self.assertIsInstance(checkpoint, ContextCompaction)
+        self.assertEqual(checkpoint.replacement_items, (
+            Instructions("Keep these instructions."),
+            Message("user", "First request."),
+            Message("user", "Latest request."),
+            OpaqueCompaction.from_responses("new-encrypted-checkpoint"),
+        ))
+        payload = _request_payload(opener)
+        self.assertEqual(payload["input"][-1], {"type": "compaction_trigger"})
+        self.assertEqual(
+            sum(item.get("type") == "compaction_trigger" for item in payload["input"]),
+            1,
+        )
+        self.assertEqual([item["name"] for item in payload["tools"]], ["lookup"])
+        headers = _request_headers(opener)
+        self.assertEqual(headers["x-codex-beta-features"], "remote_compaction_v2")
+        self.assertEqual(headers["x-codex-turn-state"], "sticky-state")
+        self.assertEqual(headers["session_id"], "session-1")
+        self.assertEqual(
+            json.loads(headers["x-codex-turn-metadata"])["turn_id"],
+            "turn-1",
+        )
+        self.assertTrue(response.closed)
+        self.assertNotIn("compaction_trigger", repr(result))
+        self.assertFalse(any(isinstance(item, ToolCall) for item in result.items))
+
+    def test_remote_v2_compaction_retains_only_newest_real_user_messages(self):
+        opener = _ScriptedOpener(_FakeSSEResponse(
+            _compaction_event(None),
+            _completed_event(),
+        ))
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            opener=opener,
+        )
+        context = ModelContext((
+            Message("user", "old-user"),
+            Message("user", f"{DEFAULT_SUMMARY_PREFIX}\nold local summary"),
+            Message("assistant", "old assistant output"),
+            Message("user", "new-user"),
+        ))
+
+        result = ResponsesOpaqueCompactor(
+            model,
+            retained_user_message_tokens=2,
+        ).compact(context)
+
+        checkpoint = result.items[0]
+        self.assertEqual(checkpoint.replacement_items, (
+            Message("user", "new-user"),
+            OpaqueCompaction.from_responses("encrypted-checkpoint"),
+        ))
+        # Retention affects only the client-built replacement; the server still
+        # receives the complete effective source context before the trigger.
+        request_text = json.dumps(_request_payload(opener)["input"])
+        self.assertIn("old-user", request_text)
+        self.assertIn("old local summary", request_text)
+
+    def test_remote_v2_compaction_requires_one_checkpoint_and_completion(self):
+        cases = (
+            (
+                (_message_event(0, "unrelated"), _completed_event()),
+                "exactly one opaque checkpoint",
+            ),
+            (
+                (_compaction_event(0, "one"), _compaction_event(1, "two"),
+                 _completed_event()),
+                "exactly one opaque checkpoint",
+            ),
+            (
+                (_compaction_event(0),),
+                "closed before response.completed",
+            ),
+            (
+                ({
+                    "type": "response.output_item.done",
+                    "item": {"type": "compaction", "encrypted_content": ""},
+                }, _completed_event()),
+                "must not be empty",
+            ),
+        )
+        for payloads, message in cases:
+            with self.subTest(message=message):
+                model = CodexResponsesModel(
+                    StreamingResponsesEndpoint(
+                        api_url=CODEX_RESPONSES_API_URL,
+                        model="codex-test",
+                        bearer_token="token",
+                        api_provider="codex",
+                    ),
+                    opener=_ScriptedOpener(_FakeSSEResponse(*payloads)),
+                )
+                with self.assertRaisesRegex(ModelResponseError, message):
+                    ResponsesOpaqueCompactor(model).compact(
+                        ModelContext((Message("user", "compact me"),))
+                    )
+
+    def test_default_compactor_uses_remote_only_for_known_codex_route(self):
+        official = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            )
+        )
+        custom = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://example.test/v1",
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            )
+        )
+        meta = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=META_RESPONSES_API_URL,
+                model="muse-spark-1.3",
+                bearer_token="token",
+                api_provider="codex",
+            )
+        )
+
+        self.assertEqual(
+            REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS,
+            64_000,
+        )
+        self.assertTrue(official.supports_remote_compaction)
+        self.assertFalse(custom.supports_remote_compaction)
+        self.assertFalse(meta.supports_remote_compaction)
+        self.assertIsInstance(
+            create_default_compactor(official),
+            ResponsesOpaqueCompactor,
+        )
+        for model in (custom, meta):
+            compactor = create_default_compactor(model)
+            self.assertIsInstance(compactor, PromptSummarizingCompactor)
+            self.assertIsNone(compactor._options.temperature)
+
+    def test_remote_compactor_rejects_pending_calls_without_network(self):
+        opener = _ScriptedOpener()
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            opener=opener,
+        )
+        with self.assertRaisesRegex(CompactionError, "unresolved tool calls"):
+            ResponsesOpaqueCompactor(model).compact(ModelContext((
+                ToolCall("lookup", "pending", "{}"),
+            )))
+        self.assertEqual(opener.calls, [])
 
     def test_session_init_owns_codex_session_and_prompt_cache_key(self):
         opener = _ScriptedOpener(

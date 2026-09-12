@@ -12,6 +12,7 @@ from .compaction import Compactor
 from .compaction import DEFAULT_COMPACTION_PROMPT
 from .compaction import DEFAULT_SUMMARY_PREFIX
 from .compaction import PromptSummarizingCompactor
+from .compaction import create_default_compactor
 from .context import ContextValidationError
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
@@ -79,6 +80,8 @@ from .responses import CODEX_RESPONSES_API_URL
 from .responses import CodexResponsesModel
 from .responses import META_RESPONSES_API_URL
 from .responses import OPENAI_RESPONSES_API_URL
+from .responses import REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
+from .responses import ResponsesOpaqueCompactor
 from .responses import StreamingResponsesEndpoint
 from .responses import X_CODEX_TURN_STATE_HEADER
 from .save import SaveError
@@ -148,7 +151,9 @@ __all__ = [
     "PlanStore",
     "PromptSummarizingCompactor",
     "Reasoning",
+    "REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS",
     "ResponsesDefaults",
+    "ResponsesOpaqueCompactor",
     "StreamingResponsesEndpoint",
     "SamplingOptions",
     "Init",
@@ -168,6 +173,7 @@ __all__ = [
     "UserInteractionBoundary",
     "X_CODEX_TURN_STATE_HEADER",
     "create_apply_patch_tool",
+    "create_default_compactor",
     "create_exec_command_tool",
     "create_update_plan_tool",
     "create_write_stdin_tool",
