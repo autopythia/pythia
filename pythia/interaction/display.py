@@ -14,6 +14,7 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -177,6 +178,8 @@ class InteractionItemRenderer:
                 )
             elif isinstance(item, SampleMetadata):
                 blocks = _render_sample_metadata(item)
+            elif isinstance(item, CompactionMetadata):
+                blocks = _render_compaction_metadata(item)
             elif isinstance(item, ModelFailure):
                 blocks = _render_model_failure(item)
             elif isinstance(item, TurnSummary):
@@ -374,6 +377,27 @@ def _render_sample_metadata(item: SampleMetadata) -> Tuple[str, ...]:
     )
 
 
+def _render_compaction_metadata(
+    item: CompactionMetadata,
+) -> Tuple[str, ...]:
+    usage = item.usage
+    fields = [
+        "[compaction]",
+        f"protocol={item.protocol}",
+        f"input={usage.input_tokens}",
+        f"output={usage.output_tokens}",
+        f"total={usage.total_tokens}",
+        f"cached={usage.cached_input_tokens}",
+    ]
+    if item.elapsed_seconds is not None:
+        fields.append(f"elapsed={item.elapsed_seconds:.2f}s")
+    if item.request_attempts != 1:
+        fields.append(f"attempts={item.request_attempts}")
+    if item.recovery:
+        fields.append(f"recovery={','.join(item.recovery)}")
+    return (" ".join(fields),)
+
+
 def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
     fields = [f"[model failure] {item.message}", f"kind={item.category}"]
     for name, value in (
@@ -419,7 +443,12 @@ def _render_turn_summary(item: TurnSummary) -> Tuple[str, ...]:
         f"cached_max={item.cached_input_tokens_max} "
         f"context={item.context_tokens} "
         f"samples={item.sample_count} "
-        f"compactions={item.compaction_count}",
+        f"compactions={item.compaction_count}"
+        + (
+            ""
+            if item.elapsed_seconds is None
+            else f" elapsed={item.elapsed_seconds:.2f}s"
+        ),
     )
 
 

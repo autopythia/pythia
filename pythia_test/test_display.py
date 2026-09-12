@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from pythia.interaction import CompactionMetadata
 from pythia.interaction import CompactionResult
 from pythia.interaction import ContextPrefix
 from pythia.interaction import DisplayItem
@@ -182,11 +183,19 @@ class InteractionItemRendererTests(unittest.TestCase):
                 ),
             ),
         )
-        self.assertEqual(compaction.context_items(), (checkpoint,))
+        metadata = CompactionMetadata(
+            usage=TokenUsage(),
+            protocol="unspecified",
+        )
+        self.assertEqual(compaction.context_items(), (checkpoint, metadata))
         self.assertEqual(
             compaction.display_items(),
             (
                 DisplayItem("[context prefix] 1 item"),
+                DisplayItem(
+                    "[compaction] protocol=unspecified input=0 output=0 "
+                    "total=0 cached=0"
+                ),
             ),
         )
 

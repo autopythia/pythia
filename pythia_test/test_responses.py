@@ -15,6 +15,7 @@ from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
 from pythia.interaction import CompactionError
+from pythia.interaction import CompactionMetadata
 from pythia.interaction import ContextPrefix
 from pythia.interaction import DEFAULT_SUMMARY_PREFIX
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -69,23 +70,27 @@ def _event_lines(payload, *, event_name=None, crlf=False):
 
 def _completed_event(
     *,
+    response_id=None,
     input_tokens=0,
     output_tokens=0,
     total_tokens=0,
     cached_tokens=0,
 ):
+    response = {
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "input_tokens_details": {
+                "cached_tokens": cached_tokens,
+            },
+        }
+    }
+    if response_id is not None:
+        response["id"] = response_id
     return {
         "type": "response.completed",
-        "response": {
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-                "input_tokens_details": {
-                    "cached_tokens": cached_tokens,
-                },
-            }
-        },
+        "response": response,
     }
 
 
@@ -533,6 +538,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             _tool_call_event(1, call_id="must-not-execute"),
             _compaction_event(2, "new-encrypted-checkpoint"),
             _completed_event(
+                response_id="response-compact-1",
                 input_tokens=120,
                 output_tokens=9,
                 total_tokens=129,
@@ -571,16 +577,27 @@ class CodexResponsesModelTests(unittest.TestCase):
             "type": "object", "properties": {},
         })
 
-        result = ResponsesOpaqueCompactor(model).compact(
-            context,
-            tools=(tool,),
-        )
+        with mock.patch(
+            "pythia.interaction.compaction.perf_counter",
+            side_effect=(200.0, 286.25),
+        ):
+            result = ResponsesOpaqueCompactor(model).compact(
+                context,
+                tools=(tool,),
+            )
 
         self.assertEqual(context.items, before)
         self.assertEqual(
             result.usage,
             TokenUsage(120, 9, 129, 80),
         )
+        self.assertEqual(result.protocol, "responses_compaction_v2")
+        self.assertEqual(result.elapsed_seconds, 86.25)
+        self.assertEqual(result.provider_turn_id, "turn-1")
+        self.assertEqual(result.provider_turn_state, "sticky-state")
+        self.assertEqual(result.provider_response_id, "response-compact-1")
+        self.assertEqual(result.request_attempts, 1)
+        self.assertEqual(result.recovery, ())
         checkpoint = result.items[0]
         self.assertIsInstance(checkpoint, ContextPrefix)
         self.assertEqual(checkpoint.prefix_items, (
@@ -606,7 +623,24 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         self.assertTrue(response.closed)
         self.assertNotIn("compaction_trigger", repr(result))
+        for private in (
+            "turn-1",
+            "sticky-state",
+            "response-compact-1",
+        ):
+            self.assertNotIn(private, repr(result))
         self.assertFalse(any(isinstance(item, ToolCall) for item in result.items))
+        self.assertEqual(
+            result.context_items()[-1],
+            CompactionMetadata(
+                usage=TokenUsage(120, 9, 129, 80),
+                protocol="responses_compaction_v2",
+                provider_turn_id="turn-1",
+                provider_turn_state="sticky-state",
+                provider_response_id="response-compact-1",
+                elapsed_seconds=86.25,
+            ),
+        )
 
     def test_remote_v2_compaction_retains_only_newest_real_user_messages(self):
         opener = _ScriptedOpener(_FakeSSEResponse(
@@ -644,6 +678,37 @@ class CodexResponsesModelTests(unittest.TestCase):
         request_text = json.dumps(_request_payload(opener)["input"])
         self.assertIn("old-user", request_text)
         self.assertIn("old local summary", request_text)
+
+    def test_remote_v2_compaction_metadata_records_transport_recovery(self):
+        response = _FakeSSEResponse(
+            _compaction_event(0),
+            _completed_event(response_id="response-after-retry"),
+        )
+        opener = _ScriptedOpener(
+            _http_error(500, body=b'{"error":{"code":"temporary"}}'),
+            response,
+        )
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            opener=opener,
+        )
+
+        result = ResponsesOpaqueCompactor(model).compact(
+            ModelContext((Message("user", "compact me"),))
+        )
+
+        metadata = result.context_items()[-1]
+        self.assertIsInstance(metadata, CompactionMetadata)
+        self.assertEqual(metadata.request_attempts, 2)
+        self.assertEqual(metadata.recovery, ("http_500_retry",))
+        self.assertEqual(metadata.provider_response_id, "response-after-retry")
+        self.assertEqual(len(opener.calls), 2)
+        self.assertTrue(response.closed)
 
     def test_remote_v2_compaction_requires_one_checkpoint_and_completion(self):
         cases = (
@@ -742,6 +807,35 @@ class CodexResponsesModelTests(unittest.TestCase):
                 ToolCall("lookup", "pending", "{}"),
             )))
         self.assertEqual(opener.calls, [])
+
+    def test_compaction_metadata_can_preserve_codex_turn_continuity(self):
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            identifier_factory=lambda: "unexpected-new-turn",
+        )
+        metadata = CompactionMetadata(
+            TokenUsage(),
+            "responses_compaction_v2",
+            provider_turn_id="compact-turn",
+            provider_turn_state="compact-state",
+        )
+        context = ModelContext((
+            Init("session"),
+            Message("user", "request"),
+            UserInteractionBoundary(),
+            metadata,
+        ))
+
+        payload, state = model._build_request_payload(context, (), None)
+
+        self.assertEqual(state.turn_id, "compact-turn")
+        self.assertEqual(state.turn_state, "compact-state")
+        self.assertNotIn("compaction_metadata", json.dumps(payload))
 
     def test_init_prefix_id_owns_codex_session_and_prompt_cache_key(self):
         opener = _ScriptedOpener(

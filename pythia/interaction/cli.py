@@ -34,6 +34,7 @@ from .default_environment import DefaultEnvironment
 from .display import DisplayItem
 from .display import render_interaction_items
 from .environment import Environment
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -224,7 +225,14 @@ async def _fail_pending_user_tools(
 
 def _has_provider_history(context: ModelContext) -> bool:
     return any(
-        (isinstance(i, SampleMetadata) and (i.provider_turn_id or i.provider_turn_state or i.provider_session_id))
+        (
+            isinstance(i, (SampleMetadata, CompactionMetadata))
+            and (
+                i.provider_turn_id
+                or i.provider_turn_state
+                or i.provider_session_id
+            )
+        )
         or (isinstance(i, Reasoning) and i.encrypted_content)
         or (isinstance(i, OpaqueCompaction) and i.protocol == "responses")
         for i in (*context.items, *context.model_items())
@@ -270,24 +278,7 @@ def _compaction_success_output(result: CompactionResult) -> str:
         for item in checkpoint.prefix_items
     )
     mode = "a remote opaque checkpoint" if opaque else "a prompt summary checkpoint"
-    output = f"Context compacted using {mode}."
-    usage = result.usage
-    if any(
-        (
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.total_tokens,
-            usage.cached_input_tokens,
-        )
-    ):
-        output += (
-            "\nusage: "
-            f"input={usage.input_tokens} "
-            f"output={usage.output_tokens} "
-            f"total={usage.total_tokens} "
-            f"cached={usage.cached_input_tokens}"
-        )
-    return output
+    return f"Context compacted using {mode}."
 
 
 async def _compact_user_tool(
@@ -331,7 +322,7 @@ async def _compact_user_tool(
         state.active_user_call = None
         return model
 
-    state.set_phase("user tool: compact")
+    state.set_phase("compacting")
     try:
         if model is None:
             result_item = UserToolResult(
@@ -469,6 +460,7 @@ async def _turn(
     args: argparse.Namespace,
     options: Optional[SamplingOptions],
 ) -> None:
+    turn_started = time.perf_counter()
     samples = 0
     while not state.closing:
         if args.max_samples is not None and samples >= args.max_samples:
@@ -533,7 +525,10 @@ async def _turn(
             final_text = sample.last_assistant_text
             if not final_text or not final_text.strip():
                 raise RuntimeError("model returned no final assistant text")
-            summary = summarize_turn_usage(context.items)
+            summary = summarize_turn_usage(
+                context.items,
+                elapsed_seconds=time.perf_counter() - turn_started,
+            )
             await _append(context, (summary,), state, path)
             state.displays.extend(render_interaction_items((summary,)))
             return
@@ -542,10 +537,13 @@ async def _turn(
 
 def _ends_with_completed_manual_compaction(context: ModelContext) -> bool:
     items = context.items
-    if len(items) < 3 or not isinstance(items[-1], ContextPrefix):
+    end = len(items)
+    if end and isinstance(items[end - 1], CompactionMetadata):
+        end -= 1
+    if end < 3 or not isinstance(items[end - 1], ContextPrefix):
         return False
-    result = items[-2]
-    call = items[-3]
+    result = items[end - 2]
+    call = items[end - 3]
     return (
         isinstance(result, UserToolResult)
         and result.result.success
@@ -563,7 +561,14 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
     for item in reversed(context.items):
         if isinstance(
             item,
-            (ModelSampleBoundary, SampleMetadata, UserInteractionBoundary, UserToolCall, UserToolResult),
+            (
+                ModelSampleBoundary,
+                SampleMetadata,
+                CompactionMetadata,
+                UserInteractionBoundary,
+                UserToolCall,
+                UserToolResult,
+            ),
         ):
             continue
         if isinstance(item, (TurnSummary, Init)):

@@ -12,7 +12,7 @@ from unittest import mock
 
 from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
-    CodexResponsesModel, CompactionError, CompactionResult, ContextPrefix,
+    CodexResponsesModel, CompactionError, CompactionMetadata, CompactionResult, ContextPrefix,
     ContextValidationError, Environment,
     Instructions, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
     ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, Init,
@@ -579,6 +579,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                         OpaqueCompaction.from_responses("private checkpoint"),
                     )),),
                     usage=TokenUsage(100, 8, 108, 75),
+                    protocol="responses_compaction_v2",
+                    elapsed_seconds=86.25,
                 )
 
         submitted = False
@@ -589,7 +591,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 submitted = True
                 t.submit("/compact")
             elif status == "idle" and submitted and self.path.exists():
-                if isinstance(load_interaction_save(self.path).items[-1], ContextPrefix):
+                if isinstance(load_interaction_save(self.path).items[-1], CompactionMetadata):
                     t.key("c-d")
 
         terminal = _Terminal(frame)
@@ -608,14 +610,18 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:len(original)], original)
-        call, result, checkpoint = saved.items[-3:]
+        call, result, checkpoint, metadata = saved.items[-4:]
         self.assertIsInstance(call, UserToolCall)
         self.assertIsInstance(result, UserToolResult)
         self.assertTrue(result.result.success)
         self.assertEqual(result.result.call_id, call.call.call_id)
         self.assertIsInstance(checkpoint, ContextPrefix)
+        self.assertIsInstance(metadata, CompactionMetadata)
         self.assertIn("remote opaque checkpoint", result.result.output)
-        self.assertIn("input=100", result.result.output)
+        self.assertNotIn("input=100", result.result.output)
+        self.assertEqual(metadata.usage, TokenUsage(100, 8, 108, 75))
+        self.assertEqual(metadata.protocol, "responses_compaction_v2")
+        self.assertEqual(metadata.elapsed_seconds, 86.25)
         self.assertEqual(saved.model_items(), checkpoint.prefix_items)
         self.assertFalse(any(
             isinstance(item, (UserToolCall, UserToolResult))
@@ -631,6 +637,11 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[user-tool-call] compact", transcript)
         self.assertIn("[user-tool-ret]  compact", transcript)
         self.assertIn("[context prefix]", transcript)
+        self.assertIn(
+            "[compaction] protocol=responses_compaction_v2 input=100 "
+            "output=8 total=108 cached=75 elapsed=86.25s",
+            transcript,
+        )
         self.assertNotIn("private checkpoint", transcript)
         self.assertIsNone(cli._resume_notice(saved))
 
@@ -648,6 +659,61 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "without recorded turn completion" in item.text
             for item in replay.items
         ))
+
+    async def test_compact_busy_status_is_compacting_with_live_elapsed_time(self):
+        original = (
+            Init("old"),
+            Message("assistant", "previous answer"),
+            TurnSummary(sample_count=1),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        entered = threading.Event()
+        release = threading.Event()
+        statuses = []
+
+        class BlockingCompactor:
+            def compact(inner_self, source, *, tools=()):
+                del source, tools
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("test did not release compaction")
+                return CompactionResult(
+                    (ContextPrefix((Message("user", "summary"),)),),
+                    protocol="prompt_summarization",
+                )
+
+        submitted = False
+
+        def frame(t, editor, status):
+            nonlocal submitted
+            if status == "idle" and not submitted:
+                submitted = True
+                t.submit("/compact")
+            elif entered.is_set() and status.startswith("compacting "):
+                statuses.append(status)
+                release.set()
+            elif status == "idle" and submitted and self.path.exists():
+                if isinstance(
+                    load_interaction_save(self.path).items[-1],
+                    CompactionMetadata,
+                ):
+                    t.key("c-d")
+
+        try:
+            with mock.patch.object(
+                cli,
+                "create_default_compactor",
+                return_value=BlockingCompactor(),
+            ):
+                self.assertEqual(
+                    await self.run_cli(_Model(self.path), _Terminal(frame)),
+                    0,
+                )
+        finally:
+            release.set()
+        self.assertTrue(statuses)
+        self.assertRegex(statuses[0], r"^compacting \d+s$")
 
     async def test_compact_uses_remote_v2_by_default_for_codex_responses(self):
         original = (
@@ -677,6 +743,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "type": "response.completed",
                         "response": {
+                            "id": "response-compact",
                             "usage": {
                                 "input_tokens": 20,
                                 "output_tokens": 3,
@@ -720,7 +787,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 submitted = True
                 t.submit("/compact")
             elif status == "idle" and submitted and observed:
-                if isinstance(load_interaction_save(self.path).items[-1], ContextPrefix):
+                if isinstance(load_interaction_save(self.path).items[-1], CompactionMetadata):
                     t.key("c-d")
 
         self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
@@ -736,9 +803,14 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "remote_compaction_v2",
         )
         saved = load_interaction_save(self.path)
-        self.assertEqual(tuple(type(item) for item in saved.items[-3:]), (
-            UserToolCall, UserToolResult, ContextPrefix,
+        self.assertEqual(tuple(type(item) for item in saved.items[-4:]), (
+            UserToolCall, UserToolResult, ContextPrefix, CompactionMetadata,
         ))
+        metadata = saved.items[-1]
+        self.assertEqual(metadata.protocol, "responses_compaction_v2")
+        self.assertEqual(metadata.usage, TokenUsage(20, 3, 23, 0))
+        self.assertIsNotNone(metadata.elapsed_seconds)
+        self.assertEqual(metadata.provider_response_id, "response-compact")
         self.assertEqual(saved.model_items(), (
             Message("user", "retain this request"),
             OpaqueCompaction.from_responses("server checkpoint"),
@@ -779,6 +851,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saved.items[-1].result.success)
         self.assertIn("invalid remote checkpoint", saved.items[-1].result.output)
         self.assertFalse(any(isinstance(item, ContextPrefix) for item in saved))
+        self.assertFalse(any(isinstance(item, CompactionMetadata) for item in saved))
         self.assertEqual(saved.model_items(), ModelContext(original).model_items())
         self.assertEqual(model.calls, [])
 
@@ -910,7 +983,10 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(Message("user", "follow up"), materialized)
         self.assertNotIn(Message("assistant", "discarded old answer"), materialized)
         self.assertFalse(any(
-            isinstance(item, (UserToolCall, UserToolResult, ContextPrefix))
+            isinstance(
+                item,
+                (CompactionMetadata, UserToolCall, UserToolResult, ContextPrefix),
+            )
             for item in materialized
         ))
         saved = load_interaction_save(self.path)

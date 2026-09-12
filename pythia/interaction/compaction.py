@@ -4,6 +4,9 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
+from functools import wraps
+from time import perf_counter
 from typing import List
 from typing import Optional
 from typing import Protocol
@@ -12,6 +15,7 @@ from typing import Tuple
 
 from .context import ContextValidationError
 from .context import ModelContext
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import InteractionItem
 from .items import Instructions
@@ -57,6 +61,14 @@ class CompactionError(RuntimeError):
 class CompactionResult:
     items: Tuple[InteractionItem, ...]
     usage: TokenUsage = field(default_factory=TokenUsage)
+    protocol: str = "unspecified"
+    provider_session_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_state: Optional[str] = field(default=None, repr=False)
+    provider_response_id: Optional[str] = field(default=None, repr=False)
+    elapsed_seconds: Optional[float] = None
+    request_attempts: int = 1
+    recovery: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -68,17 +80,32 @@ class CompactionResult:
             ModelContext(items)
         except ContextValidationError as exc:
             raise CompactionError(str(exc)) from exc
-        if not isinstance(self.usage, TokenUsage):
-            raise TypeError("usage must be TokenUsage")
+        metadata = self._metadata()
         object.__setattr__(self, "items", items)
+        object.__setattr__(self, "elapsed_seconds", metadata.elapsed_seconds)
+        object.__setattr__(self, "recovery", metadata.recovery)
 
     def context_items(self) -> Tuple[InteractionItem, ...]:
-        return self.items
+        """Return the installed prefix followed by durable operation metadata."""
+        return (*self.items, self._metadata())
+
+    def _metadata(self) -> CompactionMetadata:
+        return CompactionMetadata(
+            usage=self.usage,
+            protocol=self.protocol,
+            provider_session_id=self.provider_session_id,
+            provider_turn_id=self.provider_turn_id,
+            provider_turn_state=self.provider_turn_state,
+            provider_response_id=self.provider_response_id,
+            elapsed_seconds=self.elapsed_seconds,
+            request_attempts=self.request_attempts,
+            recovery=self.recovery,
+        )
 
     def display_items(self) -> Tuple["DisplayItem", ...]:
         from .display import render_interaction_items
 
-        return render_interaction_items(self.items)
+        return render_interaction_items(self.context_items())
 
 
 class Compactor(Protocol):
@@ -89,6 +116,27 @@ class Compactor(Protocol):
         tools: Sequence["ToolSpec"] = (),
     ) -> CompactionResult:
         ...
+
+
+def _timed_compact(
+    method: Callable[..., CompactionResult],
+) -> Callable[..., CompactionResult]:
+    """Measure a complete successful compactor call inside its worker."""
+    @wraps(method)
+    def measured(*args, **kwargs) -> CompactionResult:
+        started = perf_counter()
+        result = method(*args, **kwargs)
+        if not isinstance(result, CompactionResult):
+            raise TypeError(
+                "compactor must return CompactionResult, got "
+                f"{type(result).__name__}"
+            )
+        return replace(
+            result,
+            elapsed_seconds=perf_counter() - started,
+        )
+
+    return measured
 
 
 def create_default_compactor(model: Model) -> Compactor:
@@ -253,6 +301,7 @@ class PromptSummarizingCompactor:
             return bool(self._retain_user_message(message))
         return True
 
+    @_timed_compact
     def compact(
         self,
         context: ModelContext,
@@ -277,6 +326,8 @@ class PromptSummarizingCompactor:
         )
         compaction_prompt = Message(role="user", content=self._prompt)
         request_items = list(active_items)
+        request_attempts = 0
+        recovery = []
 
         while True:
             try:
@@ -288,8 +339,22 @@ class PromptSummarizingCompactor:
                     tools=(),
                     options=self._options,
                 )
+                if not isinstance(sample, ModelSample):
+                    raise CompactionError(
+                        f"model returned {type(sample).__name__}, expected ModelSample"
+                    )
+                request_attempts += sample.request_attempts
+                recovery.extend(sample.recovery)
                 break
             except ModelContextWindowError as exc:
+                request_attempts += (
+                    exc.failure.attempt_count
+                    if exc.failure is not None
+                    else 1
+                )
+                if exc.failure is not None:
+                    recovery.extend(exc.failure.recovery)
+                recovery.append("context_window_trim")
                 if not _drop_oldest_non_instruction_item(
                     request_items,
                     compaction_prompt,
@@ -299,10 +364,6 @@ class PromptSummarizingCompactor:
                         "after all removable items were discarded"
                     ) from exc
 
-        if not isinstance(sample, ModelSample):
-            raise CompactionError(
-                f"model returned {type(sample).__name__}, expected ModelSample"
-            )
         if sample.tool_calls:
             raise CompactionError(
                 "compaction model response must not contain tool calls"
@@ -332,6 +393,12 @@ class PromptSummarizingCompactor:
         return CompactionResult(
             items=(checkpoint,),
             usage=sample.usage,
+            protocol="prompt_summarization",
+            provider_session_id=sample.provider_session_id,
+            provider_turn_id=sample.provider_turn_id,
+            provider_turn_state=sample.provider_turn_state,
+            request_attempts=request_attempts,
+            recovery=tuple(recovery),
         )
 
 

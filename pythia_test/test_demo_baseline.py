@@ -241,10 +241,15 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 ),
             ),
         )
-        status, model, printed = self._run_demo(
-            ["--prompt", query, "--max-samples", "2", "--max-tokens", "77"],
-            samples,
-        )
+        with mock.patch.object(
+            demo,
+            "perf_counter",
+            side_effect=(10.0, 12.5),
+        ):
+            status, model, printed = self._run_demo(
+                ["--prompt", query, "--max-samples", "2", "--max-tokens", "77"],
+                samples,
+            )
 
         self.assertEqual(status, 0)
         self.assertEqual(len(model.calls), 2)
@@ -267,7 +272,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 "[assistant] Done.",
                 "[sample] input=30 output=6 total=36 cached=10",
                 "[turn] input_sum=50 output_sum=10 cold_sum=35 "
-                "cached_sum=15 cached_max=10 context=36 samples=2 compactions=0",
+                "cached_sum=15 cached_max=10 context=36 samples=2 "
+                "compactions=0 elapsed=2.50s",
             ),
         )
         restored = load_interaction_save(self.path)
@@ -285,6 +291,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 non_cached_input_tokens_sum=35,
                 context_tokens=36,
                 sample_count=2,
+                elapsed_seconds=2.5,
             ),
         )
 

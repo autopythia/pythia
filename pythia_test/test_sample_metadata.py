@@ -9,8 +9,10 @@ from unittest import mock
 
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
+from pythia.interaction import CompactionMetadata
 from pythia.interaction import CodexResponsesModel
 from pythia.interaction import ContextPrefix
+from pythia.interaction import Environment
 from pythia.interaction import Message
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
@@ -24,6 +26,7 @@ from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
 from pythia.interaction import TurnSummary
 from pythia.interaction import chat_completions
+from pythia.interaction import demo
 from pythia.interaction import interaction_item_from_dict
 from pythia.interaction import interaction_item_to_dict
 from pythia.interaction import load_interaction_save
@@ -52,7 +55,12 @@ class SampleMetadataTests(unittest.TestCase):
     def test_elapsed_validation_and_unknown_default(self):
         for item_type, fields in (
             (SampleMetadata, {"usage": _USAGE}),
+            (CompactionMetadata, {
+                "usage": _USAGE,
+                "protocol": "responses_compaction_v2",
+            }),
             (ModelSample, {"items": (Message("assistant", "Done."),)}),
+            (TurnSummary, {}),
         ):
             with self.subTest(item_type=item_type):
                 self.assertIsNone(item_type(**fields).elapsed_seconds)
@@ -97,6 +105,71 @@ class SampleMetadataTests(unittest.TestCase):
                         interaction_item_from_dict({
                             "type": kind, **_BASE_RECORD, "elapsed_seconds": value,
                         })
+
+    def test_compaction_metadata_codec_display_and_private_fields(self):
+        metadata = CompactionMetadata(
+            usage=_USAGE,
+            protocol="responses_compaction_v2",
+            provider_session_id="session-private",
+            provider_turn_id="turn-private",
+            provider_turn_state="state-private",
+            provider_response_id="response-private",
+            elapsed_seconds=86.25,
+            request_attempts=2,
+            recovery=("http_500_retry",),
+        )
+        encoded = interaction_item_to_dict(metadata)
+        self.assertEqual(encoded, {
+            "type": "compaction_metadata",
+            **_BASE_RECORD,
+            "protocol": "responses_compaction_v2",
+            "provider_response_id": "response-private",
+            "elapsed_seconds": 86.25,
+            "request_attempts": 2,
+            "recovery": ["http_500_retry"],
+        })
+        self.assertEqual(interaction_item_from_dict(encoded), metadata)
+        self.assertEqual(
+            render_interaction_items((metadata,))[0].text,
+            "[compaction] protocol=responses_compaction_v2 "
+            "input=20 output=5 total=25 cached=4 elapsed=86.25s "
+            "attempts=2 recovery=http_500_retry",
+        )
+        for private in (
+            "session-private",
+            "turn-private",
+            "state-private",
+            "response-private",
+        ):
+            self.assertNotIn(private, repr(metadata))
+            self.assertNotIn(
+                private,
+                render_interaction_items((metadata,))[0].text,
+            )
+
+        minimal = CompactionMetadata(TokenUsage(), "prompt_summarization")
+        self.assertEqual(interaction_item_to_dict(minimal), {
+            "type": "compaction_metadata",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cached_input_tokens": 0,
+            },
+            "protocol": "prompt_summarization",
+        })
+        for protocol in (
+            "",
+            " ",
+            "bad\nprotocol",
+            "responses/compaction_v2",
+            "responses.compaction_v2",
+            "responses-compaction-v2",
+            "Responses_compaction_v2",
+            "x" * 129,
+        ):
+            with self.subTest(protocol=protocol), self.assertRaises(ValueError):
+                CompactionMetadata(TokenUsage(), protocol)
 
     def test_mixed_legacy_and_nested_jsonl_normalizes_only_on_save(self):
         records = [
@@ -163,25 +236,113 @@ class SampleMetadataTests(unittest.TestCase):
 
     def test_turn_summary_keeps_usage_semantics_and_uses_short_label(self):
         items = tuple(SampleMetadata(_USAGE, elapsed_seconds=value) for value in (None, 1, 2))
-        summary = summarize_turn_usage((*items, TurnSummary(sample_count=99)))
+        compact_usage = TokenUsage(100, 10, 110, 60)
+        compaction = CompactionMetadata(
+            compact_usage,
+            "responses_compaction_v2",
+            elapsed_seconds=4,
+        )
+        prefix = ContextPrefix((Message("user", "summary"),))
+        summary = summarize_turn_usage(
+            (*items, prefix, compaction, TurnSummary(sample_count=99)),
+            elapsed_seconds=9.5,
+        )
         self.assertEqual(summary, TurnSummary(
-            input_tokens_sum=60, output_tokens_sum=15, cached_input_tokens_sum=12,
-            cached_input_tokens_max=4, non_cached_input_tokens_sum=48,
-            context_tokens=25, sample_count=3,
+            input_tokens_sum=160, output_tokens_sum=25, cached_input_tokens_sum=72,
+            cached_input_tokens_max=60, non_cached_input_tokens_sum=88,
+            context_tokens=25, sample_count=3, compaction_count=1,
+            elapsed_seconds=9.5,
         ))
         self.assertEqual(render_interaction_items((summary,))[0].text,
-                         "[turn] input_sum=60 output_sum=15 cold_sum=48 "
-                         "cached_sum=12 cached_max=4 context=25 samples=3 compactions=0")
+                         "[turn] input_sum=160 output_sum=25 cold_sum=88 "
+                         "cached_sum=72 cached_max=60 context=25 samples=3 "
+                         "compactions=1 elapsed=9.50s")
         self.assertEqual(interaction_item_to_dict(summary)["type"], "turn_summary")
-        self.assertFalse(hasattr(summary, "elapsed_seconds"))
+        self.assertEqual(summary.elapsed_seconds, 9.5)
+        self.assertIsNone(summarize_turn_usage(items).elapsed_seconds)
+        self.assertNotEqual(
+            summary.elapsed_seconds,
+            sum(value for value in (1, 2, 4)),
+        )
+
+    def test_turn_summary_elapsed_codec_is_optional_and_replay_stable(self):
+        base = {
+            "type": "turn_summary",
+            "input_tokens_sum": 1,
+            "output_tokens_sum": 2,
+            "cached_input_tokens_sum": 0,
+            "cached_input_tokens_max": 0,
+            "non_cached_input_tokens_sum": 1,
+            "context_tokens": 3,
+            "sample_count": 1,
+            "compaction_count": 0,
+        }
+        legacy = interaction_item_from_dict(base)
+        self.assertIsNone(legacy.elapsed_seconds)
+        self.assertEqual(interaction_item_to_dict(legacy), base)
+        timed = interaction_item_from_dict({**base, "elapsed_seconds": 12.25})
+        self.assertEqual(timed.elapsed_seconds, 12.25)
+        self.assertEqual(
+            interaction_item_to_dict(timed),
+            {**base, "elapsed_seconds": 12.25},
+        )
+        self.assertTrue(
+            render_interaction_items((timed,))[0].text.endswith(
+                "elapsed=12.25s"
+            )
+        )
+        for value in (*_BAD_TYPES, *_BAD_NUMBERS):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                SaveError,
+                r"turn_summary\.elapsed_seconds",
+            ):
+                interaction_item_from_dict({**base, "elapsed_seconds": value})
 
     def test_timed_metadata_remains_invisible_to_provider_content(self):
         items = (Message("user", "Question."), Message("assistant", "Answer."))
-        metadata = SampleMetadata(_USAGE, elapsed_seconds=12.3456789)
-        for encode in (chat_completions._encode_context_messages,
-                       messages._encode_context, responses._encode_context_items):
-            with self.subTest(encoder=encode.__module__):
-                self.assertEqual(encode((*items, metadata)), encode(items))
+        metadata_items = (
+            SampleMetadata(_USAGE, elapsed_seconds=12.3456789),
+            CompactionMetadata(
+                _USAGE,
+                "responses_compaction_v2",
+                elapsed_seconds=86.25,
+            ),
+        )
+        for metadata in metadata_items:
+            if isinstance(metadata, CompactionMetadata):
+                self.assertEqual(
+                    ModelContext((*items, metadata)).model_items(),
+                    items,
+                )
+            for encode in (chat_completions._encode_context_messages,
+                           messages._encode_context, responses._encode_context_items):
+                with self.subTest(
+                    encoder=encode.__module__,
+                    metadata=type(metadata).__name__,
+                ):
+                    self.assertEqual(encode((*items, metadata)), encode(items))
+
+    def test_demo_records_independent_active_turn_elapsed_time(self):
+        model = mock.Mock()
+        model.sample.return_value = ModelSample((Message("assistant", "Done."),))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "interaction.jsonl"
+            with mock.patch("builtins.print"):
+                with mock.patch.object(
+                    demo,
+                    "perf_counter",
+                    side_effect=(100.0, 112.5),
+                ):
+                    answer = demo.run(
+                        model,
+                        Environment(),
+                        prompt="Hello.",
+                        save_path=path,
+                    )
+            summary = load_interaction_save(path).items[-1]
+        self.assertEqual(answer, "Done.")
+        self.assertIsInstance(summary, TurnSummary)
+        self.assertEqual(summary.elapsed_seconds, 12.5)
 
 
 class _Clock:

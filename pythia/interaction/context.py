@@ -9,6 +9,7 @@ from typing import Tuple
 from typing import Union
 from typing import overload
 
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -63,7 +64,13 @@ def _validate_tool_sequence(
 
         if isinstance(
             item,
-            (ModelSampleBoundary, SampleMetadata, ModelFailure, TurnSummary),
+            (
+                ModelSampleBoundary,
+                SampleMetadata,
+                CompactionMetadata,
+                ModelFailure,
+                TurnSummary,
+            ),
         ):
             if pending:
                 call_batch_closed = True
@@ -106,6 +113,10 @@ def _validate_context_prefix(
         _validate_item(item, f"prefix_items[{index}]")
         if isinstance(item, (UserToolCall, UserToolResult)):
             raise ContextValidationError("user tools cannot appear in context prefixes")
+        if isinstance(item, CompactionMetadata):
+            raise ContextValidationError(
+                "compaction metadata cannot appear in context prefixes"
+            )
         if isinstance(item, ModelFailure):
             raise ContextValidationError(
                 "model failures cannot appear in context prefixes"
@@ -137,7 +148,14 @@ def _project_items(
         else:
             active.append(item)
     _validate_tool_sequence(active, allow_pending=True)
-    return tuple(i for i in active if not isinstance(i, (UserToolCall, UserToolResult)))
+    return tuple(
+        i
+        for i in active
+        if not isinstance(
+            i,
+            (CompactionMetadata, UserToolCall, UserToolResult),
+        )
+    )
 
 
 def _pending_user_tools(items: Sequence[InteractionItem]) -> Tuple[UserToolCall, ...]:

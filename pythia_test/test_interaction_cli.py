@@ -493,9 +493,21 @@ class CLIControllerTests(_ControllerTestCase):
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         checkpoint = OpaqueCompaction.from_messages("summary")
         model = _Model(self.path, ModelSample(items=(checkpoint,), stop_reason="compaction"), _answer())
-        self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
+        with mock.patch.object(
+            cli.time,
+            "perf_counter",
+            side_effect=(50.0, 57.25),
+        ):
+            self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
         self.assertIn(checkpoint, model.calls[1][0].items)
-        self.assertEqual(load_interaction_save(self.path).items[-1], TurnSummary(sample_count=2, compaction_count=1))
+        self.assertEqual(
+            load_interaction_save(self.path).items[-1],
+            TurnSummary(
+                sample_count=2,
+                compaction_count=1,
+                elapsed_seconds=7.25,
+            ),
+        )
 
     async def test_failure_after_tool_keeps_checkpoint_and_tui_alive(self):
         called = []

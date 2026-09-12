@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from dataclasses import dataclass
 from dataclasses import field
@@ -10,6 +11,9 @@ from typing import Tuple
 from typing import Union
 
 from .usage import TokenUsage
+
+
+_COMPACTION_PROTOCOL_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 def _require_string(value: object, field_name: str, *, allow_empty: bool = True) -> str:
@@ -217,6 +221,70 @@ class SampleMetadata:
                 raise ValueError(f"{field_name} must not contain newlines")
 
 
+@dataclass(frozen=True)
+class CompactionMetadata:
+    """Durable metadata for one successful explicit compaction operation.
+
+    ``protocol`` identifies the compaction procedure (for example,
+    ``responses_compaction_v2``), while ``OpaqueCompaction.protocol`` identifies
+    only the provider wire family used to replay an opaque payload. The item is
+    operational metadata and is never encoded into a model request.
+    """
+
+    usage: TokenUsage
+    protocol: str
+    provider_session_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_state: Optional[str] = field(default=None, repr=False)
+    provider_response_id: Optional[str] = field(default=None, repr=False)
+    elapsed_seconds: Optional[float] = None
+    request_attempts: int = 1
+    recovery: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.usage, TokenUsage):
+            raise TypeError("usage must be TokenUsage")
+        protocol = _require_string(
+            self.protocol,
+            "protocol",
+            allow_empty=False,
+        )
+        if _COMPACTION_PROTOCOL_RE.fullmatch(protocol) is None:
+            raise ValueError(
+                "protocol must be a lowercase snake-case identifier of at "
+                "most 128 characters"
+            )
+        object.__setattr__(
+            self,
+            "elapsed_seconds",
+            _validate_elapsed_seconds(self.elapsed_seconds),
+        )
+        if (
+            isinstance(self.request_attempts, bool)
+            or not isinstance(self.request_attempts, int)
+            or self.request_attempts <= 0
+        ):
+            raise ValueError("request_attempts must be a positive integer")
+        recovery = tuple(self.recovery)
+        for index, value in enumerate(recovery):
+            _require_string(value, f"recovery[{index}]", allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"recovery[{index}] must not contain newlines")
+        object.__setattr__(self, "recovery", recovery)
+        for field_name in (
+            "provider_session_id",
+            "provider_turn_id",
+            "provider_turn_state",
+            "provider_response_id",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            _require_string(value, field_name, allow_empty=False)
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"{field_name} must not contain newlines")
+
+
 def _require_nonnegative_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field_name} must be a nonnegative integer")
@@ -341,9 +409,13 @@ class TurnSummary:
 
     ``TurnSummary`` is encoder-transparent (never sent to the provider) and
     durable. It is derived via :func:`summarize_turn_usage`, which folds over
-    the raw log's ``SampleMetadata`` items and counts compaction markers.
+    the raw log's request metadata and counts compaction markers.
     Existing ``TurnSummary`` items are skipped by the fold so re-summarizing
     a context that already contains summaries does not double-count.
+
+    ``elapsed_seconds`` is independently measured active-turn wall time. It is
+    not the sum of request metadata durations and is not session-cumulative.
+    ``None`` means that the caller did not supply a turn measurement.
     """
 
     input_tokens_sum: int = 0
@@ -354,6 +426,7 @@ class TurnSummary:
     context_tokens: int = 0
     sample_count: int = 0
     compaction_count: int = 0
+    elapsed_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -367,6 +440,11 @@ class TurnSummary:
             "compaction_count",
         ):
             _require_nonnegative_int(getattr(self, field_name), field_name)
+        object.__setattr__(
+            self,
+            "elapsed_seconds",
+            _validate_elapsed_seconds(self.elapsed_seconds),
+        )
 
     @property
     def goal_accounting_tokens(self) -> int:
@@ -386,13 +464,20 @@ class TurnSummary:
         )
 
 
-def summarize_turn_usage(items) -> "TurnSummary":
-    """Fold per-sample ``SampleMetadata`` into a cumulative ``TurnSummary``.
+def summarize_turn_usage(
+    items,
+    *,
+    elapsed_seconds: Optional[float] = None,
+) -> "TurnSummary":
+    """Fold request metadata into a cumulative-usage ``TurnSummary``.
 
     Mirrors ``contradex.kernel.AgentState.add_response_usage``:
     warm per sample is ``min(cached, input)``, cold is ``max(0, input-warm)``.
-    ``context_tokens`` tracks the last sample's ``total_tokens`` (contradex
-    ``total_usage_tokens`` semantics: current window, not a sum).
+    Successful explicit compaction usage contributes to the cumulative token
+    sums but not ``sample_count``. ``context_tokens`` tracks the last ordinary
+    sample's ``total_tokens`` (contradex ``total_usage_tokens`` semantics:
+    current window, not a sum); a compaction request's total is not the size of
+    its installed prefix.
     ``compaction_count`` counts ``OpaqueCompaction``/``ContextPrefix``
     markers. A context prefix counts here because compaction is currently its
     only producer. ``TurnSummary`` items in the input are skipped.
@@ -409,7 +494,7 @@ def summarize_turn_usage(items) -> "TurnSummary":
     sample_count = 0
     compaction_count = 0
     for item in items:
-        if isinstance(item, SampleMetadata):
+        if isinstance(item, (SampleMetadata, CompactionMetadata)):
             usage = item.usage
             warm = min(usage.cached_input_tokens, usage.input_tokens)
             cold = max(0, usage.input_tokens - warm)
@@ -418,8 +503,9 @@ def summarize_turn_usage(items) -> "TurnSummary":
             cached_input_tokens_sum += warm
             cached_input_tokens_max = max(cached_input_tokens_max, warm)
             non_cached_input_tokens_sum += cold
-            context_tokens = usage.total_tokens
-            sample_count += 1
+            if isinstance(item, SampleMetadata):
+                context_tokens = usage.total_tokens
+                sample_count += 1
         elif isinstance(item, (OpaqueCompaction, ContextPrefix)):
             compaction_count += 1
         elif isinstance(item, TurnSummary):
@@ -433,6 +519,7 @@ def summarize_turn_usage(items) -> "TurnSummary":
         context_tokens=context_tokens,
         sample_count=sample_count,
         compaction_count=compaction_count,
+        elapsed_seconds=elapsed_seconds,
     )
 
 
@@ -489,6 +576,7 @@ InteractionItem = Union[
     UserToolResult,
     ModelSampleBoundary,
     SampleMetadata,
+    CompactionMetadata,
     ModelFailure,
     TurnSummary,
     UserInteractionBoundary,
@@ -507,6 +595,7 @@ INTERACTION_ITEM_TYPES = (
     UserToolResult,
     ModelSampleBoundary,
     SampleMetadata,
+    CompactionMetadata,
     ModelFailure,
     TurnSummary,
     UserInteractionBoundary,
@@ -534,6 +623,7 @@ __all__ = [
     "UserToolCall",
     "UserToolResult",
     "SampleMetadata",
+    "CompactionMetadata",
     "TurnSummary",
     "UserInteractionBoundary",
     "is_interaction_item",

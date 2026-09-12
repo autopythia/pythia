@@ -36,8 +36,10 @@ from .compaction import CompactionResult
 from .compaction import DEFAULT_SUMMARY_PREFIX
 from .compaction import _leading_instruction_prefix
 from .compaction import _select_retained_user_messages
+from .compaction import _timed_compact
 from .context import ContextValidationError
 from .context import ModelContext
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -221,6 +223,12 @@ class _ProviderState:
 class _RemoteCompactionResponse:
     item: OpaqueCompaction
     usage: TokenUsage = field(default_factory=TokenUsage)
+    provider_session_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_id: Optional[str] = field(default=None, repr=False)
+    provider_turn_state: Optional[str] = field(default=None, repr=False)
+    provider_response_id: Optional[str] = field(default=None, repr=False)
+    request_attempts: int = 1
+    recovery: Tuple[str, ...] = ()
 
 
 def _resolve_model_spec(endpoint: StreamingResponsesEndpoint) -> Optional[ModelSpec]:
@@ -383,6 +391,7 @@ def _encode_context_items(
                 ModelFailure,
                 Init,
                 SampleMetadata,
+                CompactionMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
             ),
@@ -559,7 +568,7 @@ def _latest_metadata_value(
     start: int = 0,
 ) -> Optional[str]:
     for item in reversed(items[start:]):
-        if isinstance(item, SampleMetadata):
+        if isinstance(item, (SampleMetadata, CompactionMetadata)):
             value = getattr(item, field_name)
             if value is not None:
                 return value
@@ -1315,11 +1324,11 @@ def _collect_remote_compaction_v2(
     ignored: in particular, a function call produced during compaction is never
     returned to the interaction controller and can therefore never execute.
     """
-    del provider_state, captured_turn_state
     compaction_items: List[Tuple[Optional[int], InteractionItem]] = []
     indexed_compactions: Dict[int, InteractionItem] = {}
     usage = TokenUsage()
     completed = False
+    provider_response_id: Optional[str] = None
     trace = _StreamTrace(forbidden_values=forbidden_values)
     iterator = _iter_sse_payloads(response)
 
@@ -1411,7 +1420,15 @@ def _collect_remote_compaction_v2(
             continue
 
         if event_type == "response.completed":
-            usage = _decode_usage(payload.get("response"))
+            response_object = payload.get("response")
+            usage = _decode_usage(response_object)
+            if isinstance(response_object, Mapping):
+                provider_response_id = _safe_diagnostic_value(
+                    response_object.get("id"),
+                    forbidden_values,
+                )
+            if provider_response_id is None:
+                provider_response_id = trace.response_id
             completed = True
             break
         if event_type == "response.failed":
@@ -1444,7 +1461,20 @@ def _collect_remote_compaction_v2(
         )
     item = ordered[0]
     assert isinstance(item, OpaqueCompaction)
-    return _RemoteCompactionResponse(item=item, usage=usage)
+    return _RemoteCompactionResponse(
+        item=item,
+        usage=usage,
+        provider_session_id=(
+            provider_state.session_id
+            if provider_state.persist_session_id
+            else None
+        ),
+        provider_turn_id=provider_state.turn_id,
+        provider_turn_state=captured_turn_state,
+        provider_response_id=provider_response_id,
+        request_attempts=attempt_count,
+        recovery=recovery,
+    )
 
 
 def _bounded_text(value: str, limit: int = 4096) -> str:
@@ -2107,6 +2137,7 @@ class ResponsesOpaqueCompactor:
             return bool(self._retain_user_message(message))
         return True
 
+    @_timed_compact
     def compact(
         self,
         context: ModelContext,
@@ -2140,7 +2171,17 @@ class ResponsesOpaqueCompactor:
                 remote.item,
             )
         )
-        return CompactionResult(items=(checkpoint,), usage=remote.usage)
+        return CompactionResult(
+            items=(checkpoint,),
+            usage=remote.usage,
+            protocol="responses_compaction_v2",
+            provider_session_id=remote.provider_session_id,
+            provider_turn_id=remote.provider_turn_id,
+            provider_turn_state=remote.provider_turn_state,
+            provider_response_id=remote.provider_response_id,
+            request_attempts=remote.request_attempts,
+            recovery=remote.recovery,
+        )
 
 
 __all__ = [

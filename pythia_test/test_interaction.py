@@ -4,10 +4,12 @@ import io
 import json
 import urllib.error
 import unittest
+from unittest import mock
 
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CompactionError
+from pythia.interaction import CompactionMetadata
 from pythia.interaction import ContextPrefix
 from pythia.interaction import ContextValidationError
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -121,6 +123,22 @@ class ModelContextTests(unittest.TestCase):
             context.items,
             (Message(role="user", content="hello"),),
         )
+
+    def test_compaction_metadata_is_log_only_and_not_prefix_content(self):
+        metadata = CompactionMetadata(
+            TokenUsage(10, 2, 12, 4),
+            "responses_compaction_v2",
+            elapsed_seconds=3.5,
+        )
+        prefix = ContextPrefix((Message("user", "summary"),))
+        context = ModelContext((prefix, metadata))
+        self.assertEqual(context.items, (prefix, metadata))
+        self.assertEqual(context.model_items(), prefix.prefix_items)
+        with self.assertRaisesRegex(
+            ContextValidationError,
+            "compaction metadata cannot appear in context prefixes",
+        ):
+            ModelContext((ContextPrefix((metadata,)),))
 
     def test_new_interaction_is_rejected_before_tool_results(self):
         call = ToolCall(
@@ -1157,6 +1175,11 @@ class CompactionTests(unittest.TestCase):
                 items=(Message(role="assistant", content="Condensed work."),),
                 stop_reason="end_turn",
                 usage=usage,
+                provider_session_id="provider-session",
+                provider_turn_id="provider-turn",
+                provider_turn_state="provider-state",
+                request_attempts=2,
+                recovery=("credential_reload",),
             )
         )
         context = ModelContext(
@@ -1175,10 +1198,18 @@ class CompactionTests(unittest.TestCase):
         before = context.items
         compactor = PromptSummarizingCompactor(model)
 
-        result = compactor.compact(context)
+        with mock.patch(
+            "pythia.interaction.compaction.perf_counter",
+            side_effect=(100.0, 112.5),
+        ):
+            result = compactor.compact(context)
 
         self.assertEqual(context.items, before)
         self.assertEqual(result.usage, usage)
+        self.assertEqual(result.protocol, "prompt_summarization")
+        self.assertEqual(result.elapsed_seconds, 12.5)
+        self.assertEqual(result.request_attempts, 2)
+        self.assertEqual(result.recovery, ("credential_reload",))
         self.assertEqual(len(result.items), 1)
         checkpoint = result.items[0]
         self.assertIsInstance(checkpoint, ContextPrefix)
@@ -1201,7 +1232,21 @@ class CompactionTests(unittest.TestCase):
         self.assertNotEqual(temporary_context.items, context.items)
         self.assertIn("CONTEXT CHECKPOINT COMPACTION", temporary_context[-1].content)
 
-        context.extend(result.items)
+        metadata = result.context_items()[-1]
+        self.assertEqual(
+            metadata,
+            CompactionMetadata(
+                usage=usage,
+                protocol="prompt_summarization",
+                provider_session_id="provider-session",
+                provider_turn_id="provider-turn",
+                provider_turn_state="provider-state",
+                elapsed_seconds=12.5,
+                request_attempts=2,
+                recovery=("credential_reload",),
+            ),
+        )
+        context.extend(result.context_items())
         self.assertEqual(context.model_items(), checkpoint.prefix_items)
         self.assertEqual(context.items[: len(before)], before)
 
@@ -1230,6 +1275,8 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(len(model.calls), 2)
         self.assertLess(len(model.calls[1][0]), len(model.calls[0][0]))
         self.assertIsInstance(result.items[0], ContextPrefix)
+        self.assertEqual(result.request_attempts, 2)
+        self.assertEqual(result.recovery, ("context_window_trim",))
 
     def test_prompt_compactor_rejects_tool_calls(self):
         model = _ScriptedModel(

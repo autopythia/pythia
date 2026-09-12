@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from time import perf_counter
 from typing import Optional
 from typing import Sequence
 from typing import Union
@@ -12,6 +13,7 @@ from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
 from .environment import Environment
 from .experimental_tools import create_inject_user_message_tool
+from .items import CompactionMetadata
 from .items import Init
 from .items import Instructions
 from .items import Message
@@ -165,6 +167,7 @@ def run(
         for display_item in user_interaction.display_items():
             print(display_item)
 
+    turn_started = perf_counter()
     sample_count = 0
     while max_samples is None or sample_count < max_samples:
         sample_count += 1
@@ -225,7 +228,10 @@ def run(
             # ``summarize_turn_usage`` skips existing ``TurnSummary`` items
             # so re-entering this path never double-counts, and
             # ``TurnSummary`` is encoder-transparent and durable.
-            turn_summary = summarize_turn_usage(context.items)
+            turn_summary = summarize_turn_usage(
+                context.items,
+                elapsed_seconds=perf_counter() - turn_started,
+            )
             context.extend((turn_summary,))
             _persist()
             for display_item in render_interaction_items((turn_summary,)):
@@ -255,6 +261,7 @@ def _final_assistant_text(context: ModelContext) -> Optional[str]:
             (
                 ModelSampleBoundary,
                 SampleMetadata,
+                CompactionMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
             ),

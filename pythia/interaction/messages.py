@@ -21,6 +21,7 @@ from typing import Tuple
 
 from .context import ContextValidationError
 from .context import ModelContext
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -311,6 +312,7 @@ def _encode_context(
                     ModelFailure,
                     Init,
                     SampleMetadata,
+                    CompactionMetadata,
                     TurnSummary,
                     UserInteractionBoundary,
                 ),
@@ -348,6 +350,7 @@ def _encode_context(
                 ModelFailure,
                 Init,
                 SampleMetadata,
+                CompactionMetadata,
                 TurnSummary,
                 UserInteractionBoundary,
             ),

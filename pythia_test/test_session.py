@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from pythia.interaction import CompactionMetadata
 from pythia.interaction import ContextPrefix
 from pythia.interaction import DefaultEnvironment
 from pythia.interaction import Init
@@ -63,6 +64,17 @@ class SessionTests(unittest.TestCase):
                 elapsed_seconds=1.25,
                 request_attempts=2,
                 recovery=("credential_reload",),
+            ),
+            CompactionMetadata(
+                usage=TokenUsage(4, 5, 9, 2),
+                protocol="responses_compaction_v2",
+                provider_session_id="provider-session",
+                provider_turn_id="provider-turn",
+                provider_turn_state="provider-state",
+                provider_response_id="provider-response",
+                elapsed_seconds=86.25,
+                request_attempts=2,
+                recovery=("http_500_retry",),
             ),
             ModelFailure(
                 category="http_error",
@@ -623,14 +635,18 @@ class SessionResumeTests(unittest.TestCase):
             save_interaction_save(path, interrupted)
             with DefaultEnvironment(cwd=root) as environment:
                 with mock.patch("builtins.print"):
-                    summary = run_repository_summary(
-                        model,
-                        environment,
-                        prompt=None,
-                        max_samples=1,
-                        save_path=path,
-                        resume=True,
-                    )
+                    with mock.patch(
+                        "pythia.interaction.demo.perf_counter",
+                        side_effect=(10.0, 12.5),
+                    ):
+                        summary = run_repository_summary(
+                            model,
+                            environment,
+                            prompt=None,
+                            max_samples=1,
+                            save_path=path,
+                            resume=True,
+                        )
 
                 resumed = load_interaction_save(path)
 
@@ -649,7 +665,7 @@ class SessionResumeTests(unittest.TestCase):
                 Message(role="assistant", content="resumed answer"),
                 SampleMetadata(usage=TokenUsage()),
                 ModelSampleBoundary(),
-                TurnSummary(sample_count=1),
+                TurnSummary(sample_count=1, elapsed_seconds=2.5),
             ),
         )
 

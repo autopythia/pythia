@@ -13,6 +13,7 @@ from typing import Optional
 from typing import Union
 
 from .context import ModelContext
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -51,6 +52,7 @@ _ITEM_TYPES = {
     UserToolResult: "user_tool_result",
     ModelSampleBoundary: "model_sample_boundary",
     SampleMetadata: "sample_metadata",
+    CompactionMetadata: "compaction_metadata",
     ModelFailure: "model_failure",
     TurnSummary: "turn_summary",
     UserInteractionBoundary: "user_interaction_boundary",
@@ -115,18 +117,23 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             interaction_item_to_dict(nested)
             for nested in item.prefix_items
         ]
-    elif isinstance(item, SampleMetadata):
+    elif isinstance(item, (SampleMetadata, CompactionMetadata)):
         encoded["usage"] = {
             "input_tokens": item.usage.input_tokens,
             "output_tokens": item.usage.output_tokens,
             "total_tokens": item.usage.total_tokens,
             "cached_input_tokens": item.usage.cached_input_tokens,
         }
-        for field_name in (
+        if isinstance(item, CompactionMetadata):
+            encoded["protocol"] = item.protocol
+        provider_fields = (
             "provider_session_id",
             "provider_turn_id",
             "provider_turn_state",
-        ):
+        )
+        if isinstance(item, CompactionMetadata):
+            provider_fields = (*provider_fields, "provider_response_id")
+        for field_name in provider_fields:
             value = getattr(item, field_name)
             if value is not None:
                 encoded[field_name] = value
@@ -176,6 +183,8 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             sample_count=item.sample_count,
             compaction_count=item.compaction_count,
         )
+        if item.elapsed_seconds is not None:
+            encoded["elapsed_seconds"] = item.elapsed_seconds
     elif isinstance(
         item,
         (ModelSampleBoundary, UserInteractionBoundary),
@@ -388,6 +397,76 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                     f"{item_type}.replacement_items must match"
                 )
         return ContextPrefix(prefix_items)
+    if item_type == "compaction_metadata":
+        usage = mapping.get("usage")
+        if not isinstance(usage, Mapping):
+            raise SaveError("compaction_metadata.usage must be an object")
+        try:
+            elapsed = _validate_elapsed_seconds(mapping.get("elapsed_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise SaveError(f"compaction_metadata.{exc}") from exc
+        recovery = mapping.get("recovery", [])
+        if not isinstance(recovery, list):
+            raise SaveError("compaction_metadata.recovery must be a list")
+        try:
+            return CompactionMetadata(
+                usage=TokenUsage(
+                    input_tokens=_require_nonnegative_int(
+                        usage.get("input_tokens"),
+                        "compaction_metadata.usage.input_tokens",
+                    ),
+                    output_tokens=_require_nonnegative_int(
+                        usage.get("output_tokens"),
+                        "compaction_metadata.usage.output_tokens",
+                    ),
+                    total_tokens=_require_nonnegative_int(
+                        usage.get("total_tokens"),
+                        "compaction_metadata.usage.total_tokens",
+                    ),
+                    cached_input_tokens=_require_nonnegative_int(
+                        usage.get("cached_input_tokens"),
+                        "compaction_metadata.usage.cached_input_tokens",
+                    ),
+                ),
+                protocol=_require_string(
+                    mapping.get("protocol"),
+                    "compaction_metadata.protocol",
+                ),
+                provider_session_id=_optional_string(
+                    mapping,
+                    "provider_session_id",
+                    "compaction_metadata.provider_session_id",
+                ),
+                provider_turn_id=_optional_string(
+                    mapping,
+                    "provider_turn_id",
+                    "compaction_metadata.provider_turn_id",
+                ),
+                provider_turn_state=_optional_string(
+                    mapping,
+                    "provider_turn_state",
+                    "compaction_metadata.provider_turn_state",
+                ),
+                provider_response_id=_optional_string(
+                    mapping,
+                    "provider_response_id",
+                    "compaction_metadata.provider_response_id",
+                ),
+                elapsed_seconds=elapsed,
+                request_attempts=_require_positive_int(
+                    mapping.get("request_attempts", 1),
+                    "compaction_metadata.request_attempts",
+                ),
+                recovery=tuple(
+                    _require_string(
+                        value,
+                        f"compaction_metadata.recovery[{index}]",
+                    )
+                    for index, value in enumerate(recovery)
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            raise SaveError(f"compaction_metadata.{exc}") from exc
     if item_type in {"sample_metadata", "turn_metadata"}:
         usage = mapping.get("usage")
         if not isinstance(usage, Mapping):
@@ -538,40 +617,45 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         except (TypeError, ValueError) as exc:
             raise SaveError(f"model_failure.{exc}") from exc
     if item_type == "turn_summary":
-        return TurnSummary(
-            input_tokens_sum=_require_nonnegative_int(
-                mapping.get("input_tokens_sum"),
-                "turn_summary.input_tokens_sum",
-            ),
-            output_tokens_sum=_require_nonnegative_int(
-                mapping.get("output_tokens_sum"),
-                "turn_summary.output_tokens_sum",
-            ),
-            cached_input_tokens_sum=_require_nonnegative_int(
-                mapping.get("cached_input_tokens_sum"),
-                "turn_summary.cached_input_tokens_sum",
-            ),
-            cached_input_tokens_max=_require_nonnegative_int(
-                mapping.get("cached_input_tokens_max"),
-                "turn_summary.cached_input_tokens_max",
-            ),
-            non_cached_input_tokens_sum=_require_nonnegative_int(
-                mapping.get("non_cached_input_tokens_sum"),
-                "turn_summary.non_cached_input_tokens_sum",
-            ),
-            context_tokens=_require_nonnegative_int(
-                mapping.get("context_tokens"),
-                "turn_summary.context_tokens",
-            ),
-            sample_count=_require_nonnegative_int(
-                mapping.get("sample_count"),
-                "turn_summary.sample_count",
-            ),
-            compaction_count=_require_nonnegative_int(
-                mapping.get("compaction_count"),
-                "turn_summary.compaction_count",
-            ),
-        )
+        try:
+            elapsed = _validate_elapsed_seconds(mapping.get("elapsed_seconds"))
+            return TurnSummary(
+                input_tokens_sum=_require_nonnegative_int(
+                    mapping.get("input_tokens_sum"),
+                    "turn_summary.input_tokens_sum",
+                ),
+                output_tokens_sum=_require_nonnegative_int(
+                    mapping.get("output_tokens_sum"),
+                    "turn_summary.output_tokens_sum",
+                ),
+                cached_input_tokens_sum=_require_nonnegative_int(
+                    mapping.get("cached_input_tokens_sum"),
+                    "turn_summary.cached_input_tokens_sum",
+                ),
+                cached_input_tokens_max=_require_nonnegative_int(
+                    mapping.get("cached_input_tokens_max"),
+                    "turn_summary.cached_input_tokens_max",
+                ),
+                non_cached_input_tokens_sum=_require_nonnegative_int(
+                    mapping.get("non_cached_input_tokens_sum"),
+                    "turn_summary.non_cached_input_tokens_sum",
+                ),
+                context_tokens=_require_nonnegative_int(
+                    mapping.get("context_tokens"),
+                    "turn_summary.context_tokens",
+                ),
+                sample_count=_require_nonnegative_int(
+                    mapping.get("sample_count"),
+                    "turn_summary.sample_count",
+                ),
+                compaction_count=_require_nonnegative_int(
+                    mapping.get("compaction_count"),
+                    "turn_summary.compaction_count",
+                ),
+                elapsed_seconds=elapsed,
+            )
+        except (TypeError, ValueError) as exc:
+            raise SaveError(f"turn_summary.{exc}") from exc
     if item_type == "model_sample_boundary":
         return ModelSampleBoundary()
     if item_type == "user_interaction_boundary":

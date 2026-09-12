@@ -1092,12 +1092,16 @@ class DemoTests(unittest.TestCase):
             model = _ScriptedRepositoryModel()
             with mock.patch("builtins.print") as print_mock:
                 with DefaultEnvironment(cwd=root) as environment:
-                    summary = run_repository_summary(
-                        model,
-                        environment,
-                        prompt=DEFAULT_PROMPT,
-                        max_samples=4,
-                    )
+                    with mock.patch(
+                        "pythia.interaction.demo.perf_counter",
+                        side_effect=(20.0, 23.0),
+                    ):
+                        summary = run_repository_summary(
+                            model,
+                            environment,
+                            prompt=DEFAULT_PROMPT,
+                            max_samples=4,
+                        )
 
             self.assertEqual(
                 summary,
@@ -1143,7 +1147,8 @@ class DemoTests(unittest.TestCase):
                     "source.",
                     "[sample] input=0 output=0 total=0 cached=0",
                     "[turn] input_sum=0 output_sum=0 cold_sum=0 "
-                    "cached_sum=0 cached_max=0 context=0 samples=2 compactions=0",
+                    "cached_sum=0 cached_max=0 context=0 samples=2 "
+                    "compactions=0 elapsed=3.00s",
                 ),
             )
 

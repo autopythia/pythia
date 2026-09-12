@@ -26,6 +26,7 @@ from .environment import Tool
 from .environment import ToolHandler
 from .environment import ToolOutcome
 from .environment import ToolSpec
+from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
@@ -105,6 +106,7 @@ __all__ = [
     "CodexResponsesModel",
     "CommandRuntime",
     "CompactionError",
+    "CompactionMetadata",
     "CompactionResult",
     "Compactor",
     "ContextPrefix",
