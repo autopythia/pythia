@@ -209,7 +209,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         type=int,
         help=(
             "server compaction threshold (minimum 50000; defaults to the known "
-            "model context maximum, otherwise the server default)"
+            "model auto-compaction threshold, otherwise the server default)"
         ),
     )
     parser.add_argument(

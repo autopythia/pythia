@@ -8,6 +8,9 @@ from typing import Optional
 from typing import Sequence
 from typing import Union
 
+from .compaction import CompactionResult
+from .compaction import create_default_compactor
+from .compaction import should_auto_compact
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
@@ -170,6 +173,26 @@ def run(
     turn_started = perf_counter()
     sample_count = 0
     while max_samples is None or sample_count < max_samples:
+        threshold = getattr(model, "auto_compact_context_tokens", None)
+        if (
+            isinstance(threshold, int)
+            and not isinstance(threshold, bool)
+            and threshold > 0
+            and should_auto_compact(context, threshold)
+        ):
+            compaction = create_default_compactor(model).compact(
+                context.copy(),
+                tools=environment.tool_specs,
+            )
+            if not isinstance(compaction, CompactionResult):
+                raise TypeError(
+                    "compactor must return CompactionResult, got "
+                    f"{type(compaction).__name__}"
+                )
+            context.extend(compaction.context_items())
+            _persist()
+            for display_item in compaction.display_items():
+                print(display_item)
         sample_count += 1
         try:
             sample = model.sample(

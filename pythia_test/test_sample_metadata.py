@@ -10,6 +10,7 @@ from unittest import mock
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CompactionMetadata
+from pythia.interaction import CompactionResult
 from pythia.interaction import CodexResponsesModel
 from pythia.interaction import ContextPrefix
 from pythia.interaction import Environment
@@ -343,6 +344,62 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(answer, "Done.")
         self.assertIsInstance(summary, TurnSummary)
         self.assertEqual(summary.elapsed_seconds, 12.5)
+
+    def test_demo_runs_configured_auto_compaction_before_sample(self):
+        class Model:
+            auto_compact_context_tokens = 100
+
+            def __init__(self):
+                self.contexts = []
+
+            def sample(self, context, *, tools=(), options=None):
+                del tools, options
+                self.contexts.append(context.copy())
+                return ModelSample((Message("assistant", "Done."),))
+
+        model = Model()
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult(
+            (ContextPrefix((Message("user", "follow up"),)),),
+            usage=TokenUsage(100, 5, 105, 50),
+            protocol="responses_compaction_v2",
+            elapsed_seconds=3,
+        )
+        original = ModelContext((
+            Message("user", "old"),
+            Message("assistant", "answer"),
+            SampleMetadata(TokenUsage(90, 10, 100, 20)),
+            ModelSampleBoundary(),
+            TurnSummary(sample_count=1, context_tokens=100),
+        ))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "interaction.jsonl"
+            save_interaction_save(path, original)
+            with mock.patch("builtins.print"):
+                with mock.patch.object(
+                    demo,
+                    "create_default_compactor",
+                    return_value=compactor,
+                ):
+                    answer = demo.run(
+                        model,
+                        Environment(),
+                        prompt="follow up",
+                        save_path=path,
+                        resume=True,
+                    )
+            saved = load_interaction_save(path)
+
+        self.assertEqual(answer, "Done.")
+        compactor.compact.assert_called_once()
+        self.assertEqual(len(model.contexts), 1)
+        self.assertEqual(model.contexts[0].model_items(), (
+            Message("user", "follow up"),
+        ))
+        self.assertEqual(
+            len([item for item in saved if isinstance(item, CompactionMetadata)]),
+            1,
+        )
 
 
 class _Clock:

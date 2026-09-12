@@ -74,7 +74,7 @@ class MessagesPromptCaching:
 
 @dataclass(frozen=True)
 class MessagesServerCompaction:
-    """An unset trigger uses the known model context maximum when encoding.
+    """An unset trigger uses the known auto-compaction limit when encoding.
 
     Without model-specific limits, omit the trigger to use the server default.
     Explicit thresholds always take precedence.
@@ -794,10 +794,18 @@ class MessagesModel:
             )
         compaction = self.endpoint.server_compaction
         if compaction is not None:
-            max_context = None if spec is None else spec.limits.max_context_tokens
-            if compaction.trigger_input_tokens is None and max_context is not None:
+            auto_compact_context = (
+                None
+                if spec is None
+                else spec.limits.auto_compact_context_tokens
+            )
+            if (
+                compaction.trigger_input_tokens is None
+                and auto_compact_context is not None
+            ):
                 compaction = replace(
-                    compaction, trigger_input_tokens=max_context,
+                    compaction,
+                    trigger_input_tokens=auto_compact_context,
                 )
             payload["context_management"] = {
                 "edits": [compaction.request_edit()]

@@ -20,6 +20,7 @@ from .items import ContextPrefix
 from .items import InteractionItem
 from .items import Instructions
 from .items import Message
+from .items import SampleMetadata
 from .model import Model
 from .model import ModelContextWindowError
 from .model import ModelSample
@@ -116,6 +117,31 @@ class Compactor(Protocol):
         tools: Sequence["ToolSpec"] = (),
     ) -> CompactionResult:
         ...
+
+
+def should_auto_compact(
+    context: ModelContext,
+    threshold_tokens: int,
+) -> bool:
+    """Return whether the latest uncompacted sample reached a threshold."""
+    if not isinstance(context, ModelContext):
+        raise TypeError("context must be ModelContext")
+    if (
+        isinstance(threshold_tokens, bool)
+        or not isinstance(threshold_tokens, int)
+        or threshold_tokens <= 0
+    ):
+        raise ValueError("threshold_tokens must be a positive integer")
+
+    # A prefix/metadata newer than the last sample means that usage belongs to
+    # the pre-compaction window. Do not immediately compact the new prefix again
+    # before it has produced a fresh provider usage measurement.
+    for item in reversed(context.items):
+        if isinstance(item, (CompactionMetadata, ContextPrefix)):
+            return False
+        if isinstance(item, SampleMetadata):
+            return item.usage.total_tokens >= threshold_tokens
+    return False
 
 
 def _timed_compact(
@@ -410,4 +436,5 @@ __all__ = [
     "DEFAULT_SUMMARY_PREFIX",
     "PromptSummarizingCompactor",
     "create_default_compactor",
+    "should_auto_compact",
 ]

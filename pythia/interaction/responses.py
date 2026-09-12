@@ -1710,16 +1710,26 @@ class CodexResponsesModel:
         self._credential_lock = Lock()
 
     @property
-    def default_context_tokens(self) -> Optional[int]:
-        """Catalog default window in tokens, or None if unknown; not enforced."""
+    def auto_compact_context_tokens(self) -> Optional[int]:
+        """Catalog threshold for caller-owned automatic compaction, or None."""
         spec = _resolve_model_spec(self.endpoint)
-        return None if spec is None else spec.limits.default_context_tokens
+        return (
+            None
+            if spec is None
+            else spec.limits.auto_compact_context_tokens
+        )
 
     @property
     def max_context_tokens(self) -> Optional[int]:
         """Catalog window override ceiling in tokens, or None; not enforced."""
         spec = _resolve_model_spec(self.endpoint)
         return None if spec is None else spec.limits.max_context_tokens
+
+    @property
+    def max_output_tokens(self) -> Optional[int]:
+        """Catalog output ceiling in tokens, or None; not enforced."""
+        spec = _resolve_model_spec(self.endpoint)
+        return None if spec is None else spec.limits.max_output_tokens
 
     @property
     def supports_remote_compaction(self) -> bool:

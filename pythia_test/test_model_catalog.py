@@ -68,7 +68,11 @@ class ModelCatalogTests(unittest.TestCase):
                                  "META_API_KEY" if provider == "meta" else None)
                 self.assertEqual(spec.route.auth_source,
                                  "environment" if provider == "meta" else "codex-login")
-                limits = ModelLimits() if provider == "meta" else ModelLimits(272_000, 872_000)
+                limits = (
+                    ModelLimits()
+                    if provider == "meta"
+                    else ModelLimits(872_000, 1_000_000, 128_000)
+                )
                 self.assertEqual(spec.limits, limits)
                 self.assertTrue(spec.source)
 
@@ -81,16 +85,31 @@ class ModelCatalogTests(unittest.TestCase):
                 self.assertEqual(payload["model"], wire_model)
                 self.assertEqual(payload.get("reasoning", {}), reasoning)
                 self.assertEqual(payload.get("text"), None if verbosity is None else {"verbosity": verbosity})
-                self.assertEqual(model.default_context_tokens, limits.default_context_tokens)
+                self.assertEqual(
+                    model.auto_compact_context_tokens,
+                    limits.auto_compact_context_tokens,
+                )
                 self.assertEqual(model.max_context_tokens, limits.max_context_tokens)
-                for field in ("default_context_tokens", "max_context_tokens", "max_output_tokens"):
+                self.assertEqual(model.max_output_tokens, limits.max_output_tokens)
+                for field in (
+                    "auto_compact_context_tokens",
+                    "max_context_tokens",
+                    "max_output_tokens",
+                ):
                     self.assertNotIn(field, payload)
 
     def test_aliases_are_identical_but_effort_presets_are_distinct(self):
         fable = get_model_spec("messages", "claude-fable-5-1")
         self.assertIs(get_model_spec("messages", " claude-fable-5.1 "), fable)
         self.assertEqual(fable.aliases, ("claude-fable-5.1",))
-        self.assertEqual(fable.limits, ModelLimits(max_context_tokens=1_000_000, max_output_tokens=128_000))
+        self.assertEqual(
+            fable.limits,
+            ModelLimits(
+                auto_compact_context_tokens=872_000,
+                max_context_tokens=1_000_000,
+                max_output_tokens=128_000,
+            ),
+        )
         self.assertEqual(fable.route.auth_source, "environment")
         self.assertEqual(fable.route.api_key_environment_variable, "ANTHROPIC_API_KEY")
         self.assertIsNone(fable.responses)
@@ -134,8 +153,9 @@ class ModelCatalogTests(unittest.TestCase):
                     self.assertEqual(payload["model"], name)
                     self.assertNotIn("reasoning", payload)
                     self.assertNotIn("text", payload)
-                    self.assertIsNone(model.default_context_tokens)
+                    self.assertIsNone(model.auto_compact_context_tokens)
                     self.assertIsNone(model.max_context_tokens)
+                    self.assertIsNone(model.max_output_tokens)
                     self.assertNotIn("session_id", model._build_headers(state))
                     chat = ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost", model=name))
                     self.assertEqual(chat._build_request_payload(context, (), None)["model"], name)
@@ -159,12 +179,16 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(len(model_catalog._build_index((spec, replace(spec, profile="responses")))), 4)
 
     def test_catalog_validation(self):
-        for field in ("default_context_tokens", "max_context_tokens", "max_output_tokens"):
+        for field in (
+            "auto_compact_context_tokens",
+            "max_context_tokens",
+            "max_output_tokens",
+        ):
             for value in (True, 0, -1, 1.5, "100"):
                 with self.assertRaises(ValueError):
                     ModelLimits(**{field: value})
         with self.assertRaises(ValueError):
-            ModelLimits(default_context_tokens=200, max_context_tokens=100)
+            ModelLimits(auto_compact_context_tokens=200, max_context_tokens=100)
         spec = get_model_spec("messages", "claude-fable-5-1")
         for fields in ({"name": ""}, {"api_model": "bad\nname"}, {"profile": "bad"},
                        {"aliases": "alias"}, {"aliases": [" "]},

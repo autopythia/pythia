@@ -29,6 +29,7 @@ from .codex_auth import CodexAuthUnavailable
 from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import create_default_compactor
+from .compaction import should_auto_compact
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
@@ -468,6 +469,34 @@ async def _turn(
                 "model did not produce a final answer within "
                 f"{args.max_samples} samples"
             )
+        threshold = getattr(model, "auto_compact_context_tokens", None)
+        if (
+            isinstance(threshold, int)
+            and not isinstance(threshold, bool)
+            and threshold > 0
+            and should_auto_compact(context, threshold)
+        ):
+            state.set_phase("compacting")
+            compactor = create_default_compactor(model)
+            compaction = await asyncio.to_thread(
+                compactor.compact,
+                context.copy(),
+                tools=environment.tool_specs,
+            )
+            if not isinstance(compaction, CompactionResult):
+                raise TypeError(
+                    "compactor must return CompactionResult, got "
+                    f"{type(compaction).__name__}"
+                )
+            await _append(
+                context,
+                compaction.context_items(),
+                state,
+                path,
+            )
+            state.displays.extend(compaction.display_items())
+            if state.closing:
+                return
         state.set_phase("sampling")
         try:
             sample = await asyncio.to_thread(

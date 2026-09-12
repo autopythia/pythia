@@ -15,6 +15,9 @@ import unittest
 from unittest import mock
 
 from pythia.interaction import DefaultEnvironment
+from pythia.interaction import CompactionMetadata
+from pythia.interaction import CompactionResult
+from pythia.interaction import ContextPrefix
 from pythia.interaction import DisplayItem
 from pythia.interaction import Environment
 from pythia.interaction import Init
@@ -26,14 +29,17 @@ from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
+from pythia.interaction import SampleMetadata
 from pythia.interaction import SaveError
 from pythia.interaction import Tool
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolOutcome
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
+from pythia.interaction import TokenUsage
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import UserToolCall
 from pythia.interaction import cli
 from pythia.interaction import demo
 from pythia.interaction import load_interaction_save
@@ -507,6 +513,88 @@ class CLIControllerTests(_ControllerTestCase):
                 compaction_count=1,
                 elapsed_seconds=7.25,
             ),
+        )
+
+    async def test_codex_threshold_auto_compacts_before_sampling(self):
+        original = (
+            Init("saved"),
+            Message("user", "old request"),
+            UserInteractionBoundary(),
+            Message("assistant", "old answer"),
+            SampleMetadata(TokenUsage(90, 10, 100, 20)),
+            ModelSampleBoundary(),
+            TurnSummary(
+                input_tokens_sum=90,
+                output_tokens_sum=10,
+                cached_input_tokens_sum=20,
+                cached_input_tokens_max=20,
+                non_cached_input_tokens_sum=70,
+                context_tokens=100,
+                sample_count=1,
+            ),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        model = _Model(self.path, _answer("after auto compact"))
+        model.auto_compact_context_tokens = 100
+        compacted = []
+
+        class Compactor:
+            def compact(inner_self, source, *, tools=()):
+                compacted.append((source.items, tuple(tools)))
+                return CompactionResult(
+                    (ContextPrefix((Message("user", "follow up"),)),),
+                    usage=TokenUsage(100, 5, 105, 50),
+                    protocol="responses_compaction_v2",
+                    elapsed_seconds=3.0,
+                )
+
+        terminal = _Terminal(
+            lambda t, e, s: t.key("c-d") if s == "idle" else None
+        )
+        with mock.patch.object(
+            cli,
+            "create_default_compactor",
+            return_value=Compactor(),
+        ) as create:
+            self.assertEqual(
+                await self._run(
+                    model,
+                    terminal,
+                    ["--resume", "--prompt", "follow up"],
+                ),
+                0,
+            )
+
+        create.assert_called_once_with(model)
+        self.assertEqual(len(compacted), 1)
+        self.assertIn(Message("user", "follow up"), compacted[0][0])
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(model.calls[0][0].model_items(), (
+            Message("user", "follow up"),
+        ))
+        saved = load_interaction_save(self.path)
+        self.assertEqual(
+            len([item for item in saved if isinstance(item, CompactionMetadata)]),
+            1,
+        )
+        self.assertFalse(any(
+            isinstance(item, UserToolCall) and item.call.name == "compact"
+            for item in saved
+        ))
+        summary = saved.items[-1]
+        self.assertIsInstance(summary, TurnSummary)
+        self.assertEqual(summary.input_tokens_sum, 190)
+        self.assertEqual(summary.output_tokens_sum, 15)
+        self.assertEqual(summary.cached_input_tokens_sum, 70)
+        self.assertEqual(summary.non_cached_input_tokens_sum, 120)
+        self.assertEqual(summary.context_tokens, 0)
+        self.assertEqual(summary.sample_count, 2)
+        self.assertEqual(summary.compaction_count, 1)
+        transcript = "\n".join(item.text for item in terminal.items)
+        self.assertIn("[context prefix]", transcript)
+        self.assertIn(
+            "[compaction] protocol=responses_compaction_v2",
+            transcript,
         )
 
     async def test_failure_after_tool_keeps_checkpoint_and_tui_alive(self):

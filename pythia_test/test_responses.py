@@ -356,15 +356,15 @@ class CodexResponsesConstructionTests(unittest.TestCase):
 
     def test_context_token_metadata_respects_model_and_provider_routes(self):
         cases = (
-            ("gpt-5.6-sol", (272_000, 872_000)),
-            ("gpt-5.6-sol-medium", (272_000, 872_000)),
-            ("gpt-5.6-sol-max", (272_000, 872_000)),
-            ("gpt-6-astra", (272_000, 872_000)),
-            ("gpt-6-astra-medium", (272_000, 872_000)),
-            ("gpt-6-astra-max", (272_000, 872_000)),
-            ("muse-spark-1.3", (None, None)),
-            ("gpt-5.6-sol-high", (None, None)),
-            ("unknown-model", (None, None)),
+            ("gpt-5.6-sol", (872_000, 1_000_000, 128_000)),
+            ("gpt-5.6-sol-medium", (872_000, 1_000_000, 128_000)),
+            ("gpt-5.6-sol-max", (872_000, 1_000_000, 128_000)),
+            ("gpt-6-astra", (872_000, 1_000_000, 128_000)),
+            ("gpt-6-astra-medium", (872_000, 1_000_000, 128_000)),
+            ("gpt-6-astra-max", (872_000, 1_000_000, 128_000)),
+            ("muse-spark-1.3", (None, None, None)),
+            ("gpt-5.6-sol-high", (None, None, None)),
+            ("unknown-model", (None, None, None)),
         )
         for api_provider in ("codex", "api"):
             for requested_model, codex_limits in cases:
@@ -383,10 +383,15 @@ class CodexResponsesConstructionTests(unittest.TestCase):
 
                     self.assertEqual(
                         (
-                            model.default_context_tokens,
+                            model.auto_compact_context_tokens,
                             model.max_context_tokens,
+                            model.max_output_tokens,
                         ),
-                        codex_limits if api_provider == "codex" else (None, None),
+                        (
+                            codex_limits
+                            if api_provider == "codex"
+                            else (None, None, None)
+                        ),
                     )
 
     def test_muse_model_uses_meta_responses_endpoint_by_default(self):
@@ -907,7 +912,7 @@ class CodexResponsesModelTests(unittest.TestCase):
 
                 payload = _request_payload(opener)
                 self.assertEqual(payload["model"], expected_model)
-                self.assertNotIn("default_context_tokens", payload)
+                self.assertNotIn("auto_compact_context_tokens", payload)
                 self.assertNotIn("max_context_tokens", payload)
                 if expected_effort is None:
                     self.assertNotIn("reasoning", payload)
@@ -950,7 +955,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 self.assertEqual(payload["model"], "gpt-6-astra")
                 self.assertEqual(payload["reasoning"], expected_reasoning)
                 self.assertEqual(payload["text"], {"verbosity": "low"})
-                self.assertNotIn("default_context_tokens", payload)
+                self.assertNotIn("auto_compact_context_tokens", payload)
                 self.assertNotIn("max_context_tokens", payload)
 
     def test_reasoning_model_aliases_are_not_applied_to_generic_responses(self):

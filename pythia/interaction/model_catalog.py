@@ -1,9 +1,11 @@
 """Static, profile-scoped model facts and Pythia request presets.
 
 This module has no adapter, credential, environment, or network dependencies.
-Limits are metadata, not output budgets. Routes describe defaults, not resolved
-credentials or permission to use account services. Unknown names remain valid
-pass-through candidates for the owning adapter.
+Maximum/output limits are metadata rather than request budgets;
+``auto_compact_context_tokens`` is caller policy consumed by interaction
+frontends and server-compaction configuration. Routes describe defaults, not
+resolved credentials or permission to use account services. Unknown names
+remain valid pass-through candidates for the owning adapter.
 """
 
 from __future__ import annotations
@@ -44,20 +46,31 @@ def _require_identifier(value: object, field_name: str) -> None:
 
 @dataclass(frozen=True)
 class ModelLimits:
-    default_context_tokens: Optional[int] = None
+    """Context policy and known ceilings for one catalogued model."""
+
+    auto_compact_context_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
-        for name in ("default_context_tokens", "max_context_tokens", "max_output_tokens"):
+        for name in (
+            "auto_compact_context_tokens",
+            "max_context_tokens",
+            "max_output_tokens",
+        ):
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or value <= 0
             ):
                 raise ValueError(f"{name} must be a positive integer or None")
-        if (self.default_context_tokens is not None and self.max_context_tokens is not None
-                and self.default_context_tokens > self.max_context_tokens):
-            raise ValueError("default context must not exceed maximum context")
+        if (
+            self.auto_compact_context_tokens is not None
+            and self.max_context_tokens is not None
+            and self.auto_compact_context_tokens > self.max_context_tokens
+        ):
+            raise ValueError(
+                "auto-compact context must not exceed maximum context"
+            )
 
 
 @dataclass(frozen=True)
@@ -144,11 +157,18 @@ _PROFILE_DEFAULT_ROUTES = MappingProxyType({
 })
 
 # Shared immutable facts, inherited by effort presets rather than copied.
-_CODEX_LIMITS = ModelLimits(default_context_tokens=272_000, max_context_tokens=872_000)
+_CODEX_LIMITS = ModelLimits(
+    auto_compact_context_tokens=872_000,
+    max_context_tokens=1_000_000,
+    max_output_tokens=128_000,
+)
 _SOL = ModelSpec(
     profile="codex", name="gpt-5.6-sol", api_model="gpt-5.6-sol", route=_CHATGPT,
     limits=_CODEX_LIMITS, responses=ResponsesDefaults(),
-    source="codex-latest-20260904/codex-rs/models-manager/models.json (context capacities)",
+    source=(
+        "codex-latest-20260904/codex-rs/models-manager/models.json; "
+        "Pythia auto-compaction/max-context policy override"
+    ),
 )
 _ASTRA = replace(
     _SOL, name="gpt-6-astra", api_model="gpt-6-astra",
@@ -162,7 +182,12 @@ _SPARK = ModelSpec(
 )
 _FABLE = ModelSpec(
     profile="messages", name="claude-fable-5-1", api_model="claude-fable-5-1",
-    route=_ANTHROPIC, limits=ModelLimits(max_context_tokens=1_000_000, max_output_tokens=128_000),
+    route=_ANTHROPIC,
+    limits=ModelLimits(
+        auto_compact_context_tokens=872_000,
+        max_context_tokens=1_000_000,
+        max_output_tokens=128_000,
+    ),
     aliases=("claude-fable-5.1",),
     source="https://platform.claude.com/docs/en/models/fable-5-1/overview",
 )

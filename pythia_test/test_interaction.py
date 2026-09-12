@@ -35,6 +35,7 @@ from pythia.interaction import ToolSpec
 from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import should_auto_compact
 from pythia.interaction.experimental_tools import create_inject_user_message_tool
 
 
@@ -72,6 +73,31 @@ def _request_payload(opener, index=0):
 
 
 class ModelContextTests(unittest.TestCase):
+    def test_auto_compaction_uses_latest_uncompacted_sample_usage(self):
+        low = SampleMetadata(TokenUsage(total_tokens=99))
+        high = SampleMetadata(TokenUsage(total_tokens=100))
+        self.assertFalse(
+            should_auto_compact(ModelContext((low,)), 100)
+        )
+        self.assertTrue(
+            should_auto_compact(ModelContext((low, high)), 100)
+        )
+
+        prefix = ContextPrefix((Message("user", "summary"),))
+        compacted = ModelContext((low, high, prefix))
+        self.assertFalse(should_auto_compact(compacted, 100))
+        compacted.append(CompactionMetadata(
+            TokenUsage(total_tokens=101),
+            "responses_compaction_v2",
+        ))
+        self.assertFalse(should_auto_compact(compacted, 100))
+        compacted.append(SampleMetadata(TokenUsage(total_tokens=100)))
+        self.assertTrue(should_auto_compact(compacted, 100))
+
+        for threshold in (True, 0, -1, 1.5):
+            with self.subTest(threshold=threshold), self.assertRaises(ValueError):
+                should_auto_compact(ModelContext(), threshold)
+
     def test_context_is_append_only_and_projects_compaction(self):
         original = [
             Message(role="user", content="old request"),

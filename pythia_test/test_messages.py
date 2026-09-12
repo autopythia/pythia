@@ -159,6 +159,33 @@ class MessagesEndpointTests(unittest.TestCase):
                 server_compaction=object(),
             )
 
+    def test_server_compaction_uses_catalog_auto_compact_threshold(self):
+        policy = MessagesServerCompaction()
+        model = MessagesModel(MessagesEndpoint(
+            api_url="https://api.anthropic.com",
+            model="claude-fable-5-1",
+            api_key="test-key",
+            server_compaction=policy,
+        ))
+
+        payload = model._build_request_payload(
+            ModelContext((Message("user", "Hello."),)),
+            (),
+            None,
+        )
+
+        self.assertEqual(payload["context_management"], {
+            "edits": [{
+                "type": "compact_20260112",
+                "trigger": {
+                    "type": "input_tokens",
+                    "value": 872_000,
+                },
+            }],
+        })
+        self.assertIs(model.endpoint.server_compaction, policy)
+        self.assertIsNone(policy.trigger_input_tokens)
+
 
 class MessagesModelTests(unittest.TestCase):
     def test_encodes_context_tools_options_and_decodes_response(self):

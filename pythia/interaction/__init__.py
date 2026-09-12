@@ -13,6 +13,7 @@ from .compaction import DEFAULT_COMPACTION_PROMPT
 from .compaction import DEFAULT_SUMMARY_PREFIX
 from .compaction import PromptSummarizingCompactor
 from .compaction import create_default_compactor
+from .compaction import should_auto_compact
 from .context import ContextValidationError
 from .context import ModelContext
 from .default_environment import DefaultEnvironment
@@ -189,5 +190,6 @@ __all__ = [
     "load_codex_credentials",
     "load_interaction_save",
     "save_interaction_save",
+    "should_auto_compact",
     "summarize_turn_usage",
 ]
