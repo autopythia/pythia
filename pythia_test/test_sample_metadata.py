@@ -10,7 +10,7 @@ from unittest import mock
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexResponsesModel
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import Message
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
@@ -122,13 +122,13 @@ class SampleMetadataTests(unittest.TestCase):
             self.assertIsNone(restored[1].elapsed_seconds)
             self.assertEqual(restored[2].elapsed_seconds, 12.3456789)
             checkpoint = restored[3]
-            self.assertIsInstance(checkpoint, ContextCompaction)
-            self.assertIsInstance(checkpoint.replacement_items[1], SampleMetadata)
-            self.assertIsNone(checkpoint.replacement_items[1].elapsed_seconds)
-            self.assertEqual(checkpoint.replacement_items[2].elapsed_seconds, 0.0)
+            self.assertIsInstance(checkpoint, ContextPrefix)
+            self.assertIsInstance(checkpoint.prefix_items[1], SampleMetadata)
+            self.assertIsNone(checkpoint.prefix_items[1].elapsed_seconds)
+            self.assertEqual(checkpoint.prefix_items[2].elapsed_seconds, 0.0)
             save_interaction_save(path, restored)
             encoded = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-            for record in (encoded[1], encoded[2], *encoded[3]["replacement_items"][1:]):
+            for record in (encoded[1], encoded[2], *encoded[3]["prefix_items"][1:]):
                 self.assertEqual(record["type"], "sample_metadata")
             self.assertNotIn("elapsed_seconds", encoded[1])
             self.assertEqual(load_interaction_save(path).items, restored.items)
@@ -170,8 +170,8 @@ class SampleMetadataTests(unittest.TestCase):
             context_tokens=25, sample_count=3,
         ))
         self.assertEqual(render_interaction_items((summary,))[0].text,
-                         "[turn] input_sum=60 output_sum=15 cached_sum=12 cached_max=4 "
-                         "cold_sum=48 context=25 samples=3 compactions=0")
+                         "[turn] input_sum=60 output_sum=15 cold_sum=48 "
+                         "cached_sum=12 cached_max=4 context=25 samples=3 compactions=0")
         self.assertEqual(interaction_item_to_dict(summary)["type"], "turn_summary")
         self.assertFalse(hasattr(summary, "elapsed_seconds"))
 

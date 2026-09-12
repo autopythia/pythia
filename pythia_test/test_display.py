@@ -4,7 +4,7 @@ import json
 import unittest
 
 from pythia.interaction import CompactionResult
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import DisplayItem
 from pythia.interaction import EnvironmentResult
 from pythia.interaction import InteractionItemRenderer
@@ -69,8 +69,8 @@ class DisplayItemTests(unittest.TestCase):
 
 class InteractionItemRendererTests(unittest.TestCase):
     def test_messages_reasoning_boundaries_and_compaction(self):
-        checkpoint = ContextCompaction(
-            replacement_items=(
+        checkpoint = ContextPrefix(
+            prefix_items=(
                 Message(role="user", content="summary"),
                 UserInteractionBoundary(),
             )
@@ -142,7 +142,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 "elapsed=1.25s recovery=credential_reload",
                 "[sample] input=20 output=5 total=25 cached=4",
                 "[compaction] opaque checkpoint",
-                "[compaction] context checkpoint (2 replacement items)",
+                "[context prefix] 2 items",
             ),
         )
         self.assertTrue(all(isinstance(item, DisplayItem) for item in rendered))
@@ -163,8 +163,8 @@ class InteractionItemRendererTests(unittest.TestCase):
                 cached_input_tokens=4,
             ),
         )
-        checkpoint = ContextCompaction(
-            replacement_items=(Message(role="user", content="summary"),)
+        checkpoint = ContextPrefix(
+            prefix_items=(Message(role="user", content="summary"),)
         )
         compaction = CompactionResult(items=(checkpoint,))
 
@@ -186,10 +186,7 @@ class InteractionItemRendererTests(unittest.TestCase):
         self.assertEqual(
             compaction.display_items(),
             (
-                DisplayItem(
-                    "[compaction] context checkpoint "
-                    "(1 replacement items)"
-                ),
+                DisplayItem("[context prefix] 1 item"),
             ),
         )
 

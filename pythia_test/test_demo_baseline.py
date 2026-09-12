@@ -266,8 +266,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 "[plan] Updated plan\n[plan] [>] Inspect",
                 "[assistant] Done.",
                 "[sample] input=30 output=6 total=36 cached=10",
-                "[turn] input_sum=50 output_sum=10 cached_sum=15 "
-                "cached_max=10 cold_sum=35 context=36 samples=2 compactions=0",
+                "[turn] input_sum=50 output_sum=10 cold_sum=35 "
+                "cached_sum=15 cached_max=10 context=36 samples=2 compactions=0",
             ),
         )
         restored = load_interaction_save(self.path)
@@ -392,8 +392,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 "[user] Original request.",
                 "[assistant] Previous answer.",
                 "[sample] input=10 output=2 total=12 cached=4",
-                "[turn] input_sum=10 output_sum=2 cached_sum=4 "
-                "cached_max=4 cold_sum=6 context=12 samples=1 compactions=0",
+                "[turn] input_sum=10 output_sum=2 cold_sum=6 "
+                "cached_sum=4 cached_max=4 context=12 samples=1 compactions=0",
             ),
         )
 

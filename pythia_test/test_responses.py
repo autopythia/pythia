@@ -15,7 +15,7 @@ from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
 from pythia.interaction import CompactionError
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import DEFAULT_SUMMARY_PREFIX
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Environment
@@ -523,7 +523,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
             )
 
-    def test_remote_v2_compaction_builds_client_replacement_and_preserves_state(self):
+    def test_remote_v2_compaction_builds_client_prefix_and_preserves_state(self):
         response = _FakeSSEResponse(
             {
                 "type": "response.output_item.done",
@@ -582,8 +582,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             TokenUsage(120, 9, 129, 80),
         )
         checkpoint = result.items[0]
-        self.assertIsInstance(checkpoint, ContextCompaction)
-        self.assertEqual(checkpoint.replacement_items, (
+        self.assertIsInstance(checkpoint, ContextPrefix)
+        self.assertEqual(checkpoint.prefix_items, (
             Instructions("Keep these instructions."),
             Message("user", "First request."),
             Message("user", "Latest request."),
@@ -635,11 +635,11 @@ class CodexResponsesModelTests(unittest.TestCase):
         ).compact(context)
 
         checkpoint = result.items[0]
-        self.assertEqual(checkpoint.replacement_items, (
+        self.assertEqual(checkpoint.prefix_items, (
             Message("user", "new-user"),
             OpaqueCompaction.from_responses("encrypted-checkpoint"),
         ))
-        # Retention affects only the client-built replacement; the server still
+        # Retention affects only the client-built prefix; the server still
         # receives the complete effective source context before the trigger.
         request_text = json.dumps(_request_payload(opener)["input"])
         self.assertIn("old-user", request_text)
@@ -743,7 +743,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             )))
         self.assertEqual(opener.calls, [])
 
-    def test_session_init_owns_codex_session_and_prompt_cache_key(self):
+    def test_init_prefix_id_owns_codex_session_and_prompt_cache_key(self):
         opener = _ScriptedOpener(
             _FakeSSEResponse(
                 _message_event(0, "done"),
@@ -764,7 +764,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         context = ModelContext(
             (
-                Init("session-from-context"),
+                Init(prefix_id="session-from-context"),
                 Message(role="user", content="hello"),
             )
         )

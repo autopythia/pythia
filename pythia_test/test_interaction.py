@@ -8,7 +8,7 @@ import unittest
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CompactionError
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import ContextValidationError
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import DEFAULT_SUMMARY_PREFIX
@@ -76,8 +76,8 @@ class ModelContextTests(unittest.TestCase):
             Message(role="assistant", content="old answer"),
         ]
         context = ModelContext(original)
-        checkpoint = ContextCompaction(
-            replacement_items=(
+        checkpoint = ContextPrefix(
+            prefix_items=(
                 Message(role="user", content="summary"),
             )
         )
@@ -103,17 +103,17 @@ class ModelContextTests(unittest.TestCase):
 
     def test_nested_compaction_is_rejected_without_mutation(self):
         context = ModelContext([Message(role="user", content="hello")])
-        nested = ContextCompaction(
-            replacement_items=(
-                ContextCompaction(
-                    replacement_items=(Message(role="user", content="summary"),)
+        nested = ContextPrefix(
+            prefix_items=(
+                ContextPrefix(
+                    prefix_items=(Message(role="user", content="summary"),)
                 ),
             )
         )
 
         with self.assertRaisesRegex(
             ContextValidationError,
-            "must not contain another ContextCompaction",
+            "must not contain another ContextPrefix",
         ):
             context.append(nested)
 
@@ -152,8 +152,8 @@ class ModelContextTests(unittest.TestCase):
     def test_compaction_projection_preserves_interaction_boundaries(self):
         user_boundary = UserInteractionBoundary()
         sample_boundary = ModelSampleBoundary()
-        checkpoint = ContextCompaction(
-            replacement_items=(
+        checkpoint = ContextPrefix(
+            prefix_items=(
                 Message(role="user", content="retained request"),
                 user_boundary,
                 Message(role="assistant", content="retained answer"),
@@ -1181,10 +1181,10 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(result.usage, usage)
         self.assertEqual(len(result.items), 1)
         checkpoint = result.items[0]
-        self.assertIsInstance(checkpoint, ContextCompaction)
-        assert isinstance(checkpoint, ContextCompaction)
+        self.assertIsInstance(checkpoint, ContextPrefix)
+        assert isinstance(checkpoint, ContextPrefix)
         self.assertEqual(
-            checkpoint.replacement_items,
+            checkpoint.prefix_items,
             (
                 Message(role="system", content="Base instructions."),
                 Message(role="user", content="First request."),
@@ -1202,7 +1202,7 @@ class CompactionTests(unittest.TestCase):
         self.assertIn("CONTEXT CHECKPOINT COMPACTION", temporary_context[-1].content)
 
         context.extend(result.items)
-        self.assertEqual(context.model_items(), checkpoint.replacement_items)
+        self.assertEqual(context.model_items(), checkpoint.prefix_items)
         self.assertEqual(context.items[: len(before)], before)
 
     def test_prompt_compactor_fits_only_temporary_request(self):
@@ -1229,7 +1229,7 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(context.items, before)
         self.assertEqual(len(model.calls), 2)
         self.assertLess(len(model.calls[1][0]), len(model.calls[0][0]))
-        self.assertIsInstance(result.items[0], ContextCompaction)
+        self.assertIsInstance(result.items[0], ContextPrefix)
 
     def test_prompt_compactor_rejects_tool_calls(self):
         model = _ScriptedModel(

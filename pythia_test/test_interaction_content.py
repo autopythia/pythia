@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import Instructions
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
@@ -100,7 +100,7 @@ class InteractionContentTests(unittest.TestCase):
             Instructions(text="Be concise."),
             Message(role="user", content=" \t\n"),
             Reasoning(content="café\n世界", summary=("brief",)),
-            ContextCompaction((
+            ContextPrefix((
                 Instructions(text="Keep this instruction."),
                 Message(role="user", content="summary"),
                 Reasoning(content="", encrypted_content="encrypted-reasoning"),

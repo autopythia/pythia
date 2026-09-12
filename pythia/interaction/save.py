@@ -13,7 +13,7 @@ from typing import Optional
 from typing import Union
 
 from .context import ModelContext
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -55,10 +55,14 @@ _ITEM_TYPES = {
     TurnSummary: "turn_summary",
     UserInteractionBoundary: "user_interaction_boundary",
     OpaqueCompaction: "opaque_compaction",
-    ContextCompaction: "context_compaction",
+    ContextPrefix: "context_prefix",
 }
 # Accept legacy records on read; new saves use only the canonical types above.
-_ITEM_TYPE_NAMES = frozenset(_ITEM_TYPES.values()) | {"session_init", "turn_metadata"}
+_ITEM_TYPE_NAMES = frozenset(_ITEM_TYPES.values()) | {
+    "context_compaction",
+    "session_init",
+    "turn_metadata",
+}
 
 
 def _item_type_name(item: InteractionItem) -> str:
@@ -83,7 +87,7 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     elif isinstance(item, Message):
         encoded.update(role=item.role, content=item.content)
     elif isinstance(item, Init):
-        encoded["session_id"] = item.session_id
+        encoded["prefix_id"] = item.prefix_id
         if item.model is not None:
             encoded["model"] = item.model
     elif isinstance(item, Reasoning):
@@ -105,11 +109,11 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             success=item.success,
         )
     elif isinstance(item, OpaqueCompaction):
-        encoded.update(protocol=item.protocol, payload=item.payload)
-    elif isinstance(item, ContextCompaction):
-        encoded["replacement_items"] = [
+        encoded.update(payload=item.payload, protocol=item.protocol)
+    elif isinstance(item, ContextPrefix):
+        encoded["prefix_items"] = [
             interaction_item_to_dict(nested)
-            for nested in item.replacement_items
+            for nested in item.prefix_items
         ]
     elif isinstance(item, SampleMetadata):
         encoded["usage"] = {
@@ -118,12 +122,6 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             "total_tokens": item.usage.total_tokens,
             "cached_input_tokens": item.usage.cached_input_tokens,
         }
-        if item.elapsed_seconds is not None:
-            encoded["elapsed_seconds"] = item.elapsed_seconds
-        if item.request_attempts != 1:
-            encoded["request_attempts"] = item.request_attempts
-        if item.recovery:
-            encoded["recovery"] = list(item.recovery)
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -132,6 +130,12 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             value = getattr(item, field_name)
             if value is not None:
                 encoded[field_name] = value
+        if item.elapsed_seconds is not None:
+            encoded["elapsed_seconds"] = item.elapsed_seconds
+        if item.request_attempts != 1:
+            encoded["request_attempts"] = item.request_attempts
+        if item.recovery:
+            encoded["recovery"] = list(item.recovery)
     elif isinstance(item, ModelFailure):
         for field_name in (
             "category",
@@ -148,18 +152,19 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             "error_code",
             "attempt_count",
             "event_count",
+            "event_types",
             "completed_item_count",
             "last_event_type",
             "last_sequence_number",
+            "recovery",
             "elapsed_seconds",
         ):
             value = getattr(item, field_name)
-            if value is not None:
+            if field_name in {"event_types", "recovery"}:
+                if value:
+                    encoded[field_name] = list(value)
+            elif value is not None:
                 encoded[field_name] = value
-        if item.recovery:
-            encoded["recovery"] = list(item.recovery)
-        if item.event_types:
-            encoded["event_types"] = list(item.event_types)
     elif isinstance(item, TurnSummary):
         encoded.update(
             input_tokens_sum=item.input_tokens_sum,
@@ -209,6 +214,19 @@ def _require_content(mapping: Mapping[str, Any], item_type: str) -> str:
                 f"{item_type}.content and {item_type}.text must match"
             )
     return content
+
+
+def _require_init_prefix_id(mapping: Mapping[str, Any]) -> str:
+    """Read the canonical prefix ID or its legacy session ID spelling."""
+    if "prefix_id" not in mapping and "session_id" in mapping:
+        return _require_string(mapping["session_id"], "init.session_id")
+
+    prefix_id = _require_string(mapping.get("prefix_id"), "init.prefix_id")
+    if "session_id" in mapping:
+        session_id = _require_string(mapping["session_id"], "init.session_id")
+        if prefix_id != session_id:
+            raise SaveError("init.prefix_id and init.session_id must match")
+    return prefix_id
 
 
 def _optional_string(
@@ -270,10 +288,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         )
     if item_type in {"init", "session_init"}:
         return Init(
-            session_id=_require_string(
-                mapping.get("session_id"),
-                "init.session_id",
-            ),
+            prefix_id=_require_init_prefix_id(mapping),
             model=_optional_string(mapping, "model", "init.model"),
         )
     if item_type == "reasoning":
@@ -344,15 +359,35 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
             ),
             protocol=protocol,
         )
-    if item_type == "context_compaction":
-        replacement = mapping.get("replacement_items")
-        if not isinstance(replacement, list):
-            raise SaveError(
-                "context_compaction.replacement_items must be a list"
-            )
-        return ContextCompaction(
-            tuple(interaction_item_from_dict(item) for item in replacement)
+    if item_type in {"context_prefix", "context_compaction"}:
+        key = (
+            "prefix_items"
+            if "prefix_items" in mapping or "replacement_items" not in mapping
+            else "replacement_items"
         )
+        prefix = mapping.get(key)
+        if not isinstance(prefix, list):
+            raise SaveError(
+                f"{item_type}.{key} must be a list"
+            )
+        prefix_items = tuple(
+            interaction_item_from_dict(item) for item in prefix
+        )
+        if key == "prefix_items" and "replacement_items" in mapping:
+            replacement = mapping["replacement_items"]
+            if not isinstance(replacement, list):
+                raise SaveError(
+                    f"{item_type}.replacement_items must be a list"
+                )
+            replacement_items = tuple(
+                interaction_item_from_dict(item) for item in replacement
+            )
+            if prefix_items != replacement_items:
+                raise SaveError(
+                    f"{item_type}.prefix_items and "
+                    f"{item_type}.replacement_items must match"
+                )
+        return ContextPrefix(prefix_items)
     if item_type in {"sample_metadata", "turn_metadata"}:
         usage = mapping.get("usage")
         if not isinstance(usage, Mapping):
@@ -571,7 +606,6 @@ def save_interaction_save(path: SavePath, context: ModelContext) -> None:
                     json.dumps(
                         encoded,
                         ensure_ascii=False,
-                        sort_keys=True,
                     )
                 )
                 temporary.write("\n")

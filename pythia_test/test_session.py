@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 import json
 import sys
 import tempfile
@@ -7,9 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import DefaultEnvironment
 from pythia.interaction import Init
+from pythia.interaction import Instructions
 from pythia.interaction import Message
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelFailure
@@ -24,6 +26,8 @@ from pythia.interaction import ToolResult
 from pythia.interaction import SampleMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import UserToolCall
+from pythia.interaction import UserToolResult
 from pythia.interaction import interaction_item_from_dict
 from pythia.interaction import interaction_item_to_dict
 from pythia.interaction import load_interaction_save
@@ -32,6 +36,154 @@ from pythia.interaction.demo import run_repository_summary
 
 
 class SessionTests(unittest.TestCase):
+    def test_serialized_item_fields_follow_dataclass_order(self):
+        call = ToolCall(name="lookup", call_id="call-1", arguments_json="{}")
+        result = ToolResult(call_id="call-1", output="done", success=False)
+        items = (
+            Init(prefix_id="prefix-1", model="model-1"),
+            Instructions(text="instructions"),
+            Message(role="user", content="message"),
+            Reasoning(
+                content="reasoning",
+                summary=("summary",),
+                encrypted_content="encrypted",
+                content_signature="signature",
+            ),
+            call,
+            result,
+            UserToolCall(call),
+            UserToolResult(result),
+            ModelSampleBoundary(),
+            UserInteractionBoundary(),
+            SampleMetadata(
+                usage=TokenUsage(1, 2, 3, 1),
+                provider_session_id="provider-session",
+                provider_turn_id="provider-turn",
+                provider_turn_state="provider-state",
+                elapsed_seconds=1.25,
+                request_attempts=2,
+                recovery=("credential_reload",),
+            ),
+            ModelFailure(
+                category="http_error",
+                message="request failed",
+                provider="responses",
+                model="model-1",
+                auth_source="codex_file",
+                http_status=503,
+                request_id="request-1",
+                response_id="response-1",
+                cf_ray="ray-1",
+                authorization_error="authorization-error",
+                auth_error_code="auth-code",
+                error_code="error-code",
+                attempt_count=2,
+                event_count=3,
+                event_types=("response.created:1",),
+                completed_item_count=1,
+                last_event_type="response.output_item.done",
+                last_sequence_number=4,
+                recovery=("http_503_retry",),
+                elapsed_seconds=2.5,
+            ),
+            TurnSummary(),
+            OpaqueCompaction(payload="opaque", protocol="responses"),
+            ContextPrefix(
+                prefix_items=(Message(role="user", content="summary"),)
+            ),
+        )
+
+        for item in items:
+            with self.subTest(item_type=type(item).__name__):
+                encoded = interaction_item_to_dict(item)
+                expected = [
+                    "type",
+                    *(field.name for field in fields(item) if field.name in encoded),
+                ]
+                self.assertEqual(list(encoded), expected)
+
+        metadata = interaction_item_to_dict(items[10])
+        self.assertEqual(
+            list(metadata["usage"]),
+            [field.name for field in fields(TokenUsage)],
+        )
+
+    def test_jsonl_writer_preserves_item_field_order(self):
+        context = ModelContext((Init(prefix_id="prefix-1", model="model-1"),))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "interaction.jsonl"
+            save_interaction_save(path, context)
+            serialized = path.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            serialized,
+            '{"type": "init", "prefix_id": "prefix-1", "model": "model-1"}\n',
+        )
+
+    def test_init_uses_prefix_id_without_changing_generated_id_format(self):
+        init = Init(prefix_id="prefix-test")
+
+        self.assertEqual(init.prefix_id, "prefix-test")
+        self.assertFalse(hasattr(init, "session_id"))
+        self.assertRegex(Init().prefix_id, r"^session_[0-9a-f]{32}$")
+
+    def test_context_prefix_uses_prefix_items_and_canonical_codec(self):
+        checkpoint = ContextPrefix(
+            prefix_items=[Message(role="user", content="summary")]
+        )
+
+        self.assertEqual(
+            checkpoint.prefix_items,
+            (Message(role="user", content="summary"),),
+        )
+        self.assertFalse(hasattr(checkpoint, "replacement_items"))
+        self.assertEqual(
+            interaction_item_to_dict(checkpoint),
+            {
+                "type": "context_prefix",
+                "prefix_items": [
+                    {"type": "message", "role": "user", "content": "summary"}
+                ],
+            },
+        )
+
+    def test_legacy_context_compaction_forms_load_as_context_prefix(self):
+        for field_name in ("replacement_items", "prefix_items"):
+            with self.subTest(field_name=field_name):
+                restored = interaction_item_from_dict({
+                    "type": "context_compaction",
+                    field_name: [
+                        {"type": "message", "role": "user", "content": "summary"}
+                    ],
+                })
+
+                self.assertEqual(
+                    restored,
+                    ContextPrefix(
+                        prefix_items=(Message(role="user", content="summary"),)
+                    ),
+                )
+                canonical = interaction_item_to_dict(restored)
+                self.assertEqual(canonical["type"], "context_prefix")
+                self.assertIn("prefix_items", canonical)
+                self.assertNotIn("replacement_items", canonical)
+
+    def test_compaction_rejects_conflicting_item_spellings(self):
+        with self.assertRaisesRegex(
+            SaveError,
+            "prefix_items and context_compaction.replacement_items must match",
+        ):
+            interaction_item_from_dict({
+                "type": "context_compaction",
+                "prefix_items": [
+                    {"type": "message", "role": "user", "content": "new"}
+                ],
+                "replacement_items": [
+                    {"type": "message", "role": "user", "content": "old"}
+                ],
+            })
+
     def test_atomic_save_failures_preserve_previous_log_and_remove_temporary_file(self):
         for failure in ("tempfile.NamedTemporaryFile", "os.fsync", "os.replace"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmpdir:
@@ -64,7 +216,7 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(
             first_record,
-            {"type": "init", "session_id": "session-test", "model": "initial-model"},
+            {"type": "init", "prefix_id": "session-test", "model": "initial-model"},
         )
         self.assertEqual(restored.items, context.items)
         self.assertNotIn(restored.items[0], restored.model_items())
@@ -89,9 +241,31 @@ class SessionTests(unittest.TestCase):
             save_interaction_save(path, restored)
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8").splitlines()[0]),
-                {"type": "init", "session_id": "legacy-session"},
+                {"type": "init", "prefix_id": "legacy-session"},
             )
             self.assertEqual(load_interaction_save(path).items, restored.items)
+
+    def test_legacy_init_session_id_loads_as_prefix_id(self):
+        restored = interaction_item_from_dict(
+            {"type": "init", "session_id": "legacy-session"}
+        )
+
+        self.assertEqual(restored, Init(prefix_id="legacy-session"))
+        self.assertEqual(
+            interaction_item_to_dict(restored),
+            {"type": "init", "prefix_id": "legacy-session"},
+        )
+
+    def test_init_rejects_conflicting_id_spellings(self):
+        with self.assertRaisesRegex(
+            SaveError,
+            "prefix_id and init.session_id must match",
+        ):
+            interaction_item_from_dict({
+                "type": "init",
+                "prefix_id": "new-value",
+                "session_id": "old-value",
+            })
 
     def test_legacy_session_init_validates_fields(self):
         for session_id in (None, 123, True):
@@ -99,6 +273,14 @@ class SessionTests(unittest.TestCase):
                 with self.assertRaisesRegex(SaveError, "session_id must be a string"):
                     interaction_item_from_dict(
                         {"type": "session_init", "session_id": session_id}
+                    )
+
+    def test_init_validates_prefix_id_field(self):
+        for prefix_id in (None, 123, True):
+            with self.subTest(prefix_id=prefix_id):
+                with self.assertRaisesRegex(SaveError, "prefix_id must be a string"):
+                    interaction_item_from_dict(
+                        {"type": "init", "prefix_id": prefix_id}
                     )
 
     def test_session_init_must_be_first_and_not_compacted(self):
@@ -112,7 +294,7 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not contain"):
             ModelContext(
                 (
-                    ContextCompaction(
+                    ContextPrefix(
                         (Init("session-test"),)
                     ),
                 )
@@ -199,7 +381,7 @@ class SessionTests(unittest.TestCase):
             ),
             OpaqueCompaction.from_responses("opaque"),
             OpaqueCompaction.from_messages("summary"),
-            ContextCompaction(
+            ContextPrefix(
                 (
                     Message(role="user", content="summary"),
                     UserInteractionBoundary(),

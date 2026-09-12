@@ -9,7 +9,7 @@ from typing import Tuple
 from typing import Union
 from typing import overload
 
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -98,30 +98,30 @@ def _validate_tool_sequence(
     return pending_calls
 
 
-def _validate_compaction_replacement(
-    replacement_items: Sequence[InteractionItem],
+def _validate_context_prefix(
+    prefix_items: Sequence[InteractionItem],
 ) -> Tuple[InteractionItem, ...]:
-    replacement = tuple(replacement_items)
-    for index, item in enumerate(replacement):
-        _validate_item(item, f"replacement_items[{index}]")
+    prefix = tuple(prefix_items)
+    for index, item in enumerate(prefix):
+        _validate_item(item, f"prefix_items[{index}]")
         if isinstance(item, (UserToolCall, UserToolResult)):
-            raise ContextValidationError("user tools cannot appear in compaction replacements")
+            raise ContextValidationError("user tools cannot appear in context prefixes")
         if isinstance(item, ModelFailure):
             raise ContextValidationError(
-                "model failures cannot appear in compaction replacements"
+                "model failures cannot appear in context prefixes"
             )
-        if isinstance(item, ContextCompaction):
+        if isinstance(item, ContextPrefix):
             raise ContextValidationError(
-                "ContextCompaction replacement_items must not contain "
-                "another ContextCompaction"
+                "ContextPrefix prefix_items must not contain "
+                "another ContextPrefix"
             )
         if isinstance(item, Init):
             raise ContextValidationError(
-                "ContextCompaction replacement_items must not contain "
+                "ContextPrefix prefix_items must not contain "
                 "Init"
             )
-    _validate_tool_sequence(replacement, allow_pending=False)
-    return replacement
+    _validate_tool_sequence(prefix, allow_pending=False)
+    return prefix
 
 
 def _project_items(
@@ -129,10 +129,10 @@ def _project_items(
 ) -> Tuple[InteractionItem, ...]:
     active: List[InteractionItem] = []
     for item in items:
-        if isinstance(item, ContextCompaction):
+        if isinstance(item, ContextPrefix):
             _validate_tool_sequence(active, allow_pending=False)
             active = list(
-                _validate_compaction_replacement(item.replacement_items)
+                _validate_context_prefix(item.prefix_items)
             )
         else:
             active.append(item)
@@ -166,8 +166,8 @@ def _validate_log(items: Sequence[InteractionItem]) -> None:
             raise ContextValidationError(
                 "Init must be the first interaction item"
             )
-        if isinstance(item, ContextCompaction):
-            _validate_compaction_replacement(item.replacement_items)
+        if isinstance(item, ContextPrefix):
+            _validate_context_prefix(item.prefix_items)
     _project_items(items)
 
 

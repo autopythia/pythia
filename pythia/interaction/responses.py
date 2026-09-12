@@ -38,7 +38,7 @@ from .compaction import _leading_instruction_prefix
 from .compaction import _select_retained_user_messages
 from .context import ContextValidationError
 from .context import ModelContext
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -471,9 +471,9 @@ def _encode_context_items(
             )
             continue
 
-        if isinstance(item, ContextCompaction):
+        if isinstance(item, ContextPrefix):
             raise ModelConfigurationError(
-                "ContextCompaction must be projected before request encoding"
+                "ContextPrefix must be projected before request encoding"
             )
 
         raise ModelConfigurationError(
@@ -573,7 +573,7 @@ def _resolve_provider_state(
     items = context.items
     session_init = items[0] if items else None
     if isinstance(session_init, Init):
-        session_id = session_init.session_id
+        session_id = session_init.prefix_id
         persist_session_id = False
     else:
         session_id = _latest_metadata_value(
@@ -2071,7 +2071,7 @@ class CodexResponsesModel:
 
 
 class ResponsesOpaqueCompactor:
-    """Remote Responses V2 compactor with client-built replacement history."""
+    """Remote Responses V2 compactor with client-built prefix history."""
 
     def __init__(
         self,
@@ -2133,8 +2133,8 @@ class ResponsesOpaqueCompactor:
             user_messages,
             self._retained_user_message_tokens,
         )
-        checkpoint = ContextCompaction(
-            replacement_items=(
+        checkpoint = ContextPrefix(
+            prefix_items=(
                 *instruction_prefix,
                 *retained_users,
                 remote.item,

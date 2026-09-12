@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
 
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import Instructions
 from pythia.interaction import MESSAGES_COMPACTION_BETA
 from pythia.interaction import Message
@@ -168,7 +168,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
     def test_caching_composes_with_compaction_without_changing_the_log(self):
         for checkpoint in (
             OpaqueCompaction.from_messages("Summary."),
-            ContextCompaction((Instructions("Be concise."), Message("user", "Summary."))),
+            ContextPrefix((Instructions("Be concise."), Message("user", "Summary."))),
         ):
             with self.subTest(checkpoint=checkpoint):
                 context = ModelContext((

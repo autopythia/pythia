@@ -34,7 +34,7 @@ from .default_environment import DefaultEnvironment
 from .display import DisplayItem
 from .display import render_interaction_items
 from .environment import Environment
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -264,10 +264,10 @@ def _compaction_failure_output(exc: BaseException) -> str:
 
 def _compaction_success_output(result: CompactionResult) -> str:
     checkpoint = result.items[0]
-    assert isinstance(checkpoint, ContextCompaction)
+    assert isinstance(checkpoint, ContextPrefix)
     opaque = any(
         isinstance(item, OpaqueCompaction)
-        for item in checkpoint.replacement_items
+        for item in checkpoint.prefix_items
     )
     mode = "a remote opaque checkpoint" if opaque else "a prompt summary checkpoint"
     output = f"Context compacted using {mode}."
@@ -542,7 +542,7 @@ async def _turn(
 
 def _ends_with_completed_manual_compaction(context: ModelContext) -> bool:
     items = context.items
-    if len(items) < 3 or not isinstance(items[-1], ContextCompaction):
+    if len(items) < 3 or not isinstance(items[-1], ContextPrefix):
         return False
     result = items[-2]
     call = items[-3]
@@ -556,7 +556,7 @@ def _ends_with_completed_manual_compaction(context: ModelContext) -> bool:
 
 
 def _resume_notice(context: ModelContext) -> Optional[str]:
-    # Inspect the raw tail, not a compaction's replacement model context.
+    # Inspect the raw tail, not the model context established by a ContextPrefix.
     # A sample boundary does not record stop_reason or turn completion.
     if _ends_with_completed_manual_compaction(context):
         return None
@@ -568,8 +568,10 @@ def _resume_notice(context: ModelContext) -> Optional[str]:
             continue
         if isinstance(item, (TurnSummary, Init)):
             return None
-        if isinstance(item, (OpaqueCompaction, ContextCompaction)):
+        if isinstance(item, OpaqueCompaction):
             tail = "a compaction checkpoint"
+        elif isinstance(item, ContextPrefix):
+            tail = "a context-prefix checkpoint"
         elif isinstance(item, ToolResult):
             tail = "tool results"
         elif isinstance(item, Message) and item.role == "user":

@@ -20,7 +20,7 @@ from typing import Tuple
 
 from .context import ContextValidationError
 from .context import ModelContext
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -262,9 +262,9 @@ def _encode_context_messages(
                 "Chat Completions cannot encode OpaqueCompaction"
             )
 
-        if isinstance(item, ContextCompaction):
+        if isinstance(item, ContextPrefix):
             raise ModelConfigurationError(
-                "ContextCompaction must be projected before request encoding"
+                "ContextPrefix must be projected before request encoding"
             )
 
         raise ModelConfigurationError(

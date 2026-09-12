@@ -34,7 +34,7 @@ def _validate_elapsed_seconds(value: object) -> Optional[float]:
     return elapsed
 
 
-def _fresh_session_id() -> str:
+def _fresh_prefix_id() -> str:
     return f"session_{uuid.uuid4().hex}"
 
 
@@ -42,15 +42,15 @@ def _fresh_session_id() -> str:
 class Init:
     """Durable identity established before an interaction begins."""
 
-    session_id: str = field(default_factory=_fresh_session_id)
+    prefix_id: str = field(default_factory=_fresh_prefix_id)
     model: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.model is not None:
             _require_string(self.model, "model", allow_empty=False)
-        _require_string(self.session_id, "session_id", allow_empty=False)
-        if "\r" in self.session_id or "\n" in self.session_id:
-            raise ValueError("session_id must not contain newlines")
+        _require_string(self.prefix_id, "prefix_id", allow_empty=False)
+        if "\r" in self.prefix_id or "\n" in self.prefix_id:
+            raise ValueError("prefix_id must not contain newlines")
 
 
 @dataclass(frozen=True)
@@ -393,8 +393,9 @@ def summarize_turn_usage(items) -> "TurnSummary":
     warm per sample is ``min(cached, input)``, cold is ``max(0, input-warm)``.
     ``context_tokens`` tracks the last sample's ``total_tokens`` (contradex
     ``total_usage_tokens`` semantics: current window, not a sum).
-    ``compaction_count`` counts ``OpaqueCompaction``/``ContextCompaction``
-    markers. ``TurnSummary`` items in the input are skipped.
+    ``compaction_count`` counts ``OpaqueCompaction``/``ContextPrefix``
+    markers. A context prefix counts here because compaction is currently its
+    only producer. ``TurnSummary`` items in the input are skipped.
 
     Pass the raw log (``context.items``) for session-cumulative stats, or a
     slice after the last ``UserInteractionBoundary`` for per-turn stats.
@@ -419,7 +420,7 @@ def summarize_turn_usage(items) -> "TurnSummary":
             non_cached_input_tokens_sum += cold
             context_tokens = usage.total_tokens
             sample_count += 1
-        elif isinstance(item, (OpaqueCompaction, ContextCompaction)):
+        elif isinstance(item, (OpaqueCompaction, ContextPrefix)):
             compaction_count += 1
         elif isinstance(item, TurnSummary):
             continue
@@ -463,11 +464,18 @@ class OpaqueCompaction:
 
 
 @dataclass(frozen=True)
-class ContextCompaction:
-    replacement_items: Tuple["InteractionItem", ...]
+class ContextPrefix:
+    """Establish a new model-visible prefix at this point in the log.
+
+    Earlier effective items are replaced by ``prefix_items``. Items appended
+    after this interaction item follow that prefix. The underlying interaction
+    log remains append-only.
+    """
+
+    prefix_items: Tuple["InteractionItem", ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "replacement_items", tuple(self.replacement_items))
+        object.__setattr__(self, "prefix_items", tuple(self.prefix_items))
 
 
 InteractionItem = Union[
@@ -485,7 +493,7 @@ InteractionItem = Union[
     TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
-    ContextCompaction,
+    ContextPrefix,
 ]
 
 INTERACTION_ITEM_TYPES = (
@@ -503,7 +511,7 @@ INTERACTION_ITEM_TYPES = (
     TurnSummary,
     UserInteractionBoundary,
     OpaqueCompaction,
-    ContextCompaction,
+    ContextPrefix,
 )
 
 
@@ -512,7 +520,7 @@ def is_interaction_item(value: object) -> bool:
 
 
 __all__ = [
-    "ContextCompaction",
+    "ContextPrefix",
     "Instructions",
     "InteractionItem",
     "Message",

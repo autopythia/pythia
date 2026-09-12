@@ -7,7 +7,7 @@ import unittest
 import weakref
 from unittest import mock
 
-from pythia.interaction import ContextCompaction
+from pythia.interaction import ContextPrefix
 from pythia.interaction import DefaultEnvironment
 from pythia.interaction import Environment
 from pythia.interaction import Init
@@ -71,8 +71,8 @@ class CLIRecoveryTests(_ControllerTestCase):
             ((OpaqueCompaction.from_messages("secret messages checkpoint"),
               ModelSampleBoundary()), "compaction checkpoint"),
             ((OpaqueCompaction.from_responses("secret responses checkpoint"),), "compaction checkpoint"),
-            ((ContextCompaction((Message("assistant", "replacement, not transcript"),)),),
-             "compaction checkpoint"),
+            ((ContextPrefix((Message("assistant", "replacement, not transcript"),)),),
+             "context-prefix checkpoint"),
             ((Instructions("changed"),), "instructions update"),
             ((Reasoning("thinking"), ModelSampleBoundary()), "incomplete model output"),
         )

@@ -12,7 +12,7 @@ from typing import Tuple
 
 from .context import ContextValidationError
 from .context import ModelContext
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import InteractionItem
 from .items import Instructions
 from .items import Message
@@ -60,9 +60,9 @@ class CompactionResult:
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
-        if len(items) != 1 or not isinstance(items[0], ContextCompaction):
+        if len(items) != 1 or not isinstance(items[0], ContextPrefix):
             raise CompactionError(
-                "compaction result must contain exactly one ContextCompaction"
+                "compaction result must contain exactly one ContextPrefix"
             )
         try:
             ModelContext(items)
@@ -321,13 +321,13 @@ class PromptSummarizingCompactor:
             role="user",
             content=f"{self._summary_prefix}\n{summary_text.strip()}",
         )
-        replacement_items = (
+        prefix_items = (
             *instruction_prefix,
             *retained_users,
             summary_message,
         )
-        checkpoint = ContextCompaction(
-            replacement_items=tuple(replacement_items),
+        checkpoint = ContextPrefix(
+            prefix_items=tuple(prefix_items),
         )
         return CompactionResult(
             items=(checkpoint,),

@@ -12,7 +12,7 @@ from unittest import mock
 
 from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
-    CodexResponsesModel, CompactionError, CompactionResult, ContextCompaction,
+    CodexResponsesModel, CompactionError, CompactionResult, ContextPrefix,
     ContextValidationError, Environment,
     Instructions, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
     ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, Init,
@@ -138,7 +138,7 @@ class UserToolValueTests(unittest.TestCase):
             (result,), (call, model_result), (model_call, result),
             (call, call), (call, Message("user", "early")),
             (call, result, call), (model_call, call),
-            (ContextCompaction((call, result)),),
+            (ContextPrefix((call, result)),),
         ):
             with self.subTest(items=items), self.assertRaises(ContextValidationError):
                 ModelContext(items)
@@ -574,7 +574,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 persisted = load_interaction_save(self.path)
                 observations.append((source.items, tuple(tools), persisted.items))
                 return CompactionResult(
-                    items=(ContextCompaction((
+                    items=(ContextPrefix((
                         Message("user", "retained request"),
                         OpaqueCompaction.from_responses("private checkpoint"),
                     )),),
@@ -589,7 +589,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 submitted = True
                 t.submit("/compact")
             elif status == "idle" and submitted and self.path.exists():
-                if isinstance(load_interaction_save(self.path).items[-1], ContextCompaction):
+                if isinstance(load_interaction_save(self.path).items[-1], ContextPrefix):
                     t.key("c-d")
 
         terminal = _Terminal(frame)
@@ -613,10 +613,10 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, UserToolResult)
         self.assertTrue(result.result.success)
         self.assertEqual(result.result.call_id, call.call.call_id)
-        self.assertIsInstance(checkpoint, ContextCompaction)
+        self.assertIsInstance(checkpoint, ContextPrefix)
         self.assertIn("remote opaque checkpoint", result.result.output)
         self.assertIn("input=100", result.result.output)
-        self.assertEqual(saved.model_items(), checkpoint.replacement_items)
+        self.assertEqual(saved.model_items(), checkpoint.prefix_items)
         self.assertFalse(any(
             isinstance(item, (UserToolCall, UserToolResult))
             for item in saved.model_items()
@@ -630,7 +630,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         transcript = "\n".join(item.text for item in terminal.items)
         self.assertIn("[user-tool-call] compact", transcript)
         self.assertIn("[user-tool-ret]  compact", transcript)
-        self.assertIn("[compaction] context checkpoint", transcript)
+        self.assertIn("[context prefix]", transcript)
         self.assertNotIn("private checkpoint", transcript)
         self.assertIsNone(cli._resume_notice(saved))
 
@@ -720,7 +720,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 submitted = True
                 t.submit("/compact")
             elif status == "idle" and submitted and observed:
-                if isinstance(load_interaction_save(self.path).items[-1], ContextCompaction):
+                if isinstance(load_interaction_save(self.path).items[-1], ContextPrefix):
                     t.key("c-d")
 
         self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
@@ -737,7 +737,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         )
         saved = load_interaction_save(self.path)
         self.assertEqual(tuple(type(item) for item in saved.items[-3:]), (
-            UserToolCall, UserToolResult, ContextCompaction,
+            UserToolCall, UserToolResult, ContextPrefix,
         ))
         self.assertEqual(saved.model_items(), (
             Message("user", "retain this request"),
@@ -778,7 +778,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(saved.items[-1], UserToolResult)
         self.assertFalse(saved.items[-1].result.success)
         self.assertIn("invalid remote checkpoint", saved.items[-1].result.output)
-        self.assertFalse(any(isinstance(item, ContextCompaction) for item in saved))
+        self.assertFalse(any(isinstance(item, ContextPrefix) for item in saved))
         self.assertEqual(saved.model_items(), ModelContext(original).model_items())
         self.assertEqual(model.calls, [])
 
@@ -802,7 +802,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saved.items[-1].result.success)
         self.assertIn("was not rerun", saved.items[-1].result.output)
         self.assertIn("no durable compaction checkpoint", saved.items[-1].result.output)
-        self.assertFalse(any(isinstance(item, ContextCompaction) for item in saved))
+        self.assertFalse(any(isinstance(item, ContextPrefix) for item in saved))
 
     async def test_compact_result_checkpoint_save_failure_is_not_rerun(self):
         original = (
@@ -814,13 +814,13 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.args.resume = True
         model = _Model(self.path)
         compactor = mock.Mock()
-        compactor.compact.return_value = CompactionResult((ContextCompaction((
+        compactor.compact.return_value = CompactionResult((ContextPrefix((
             Message("user", "summary"),
         )),))
         real_save = save_interaction_save
 
         def fail_checkpoint(path, context):
-            if any(isinstance(item, ContextCompaction) for item in context):
+            if any(isinstance(item, ContextPrefix) for item in context):
                 raise OSError("disk failed")
             real_save(path, context)
 
@@ -842,7 +842,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interrupted.items[:-1], original)
         self.assertIsInstance(interrupted.items[-1], UserToolCall)
         self.assertEqual(interrupted.pending_user_tool_calls(), (interrupted.items[-1],))
-        self.assertFalse(any(isinstance(item, ContextCompaction) for item in interrupted))
+        self.assertFalse(any(isinstance(item, ContextPrefix) for item in interrupted))
 
         # Startup closes the pending audit record but cannot infer or recreate
         # the checkpoint that failed to persist.
@@ -853,7 +853,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         recovered = load_interaction_save(self.path)
         self.assertIsInstance(recovered.items[-1], UserToolResult)
         self.assertFalse(recovered.items[-1].result.success)
-        self.assertFalse(any(isinstance(item, ContextCompaction) for item in recovered))
+        self.assertFalse(any(isinstance(item, ContextPrefix) for item in recovered))
 
     async def test_compact_without_an_active_model_is_a_recorded_failure(self):
         submitted = False
@@ -878,7 +878,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("authentication needed", saved.items[-1].result.output.lower())
         self.assertEqual(saved.model_items(), ())
 
-    async def test_follow_up_queued_after_compact_uses_only_replacement_context(self):
+    async def test_follow_up_queued_after_compact_uses_only_prefix_context(self):
         original = (
             Init("old"),
             Message("assistant", "discarded old answer"),
@@ -888,7 +888,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.args.resume = True
         model = _Model(self.path, _answer("answer after compact"))
         compactor = mock.Mock()
-        compactor.compact.return_value = CompactionResult((ContextCompaction((
+        compactor.compact.return_value = CompactionResult((ContextPrefix((
             Message("user", "compacted state"),
         )),))
         submitted = False
@@ -910,7 +910,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(Message("user", "follow up"), materialized)
         self.assertNotIn(Message("assistant", "discarded old answer"), materialized)
         self.assertFalse(any(
-            isinstance(item, (UserToolCall, UserToolResult, ContextCompaction))
+            isinstance(item, (UserToolCall, UserToolResult, ContextPrefix))
             for item in materialized
         ))
         saved = load_interaction_save(self.path)

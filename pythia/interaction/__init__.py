@@ -26,7 +26,7 @@ from .environment import Tool
 from .environment import ToolHandler
 from .environment import ToolOutcome
 from .environment import ToolSpec
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -107,7 +107,7 @@ __all__ = [
     "CompactionError",
     "CompactionResult",
     "Compactor",
-    "ContextCompaction",
+    "ContextPrefix",
     "ContextValidationError",
     "DefaultEnvironment",
     "DEFAULT_ANTHROPIC_VERSION",

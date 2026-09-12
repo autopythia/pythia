@@ -14,7 +14,7 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
-from .items import ContextCompaction
+from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
@@ -188,10 +188,11 @@ class InteractionItemRenderer:
                 blocks = ()
             elif isinstance(item, OpaqueCompaction):
                 blocks = ("[compaction] opaque checkpoint",)
-            elif isinstance(item, ContextCompaction):
+            elif isinstance(item, ContextPrefix):
+                item_count = len(item.prefix_items)
+                noun = "item" if item_count == 1 else "items"
                 blocks = (
-                    "[compaction] context checkpoint "
-                    f"({len(item.replacement_items)} replacement items)",
+                    f"[context prefix] {item_count} {noun}",
                 )
             else:
                 raise TypeError(
@@ -407,15 +408,15 @@ def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
 
 def _render_turn_summary(item: TurnSummary) -> Tuple[str, ...]:
     # Contradex-style end-of-turn aggregate: warm = cached, cold = non-cached.
-    # Keep field-order stable for tests: input/output sums, warm sum/max,
-    # cold sum, context window, sample/compaction counts.
+    # Keep field-order stable for tests: input/output sums, cold sum,
+    # warm sum/max, context window, sample/compaction counts.
     return (
         "[turn] "
         f"input_sum={item.input_tokens_sum} "
         f"output_sum={item.output_tokens_sum} "
+        f"cold_sum={item.non_cached_input_tokens_sum} "
         f"cached_sum={item.cached_input_tokens_sum} "
         f"cached_max={item.cached_input_tokens_max} "
-        f"cold_sum={item.non_cached_input_tokens_sum} "
         f"context={item.context_tokens} "
         f"samples={item.sample_count} "
         f"compactions={item.compaction_count}",
