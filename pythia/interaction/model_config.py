@@ -24,6 +24,17 @@ from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 DEFAULT_SAVE_PATH = Path("interaction.jsonl")
 
 
+def _boolean_argument(value: str) -> bool:
+    if not isinstance(value, str):
+        raise argparse.ArgumentTypeError("expected True or False")
+    normalized = value.casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected True or False")
+
+
 def _save_path_argument(value: str) -> Path:
     # Validate before Path("") can turn an empty argument into the current dir.
     if not value.strip() or "\x00" in value or value == "-":
@@ -219,6 +230,18 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--messages-compaction-instructions")
     parser.add_argument("--cwd", default=".")
+    parser.add_argument(
+        "--enable-workspace",
+        nargs="?",
+        const=True,
+        default=True,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "restrict exec_command workdir and apply_patch paths to --cwd; "
+            "a bare flag means True (default: %(default)s)"
+        ),
+    )
     parser.add_argument(
         "--max-samples",
         type=int,

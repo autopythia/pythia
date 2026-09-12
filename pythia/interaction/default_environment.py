@@ -25,6 +25,7 @@ class DefaultEnvironment(Environment):
         cwd: Union[str, Path] = ".",
         *,
         shell: Optional[str] = None,
+        enable_workspace: bool = True,
         enable_exec_command: bool = True,
         enable_write_stdin: bool = True,
         enable_apply_patch: bool = True,
@@ -33,6 +34,7 @@ class DefaultEnvironment(Environment):
         extra_tools: Iterable[Tool] = (),
     ) -> None:
         for field_name, value in (
+            ("enable_workspace", enable_workspace),
             ("enable_exec_command", enable_exec_command),
             ("enable_write_stdin", enable_write_stdin),
             ("enable_apply_patch", enable_apply_patch),
@@ -43,7 +45,11 @@ class DefaultEnvironment(Environment):
 
         extra_tools = tuple(extra_tools)
         root = Path(cwd).expanduser().resolve()
-        self._command_runtime = CommandRuntime(root, shell=shell)
+        self._command_runtime = CommandRuntime(
+            root,
+            shell=shell,
+            enable_workspace=enable_workspace,
+        )
         self._plan_store = PlanStore(on_update=on_plan_update)
         self._closed = False
 
@@ -55,7 +61,12 @@ class DefaultEnvironment(Environment):
         if enable_update_plan:
             tools.append(create_update_plan_tool(self._plan_store))
         if enable_apply_patch:
-            tools.append(create_apply_patch_tool(root))
+            tools.append(
+                create_apply_patch_tool(
+                    root,
+                    enable_workspace=enable_workspace,
+                )
+            )
         try:
             super().__init__(tools=(*tools, *extra_tools))
         except Exception:

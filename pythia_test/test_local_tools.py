@@ -983,6 +983,80 @@ class DefaultEnvironmentTests(unittest.TestCase):
                     ("exec_command", "update_plan"),
                 )
 
+    def test_disabled_workspace_allows_external_workdir_and_patch_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            absolute_target = outside / "absolute.txt"
+            parent_target = root / "parent.txt"
+
+            with DefaultEnvironment(
+                cwd=workspace,
+                enable_workspace=False,
+            ) as environment:
+                command = _execute(
+                    environment,
+                    "exec_command",
+                    "external-command",
+                    {
+                        "cmd": "pwd",
+                        "workdir": "../outside",
+                        "yield_time_ms": 1_000,
+                    },
+                )
+                patch = _execute(
+                    environment,
+                    "apply_patch",
+                    "external-patch",
+                    {
+                        "patch": "\n".join((
+                            "*** Begin Patch",
+                            f"*** Add File: {absolute_target}",
+                            "+absolute",
+                            "*** Add File: ../parent.txt",
+                            "+parent",
+                            "*** End Patch",
+                        ))
+                    },
+                )
+                patch_spec = next(
+                    spec
+                    for spec in environment.tool_specs
+                    if spec.name == "apply_patch"
+                )
+
+            self.assertTrue(command.success)
+            self.assertIn(str(outside), command.output)
+            self.assertTrue(patch.success)
+            self.assertEqual(
+                absolute_target.read_text(encoding="utf-8"),
+                "absolute\n",
+            )
+            self.assertEqual(parent_target.read_text(encoding="utf-8"), "parent\n")
+            self.assertIn(
+                "absolute paths within the workspace",
+                patch_spec.description,
+            )
+
+    def test_workspace_flags_require_real_booleans(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for value in (None, 0, 1, "False"):
+                with self.subTest(constructor="DefaultEnvironment", value=value):
+                    with self.assertRaisesRegex(TypeError, "enable_workspace"):
+                        DefaultEnvironment(tmpdir, enable_workspace=value)
+                with self.subTest(constructor="CommandRuntime", value=value):
+                    with self.assertRaisesRegex(TypeError, "enable_workspace"):
+                        CommandRuntime(tmpdir, enable_workspace=value)
+                with self.subTest(constructor="apply_patch", value=value):
+                    with self.assertRaisesRegex(TypeError, "enable_workspace"):
+                        create_apply_patch_tool(
+                            tmpdir,
+                            enable_workspace=value,
+                        )
+
 
 class _ScriptedRepositoryModel:
     def __init__(self):

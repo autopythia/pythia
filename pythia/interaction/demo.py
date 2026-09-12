@@ -333,6 +333,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "trusted model and workspace.",
         file=sys.stderr,
     )
+    if not args.enable_workspace:
+        print(
+            "Warning: workspace path restrictions are disabled; "
+            "exec_command workdir and apply_patch paths may resolve "
+            "outside --cwd.",
+            file=sys.stderr,
+        )
     try:
         save_path = resolve_save_path(args.save_path)
         if prompt is None and (not args.resume or not save_path.exists()):
@@ -349,7 +356,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.experimental_user_message_injection
             else ()
         )
-        with DefaultEnvironment(cwd=cwd, extra_tools=extra_tools) as environment:
+        with DefaultEnvironment(
+            cwd=cwd,
+            enable_workspace=args.enable_workspace,
+            extra_tools=extra_tools,
+        ) as environment:
             run(
                 model,
                 environment,

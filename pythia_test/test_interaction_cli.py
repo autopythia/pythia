@@ -190,11 +190,36 @@ for module in (cli, demo):
             ["--model-api", "codex", "--model", "gpt-6-astra", "--resume",
              "--prompt", "/quit\nA literal query", "--instructions", "",
              "--max-samples", "3", "--max-tokens", "77", "--cwd", "work",
-             "--save", "chosen.jsonl"],
+             "--save", "chosen.jsonl", "--enable-workspace=False"],
         ):
             demo_args = vars(demo._build_parser().parse_args(argv))
             self.assertFalse(demo_args.pop("experimental_user_message_injection"))
             self.assertEqual(vars(cli._build_parser().parse_args(argv)), demo_args)
+
+    def test_workspace_argument_accepts_bare_and_explicit_booleans(self):
+        cases = (
+            ((), True),
+            (("--enable-workspace",), True),
+            (("--enable-workspace=True",), True),
+            (("--enable-workspace=False",), False),
+            (("--enable-workspace", "false"), False),
+        )
+        for frontend in (cli, demo):
+            for argv, expected in cases:
+                with self.subTest(frontend=frontend.__name__, argv=argv):
+                    args = frontend._build_parser().parse_args(argv)
+                    self.assertIs(args.enable_workspace, expected)
+
+    def test_workspace_argument_rejects_other_boolean_spellings(self):
+        for frontend in (cli, demo):
+            for value in ("", "0", "1", "yes", "no", "enabled"):
+                with self.subTest(frontend=frontend.__name__, value=value):
+                    with mock.patch("sys.stderr", new=io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            frontend._build_parser().parse_args([
+                                f"--enable-workspace={value}",
+                            ])
+                    self.assertEqual(raised.exception.code, 2)
 
     def test_user_message_experiment_is_demo_only(self):
         with mock.patch("sys.stderr", new=io.StringIO()):
@@ -212,6 +237,44 @@ for module in (cli, demo):
         model.assert_not_called()
         environment.assert_not_called()
         save.assert_not_called()
+
+    def test_main_forwards_disabled_workspace_policy(self):
+        terminal_stream = SimpleNamespace(isatty=lambda: True)
+        context_manager = mock.MagicMock()
+        selected_environment = object()
+        context_manager.__enter__.return_value = selected_environment
+
+        def skip_run(coroutine):
+            coroutine.close()
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            with mock.patch.object(cli.sys, "stdin", terminal_stream):
+                with mock.patch.object(cli.sys, "stdout", terminal_stream):
+                    with mock.patch.object(cli, "build_model", return_value=object()):
+                        with mock.patch.object(
+                            cli,
+                            "DefaultEnvironment",
+                            return_value=context_manager,
+                        ) as environment:
+                            with mock.patch.object(cli, "PosixTerminal"):
+                                with mock.patch.object(
+                                    cli.asyncio,
+                                    "run",
+                                    side_effect=skip_run,
+                                ):
+                                    result = cli.main([
+                                        "--cwd", str(root),
+                                        "--save", str(root / "session.jsonl"),
+                                        "--enable-workspace=False",
+                                    ])
+
+        self.assertEqual(result, 0)
+        environment.assert_called_once_with(
+            cwd=root,
+            enable_workspace=False,
+        )
 
     def test_module_help_works_without_a_tty(self):
         result = subprocess.run(
@@ -476,6 +539,25 @@ class CLIControllerTests(_ControllerTestCase):
                 self.assertEqual(context.items[1:], (
                     Message("user", "fresh"), UserInteractionBoundary(),
                 ))
+
+    async def test_disabled_workspace_policy_is_warned(self):
+        terminal = _Terminal(
+            lambda terminal, editor, status: (
+                terminal.key("c-d") if status == "idle" else None
+            )
+        )
+        model = _Model(self.path, _answer())
+
+        self.assertEqual(await self._run(
+            model,
+            terminal,
+            ["--prompt", "fresh", "--enable-workspace=False"],
+        ), 0)
+
+        self.assertTrue(any(
+            "workspace path restrictions are disabled" in item.text
+            for item in terminal.items
+        ))
 
     async def test_completed_resume_does_not_repeat_answer_or_summary(self):
         original = (Init("saved"), Message("assistant", "previous"),

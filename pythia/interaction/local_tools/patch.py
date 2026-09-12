@@ -408,16 +408,21 @@ def _parse_patch(patch_text: str) -> Tuple[_PatchOperation, ...]:
     return _parse_unified_patch(patch_text)
 
 
-def _resolve_workspace_path(root: Path, raw_path: str) -> Path:
+def _resolve_workspace_path(
+    root: Path,
+    raw_path: str,
+    *,
+    enable_workspace: bool,
+) -> Path:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError("apply_patch path must not be empty")
     path = Path(raw_path)
-    if ".." in path.parts:
+    if enable_workspace and ".." in path.parts:
         raise ValueError(f"apply_patch path escapes workspace: {raw_path}")
 
     candidate = path if path.is_absolute() else root.joinpath(path)
     resolved = candidate.resolve(strict=False)
-    if resolved != root and root not in resolved.parents:
+    if enable_workspace and resolved != root and root not in resolved.parents:
         raise ValueError(f"apply_patch path escapes workspace: {raw_path}")
     return candidate
 
@@ -425,13 +430,23 @@ def _resolve_workspace_path(root: Path, raw_path: str) -> Path:
 def _resolve_operations(
     root: Path,
     operations: Tuple[_PatchOperation, ...],
+    *,
+    enable_workspace: bool,
 ) -> Tuple[_ResolvedOperation, ...]:
     resolved = []
     for operation in operations:
-        source = _resolve_workspace_path(root, operation.path)
+        source = _resolve_workspace_path(
+            root,
+            operation.path,
+            enable_workspace=enable_workspace,
+        )
         destination = None
         if operation.move_to is not None:
-            destination = _resolve_workspace_path(root, operation.move_to)
+            destination = _resolve_workspace_path(
+                root,
+                operation.move_to,
+                enable_workspace=enable_workspace,
+            )
         resolved.append(
             _ResolvedOperation(
                 kind=operation.kind,
@@ -648,9 +663,18 @@ def _commit_staged(
         raise
 
 
-def _apply_patch_text(workspace_root: Path, patch_text: str) -> str:
+def _apply_patch_text(
+    workspace_root: Path,
+    patch_text: str,
+    *,
+    enable_workspace: bool,
+) -> str:
     operations = _parse_patch(patch_text)
-    resolved = _resolve_operations(workspace_root, operations)
+    resolved = _resolve_operations(
+        workspace_root,
+        operations,
+        enable_workspace=enable_workspace,
+    )
     staged, changes = _stage_operations(resolved)
     originals = _snapshot_originals(staged)
     _commit_staged(staged, originals)
@@ -660,6 +684,7 @@ def _apply_patch_text(workspace_root: Path, patch_text: str) -> str:
 def create_apply_patch_tool(
     workspace_root: Union[str, Path],
     *,
+    enable_workspace: bool = True,
     timeout_seconds: Optional[float] = None,
 ) -> Tool:
     root = Path(workspace_root).expanduser().resolve()
@@ -667,6 +692,8 @@ def create_apply_patch_tool(
         raise ValueError(f"workspace_root does not exist: {root}")
     if not root.is_dir():
         raise ValueError(f"workspace_root is not a directory: {root}")
+    if not isinstance(enable_workspace, bool):
+        raise TypeError("enable_workspace must be a bool")
     apply_lock = Lock()
 
     def apply_patch(
@@ -681,7 +708,13 @@ def create_apply_patch_tool(
         if not isinstance(patch_text, str) or not patch_text.strip():
             raise ValueError("apply_patch requires a non-empty patch string")
         with apply_lock:
-            return ToolOutcome(output=_apply_patch_text(root, patch_text))
+            return ToolOutcome(
+                output=_apply_patch_text(
+                    root,
+                    patch_text,
+                    enable_workspace=enable_workspace,
+                )
+            )
 
     return Tool(
         spec=ToolSpec(

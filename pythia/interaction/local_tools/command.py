@@ -114,6 +114,7 @@ class CommandRuntime:
         cwd: Union[str, Path] = ".",
         *,
         shell: Optional[str] = None,
+        enable_workspace: bool = True,
         default_exec_yield_time_ms: int = 10_000,
         default_write_yield_time_ms: int = 250,
         default_max_output_tokens: Optional[int] = 4_000,
@@ -129,6 +130,8 @@ class CommandRuntime:
             not isinstance(shell, str) or not shell.strip()
         ):
             raise ValueError("shell must not be empty")
+        if not isinstance(enable_workspace, bool):
+            raise TypeError("enable_workspace must be a bool")
         selected_shell = shell if shell is not None else _detect_default_shell()
         resolved_shell = shutil.which(selected_shell)
         if resolved_shell is None:
@@ -136,6 +139,7 @@ class CommandRuntime:
 
         self.cwd = root
         self.shell = resolved_shell
+        self._enable_workspace = enable_workspace
         self.default_exec_yield_time_ms = _require_nonnegative_integer(
             default_exec_yield_time_ms,
             "default_exec_yield_time_ms",
@@ -187,7 +191,11 @@ class CommandRuntime:
         if not candidate.is_absolute():
             candidate = self.cwd / candidate
         resolved = candidate.resolve()
-        if resolved != self.cwd and self.cwd not in resolved.parents:
+        if (
+            self._enable_workspace
+            and resolved != self.cwd
+            and self.cwd not in resolved.parents
+        ):
             raise ValueError(f"workdir escapes configured cwd: {value}")
         if not resolved.is_dir():
             raise ValueError(f"workdir is not a directory: {value}")

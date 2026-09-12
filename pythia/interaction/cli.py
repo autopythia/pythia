@@ -785,6 +785,12 @@ async def _run(
     state.notice(
         "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
     )
+    if not args.enable_workspace:
+        state.notice(
+            "Warning: workspace path restrictions are disabled; "
+            "exec_command workdir and apply_patch paths may resolve "
+            "outside --cwd."
+        )
     worker = None
     frame = 0
     with terminal:
@@ -863,7 +869,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise
             model = None
         cwd = Path(args.cwd).expanduser().resolve()
-        with DefaultEnvironment(cwd=cwd) as environment:
+        with DefaultEnvironment(
+            cwd=cwd,
+            enable_workspace=args.enable_workspace,
+        ) as environment:
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(model, environment, terminal, args, path=save_path))
     except Exception as exc:

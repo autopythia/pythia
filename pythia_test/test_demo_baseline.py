@@ -45,6 +45,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "messages_pause_after_compaction": False,
     "messages_compaction_instructions": None,
     "cwd": ".",
+    "enable_workspace": True,
     "max_samples": None,
     "max_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -199,6 +200,29 @@ class DemoStartupBaselineTests(unittest.TestCase):
         ):
             self.assertEqual(context.items, checkpoint.items)
         return status, model, printed
+
+    def test_workspace_flag_is_forwarded_and_warned(self):
+        with mock.patch.object(
+            demo,
+            "DefaultEnvironment",
+            wraps=demo.DefaultEnvironment,
+        ) as environment:
+            status, _model, printed = self._run_demo([
+                "--cwd", str(self.workspace),
+                "--enable-workspace=False",
+                "--prompt", "No restricted workdir.",
+            ])
+
+        self.assertEqual(status, 0)
+        environment.assert_called_once_with(
+            cwd=self.workspace,
+            enable_workspace=False,
+            extra_tools=(),
+        )
+        self.assertTrue(any(
+            "workspace path restrictions are disabled" in text
+            for text in printed
+        ))
 
     def test_one_shot_default_query_is_still_injected(self):
         status, model, _printed = self._run_demo()
