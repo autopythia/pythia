@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -106,6 +107,18 @@ def run(
         raise ValueError("max_samples must be a positive integer or None")
     if options is not None and not isinstance(options, SamplingOptions):
         raise TypeError("options must be SamplingOptions or None")
+    enable_auto_compaction = (
+        enable_auto_compaction
+        and (
+            options is None
+            or options.enable_auto_compaction is not False
+        )
+    )
+    if not enable_auto_compaction:
+        options = replace(
+            options or SamplingOptions(),
+            enable_auto_compaction=False,
+        )
 
     resumed_existing_save = False
     if resume and Path(save_path).exists():
@@ -327,8 +340,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cwd = Path(args.cwd).expanduser().resolve()
     prompt = args.prompt
     options = (
-        SamplingOptions(max_tokens=args.max_tokens)
-        if args.max_tokens is not None
+        SamplingOptions(
+            max_tokens=args.max_tokens,
+            enable_auto_compaction=(
+                False if not args.enable_auto_compaction else None
+            ),
+        )
+        if args.max_tokens is not None or not args.enable_auto_compaction
         else None
     )
 

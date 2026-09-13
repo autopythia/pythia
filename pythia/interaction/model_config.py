@@ -73,19 +73,6 @@ def supports_account_services(args: argparse.Namespace) -> bool:
 
 
 def build_model(args: argparse.Namespace) -> Model:
-    messages_compaction_options_requested = any(
-        (
-            args.messages_server_compaction,
-            args.messages_compaction_trigger_tokens is not None,
-            args.messages_pause_after_compaction,
-            args.messages_compaction_instructions is not None,
-        )
-    )
-    if args.model_api != "messages" and messages_compaction_options_requested:
-        raise ValueError(
-            "Messages compaction options require --model-api messages"
-        )
-
     if args.model_api == "chat-completions":
         if args.codex_home is not None or args.codex_auth_file is not None:
             raise ValueError(
@@ -109,29 +96,10 @@ def build_model(args: argparse.Namespace) -> Model:
         if args.model is None or not args.model.strip():
             raise ValueError("--model is required with --model-api messages")
         compaction_options = (
-            MessagesServerCompaction(
-                trigger_input_tokens=(
-                    args.messages_compaction_trigger_tokens
-                ),
-                pause_after_compaction=(
-                    args.messages_pause_after_compaction
-                ),
-                instructions=args.messages_compaction_instructions,
-            )
-            if args.messages_server_compaction
+            MessagesServerCompaction()
+            if args.enable_auto_compaction
             else None
         )
-        if compaction_options is None and any(
-            (
-                args.messages_compaction_trigger_tokens is not None,
-                args.messages_pause_after_compaction,
-                args.messages_compaction_instructions is not None,
-            )
-        ):
-            raise ValueError(
-                "Messages compaction options require "
-                "--messages-server-compaction"
-            )
         route = get_model_route("messages", args.model)
         endpoint = MessagesEndpoint(
             api_url=args.api_url or route.api_url,
@@ -215,25 +183,6 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--codex-home")
     parser.add_argument("--codex-auth-file")
-    parser.add_argument(
-        "--messages-server-compaction",
-        action="store_true",
-        help="enable Anthropic Messages server-side compaction",
-    )
-    parser.add_argument(
-        "--messages-compaction-trigger-tokens",
-        type=int,
-        help=(
-            "server compaction threshold (minimum 50000; defaults to the known "
-            "model auto-compaction threshold, otherwise the server default)"
-        ),
-    )
-    parser.add_argument(
-        "--messages-pause-after-compaction",
-        action="store_true",
-        help="pause and resample after the server creates a compaction block",
-    )
-    parser.add_argument("--messages-compaction-instructions")
     parser.add_argument("--cwd", default=".")
     parser.add_argument(
         "--enable-auto-compaction",
@@ -243,8 +192,8 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         type=_boolean_argument,
         metavar="{False,True}",
         help=(
-            "automatically compact before sampling when the latest context "
-            "reaches the model threshold; a bare flag means True "
+            "enable automatic remote compaction (Responses threshold triggers "
+            "and Messages server edits); a bare flag means True "
             "(default: %(default)s)"
         ),
     )

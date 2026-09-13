@@ -186,6 +186,28 @@ class MessagesEndpointTests(unittest.TestCase):
         self.assertIs(model.endpoint.server_compaction, policy)
         self.assertIsNone(policy.trigger_input_tokens)
 
+        disabled = model._build_request_payload(
+            ModelContext((Message("user", "Hello."),)),
+            (),
+            SamplingOptions(enable_auto_compaction=False),
+        )
+        self.assertNotIn("context_management", disabled)
+
+        response = _FakeResponse({
+            "type": "message",
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Done."}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        })
+        opener = _Opener(response)
+        MessagesModel(model.endpoint, opener=opener).sample(
+            ModelContext((Message("user", "Hello."),)),
+            options=SamplingOptions(enable_auto_compaction=False),
+        )
+        request, _ = opener.calls[0]
+        self.assertIsNone(request.get_header("Anthropic-beta"))
+
 
 class MessagesModelTests(unittest.TestCase):
     def test_encodes_context_tools_options_and_decodes_response(self):
@@ -702,48 +724,36 @@ class MessagesDemoTests(unittest.TestCase):
         )
         self.assertNotIn("secret-key", repr(model.endpoint))
 
-    def test_demo_builds_server_compaction_options(self):
-        args = _build_parser().parse_args(
-            [
-                "--model-api",
-                "messages",
-                "--model",
-                "claude-sonnet-5",
-                "--messages-server-compaction",
-                "--messages-compaction-trigger-tokens",
-                "200000",
-                "--messages-pause-after-compaction",
-                "--messages-compaction-instructions",
-                "Keep implementation state.",
-            ]
-        )
-
-        model = _build_model(args)
+    def test_auto_compaction_flag_configures_messages_server_policy(self):
+        base = [
+            "--model-api",
+            "messages",
+            "--model",
+            "claude-sonnet-5",
+        ]
+        enabled = _build_model(_build_parser().parse_args(base))
+        disabled = _build_model(_build_parser().parse_args([
+            *base,
+            "--enable-auto-compaction=False",
+        ]))
 
         self.assertEqual(
-            model.endpoint.server_compaction,
-            MessagesServerCompaction(
-                trigger_input_tokens=200_000,
-                pause_after_compaction=True,
-                instructions="Keep implementation state.",
-            ),
+            enabled.endpoint.server_compaction,
+            MessagesServerCompaction(),
         )
+        self.assertIsNone(disabled.endpoint.server_compaction)
 
-        missing_enable = _build_parser().parse_args(
-            [
-                "--model-api",
-                "messages",
-                "--model",
-                "claude-sonnet-5",
-                "--messages-compaction-trigger-tokens",
-                "200000",
-            ]
-        )
-        with self.assertRaisesRegex(
-            ValueError,
+        for removed in (
             "--messages-server-compaction",
+            "--messages-compaction-trigger-tokens=200000",
+            "--messages-pause-after-compaction",
+            "--messages-compaction-instructions=value",
         ):
-            _build_model(missing_enable)
+            with self.subTest(removed=removed):
+                with mock.patch("sys.stderr", new=io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        _build_parser().parse_args([*base, removed])
+                self.assertEqual(raised.exception.code, 2)
 
     def test_demo_continues_after_paused_compaction(self):
         class Model:

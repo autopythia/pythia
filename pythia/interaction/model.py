@@ -98,6 +98,8 @@ class SamplingOptions:
     top_p: Optional[float] = None
     stop: Tuple[str, ...] = ()
     seed: Optional[int] = None
+    # Host/provider context-management control, never a sampling wire field.
+    enable_auto_compaction: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.max_tokens is not None:
@@ -131,6 +133,13 @@ class SamplingOptions:
             isinstance(self.seed, bool) or not isinstance(self.seed, int)
         ):
             raise TypeError("seed must be an integer or None")
+        if self.enable_auto_compaction is not None and not isinstance(
+            self.enable_auto_compaction,
+            bool,
+        ):
+            raise TypeError(
+                "enable_auto_compaction must be a bool or None"
+            )
 
 
 @dataclass(frozen=True)

@@ -224,8 +224,7 @@ class AuthConfigurationTests(unittest.TestCase):
             with self.assertRaises(CodexAuthUnavailable):
                 build_model(cli._build_parser().parse_args(argv))
             for extra in (["--api-url", "not-a-url"], ["--request-timeout-seconds", "nan"],
-                          ["--messages-server-compaction"], ["--api-key", "secret"],
-                          ["--codex-home", ""]):
+                          ["--api-key", "secret"], ["--codex-home", ""]):
                 with self.subTest(extra=extra):
                     with self.assertRaises(ValueError) as error:
                         build_model(cli._build_parser().parse_args([*argv, *extra]))

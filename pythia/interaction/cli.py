@@ -770,8 +770,14 @@ async def _run(
 ) -> int:
     path = Path(path).absolute()
     options = (
-        SamplingOptions(max_tokens=args.max_tokens)
-        if args.max_tokens is not None else None
+        SamplingOptions(
+            max_tokens=args.max_tokens,
+            enable_auto_compaction=(
+                False if not args.enable_auto_compaction else None
+            ),
+        )
+        if args.max_tokens is not None or not args.enable_auto_compaction
+        else None
     )
     prompt = args.prompt or ""
     state = _UIState(

@@ -23,6 +23,7 @@ from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import ModelTimeoutError
 from pythia.interaction import SampleMetadata
 from pythia.interaction import SaveError
+from pythia.interaction import SamplingOptions
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
 from pythia.interaction import TurnSummary
@@ -53,6 +54,19 @@ _BAD_NUMBERS = (-1, -0.1, float("nan"), float("inf"), -float("inf"), 10**1000)
 
 
 class SampleMetadataTests(unittest.TestCase):
+    def test_sampling_auto_compaction_override_is_optional_boolean(self):
+        for value in (None, False, True):
+            self.assertIs(
+                SamplingOptions(enable_auto_compaction=value).enable_auto_compaction,
+                value,
+            )
+        for value in (0, 1, "false", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                TypeError,
+                "enable_auto_compaction",
+            ):
+                SamplingOptions(enable_auto_compaction=value)
+
     def test_elapsed_validation_and_unknown_default(self):
         for item_type, fields in (
             (SampleMetadata, {"usage": _USAGE}),
@@ -351,10 +365,12 @@ class SampleMetadataTests(unittest.TestCase):
 
             def __init__(self):
                 self.contexts = []
+                self.options = []
 
             def sample(self, context, *, tools=(), options=None):
-                del tools, options
+                del tools
                 self.contexts.append(context.copy())
+                self.options.append(options)
                 return ModelSample((Message("assistant", "Done."),))
 
         model = Model()
@@ -393,6 +409,10 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(answer, "Done.")
         compactor.compact.assert_called_once()
         self.assertEqual(len(model.contexts), 1)
+        self.assertEqual(
+            model.options,
+            [None],
+        )
         self.assertEqual(model.contexts[0].model_items(), (
             Message("user", "follow up"),
         ))
@@ -407,10 +427,12 @@ class SampleMetadataTests(unittest.TestCase):
 
             def __init__(self):
                 self.contexts = []
+                self.options = []
 
             def sample(self, context, *, tools=(), options=None):
-                del tools, options
+                del tools
                 self.contexts.append(context.copy())
+                self.options.append(options)
                 return ModelSample((Message("assistant", "Done."),))
 
         model = Model()
@@ -437,6 +459,10 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(answer, "Done.")
         create.assert_not_called()
         self.assertEqual(len(model.contexts), 1)
+        self.assertEqual(
+            model.options,
+            [SamplingOptions(enable_auto_compaction=False)],
+        )
         self.assertIn(
             Message("assistant", "uncompacted"),
             model.contexts[0].model_items(),

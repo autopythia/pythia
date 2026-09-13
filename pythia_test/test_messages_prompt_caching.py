@@ -263,7 +263,8 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
         for frontend in (cli, demo):
             for flags in (
                 [],
-                ["--messages-server-compaction"],
+                ["--enable-auto-compaction"],
+                ["--enable-auto-compaction=False"],
                 ["--resume"],
                 ["--api-url", "http://localhost"],
             ):
@@ -276,7 +277,11 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
                     self.assertEqual(model.endpoint.prompt_caching.ttl, "5m")
                     self.assertEqual(
                         model.endpoint.server_compaction,
-                        MessagesServerCompaction() if args.messages_server_compaction else None,
+                        (
+                            MessagesServerCompaction()
+                            if args.enable_auto_compaction
+                            else None
+                        ),
                     )
                     payload = model._build_request_payload(
                         ModelContext((Message("user", "Hello."),)), (), None,

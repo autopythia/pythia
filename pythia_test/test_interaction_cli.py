@@ -727,6 +727,10 @@ class CLIControllerTests(_ControllerTestCase):
 
         create.assert_not_called()
         self.assertEqual(len(model.calls), 1)
+        self.assertEqual(
+            model.calls[0][2],
+            SamplingOptions(enable_auto_compaction=False),
+        )
         self.assertIn(
             Message("assistant", "uncompacted answer"),
             model.calls[0][0].model_items(),

@@ -798,7 +798,10 @@ class MessagesModel:
                 self.endpoint.prompt_caching.request_cache_control()
             )
         compaction = self.endpoint.server_compaction
-        if compaction is not None:
+        enable_auto_compaction = (
+            options is None or options.enable_auto_compaction is not False
+        )
+        if compaction is not None and enable_auto_compaction:
             auto_compact_context = (
                 None
                 if spec is None
@@ -843,7 +846,7 @@ class MessagesModel:
             "Content-Type": "application/json",
             "User-Agent": "pythia-interaction/0.1",
         }
-        if self.endpoint.server_compaction is not None:
+        if "context_management" in payload:
             headers["Anthropic-Beta"] = MESSAGES_COMPACTION_BETA
         if self.endpoint.api_key is not None:
             headers["X-API-Key"] = self.endpoint.api_key
