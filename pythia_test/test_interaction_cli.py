@@ -23,7 +23,7 @@ from pythia.interaction import Environment
 from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
@@ -504,7 +504,7 @@ class CLIControllerTests(_ControllerTestCase):
         call = ToolCall("missing", "pending", "{}")
         original = (Init("resumed"), Instructions("old"), Message("user", "old"),
                     UserInteractionBoundary(), call, ModelSampleBoundary())
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/quit") if s == "idle" else None)
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(
@@ -525,7 +525,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_resume_without_query_marks_pending_calls_unrecoverable_and_waits(self):
         original = (Init("saved"), Message("user", "original"),
                     UserInteractionBoundary(), ToolCall("missing", "pending", "{}"))
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
@@ -540,7 +540,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_instructions_only_resume_samples_without_a_new_user_message(self):
         original = (Init("saved"), Instructions("old"),
                     Message("assistant", "previous"), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(
@@ -554,7 +554,7 @@ class CLIControllerTests(_ControllerTestCase):
                 if resume:
                     self.path.unlink()
                 else:
-                    save_interaction_save(self.path, ModelContext((Init("old"),)))
+                    save_interaction_save(self.path, InteractionContext((Init("old"),)))
                 terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
                 model = _Model(self.path, _answer())
                 argv = ["--prompt", "fresh"] + (["--resume"] if resume else [])
@@ -591,7 +591,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_completed_resume_does_not_repeat_answer_or_summary(self):
         original = (Init("saved"), Message("assistant", "previous"),
                     ModelSampleBoundary(), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/exit") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
@@ -644,7 +644,7 @@ class CLIControllerTests(_ControllerTestCase):
                 sample_count=1,
             ),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("after auto compact"))
         model.auto_compact_context_tokens = 100
         compacted = []
@@ -716,7 +716,7 @@ class CLIControllerTests(_ControllerTestCase):
             ModelSampleBoundary(),
             TurnSummary(sample_count=1, context_tokens=100),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("done"))
         model.auto_compact_context_tokens = 100
         terminal = _Terminal(

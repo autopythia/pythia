@@ -13,7 +13,7 @@ from typing import Sequence
 from typing import TYPE_CHECKING
 from typing import Tuple
 
-from .context import ModelContext
+from .context import InteractionContext
 from .items import InteractionItem
 from .items import Message
 from .items import ModelFailure
@@ -271,7 +271,7 @@ def _timed_sample(method: Callable[..., ModelSample]) -> Callable[..., ModelSamp
 class Model(Protocol):
     def sample(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence["ToolSpec"] = (),
         options: Optional[SamplingOptions] = None,

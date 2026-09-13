@@ -19,7 +19,7 @@ from pythia.interaction import MessagesDefaults
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
 from pythia.interaction import ModelConfigurationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelLimits
 from pythia.interaction import ModelRoute
 from pythia.interaction import ModelSpec
@@ -81,7 +81,7 @@ class ModelCatalogTests(unittest.TestCase):
 
                 model = CodexResponsesModel(model=name, auth=CodexAuth("FAKE"),
                                             identifier_factory=lambda: "fixed-turn")
-                context = ModelContext((Init("session"), Message("user", "Hello.")))
+                context = InteractionContext((Init("session"), Message("user", "Hello.")))
                 payload, _ = model._build_request_payload(context, (), None)
                 self.assertEqual(model.endpoint.api_url, expected_url)
                 self.assertEqual(model.endpoint.model, name)
@@ -148,7 +148,7 @@ class ModelCatalogTests(unittest.TestCase):
                       get_model_spec("codex", "gpt-6-astra"))
 
     def test_fable_max_uses_output_effort(self):
-        context = ModelContext((Message("user", "Hello."),))
+        context = InteractionContext((Message("user", "Hello."),))
         cases = (
             ("claude-fable-5-1", None),
             ("claude-fable-5.1", None),
@@ -197,7 +197,7 @@ class ModelCatalogTests(unittest.TestCase):
         for spec in list_model_specs():
             for name in (spec.name, *spec.aliases):
                 with self.subTest(name=name):
-                    context = ModelContext((Message("user", "Hello."),))
+                    context = InteractionContext((Message("user", "Hello."),))
                     model = CodexResponsesModel(StreamingResponsesEndpoint(
                         api_url="https://proxy.example.test/v1", model=name, bearer_token="FAKE",
                     ))

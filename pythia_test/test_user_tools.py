@@ -14,7 +14,7 @@ from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
     CodexResponsesModel, CompactionError, CompactionMetadata, CompactionResult, ContextPrefix,
     ContextValidationError, DefaultEnvironment, Environment,
-    Instructions, InteractionConfig, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
+    Instructions, InteractionConfig, Message, MessagesEndpoint, MessagesModel, InteractionContext, ModelSample,
     ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, SamplingOptions, Init,
     TokenUsage, ToolCall, ToolResult, SampleMetadata, TurnSummary, UserInteraction,
     UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_save,
@@ -190,7 +190,7 @@ class UserToolValueTests(unittest.TestCase):
                     UserToolResult(ToolResult("user_one", old_output)))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interaction.jsonl"
-            save_interaction_save(path, ModelContext(original))
+            save_interaction_save(path, InteractionContext(original))
             before = path.read_bytes()
             restored = load_interaction_save(path)
             for _ in range(2):
@@ -206,13 +206,13 @@ class UserToolValueTests(unittest.TestCase):
                 Message("assistant", "answer"),
                 SampleMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="opaque"),
                 ModelSampleBoundary(), TurnSummary(sample_count=1))
-        context = ModelContext((*base, *_records()))
+        context = InteractionContext((*base, *_records()))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session.jsonl"
             save_interaction_save(path, context)
             self.assertIn('"type": "user_tool_call"', path.read_text())
             self.assertEqual(load_interaction_save(path).items, context.items)
-        self.assertEqual(context.model_items(), ModelContext(base).model_items())
+        self.assertEqual(context.model_items(), InteractionContext(base).model_items())
         models = (
             ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost:8000")),
             MessagesModel(MessagesEndpoint(
@@ -226,7 +226,7 @@ class UserToolValueTests(unittest.TestCase):
         for model in models:
             with self.subTest(model=type(model).__name__):
                 self.assertEqual(model._build_request_payload(context, (), None),
-                                 model._build_request_payload(ModelContext(base), (), None))
+                                 model._build_request_payload(InteractionContext(base), (), None))
                 self.assertNotIn("private account", repr(model._build_request_payload(context, (), None)))
         self.assertIsNone(cli._resume_notice(context))
         self.assertEqual(demo._final_assistant_text(context), "answer")
@@ -234,7 +234,7 @@ class UserToolValueTests(unittest.TestCase):
     def test_origin_aware_display_and_validation(self):
         call, result = _records(call_id="same")
         model_call, model_result = ToolCall("model_tool", "same", "{}"), ToolResult("same", "model result")
-        context = ModelContext((model_call, model_result, call, result))
+        context = InteractionContext((model_call, model_result, call, result))
         display = "\n".join(i.text for i in render_interaction_items(context.items))
         self.assertIn("[tool-ret]  model_tool (same)", display)
         self.assertIn("[user-tool-ret]  quota (same)", display)
@@ -245,8 +245,8 @@ class UserToolValueTests(unittest.TestCase):
             (ContextPrefix((call, result)),),
         ):
             with self.subTest(items=items), self.assertRaises(ContextValidationError):
-                ModelContext(items)
-        pending = ModelContext((call,))
+                InteractionContext(items)
+        pending = InteractionContext((call,))
         self.assertEqual(pending.pending_tool_calls(), ())
         self.assertEqual(pending.pending_user_tool_calls(), (call,))
         with self.assertRaises(ContextValidationError):
@@ -261,7 +261,7 @@ class UserToolValueTests(unittest.TestCase):
     def test_compaction_excludes_user_tools_but_retains_raw_replay(self):
         model = mock.Mock()
         model.sample.return_value = _answer("summary")
-        context = ModelContext((Message("user", "hello"), *_records()))
+        context = InteractionContext((Message("user", "hello"), *_records()))
         result = PromptSummarizingCompactor(model).compact(context)
         submitted = model.sample.call_args.args[0]
         self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in submitted))
@@ -456,7 +456,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         ))
         save_interaction_save(
             self.path,
-            ModelContext((Init("saved"), call)),
+            InteractionContext((Init("saved"), call)),
         )
         self.args.resume = True
         terminal = _Terminal(
@@ -526,7 +526,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             ModelSampleBoundary(),
             TurnSummary(sample_count=1, context_tokens=100),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         step = 0
 
@@ -768,7 +768,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_unfinished_user_tool_never_executes_and_preserves_model_tail(self):
         original = (Init("old"), Message("assistant", "answer"), TurnSummary(), _records("login")[0])
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         model = _Model(self.path)
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
@@ -910,7 +910,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_account_login_rebinds_without_sampling_or_changing_provider_state(self):
         metadata = SampleMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="state")
         original = (Init("old"), Message("assistant", "answer"), metadata, TurnSummary())
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         model = _Model(self.path)
         model.endpoint = SimpleNamespace(account_id="account")
@@ -942,7 +942,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rebuilt[0].endpoint.bearer_token, "new-token")
         saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:len(original)], original)
-        self.assertEqual(saved.model_items(), ModelContext(original).model_items())
+        self.assertEqual(saved.model_items(), InteractionContext(original).model_items())
         self.assertEqual(len(saved.items), len(original) + 2)
         self.assertEqual(model.calls, [])
 
@@ -952,7 +952,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "previous answer"),
             TurnSummary(sample_count=1),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         model = _Model(self.path)
         observations = []
@@ -994,7 +994,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(persisted_items[-1], UserToolCall)
         self.assertEqual(persisted_items[-1].call.name, "compact")
         self.assertEqual(persisted_items[-1].call.arguments_json, "{}")
-        self.assertEqual(ModelContext(source_items).pending_user_tool_calls(), ())
+        self.assertEqual(InteractionContext(source_items).pending_user_tool_calls(), ())
 
         saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:len(original)], original)
@@ -1054,7 +1054,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "previous answer"),
             TurnSummary(sample_count=1),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         entered = threading.Event()
         release = threading.Event()
@@ -1110,7 +1110,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "old answer"),
             TurnSummary(sample_count=1),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         observed = []
 
@@ -1214,7 +1214,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "previous answer"),
             TurnSummary(sample_count=1),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         model = _Model(self.path)
         submitted = False
@@ -1240,7 +1240,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("invalid remote checkpoint", saved.items[-1].result.output)
         self.assertFalse(any(isinstance(item, ContextPrefix) for item in saved))
         self.assertFalse(any(isinstance(item, CompactionMetadata) for item in saved))
-        self.assertEqual(saved.model_items(), ModelContext(original).model_items())
+        self.assertEqual(saved.model_items(), InteractionContext(original).model_items())
         self.assertEqual(model.calls, [])
 
     async def test_resume_never_reruns_an_unfinished_compact(self):
@@ -1251,7 +1251,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             TurnSummary(sample_count=1),
             call,
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         with mock.patch.object(cli, "create_default_compactor") as create:
@@ -1271,7 +1271,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "previous answer"),
             TurnSummary(sample_count=1),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         model = _Model(self.path)
         compactor = mock.Mock()
@@ -1345,7 +1345,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "discarded old answer"),
             TurnSummary(sample_count=1),
         )
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         model = _Model(self.path, _answer("answer after compact"))
         compactor = mock.Mock()
@@ -1389,7 +1389,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_auth_needed_instructions_resume_does_not_sample_or_add_a_user_boundary(self):
         original = (Init("old"), Message("assistant", "answer"), TurnSummary())
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         self.args.resume, self.args.instructions = True, "new instructions"
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "auth needed" else None)
         self.assertEqual(await self.run_cli(None, terminal), 0)

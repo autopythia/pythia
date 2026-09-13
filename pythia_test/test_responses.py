@@ -29,7 +29,7 @@ from pythia.interaction import META_RESPONSES_API_URL
 from pythia.interaction import Message
 from pythia.interaction import ModelAuthenticationError
 from pythia.interaction import ModelConfigurationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
@@ -514,7 +514,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext(
+            InteractionContext(
                 (
                     OpaqueCompaction.from_responses("encrypted-summary"),
                     Message(role="user", content="continue"),
@@ -541,7 +541,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             "Messages opaque compaction",
         ):
             model.sample(
-                ModelContext(
+                InteractionContext(
                     (
                         OpaqueCompaction.from_messages("summary"),
                         Message(role="user", content="continue"),
@@ -584,7 +584,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             provider_turn_id="turn-1",
             provider_turn_state="sticky-state",
         )
-        context = ModelContext((
+        context = InteractionContext((
             Init("session-1"),
             Instructions("Keep these instructions."),
             Message("user", "First request."),
@@ -677,7 +677,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             ),
             opener=opener,
         )
-        context = ModelContext((
+        context = InteractionContext((
             Message("user", "old-user"),
             Message("user", f"{DEFAULT_SUMMARY_PREFIX}\nold local summary"),
             Message("assistant", "old assistant output"),
@@ -721,7 +721,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         result = ResponsesOpaqueCompactor(model).compact(
-            ModelContext((Message("user", "compact me"),))
+            InteractionContext((Message("user", "compact me"),))
         )
 
         metadata = result.context_items()[-1]
@@ -755,7 +755,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         result = ResponsesOpaqueCompactor(model).compact(
-            ModelContext((Message("user", "compact me"),))
+            InteractionContext((Message("user", "compact me"),))
         )
 
         self.assertEqual(
@@ -810,7 +810,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ModelResponseError, message):
                     ResponsesOpaqueCompactor(model).compact(
-                        ModelContext((Message("user", "compact me"),))
+                        InteractionContext((Message("user", "compact me"),))
                     )
 
     def test_default_compactor_uses_remote_only_for_known_codex_route(self):
@@ -871,7 +871,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             opener=opener,
         )
         with self.assertRaisesRegex(CompactionError, "unresolved tool calls"):
-            ResponsesOpaqueCompactor(model).compact(ModelContext((
+            ResponsesOpaqueCompactor(model).compact(InteractionContext((
                 ToolCall("lookup", "pending", "{}"),
             )))
         self.assertEqual(opener.calls, [])
@@ -892,7 +892,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             provider_turn_id="compact-turn",
             provider_turn_state="compact-state",
         )
-        context = ModelContext((
+        context = InteractionContext((
             Init("session"),
             Message("user", "request"),
             UserInteractionBoundary(),
@@ -924,7 +924,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             opener=opener,
             identifier_factory=lambda: next(turn_identifiers),
         )
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Init(prefix_id="session-from-context"),
                 Message(role="user", content="hello"),
@@ -970,7 +970,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
                 payload = _request_payload(opener)
@@ -1006,7 +1006,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
                 request, _ = opener.calls[0]
@@ -1046,7 +1046,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
                 payload = _request_payload(opener)
@@ -1077,7 +1077,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 )
 
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
                 request, _ = opener.calls[0]
@@ -1130,7 +1130,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             opener=opener,
             identifier_factory=lambda: next(identifiers),
         )
-        context = ModelContext(
+        context = InteractionContext(
             UserInteraction(
                 items=(Message(role="user", content="Summarize this repo."),)
             ).context_items()
@@ -1356,7 +1356,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             opener=opener,
             identifier_factory=lambda: next(identifiers),
         )
-        context = ModelContext(
+        context = InteractionContext(
             UserInteraction(
                 items=(Message(role="user", content="First turn"),)
             ).context_items()
@@ -1454,7 +1454,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", content="hello")])
+            InteractionContext([Message(role="user", content="hello")])
         )
 
         headers = _request_headers(opener)
@@ -1487,7 +1487,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             opener=_ScriptedOpener(first_response),
             identifier_factory=lambda: next(identifiers),
         )
-        context = ModelContext(
+        context = InteractionContext(
             UserInteraction(
                 items=(Message(role="user", content="Use the tool"),)
             ).context_items()
@@ -1563,7 +1563,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", content="hello")])
+            InteractionContext([Message(role="user", content="hello")])
         )
 
         self.assertEqual(sample.last_assistant_text, "multiline")
@@ -1584,7 +1584,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", content="hello")])
+            InteractionContext([Message(role="user", content="hello")])
         )
 
         self.assertEqual(
@@ -1609,7 +1609,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             "temperature",
         ):
             model.sample(
-                ModelContext([Message(role="user", content="hello")]),
+                InteractionContext([Message(role="user", content="hello")]),
                 options=SamplingOptions(temperature=0.5),
             )
 
@@ -1637,7 +1637,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 ),
                 retry_sleep=lambda _delay: None,
             ).sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
         self.assertEqual(
             raised.exception.completed_items,
@@ -1680,7 +1680,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 model.endpoint,
                 opener=_ScriptedOpener(unsupported_response),
             ).sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
         malformed_response = _FakeSSEResponse()
@@ -1690,7 +1690,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 model.endpoint,
                 opener=_ScriptedOpener(malformed_response),
             ).sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
     def test_codex_401_is_actionable_and_does_not_expose_token(self):
@@ -1720,7 +1720,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             "codex login",
         ) as raised:
             model.sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
         self.assertNotIn("secret-token", str(raised.exception))
@@ -1747,7 +1747,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelAuthenticationError) as raised:
-            model.sample(ModelContext((Message("user", "hello"),)))
+            model.sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(len(opener.calls), 1)
         sleeper.assert_not_called()
@@ -1790,7 +1790,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 opener=opener,
             )
             sample = model.sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
         self.assertEqual(sample.last_assistant_text, "recovered")
@@ -1834,7 +1834,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
 
             sample = model.sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
         self.assertEqual(sample.last_assistant_text, "accepted unchanged")
@@ -1897,7 +1897,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
 
             sample = model.sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
             saved = json.loads(auth_file.read_text(encoding="utf-8"))
             saved_mode = auth_file.stat().st_mode & 0o777
@@ -1944,7 +1944,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 opener=opener,
             )
             sample = model.sample(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
         headers = [
@@ -1969,7 +1969,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
             with self.assertRaises(ModelAuthenticationError) as raised:
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
         self.assertEqual(len(opener.calls), 2)
@@ -2019,7 +2019,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
             with self.assertRaises(ModelAuthenticationError) as raised:
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
             saved = json.loads(auth_file.read_text(encoding="utf-8"))
@@ -2087,7 +2087,7 @@ class CodexResponsesModelTests(unittest.TestCase):
 
             with self.assertRaises(ModelAuthenticationError) as raised:
                 model.sample(
-                    ModelContext([Message(role="user", content="hello")])
+                    InteractionContext([Message(role="user", content="hello")])
                 )
 
         self.assertEqual(len(opener.calls), 3)
@@ -2131,7 +2131,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             ),
             opener=recovered_opener,
             retry_sleep=lambda _delay: None,
-        ).sample(ModelContext([Message(role="user", content="hello")]))
+        ).sample(InteractionContext([Message(role="user", content="hello")]))
         self.assertEqual(recovered.request_attempts, 2)
         self.assertEqual(recovered.recovery, ("http_503_retry",))
 
@@ -2154,7 +2154,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             opener=terminal_opener,
         )
         with self.assertRaises(ModelTransportError) as raised:
-            model.sample(ModelContext([Message(role="user", content="hello")]))
+            model.sample(InteractionContext([Message(role="user", content="hello")]))
         self.assertEqual(raised.exception.failure.http_status, 400)
         self.assertEqual(raised.exception.failure.request_id, "request-invalid")
         self.assertEqual(raised.exception.failure.error_code, "invalid_request")
@@ -2189,7 +2189,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext((Init("session"), Message("user", "hello")))
+            InteractionContext((Init("session"), Message("user", "hello")))
         )
 
         self.assertEqual(sample.items, (Message("assistant", "final output"),))
@@ -2233,7 +2233,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelResponseError) as raised:
-            model.sample(ModelContext((Message("user", "hello"),)))
+            model.sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(len(opener.calls), 3)
         self.assertEqual(sleeps, [0.25, 0.5])
@@ -2266,7 +2266,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             ),
             opener=opener,
             retry_sleep=sleeps.append,
-        ).sample(ModelContext((Message("user", "hello"),)))
+        ).sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(sample.last_assistant_text, "reconnected")
         self.assertEqual(sample.request_attempts, 3)
@@ -2293,7 +2293,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelTransportError) as raised:
-            model.sample(ModelContext((Message("user", "hello"),)))
+            model.sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(len(opener.calls), 3)
         self.assertEqual(sleeps, [0.25, 0.5])

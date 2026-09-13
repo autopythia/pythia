@@ -3,7 +3,7 @@ import argparse
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import Message
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import UserInteraction
 
 
@@ -23,7 +23,7 @@ def main() -> None:
         api_key=args.api_key,
     )
     model = ChatCompletionsModel(endpoint=endpoint)
-    context = ModelContext(
+    context = InteractionContext(
         [
             Message(
                 role="system",

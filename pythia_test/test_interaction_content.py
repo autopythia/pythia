@@ -8,7 +8,7 @@ from pathlib import Path
 from pythia.interaction import ContextPrefix
 from pythia.interaction import Instructions
 from pythia.interaction import Message
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import Reasoning
 from pythia.interaction import SaveError
 from pythia.interaction import interaction_item_from_dict
@@ -96,7 +96,7 @@ class InteractionContentTests(unittest.TestCase):
                         interaction_item_from_dict({**base, **fields})
 
     def test_jsonl_loads_legacy_new_and_mixed_logs_and_normalizes_on_save(self):
-        expected = ModelContext((
+        expected = InteractionContext((
             Instructions(text="Be concise."),
             Message(role="user", content=" \t\n"),
             Reasoning(content="café\n世界", summary=("brief",)),

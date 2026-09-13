@@ -7,6 +7,9 @@ import urllib.error
 import unittest
 from unittest import mock
 
+import pythia.interaction as interaction
+import pythia.interaction.context as context_module
+
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CompactionError
@@ -21,7 +24,7 @@ from pythia.interaction import EnvironmentError
 from pythia.interaction import EnvironmentResult
 from pythia.interaction import Message
 from pythia.interaction import ModelConfigurationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
@@ -101,19 +104,32 @@ def _request_payload(opener, index=0):
     return json.loads(request.data.decode("utf-8"))
 
 
-class ModelContextTests(unittest.TestCase):
+class InteractionContextTests(unittest.TestCase):
+    def test_public_context_name_and_repr(self):
+        self.assertIs(context_module.InteractionContext, InteractionContext)
+        for module in (interaction, context_module):
+            self.assertIn("InteractionContext", module.__all__)
+            self.assertNotIn("ModelContext", module.__all__)
+            self.assertFalse(hasattr(module, "ModelContext"))
+
+        self.assertEqual(repr(InteractionContext()), "InteractionContext([])")
+        items = [Message(role="user", content="hello")]
+        self.assertEqual(
+            repr(InteractionContext(items)), f"InteractionContext({items!r})"
+        )
+
     def test_auto_compaction_uses_latest_uncompacted_sample_usage(self):
         low = SampleMetadata(TokenUsage(total_tokens=99))
         high = SampleMetadata(TokenUsage(total_tokens=100))
         self.assertFalse(
-            should_auto_compact(ModelContext((low,)), 100)
+            should_auto_compact(InteractionContext((low,)), 100)
         )
         self.assertTrue(
-            should_auto_compact(ModelContext((low, high)), 100)
+            should_auto_compact(InteractionContext((low, high)), 100)
         )
 
         prefix = ContextPrefix((Message("user", "summary"),))
-        compacted = ModelContext((low, high, prefix))
+        compacted = InteractionContext((low, high, prefix))
         self.assertFalse(should_auto_compact(compacted, 100))
         compacted.append(CompactionMetadata(
             TokenUsage(total_tokens=101),
@@ -125,14 +141,14 @@ class ModelContextTests(unittest.TestCase):
 
         for threshold in (True, 0, -1, 1.5):
             with self.subTest(threshold=threshold), self.assertRaises(ValueError):
-                should_auto_compact(ModelContext(), threshold)
+                should_auto_compact(InteractionContext(), threshold)
 
     def test_context_is_append_only_and_projects_compaction(self):
         original = [
             Message(role="user", content="old request"),
             Message(role="assistant", content="old answer"),
         ]
-        context = ModelContext(original)
+        context = InteractionContext(original)
         checkpoint = ContextPrefix(
             prefix_items=(
                 Message(role="user", content="summary"),
@@ -159,7 +175,7 @@ class ModelContextTests(unittest.TestCase):
         )
 
     def test_nested_compaction_is_rejected_without_mutation(self):
-        context = ModelContext([Message(role="user", content="hello")])
+        context = InteractionContext([Message(role="user", content="hello")])
         nested = ContextPrefix(
             prefix_items=(
                 ContextPrefix(
@@ -186,14 +202,14 @@ class ModelContextTests(unittest.TestCase):
             elapsed_seconds=3.5,
         )
         prefix = ContextPrefix((Message("user", "summary"),))
-        context = ModelContext((prefix, metadata))
+        context = InteractionContext((prefix, metadata))
         self.assertEqual(context.items, (prefix, metadata))
         self.assertEqual(context.model_items(), prefix.prefix_items)
         with self.assertRaisesRegex(
             ContextValidationError,
             "compaction metadata cannot appear in context prefixes",
         ):
-            ModelContext((ContextPrefix((metadata,)),))
+            InteractionContext((ContextPrefix((metadata,)),))
 
     def test_new_interaction_is_rejected_before_tool_results(self):
         call = ToolCall(
@@ -201,7 +217,7 @@ class ModelContextTests(unittest.TestCase):
             call_id="call-1",
             arguments_json="{}",
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 call,
                 ModelSampleBoundary(),
@@ -233,7 +249,7 @@ class ModelContextTests(unittest.TestCase):
                 sample_boundary,
             )
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="user", content="old request"),
                 checkpoint,
@@ -253,7 +269,7 @@ class ModelContextTests(unittest.TestCase):
         )
 
     def test_pending_tool_calls_are_derived_from_effective_context(self):
-        context = ModelContext(
+        context = InteractionContext(
             [
                 ToolCall(
                     name="lookup",
@@ -289,7 +305,7 @@ class ModelContextTests(unittest.TestCase):
                 cached_input_tokens=4,
             )
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="user", content="lookup"),
                 UserInteractionBoundary(),
@@ -315,7 +331,7 @@ class ModelContextTests(unittest.TestCase):
         context.assert_model_ready()
 
     def test_unknown_tool_result_is_rejected_atomically(self):
-        context = ModelContext([Message(role="user", content="hello")])
+        context = InteractionContext([Message(role="user", content="hello")])
 
         with self.assertRaisesRegex(ContextValidationError, "does not match"):
             context.extend(
@@ -331,12 +347,18 @@ class ModelContextTests(unittest.TestCase):
         )
 
     def test_copy_branches_the_context(self):
-        context = ModelContext([Message(role="user", content="root")])
+        context = InteractionContext([Message(role="user", content="root")])
         branch = context.copy()
+        self.assertIsInstance(branch, InteractionContext)
+        self.assertIsNot(branch, context)
         branch.append(Message(role="assistant", content="branch"))
 
         self.assertEqual(len(context), 1)
         self.assertEqual(len(branch), 2)
+
+        original_only = Message(role="assistant", content="original")
+        context.append(original_only)
+        self.assertNotIn(original_only, branch)
 
 
 class UserInteractionTests(unittest.TestCase):
@@ -532,7 +554,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="system", content="Be concise."),
                 Message(role="user", content="Weather in Paris?"),
@@ -631,7 +653,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext([Message(role="user", content="hello")])
+            InteractionContext([Message(role="user", content="hello")])
         )
 
         request, _ = opener.calls[0]
@@ -705,7 +727,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
                 ),
             )
         )
-        context = ModelContext()
+        context = InteractionContext()
         user_interaction = UserInteraction(
             items=(Message(role="user", content="Use echo."),),
         )
@@ -760,7 +782,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
     def test_injected_user_message_is_encoded_after_tool_result(self):
         tool = create_inject_user_message_tool()
         call = ToolCall(tool.spec.name, "inject-1", "{}")
-        context = ModelContext((
+        context = InteractionContext((
             Message("user", "Run the experiment."), call, ModelSampleBoundary(),
         ))
         environment = Environment((tool,))
@@ -800,7 +822,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="user", content="question"),
                 UserInteractionBoundary(),
@@ -854,7 +876,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="user", content="question"),
                 UserInteractionBoundary(),
@@ -903,7 +925,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ChatCompletionsEndpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="user", content="question"),
                 Message(role="assistant", content="first"),
@@ -944,7 +966,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             opener=opener,
         )
 
-        model.sample(ModelContext([Message(role="user", content="hello")]))
+        model.sample(InteractionContext([Message(role="user", content="hello")]))
 
         self.assertNotIn("model", _request_payload(opener))
 
@@ -964,7 +986,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelContextWindowError):
-            model.sample(ModelContext([Message(role="user", content="hello")]))
+            model.sample(InteractionContext([Message(role="user", content="hello")]))
 
     def test_retryable_http_statuses_use_two_retries_and_metadata(self):
         returned_error = _FakeHTTPResponse(
@@ -990,7 +1012,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             retry_sleep=sleeps.append,
         )
 
-        sample = model.sample(ModelContext((Message("user", "hello"),)))
+        sample = model.sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(sample.last_assistant_text, "recovered")
         self.assertEqual(sample.request_attempts, 3)
@@ -1022,7 +1044,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ChatCompletionsEndpoint(api_url="https://api.example.test"),
             opener=opener,
             retry_sleep=sleeps.append,
-        ).sample(ModelContext((Message("user", "hello"),)))
+        ).sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(sample.request_attempts, 3)
         self.assertEqual(
@@ -1044,7 +1066,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelTimeoutError) as raised:
-            model.sample(ModelContext((Message("user", "hello"),)))
+            model.sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(len(opener.calls), 3)
         self.assertEqual(sleeps, [0.25, 0.5])
@@ -1177,7 +1199,7 @@ class EnvironmentTests(unittest.TestCase):
             ToolCall("missing", "2", "{}"),
             ToolCall("inject", "3", '{"value":"b"}'),
         )
-        context = ModelContext((*calls, ModelSampleBoundary()))
+        context = InteractionContext((*calls, ModelSampleBoundary()))
         before = context.items
         result = environment.execute_tool_calls(calls)
         self.assertEqual(context.items, before)
@@ -1195,7 +1217,7 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_user_messages_cannot_be_appended_in_a_partial_call_batch(self):
         calls = (ToolCall("test", "1", "{}"), ToolCall("test", "2", "{}"))
-        context = ModelContext(calls)
+        context = InteractionContext(calls)
         result = EnvironmentResult(
             (ToolResult("1", "ok"),),
             user_messages=(Message("user", "synthetic"),),
@@ -1339,7 +1361,7 @@ class CompactionTests(unittest.TestCase):
                 recovery=("credential_reload",),
             )
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="system", content="Base instructions."),
                 Message(role="user", content="First request."),
@@ -1421,7 +1443,7 @@ class CompactionTests(unittest.TestCase):
                 items=(Message(role="assistant", content="summary"),),
             ),
         )
-        context = ModelContext(
+        context = InteractionContext(
             [
                 Message(role="system", content="instructions"),
                 Message(role="user", content="old"),
@@ -1458,7 +1480,7 @@ class CompactionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CompactionError, "must not contain tool calls"):
             compactor.compact(
-                ModelContext([Message(role="user", content="hello")])
+                InteractionContext([Message(role="user", content="hello")])
             )
 
 

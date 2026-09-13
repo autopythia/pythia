@@ -24,7 +24,7 @@ from typing import Tuple
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
-from .context import ModelContext
+from .context import InteractionContext
 from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
@@ -323,7 +323,7 @@ def _encode_context(
     items: Sequence[InteractionItem],
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
     # Anthropic ignores content before the latest Messages compaction block.
-    # Keep the append-only ModelContext intact while avoiding an ever-growing
+    # Keep the append-only InteractionContext intact while avoiding an ever-growing
     # outbound HTTP body.
     latest_compaction = -1
     for index, item in enumerate(items):
@@ -867,12 +867,12 @@ class MessagesModel:
 
     def _build_request_payload(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         tools: Sequence[Any],
         options: Optional[SamplingOptions],
     ) -> Dict[str, Any]:
-        if not isinstance(context, ModelContext):
-            raise TypeError("context must be ModelContext")
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
         context.assert_model_ready()
         system, messages = _encode_context(context.model_items())
         spec = get_model_spec("messages", self.endpoint.model)
@@ -930,7 +930,7 @@ class MessagesModel:
     @_timed_sample
     def sample(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
         options: Optional[SamplingOptions] = None,

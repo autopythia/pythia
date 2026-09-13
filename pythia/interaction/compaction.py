@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from typing import Tuple
 
 from .context import ContextValidationError
-from .context import ModelContext
+from .context import InteractionContext
 from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import InteractionItem
@@ -83,7 +83,7 @@ class CompactionResult:
                 "compaction result must contain exactly one ContextPrefix"
             )
         try:
-            ModelContext(items)
+            InteractionContext(items)
         except ContextValidationError as exc:
             raise CompactionError(str(exc)) from exc
         metadata = self._metadata()
@@ -117,7 +117,7 @@ class CompactionResult:
 class Compactor(Protocol):
     def compact(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence["ToolSpec"] = (),
     ) -> CompactionResult:
@@ -125,12 +125,12 @@ class Compactor(Protocol):
 
 
 def should_auto_compact(
-    context: ModelContext,
+    context: InteractionContext,
     threshold_tokens: int,
 ) -> bool:
     """Return whether the latest uncompacted sample reached a threshold."""
-    if not isinstance(context, ModelContext):
-        raise TypeError("context must be ModelContext")
+    if not isinstance(context, InteractionContext):
+        raise TypeError("context must be InteractionContext")
     if (
         isinstance(threshold_tokens, bool)
         or not isinstance(threshold_tokens, int)
@@ -277,7 +277,7 @@ def _drop_oldest_non_instruction_item(
     del items[index]
     while True:
         try:
-            ModelContext((*items, compaction_prompt))
+            InteractionContext((*items, compaction_prompt))
             return True
         except ContextValidationError:
             if index >= len(items):
@@ -337,13 +337,13 @@ class PromptSummarizingCompactor:
     @_timed_compact
     def compact(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence["ToolSpec"] = (),
     ) -> CompactionResult:
         del tools
-        if not isinstance(context, ModelContext):
-            raise TypeError("context must be ModelContext")
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
         try:
             context.assert_model_ready()
         except ContextValidationError as exc:
@@ -364,7 +364,7 @@ class PromptSummarizingCompactor:
 
         while True:
             try:
-                temporary_context = ModelContext(
+                temporary_context = InteractionContext(
                     (*request_items, compaction_prompt)
                 )
                 sample = self._model.sample(

@@ -14,7 +14,7 @@ from pythia.interaction import MessagesModel
 from pythia.interaction import MessagesPromptCaching
 from pythia.interaction import MessagesServerCompaction
 from pythia.interaction import ModelConfigurationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
@@ -81,7 +81,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
         )
         self.assertIsNone(endpoint.prompt_caching)
         MessagesModel(endpoint, opener=opener).sample(
-            ModelContext((Message("user", "Hello."),))
+            InteractionContext((Message("user", "Hello."),))
         )
         self.assertNotIn("cache_control", _payload(opener))
         self.assertIsNone(opener.calls[0][0].get_header("Anthropic-beta"))
@@ -97,7 +97,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
             prompt_caching=MessagesPromptCaching(),
         ), opener=opener)
         with self.assertRaisesRegex(ModelTransportError, "cache_control"):
-            model.sample(ModelContext((Message("user", "Hello."),)))
+            model.sample(InteractionContext((Message("user", "Hello."),)))
         self.assertEqual(len(opener.calls), 1)
         self.assertIn("cache_control", _payload(opener))
 
@@ -118,7 +118,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 )
                 model = MessagesModel(endpoint, opener=opener)
                 uncached = MessagesModel(replace(endpoint, prompt_caching=None))
-                context = ModelContext((
+                context = InteractionContext((
                     Instructions("Be concise."), Message("user", "Check facts."),
                 ))
                 tools = (ToolSpec("lookup", "Look up facts.", {"type": "object"}),)
@@ -153,9 +153,9 @@ class MessagesPromptCachingTests(unittest.TestCase):
 
     def test_no_explicit_breakpoints_are_added_to_thinking_or_empty_blocks(self):
         for context in (
-            ModelContext((Message("user", "Hello."),)),
-            ModelContext((Instructions(""), Message("user", "Hello."), Reasoning("thought"))),
-            ModelContext((Message("user", "Hello."), Message("assistant", ""))),
+            InteractionContext((Message("user", "Hello."),)),
+            InteractionContext((Instructions(""), Message("user", "Hello."), Reasoning("thought"))),
+            InteractionContext((Message("user", "Hello."), Message("assistant", ""))),
         ):
             with self.subTest(context=context):
                 opener = _ScriptedOpener(_response())
@@ -179,7 +179,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
             ContextPrefix((Instructions("Be concise."), Message("user", "Summary."))),
         ):
             with self.subTest(checkpoint=checkpoint):
-                context = ModelContext((
+                context = InteractionContext((
                     Instructions("Be concise."), Message("user", "Old question."),
                     checkpoint, Message("user", "Continue."),
                 ))
@@ -235,7 +235,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                     max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
                 ), opener=opener)
-                sample = model.sample(ModelContext((Message("user", "Hello."),)))
+                sample = model.sample(InteractionContext((Message("user", "Hello."),)))
                 self.assertEqual(sample.usage, expected)
                 summary = summarize_turn_usage(sample.context_items())
                 self.assertEqual(summary.cached_input_tokens_sum, expected.cached_input_tokens)
@@ -265,7 +265,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                     prompt_caching=MessagesPromptCaching(),
                     server_compaction=MessagesServerCompaction(),
                 ), opener=opener)
-                sample = model.sample(ModelContext((Message("user", "Hello."),)))
+                sample = model.sample(InteractionContext((Message("user", "Hello."),)))
                 self.assertEqual(sample.usage, TokenUsage(460, 15, 475, 110))
 
 
@@ -296,7 +296,7 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
                         ),
                     )
                     payload = model._build_request_payload(
-                        ModelContext((Message("user", "Hello."),)), (), None,
+                        InteractionContext((Message("user", "Hello."),)), (), None,
                     )
                     self.assertEqual(
                         payload["cache_control"], {"type": "ephemeral", "ttl": "5m"},

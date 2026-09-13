@@ -6,7 +6,7 @@ from typing import Any
 
 from pythia.interaction.chat_completions import ChatCompletionsEndpoint
 from pythia.interaction.chat_completions import ChatCompletionsModel
-from pythia.interaction.context import ModelContext
+from pythia.interaction.context import InteractionContext
 from pythia.interaction.items import Message
 from pythia.interaction.items import Reasoning
 
@@ -48,7 +48,7 @@ def _sample_message(message: dict[str, Any]):
     )
     endpoint = ChatCompletionsEndpoint(api_url="http://127.0.0.1:1")
     model = ChatCompletionsModel(endpoint, opener=opener)
-    context = ModelContext((Message(role="user", content="hello"),))
+    context = InteractionContext((Message(role="user", content="hello"),))
     return model.sample(context)
 
 
@@ -115,7 +115,7 @@ class ReasoningFieldTests(unittest.TestCase):
             ChatCompletionsEndpoint(api_url="http://127.0.0.1:1"),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Message(role="user", content="hello"),
                 Reasoning(

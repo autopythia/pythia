@@ -30,7 +30,7 @@ from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import create_default_compactor
 from .compaction import should_auto_compact
-from .context import ModelContext
+from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
 from .display import render_interaction_items
@@ -147,7 +147,7 @@ class _UIState:
                 self.changed.set()
 
 
-async def _checkpoint(context: ModelContext, state: _UIState, path: Path) -> None:
+async def _checkpoint(context: InteractionContext, state: _UIState, path: Path) -> None:
     state.set_phase("saving")
     try:
         await asyncio.to_thread(save_interaction_save, path, context.copy())
@@ -157,7 +157,7 @@ async def _checkpoint(context: ModelContext, state: _UIState, path: Path) -> Non
 
 
 async def _append(
-    context: ModelContext,
+    context: InteractionContext,
     items: Iterable[InteractionItem],
     state: _UIState,
     path: Path,
@@ -167,7 +167,7 @@ async def _append(
 
 
 async def _sweep_tools(
-    context: ModelContext, environment: Environment, state: _UIState, path: Path
+    context: InteractionContext, environment: Environment, state: _UIState, path: Path
 ) -> None:
     for call in context.pending_tool_calls():
         if state.closing:
@@ -179,7 +179,7 @@ async def _sweep_tools(
 
 
 async def _fail_pending_tools(
-    context: ModelContext, state: _UIState, path: Path, *, reason: str
+    context: InteractionContext, state: _UIState, path: Path, *, reason: str
 ) -> None:
     """Close missing outcomes without claiming that their effects did not happen."""
     for call in context.pending_tool_calls():
@@ -201,7 +201,7 @@ async def _fail_pending_tools(
 
 
 async def _fail_pending_user_tools(
-    context: ModelContext, state: _UIState, path: Path,
+    context: InteractionContext, state: _UIState, path: Path,
 ) -> None:
     for call in context.pending_user_tool_calls():
         if state.closing:
@@ -231,7 +231,7 @@ async def _fail_pending_user_tools(
         state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
 
 
-def _has_provider_history(context: ModelContext) -> bool:
+def _has_provider_history(context: InteractionContext) -> bool:
     return any(
         (
             isinstance(i, (SampleMetadata, CompactionMetadata))
@@ -292,7 +292,7 @@ def _compaction_success_output(result: CompactionResult) -> str:
 async def _compact_user_tool(
     intent: UserToolIntent,
     model: Optional[Model],
-    context: ModelContext,
+    context: InteractionContext,
     model_environment: Environment,
     state: _UIState,
     path: Path,
@@ -393,7 +393,7 @@ async def _compact_user_tool(
 
 
 async def _user_tool(
-    intent: UserToolIntent, model: Optional[Model], context: ModelContext,
+    intent: UserToolIntent, model: Optional[Model], context: InteractionContext,
     state: _UIState, path: Path, args: argparse.Namespace,
     model_environment: Environment, config: InteractionConfig,
 ) -> Optional[Model]:
@@ -461,7 +461,7 @@ async def _user_tool(
 
 
 async def _turn(
-    context: ModelContext,
+    context: InteractionContext,
     model: Model,
     environment: Environment,
     state: _UIState,
@@ -577,7 +577,7 @@ async def _turn(
         await _sweep_tools(context, environment, state, path)
 
 
-def _ends_with_completed_manual_compaction(context: ModelContext) -> bool:
+def _ends_with_completed_manual_compaction(context: InteractionContext) -> bool:
     items = context.items
     end = len(items)
     if end and isinstance(items[end - 1], CompactionMetadata):
@@ -595,7 +595,7 @@ def _ends_with_completed_manual_compaction(context: ModelContext) -> bool:
     )
 
 
-def _resume_notice(context: ModelContext) -> Optional[str]:
+def _resume_notice(context: InteractionContext) -> Optional[str]:
     # Inspect the raw tail, not the model context established by a ContextPrefix.
     # A sample boundary does not record stop_reason or turn completion.
     if _ends_with_completed_manual_compaction(context):
@@ -672,7 +672,7 @@ async def _drive_interaction(
         initial = [Init(model=args.model or initial_model_name(model))]
         if args.instructions is not None:
             initial.append(Instructions(args.instructions))
-        context = ModelContext(initial)
+        context = InteractionContext(initial)
     if state.closing:
         return
     initial_query = args.prompt

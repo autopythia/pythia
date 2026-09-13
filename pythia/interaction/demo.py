@@ -12,7 +12,7 @@ from typing import Union
 from .compaction import CompactionResult
 from .compaction import create_default_compactor
 from .compaction import should_auto_compact
-from .context import ModelContext
+from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
 from .environment import Environment
@@ -142,7 +142,7 @@ def run(
         initial: list = [Init(model=initial_model_name(model))]
         if instructions_item is not None:
             initial.append(instructions_item)
-        context = ModelContext(tuple(initial))
+        context = InteractionContext(tuple(initial))
 
     if save_path is not None:
         save_interaction_save(save_path, context)
@@ -293,7 +293,7 @@ def run(
 run_repository_summary = run
 
 
-def _final_assistant_text(context: ModelContext) -> Optional[str]:
+def _final_assistant_text(context: InteractionContext) -> Optional[str]:
     """Return final assistant text if the effective context ends with it."""
     for item in reversed(context.model_items()):
         if isinstance(

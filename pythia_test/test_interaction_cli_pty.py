@@ -19,7 +19,7 @@ if os.name == "posix":
 
 from pythia.interaction import Init
 from pythia.interaction import Message
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import TurnSummary
@@ -358,7 +358,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         path = self.root / "interaction.jsonl"
         original = (Init("old"), Message("user", "old query"),
                     ToolCall("exec_command", "pending", '{"cmd":"touch must-not-run"}'))
-        save_interaction_save(path, ModelContext(original))
+        save_interaction_save(path, InteractionContext(original))
         self.start("--resume")
         await self.wait_output(b"was not rerun")
         await self.wait_output(b"idle")

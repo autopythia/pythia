@@ -13,7 +13,7 @@ from unittest import mock
 
 from pythia.interaction import cli, demo
 from pythia.interaction import (
-    Environment, Init, Instructions, Message, ModelContext, ModelSample,
+    Environment, Init, Instructions, Message, InteractionContext, ModelSample,
     ToolCall, ToolResult, TurnSummary, UserInteractionBoundary,
     UserToolCall, UserToolResult, load_interaction_save, save_interaction_save,
 )
@@ -178,7 +178,7 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_completed_resume_replays_only_chosen_file_without_sampling(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
-                save_interaction_save(self.selected, ModelContext(_COMPLETED))
+                save_interaction_save(self.selected, InteractionContext(_COMPLETED))
                 before = self.selected.read_bytes()
                 code, model, terminal, printed = self._main(frontend, ["--resume"], samples=())
                 self.assertEqual(code, 0)
@@ -217,7 +217,7 @@ class SaveEntrypointTests(_SavePathTestCase):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
                 original = (Init("old"), Message("user", "old query"), _PLAN_CALL)
-                save_interaction_save(self.selected, ModelContext(original))
+                save_interaction_save(self.selected, InteractionContext(original))
                 code, model, _terminal, _printed = self._main(
                     frontend, ["--resume", "--instructions", "", "--prompt", "follow-up"],
                 )
@@ -238,7 +238,7 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_instructions_only_resume_on_selected_file_adds_no_user_turn(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
-                save_interaction_save(self.selected, ModelContext(_COMPLETED))
+                save_interaction_save(self.selected, InteractionContext(_COMPLETED))
                 code, model, _terminal, _printed = self._main(
                     frontend, ["--resume", "--instructions", "override"],
                 )
@@ -248,7 +248,7 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_custom_user_tool_recovery_never_dispatches_or_samples(self):
         call = UserToolCall(ToolCall("login", "user_pending", "{}"))
         original = (*_COMPLETED, call)
-        save_interaction_save(self.selected, ModelContext(original))
+        save_interaction_save(self.selected, InteractionContext(original))
         with mock.patch.object(cli, "create_user_environment") as create:
             code, model, _terminal, _printed = self._main(cli, ["--resume"], samples=())
         self.assertEqual(code, 0)

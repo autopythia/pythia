@@ -16,7 +16,7 @@ from .compaction import PromptSummarizingCompactor
 from .compaction import create_default_compactor
 from .compaction import should_auto_compact
 from .context import ContextValidationError
-from .context import ModelContext
+from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
 from .display import InteractionItemRenderer
@@ -135,6 +135,7 @@ __all__ = [
     "InteractionItemRenderer",
     "InteractionConfig",
     "InteractionConfigSnapshot",
+    "InteractionContext",
     "Instructions",
     "Message",
     "MESSAGES_COMPACTION_BETA",
@@ -147,7 +148,6 @@ __all__ = [
     "Model",
     "ModelAuthenticationError",
     "ModelConfigurationError",
-    "ModelContext",
     "ModelContextWindowError",
     "ModelError",
     "ModelFailure",

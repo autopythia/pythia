@@ -19,7 +19,7 @@ from pythia.interaction import Message
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
 from pythia.interaction import ModelConfigurationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelTimeoutError
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import Tool
@@ -88,7 +88,7 @@ class _ReadTimeoutResponse:
 
 class InteractionTimeoutTests(unittest.TestCase):
     def test_model_defaults_and_overrides_reach_http_transport(self):
-        context = ModelContext((Message("user", "Hello."),))
+        context = InteractionContext((Message("user", "Hello."),))
         for options, expected in (
             ({}, DEFAULT_REQUEST_TIMEOUT_SECONDS),
             ({"request_timeout_seconds": 17.5}, 17.5),
@@ -114,7 +114,7 @@ class InteractionTimeoutTests(unittest.TestCase):
                 response = _ReadTimeoutResponse()
                 opener.return_value = response
                 with self.assertRaises(ModelTimeoutError):
-                    model.sample(ModelContext((Message("user", "Hello."),)))
+                    model.sample(InteractionContext((Message("user", "Hello."),)))
                 self.assertTrue(response.closed)
 
     def test_responses_preserves_none_sentinel_and_explicit_endpoint(self):

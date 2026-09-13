@@ -211,7 +211,14 @@ def _collapse_instructions(
     return (effective, *remaining)
 
 
-class ModelContext(Sequence[InteractionItem]):
+class InteractionContext(Sequence[InteractionItem]):
+    """Caller-owned, validated append-only interaction log.
+
+    ``items`` retains the full log; ``model_items()`` derives its effective
+    model view. This container is synchronous and not thread-safe. Scheduling
+    and serialization of mutations remain the caller's responsibility.
+    """
+
     def __init__(self, items: Iterable[InteractionItem] = ()) -> None:
         initial_items = list(items)
         _validate_log(initial_items)
@@ -277,14 +284,14 @@ class ModelContext(Sequence[InteractionItem]):
         _validate_log(candidate)
         self._items.extend(new_items)
 
-    def copy(self) -> "ModelContext":
-        return ModelContext(self._items)
+    def copy(self) -> "InteractionContext":
+        return InteractionContext(self._items)
 
     def __repr__(self) -> str:
-        return f"ModelContext({self._items!r})"
+        return f"InteractionContext({self._items!r})"
 
 
 __all__ = [
     "ContextValidationError",
-    "ModelContext",
+    "InteractionContext",
 ]

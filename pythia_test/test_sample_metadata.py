@@ -17,7 +17,7 @@ from pythia.interaction import Environment
 from pythia.interaction import Message
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import ModelTimeoutError
@@ -236,7 +236,7 @@ class SampleMetadataTests(unittest.TestCase):
                     metadata = sample.context_items()[-2]
                     self.assertEqual(metadata.elapsed_seconds, elapsed)
                     self.assertEqual(sample.context_items()[-1], ModelSampleBoundary())
-                    context = ModelContext(sample.context_items())
+                    context = InteractionContext(sample.context_items())
                     path = Path(directory) / "interaction.jsonl"
                     save_interaction_save(path, context)
                     replay = render_interaction_items(load_interaction_save(path).items)
@@ -326,7 +326,7 @@ class SampleMetadataTests(unittest.TestCase):
         for metadata in metadata_items:
             if isinstance(metadata, CompactionMetadata):
                 self.assertEqual(
-                    ModelContext((*items, metadata)).model_items(),
+                    InteractionContext((*items, metadata)).model_items(),
                     items,
                 )
             for encode in (chat_completions._encode_context_messages,
@@ -381,7 +381,7 @@ class SampleMetadataTests(unittest.TestCase):
             protocol="responses_compaction_v2",
             elapsed_seconds=3,
         )
-        original = ModelContext((
+        original = InteractionContext((
             Message("user", "old"),
             Message("assistant", "answer"),
             SampleMetadata(TokenUsage(90, 10, 100, 20)),
@@ -436,7 +436,7 @@ class SampleMetadataTests(unittest.TestCase):
                 return ModelSample((Message("assistant", "Done."),))
 
         model = Model()
-        original = ModelContext((
+        original = InteractionContext((
             Message("assistant", "uncompacted"),
             SampleMetadata(TokenUsage(total_tokens=100)),
             ModelSampleBoundary(),
@@ -576,7 +576,7 @@ class SampleTimingTests(unittest.TestCase):
                     clock.advance(4)
                     return decode(*args, **kwargs)
 
-                context = ModelContext((Message("user", "Hello."),))
+                context = InteractionContext((Message("user", "Hello."),))
                 before = context.items
                 with ExitStack() as stack:
                     stack.enter_context(mock.patch("pythia.interaction.model.perf_counter", clock))
@@ -604,7 +604,7 @@ class SampleTimingTests(unittest.TestCase):
             with self.subTest(name=name):
                 clock = _Clock()
                 model, response, _, _ = _timing_case(name, clock, fail=True)
-                context = ModelContext((Message("user", "Hello."),))
+                context = InteractionContext((Message("user", "Hello."),))
                 before = context.items
                 with mock.patch("pythia.interaction.model.perf_counter", clock):
                     with self.assertRaises(ModelTimeoutError):
@@ -620,7 +620,7 @@ class SampleTimingTests(unittest.TestCase):
             "type": "compaction", "content": "Summary.",
         }])
         with mock.patch("pythia.interaction.model.perf_counter", clock):
-            sample = model.sample(ModelContext((Message("user", "Hello."),)))
+            sample = model.sample(InteractionContext((Message("user", "Hello."),)))
         self.assertEqual(sample.stop_reason, "compaction")
         self.assertEqual(sample.elapsed_seconds, 10.0)
         self.assertEqual(

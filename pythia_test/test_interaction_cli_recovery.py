@@ -14,7 +14,7 @@ from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
 from pythia.interaction import ModelAuthenticationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelFailure
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSample
@@ -78,7 +78,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         )
         for tail, notice in tails:
             with self.subTest(tail=tail):
-                context = ModelContext((*old, *tail))
+                context = InteractionContext((*old, *tail))
                 save_interaction_save(self.path, context)
                 original_bytes = self.path.read_bytes()
                 model = _Model(self.path)
@@ -227,7 +227,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         calls = tuple(ToolCall("record", name, "{}") for name in ("one", "two", "three"))
         original = (Init("old"), *calls, ModelSampleBoundary(),
                     ToolResult("one", "already saved"))
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         environment = mock.Mock(spec=Environment)
         writes = []
 
@@ -258,7 +258,7 @@ class CLIRecoveryTests(_ControllerTestCase):
     async def test_pending_recovery_with_instructions_only_is_explicit_continuation(self):
         original = (Init("old"), Message("user", "old query"),
                     ToolCall("record", "one", "{}"))
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         environment = Environment()
         model = _Model(self.path, _answer())
         with mock.patch.object(environment, "execute_tool_calls") as execute:
@@ -281,7 +281,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         original = (Init("old"), Message("user", "old query"), reasoning,
                     OpaqueCompaction.from_responses("opaque-checkpoint"), call, metadata,
                     ModelSampleBoundary())
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer())
         terminal = _Terminal(_quit_when_idle)
         await self._run(model, terminal, ["--resume", "--prompt", "follow-up\nunchanged"])
@@ -308,7 +308,7 @@ class CLIRecoveryTests(_ControllerTestCase):
             self.assertIsNotNone(previous.latest_plan)
         original = (Init("old"), *calls, *results.items,
                     Message("assistant", "previous"), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, ModelContext(original))
+        save_interaction_save(self.path, InteractionContext(original))
         with DefaultEnvironment(cwd=self.path.parent) as environment:
             model = _Model(self.path, ModelSample(items=(ToolCall(
                 "write_stdin", "lost", '{"session_id":1,"chars":"must not write"}'
@@ -332,7 +332,7 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
                 with self.subTest(resume=resume, fail_at=fail_at):
                     calls = (ToolCall("record", "one", "{}"), ToolCall("record", "two", "{}"))
                     original = (Init("old"), *calls) if resume else (Init("old"),)
-                    save_interaction_save(self.path, ModelContext(original))
+                    save_interaction_save(self.path, InteractionContext(original))
                     executions, attempts, references = [], [], []
                     durable = self.path.read_bytes()
                     real_checkpoint = cli._checkpoint

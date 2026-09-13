@@ -24,7 +24,7 @@ from typing import Tuple
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
-from .context import ModelContext
+from .context import InteractionContext
 from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
@@ -623,12 +623,12 @@ class ChatCompletionsModel:
 
     def _build_request_payload(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         tools: Sequence[Any],
         options: Optional[SamplingOptions],
     ) -> Dict[str, Any]:
-        if not isinstance(context, ModelContext):
-            raise TypeError("context must be ModelContext")
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
         context.assert_model_ready()
         payload: Dict[str, Any] = {
             "messages": _encode_context_messages(context.model_items()),
@@ -646,7 +646,7 @@ class ChatCompletionsModel:
     @_timed_sample
     def sample(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
         options: Optional[SamplingOptions] = None,

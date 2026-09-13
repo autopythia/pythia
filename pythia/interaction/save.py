@@ -12,7 +12,7 @@ from typing import Mapping
 from typing import Optional
 from typing import Union
 
-from .context import ModelContext
+from .context import InteractionContext
 from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
@@ -671,7 +671,7 @@ def iter_interaction_items(
         yield interaction_item_to_dict(item)
 
 
-def save_interaction_save(path: SavePath, context: ModelContext) -> None:
+def save_interaction_save(path: SavePath, context: InteractionContext) -> None:
     """Atomically write a context as one JSON interaction item per line."""
     destination = Path(path)
     temporary_name: Optional[str] = None
@@ -709,7 +709,7 @@ def save_interaction_save(path: SavePath, context: ModelContext) -> None:
                 pass
 
 
-def load_interaction_save(path: SavePath) -> ModelContext:
+def load_interaction_save(path: SavePath) -> InteractionContext:
     """Load and validate a JSONL interaction-save file."""
     source = Path(path)
     items: list[InteractionItem] = []
@@ -737,7 +737,7 @@ def load_interaction_save(path: SavePath) -> ModelContext:
         raise SaveError(f"could not load save {source}: {exc}") from exc
 
     try:
-        return ModelContext(items)
+        return InteractionContext(items)
     except (TypeError, ValueError) as exc:
         raise SaveError(f"invalid save {source}: {exc}") from exc
 

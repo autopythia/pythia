@@ -14,7 +14,7 @@ from pythia.interaction import DefaultEnvironment
 from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelFailure
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
@@ -37,6 +37,25 @@ from pythia.interaction.demo import run_repository_summary
 
 
 class SessionTests(unittest.TestCase):
+    def test_existing_jsonl_loads_as_interaction_context_without_schema_change(self):
+        serialized = (
+            '{"type": "init", "prefix_id": "session-test", "model": "model-1"}\n'
+            '{"type": "message", "role": "user", "content": "hello"}\n'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "interaction.jsonl"
+            path.write_text(serialized, encoding="utf-8")
+            restored = load_interaction_save(path)
+
+            self.assertIsInstance(restored, InteractionContext)
+            self.assertEqual(
+                restored.items,
+                (Init("session-test", model="model-1"), Message("user", "hello")),
+            )
+            self.assertEqual(path.read_text(encoding="utf-8"), serialized)
+            save_interaction_save(path, restored)
+            self.assertEqual(path.read_text(encoding="utf-8"), serialized)
+
     def test_serialized_item_fields_follow_dataclass_order(self):
         call = ToolCall(name="lookup", call_id="call-1", arguments_json="{}")
         result = ToolResult(call_id="call-1", output="done", success=False)
@@ -121,7 +140,7 @@ class SessionTests(unittest.TestCase):
         )
 
     def test_jsonl_writer_preserves_item_field_order(self):
-        context = ModelContext((Init(prefix_id="prefix-1", model="model-1"),))
+        context = InteractionContext((Init(prefix_id="prefix-1", model="model-1"),))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "interaction.jsonl"
@@ -200,19 +219,19 @@ class SessionTests(unittest.TestCase):
         for failure in ("tempfile.NamedTemporaryFile", "os.fsync", "os.replace"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmpdir:
                 path = Path(tmpdir) / "interaction.jsonl"
-                original = ModelContext((Init("old"),))
+                original = InteractionContext((Init("old"),))
                 save_interaction_save(path, original)
                 old_bytes = path.read_bytes()
                 with mock.patch("pythia.interaction.save." + failure,
                                 side_effect=OSError("injected disk failure")):
                     with self.assertRaisesRegex(SaveError, "injected disk failure"):
-                        save_interaction_save(path, ModelContext((Init("new"),)))
+                        save_interaction_save(path, InteractionContext((Init("new"),)))
                 self.assertEqual(path.read_bytes(), old_bytes)
                 self.assertEqual(load_interaction_save(path).items, original.items)
                 self.assertEqual(tuple(path.parent.glob(".interaction.jsonl.*.tmp")), ())
 
     def test_session_init_is_first_and_round_trips(self):
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Init("session-test", model="initial-model"),
                 Message(role="user", content="hello"),
@@ -297,14 +316,14 @@ class SessionTests(unittest.TestCase):
 
     def test_session_init_must_be_first_and_not_compacted(self):
         with self.assertRaisesRegex(ValueError, "must be the first"):
-            ModelContext(
+            InteractionContext(
                 (
                     Message(role="user", content="hello"),
                     Init("session-test"),
                 )
             )
         with self.assertRaisesRegex(ValueError, "must not contain"):
-            ModelContext(
+            InteractionContext(
                 (
                     ContextPrefix(
                         (Init("session-test"),)
@@ -412,7 +431,7 @@ class SessionTests(unittest.TestCase):
                 compaction_count=3,
             ),
         )
-        context = ModelContext(items)
+        context = InteractionContext(items)
         encoded_reasoning = interaction_item_to_dict(items[2])
         self.assertEqual(
             encoded_reasoning["content_signature"],
@@ -504,7 +523,7 @@ class SessionResumeTests(unittest.TestCase):
         )
 
     def test_resume_replays_existing_items(self):
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Message(role="user", content="original request"),
                 UserInteractionBoundary(),
@@ -543,7 +562,7 @@ class SessionResumeTests(unittest.TestCase):
         )
 
     def test_resume_appends_follow_up_prompt_once(self):
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Message(role="user", content="original request"),
                 UserInteractionBoundary(),
@@ -608,7 +627,7 @@ class SessionResumeTests(unittest.TestCase):
                 }
             ),
         )
-        interrupted = ModelContext(
+        interrupted = InteractionContext(
             (
                 Message(role="user", content="original request"),
                 UserInteractionBoundary(),

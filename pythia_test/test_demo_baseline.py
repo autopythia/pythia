@@ -17,7 +17,7 @@ from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Init
 from pythia.interaction import Instructions
 from pythia.interaction import Message
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import Reasoning
@@ -367,7 +367,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
 
     def test_fresh_start_replaces_launch_session_not_workspace_session(self):
         save_interaction_save(
-            self.path, ModelContext(COMPLETED_SESSION_ITEMS)
+            self.path, InteractionContext(COMPLETED_SESSION_ITEMS)
         )
         workspace_path = self.workspace / "interaction.jsonl"
         workspace_path.write_text("workspace sentinel\n", encoding="utf-8")
@@ -409,7 +409,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
 
     def test_completed_resume_replays_summary_without_sampling_or_appending(self):
         save_interaction_save(
-            self.path, ModelContext(COMPLETED_SESSION_ITEMS)
+            self.path, InteractionContext(COMPLETED_SESSION_ITEMS)
         )
         before = self.path.read_bytes()
 
@@ -438,7 +438,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
             PLAN_CALL,
             ModelSampleBoundary(),
         )
-        save_interaction_save(self.path, ModelContext(interrupted))
+        save_interaction_save(self.path, InteractionContext(interrupted))
 
         status, model, _printed = self._run_demo(
             ["--resume", "--instructions", "", "--prompt", "Follow-up."]
@@ -463,7 +463,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         for instructions in ("", "New instructions."):
             with self.subTest(instructions=instructions):
                 save_interaction_save(
-                    self.path, ModelContext(COMPLETED_SESSION_ITEMS)
+                    self.path, InteractionContext(COMPLETED_SESSION_ITEMS)
                 )
                 status, model, _printed = self._run_demo(
                     ["--resume", "--instructions", instructions]
@@ -514,7 +514,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
 
     def test_empty_initial_query_fails_before_replacing_session_or_sampling(self):
         save_interaction_save(
-            self.path, ModelContext(COMPLETED_SESSION_ITEMS)
+            self.path, InteractionContext(COMPLETED_SESSION_ITEMS)
         )
         before = self.path.read_bytes()
         for prompt in ("", " \n\t"):
@@ -603,7 +603,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         )
 
     def test_experimental_resume_does_not_append_seed_to_completed_save(self):
-        save_interaction_save(self.path, ModelContext(COMPLETED_SESSION_ITEMS))
+        save_interaction_save(self.path, InteractionContext(COMPLETED_SESSION_ITEMS))
         before = self.path.read_bytes()
         status, model, _printed = self._run_demo(
             ["--resume", "--experimental-user-message-injection"], samples=(),
@@ -616,7 +616,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         interrupted = (
             *COMPLETED_SESSION_ITEMS[:4], INJECTION_CALL, ModelSampleBoundary(),
         )
-        save_interaction_save(self.path, ModelContext(interrupted))
+        save_interaction_save(self.path, InteractionContext(interrupted))
         status, model, _printed = self._run_demo(
             ["--resume", "--experimental-user-message-injection"],
         )
@@ -632,7 +632,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         interrupted = (
             *COMPLETED_SESSION_ITEMS[:4], INJECTION_CALL, ModelSampleBoundary(),
         )
-        save_interaction_save(self.path, ModelContext(interrupted))
+        save_interaction_save(self.path, InteractionContext(interrupted))
         status, model, _printed = self._run_demo(["--resume"])
         self.assertEqual(status, 0)
         result = model.calls[0][0].items[-1]

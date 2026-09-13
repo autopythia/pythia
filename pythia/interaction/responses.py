@@ -42,7 +42,7 @@ from .compaction import _leading_instruction_prefix
 from .compaction import _select_retained_user_messages
 from .compaction import _timed_compact
 from .context import ContextValidationError
-from .context import ModelContext
+from .context import InteractionContext
 from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
@@ -580,7 +580,7 @@ def _latest_metadata_value(
 
 
 def _resolve_provider_state(
-    context: ModelContext,
+    context: InteractionContext,
     identifier_factory: Callable[[], Any],
 ) -> _ProviderState:
     items = context.items
@@ -1805,12 +1805,12 @@ class CodexResponsesModel:
 
     def _build_request_payload(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         tools: Sequence[Any],
         options: Optional[SamplingOptions],
     ) -> Tuple[Dict[str, Any], _ProviderState]:
-        if not isinstance(context, ModelContext):
-            raise TypeError("context must be ModelContext")
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
         context.assert_model_ready()
 
         if self.endpoint.api_provider == "codex":
@@ -1965,7 +1965,7 @@ class CodexResponsesModel:
     @_timed_sample
     def sample(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
         options: Optional[SamplingOptions] = None,
@@ -1975,7 +1975,7 @@ class CodexResponsesModel:
 
     def _sample_locked(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         tools: Sequence[Any],
         options: Optional[SamplingOptions],
     ) -> ModelSample:
@@ -1990,7 +1990,7 @@ class CodexResponsesModel:
 
     def _compact_responses_v2(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         tools: Sequence[Any],
     ) -> _RemoteCompactionResponse:
         with self._credential_lock:
@@ -2343,12 +2343,12 @@ class ResponsesOpaqueCompactor:
     @_timed_compact
     def compact(
         self,
-        context: ModelContext,
+        context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
     ) -> CompactionResult:
-        if not isinstance(context, ModelContext):
-            raise TypeError("context must be ModelContext")
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
         try:
             context.assert_model_ready()
         except ContextValidationError as exc:

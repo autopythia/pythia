@@ -75,7 +75,7 @@ class Instructions:
     whitespace-only text is supported; ``no instructions`` is represented
     only by the absence of an ``Instructions`` item. When several
     ``Instructions`` items appear in a log, the last one overrides all
-    earlier ones (see ``ModelContext.model_items``).
+    earlier ones (see ``InteractionContext.model_items``).
     """
 
     text: str

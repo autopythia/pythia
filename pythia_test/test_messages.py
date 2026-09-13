@@ -18,7 +18,7 @@ from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
 from pythia.interaction import MessagesServerCompaction
 from pythia.interaction import ModelConfigurationError
-from pythia.interaction import ModelContext
+from pythia.interaction import InteractionContext
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSample
@@ -221,7 +221,7 @@ class MessagesEndpointTests(unittest.TestCase):
         ))
 
         payload = model._build_request_payload(
-            ModelContext((Message("user", "Hello."),)),
+            InteractionContext((Message("user", "Hello."),)),
             (),
             None,
         )
@@ -239,7 +239,7 @@ class MessagesEndpointTests(unittest.TestCase):
         self.assertIsNone(policy.trigger_input_tokens)
 
         disabled = model._build_request_payload(
-            ModelContext((Message("user", "Hello."),)),
+            InteractionContext((Message("user", "Hello."),)),
             (),
             SamplingOptions(enable_auto_compaction=False),
         )
@@ -251,7 +251,7 @@ class MessagesEndpointTests(unittest.TestCase):
             api_key="test-key",
         ))
         enabled_after_startup = runtime_enabled._build_request_payload(
-            ModelContext((Message("user", "Hello."),)),
+            InteractionContext((Message("user", "Hello."),)),
             (),
             SamplingOptions(enable_auto_compaction=True),
         )
@@ -270,7 +270,7 @@ class MessagesEndpointTests(unittest.TestCase):
         })
         opener = _Opener(response)
         MessagesModel(model.endpoint, opener=opener).sample(
-            ModelContext((Message("user", "Hello."),)),
+            InteractionContext((Message("user", "Hello."),)),
             options=SamplingOptions(enable_auto_compaction=False),
         )
         request, _ = opener.calls[0]
@@ -317,7 +317,7 @@ class MessagesModelTests(unittest.TestCase):
             ),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Message(role="system", content="system text"),
                 Message(role="developer", content="developer text"),
@@ -449,7 +449,7 @@ class MessagesModelTests(unittest.TestCase):
     def test_injected_message_is_user_text_after_tool_result_block(self):
         tool = create_inject_user_message_tool()
         call = ToolCall(tool.spec.name, "inject-1", "{}")
-        context = ModelContext((Message("user", "Run the experiment."),))
+        context = InteractionContext((Message("user", "Run the experiment."),))
         context.extend(ModelSample(items=(call,)).context_items())
         environment = Environment((tool,))
         context.extend(environment.execute_tool_calls((call,)).context_items())
@@ -497,7 +497,7 @@ class MessagesModelTests(unittest.TestCase):
             opener=opener,
         )
 
-        model.sample(ModelContext((Message(role="user", content="hello"),)))
+        model.sample(InteractionContext((Message(role="user", content="hello"),)))
 
         payload = _payload(opener)
         self.assertEqual(payload["max_tokens"], 77)
@@ -515,7 +515,7 @@ class MessagesModelTests(unittest.TestCase):
         )
         cases = [
             (
-                ModelContext(
+                InteractionContext(
                     (
                         Message(role="user", content="hello"),
                         Message(role="system", content="late"),
@@ -525,7 +525,7 @@ class MessagesModelTests(unittest.TestCase):
                 "appears after",
             ),
             (
-                ModelContext(
+                InteractionContext(
                     (
                         Message(role="user", content="hello"),
                         ToolCall(
@@ -540,7 +540,7 @@ class MessagesModelTests(unittest.TestCase):
                 "decode to an object",
             ),
             (
-                ModelContext((Message(role="user", content="hello"),)),
+                InteractionContext((Message(role="user", content="hello"),)),
                 SamplingOptions(seed=1),
                 "seed",
             ),
@@ -564,7 +564,7 @@ class MessagesModelTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(ModelResponseError, "redacted_thinking"):
-            model.sample(ModelContext((Message(role="user", content="hello"),)))
+            model.sample(InteractionContext((Message(role="user", content="hello"),)))
 
     def test_context_window_http_error_is_typed(self):
         error = urllib.error.HTTPError(
@@ -580,7 +580,7 @@ class MessagesModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelContextWindowError):
-            model.sample(ModelContext((Message(role="user", content="hello"),)))
+            model.sample(InteractionContext((Message(role="user", content="hello"),)))
 
     def test_server_compaction_round_trips_and_projects_latest_block(self):
         first_response = _FakeResponse(
@@ -633,7 +633,7 @@ class MessagesModelTests(unittest.TestCase):
             ),
             opener=opener,
         )
-        context = ModelContext(
+        context = InteractionContext(
             (
                 Message(role="system", content="instructions"),
                 Message(role="user", content="old question"),
@@ -720,7 +720,7 @@ class MessagesModelTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ModelResponseError, "content"):
             null_model.sample(
-                ModelContext((Message(role="user", content="hello"),))
+                InteractionContext((Message(role="user", content="hello"),))
             )
 
         wrong_protocol_model = MessagesModel(
@@ -732,7 +732,7 @@ class MessagesModelTests(unittest.TestCase):
             "Responses opaque compaction",
         ):
             wrong_protocol_model.sample(
-                ModelContext(
+                InteractionContext(
                     (
                         OpaqueCompaction.from_responses("encrypted"),
                         Message(role="user", content="hello"),
@@ -753,7 +753,7 @@ class MessagesModelTests(unittest.TestCase):
             opener=_Opener(error),
         )
         with self.assertRaises(ModelContextWindowError):
-            model.sample(ModelContext((Message(role="user", content="hello"),)))
+            model.sample(InteractionContext((Message(role="user", content="hello"),)))
 
     def test_retryable_http_statuses_use_two_retries_and_metadata(self):
         returned_overload = _FakeResponse(
@@ -780,7 +780,7 @@ class MessagesModelTests(unittest.TestCase):
         )
 
         sample = model.sample(
-            ModelContext((Message(role="user", content="hello"),))
+            InteractionContext((Message(role="user", content="hello"),))
         )
 
         self.assertEqual(sample.last_assistant_text, "recovered")
@@ -816,7 +816,7 @@ class MessagesModelTests(unittest.TestCase):
             _endpoint(api_url="https://api.anthropic.com", model="model"),
             opener=opener,
             retry_sleep=sleeps.append,
-        ).sample(ModelContext((Message("user", "hello"),)))
+        ).sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(sample.request_attempts, 3)
         self.assertEqual(
@@ -838,7 +838,7 @@ class MessagesModelTests(unittest.TestCase):
         )
 
         with self.assertRaises(ModelTimeoutError) as raised:
-            model.sample(ModelContext((Message("user", "hello"),)))
+            model.sample(InteractionContext((Message("user", "hello"),)))
 
         self.assertEqual(len(opener.calls), 3)
         self.assertEqual(sleeps, [0.25, 0.5])
