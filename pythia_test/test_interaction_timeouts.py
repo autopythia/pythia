@@ -34,11 +34,16 @@ from pythia.interaction._account_http import AccountServiceError
 from pythia.interaction.model_config import build_model
 
 
+def _no_retry_sleep(_delay):
+    return None
+
+
 def _models(opener, **options):
     return (
         ("chat", ChatCompletionsModel(
             ChatCompletionsEndpoint(api_url="http://localhost", **options),
             opener=opener,
+            retry_sleep=_no_retry_sleep,
         )),
         ("messages", MessagesModel(
             MessagesEndpoint(
@@ -48,15 +53,18 @@ def _models(opener, **options):
                 **options,
             ),
             opener=opener,
+            retry_sleep=_no_retry_sleep,
         )),
         ("responses endpoint", CodexResponsesModel(
             StreamingResponsesEndpoint(
                 api_url="http://localhost", model="model", bearer_token="FAKE", **options,
             ),
             opener=opener,
+            retry_sleep=_no_retry_sleep,
         )),
         ("responses convenience", CodexResponsesModel(
-            model="model", auth=CodexAuth("FAKE"), opener=opener, **options,
+            model="model", auth=CodexAuth("FAKE"), opener=opener,
+            retry_sleep=_no_retry_sleep, **options,
         )),
     )
 
@@ -93,8 +101,11 @@ class InteractionTimeoutTests(unittest.TestCase):
                         self.assertEqual(model.endpoint.request_timeout_seconds, expected)
                         with self.assertRaises(ModelTimeoutError):
                             model.sample(context)
-                        opener.assert_called_once()
-                        self.assertEqual(opener.call_args.kwargs["timeout"], expected)
+                        self.assertEqual(opener.call_count, 3)
+                        self.assertTrue(all(
+                            call.kwargs["timeout"] == expected
+                            for call in opener.call_args_list
+                        ))
 
     def test_body_and_stream_timeouts_remain_typed_and_close_responses(self):
         opener = mock.Mock()

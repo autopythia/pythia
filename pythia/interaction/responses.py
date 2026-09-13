@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import math
 import os
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +26,8 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
+from ._transport_retry import retry_delay_seconds
 from .codex_auth import CodexAuth
 from .codex_auth import CodexAuthPath
 from .codex_auth import CodexCredentials
@@ -77,7 +81,7 @@ from .usage import TokenUsage
 X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
 REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS = 64_000
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-_MAX_TRANSIENT_HTTP_RETRIES = 1
+_MAX_TRANSIENT_RETRIES = DEFAULT_MAX_TRANSIENT_RETRIES
 _MAX_DIAGNOSTIC_VALUE_CHARS = 256
 _MAX_DIAGNOSTIC_EVENT_TYPES = 32
 
@@ -1136,7 +1140,7 @@ def _collect_sample(
                 failure=partial.failure,
                 completed_items=partial.completed_items,
             ) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
             partial = _stream_failure(
                 "Responses stream failed before response.completed",
                 category="stream_transport",
@@ -1367,7 +1371,7 @@ def _collect_remote_compaction_v2(
                 failure=partial.failure,
                 completed_items=partial.completed_items,
             ) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
             partial = failure(
                 "Remote Responses compaction failed before response.completed",
                 category="stream_transport",
@@ -1580,6 +1584,54 @@ def _http_failure(
     return error_type(message, failure=failure)
 
 
+def _request_transport_failure(
+    *,
+    timeout: bool,
+    api_provider: str,
+    model: str,
+    auth_source: str,
+    attempt_count: int,
+    recovery: Tuple[str, ...],
+) -> ModelTransportError:
+    label = "Codex Responses" if api_provider == "codex" else "Responses"
+    category = "request_timeout" if timeout else "request_transport"
+    message = (
+        f"{label} request timed out"
+        if timeout
+        else f"{label} request failed before a response was completed"
+    )
+    failure = ModelFailure(
+        category=category,
+        message=message,
+        provider=api_provider,
+        model=model,
+        auth_source=auth_source,
+        attempt_count=attempt_count,
+        recovery=recovery,
+    )
+    error_type = ModelTimeoutError if timeout else ModelTransportError
+    return error_type(message, failure=failure)
+
+
+def _stream_retry_label(exc: ModelError) -> Optional[str]:
+    failure = exc.failure
+    if failure is None:
+        return None
+    return {
+        "stream_closed": "stream_closed_retry",
+        "stream_transport": "stream_transport_retry",
+        "stream_timeout": "stream_timeout_retry",
+    }.get(failure.category)
+
+
+def _close_response(response: Any) -> None:
+    if response is None:
+        return
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
 def _response_header(response: Any, name: str) -> Optional[str]:
     headers = getattr(response, "headers", None)
     if headers is None:
@@ -1618,6 +1670,7 @@ class CodexResponsesModel:
         opener: Optional[Callable[..., Any]] = None,
         auth_opener: Optional[Callable[..., Any]] = None,
         identifier_factory: Optional[Callable[[], Any]] = None,
+        retry_sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         if endpoint is not None:
             if not isinstance(endpoint, StreamingResponsesEndpoint):
@@ -1701,10 +1754,13 @@ class CodexResponsesModel:
             raise TypeError("identifier_factory must be callable or None")
         if auth_opener is not None and not callable(auth_opener):
             raise TypeError("auth_opener must be callable or None")
+        if retry_sleep is not None and not callable(retry_sleep):
+            raise TypeError("retry_sleep must be callable or None")
         self.endpoint = resolved_endpoint
         self._opener = opener or urllib.request.urlopen
         self._auth_opener = auth_opener
         self._identifier_factory = identifier_factory or uuid.uuid4
+        self._retry_sleep = time.sleep if retry_sleep is None else retry_sleep
         self._credential_source = credential_source
         self._expected_account_id = resolved_endpoint.account_id
         self._credential_lock = Lock()
@@ -1970,6 +2026,7 @@ class CodexResponsesModel:
         recovery: List[str] = []
         attempts = 0
         transient_retries = 0
+        unauthorized_retried = False
         reloaded = False
         refreshed = False
 
@@ -2017,7 +2074,16 @@ class CodexResponsesModel:
                         )
 
                 if isinstance(status, int) and not 200 <= status < 300:
-                    if status == 401 and self.endpoint.api_provider == "codex":
+                    # No retry or credential-recovery work should retain an
+                    # error response while sleeping or making another request.
+                    _close_response(response)
+                    response = None
+                    context_window_error = _is_context_window_error(detail)
+                    if (
+                        status == 401
+                        and self.endpoint.api_provider == "codex"
+                        and not context_window_error
+                    ):
                         if not reloaded and self._credential_source.kind != "static":
                             reloaded = True
                             try:
@@ -2040,6 +2106,17 @@ class CodexResponsesModel:
                                 recovery.append("credential_reload")
                                 continue
                             recovery.append("credential_reload_unchanged")
+                        # The Codex backend has occasionally returned an
+                        # isolated 401 for credentials that succeed unchanged
+                        # on the next request. Try the same credential exactly
+                        # once before rotating it through the OAuth endpoint.
+                        if not unauthorized_retried:
+                            unauthorized_retried = True
+                            recovery.append("http_401_retry")
+                            self._retry_sleep(
+                                retry_delay_seconds(1, headers)
+                            )
+                            continue
                         if not refreshed and self._credential_source.kind == "codex_file":
                             refreshed = True
                             loaded = self._refresh_after_unauthorized(snapshot)
@@ -2050,11 +2127,17 @@ class CodexResponsesModel:
                             recovery.append("oauth_refresh_failed")
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
-                        and not _is_context_window_error(detail)
-                        and transient_retries < _MAX_TRANSIENT_HTTP_RETRIES
+                        and not context_window_error
+                        and transient_retries < _MAX_TRANSIENT_RETRIES
                     ):
                         transient_retries += 1
                         recovery.append(f"http_{status}_retry")
+                        self._retry_sleep(
+                            retry_delay_seconds(
+                                transient_retries,
+                                headers,
+                            )
+                        )
                         continue
                     raise _http_failure(
                         status,
@@ -2074,10 +2157,16 @@ class CodexResponsesModel:
                     self.endpoint.api_provider == "codex"
                     and captured_turn_state is None
                 ):
-                    captured_turn_state = _response_header(
+                    response_turn_state = _response_header(
                         response,
                         X_CODEX_TURN_STATE_HEADER,
                     )
+                    if response_turn_state is not None:
+                        captured_turn_state = response_turn_state
+                        provider_state = replace(
+                            provider_state,
+                            turn_state=response_turn_state,
+                        )
                 try:
                     return collector(
                         response,
@@ -2091,23 +2180,127 @@ class CodexResponsesModel:
                         response_headers=headers,
                         forbidden_values=(snapshot.auth.access_token,),
                     )
+                except ModelError as exc:
+                    retry_label = _stream_retry_label(exc)
+                    if (
+                        retry_label is not None
+                        and transient_retries < _MAX_TRANSIENT_RETRIES
+                    ):
+                        transient_retries += 1
+                        recovery.append(retry_label)
+                        _close_response(response)
+                        response = None
+                        self._retry_sleep(
+                            retry_delay_seconds(
+                                transient_retries,
+                                headers,
+                            )
+                        )
+                        continue
+                    raise
                 except (TimeoutError, socket.timeout) as exc:
-                    raise ModelTimeoutError(str(exc)) from exc
-                except OSError as exc:
-                    raise ModelTransportError(str(exc)) from exc
+                    if transient_retries < _MAX_TRANSIENT_RETRIES:
+                        transient_retries += 1
+                        recovery.append("stream_timeout_retry")
+                        _close_response(response)
+                        response = None
+                        self._retry_sleep(
+                            retry_delay_seconds(
+                                transient_retries,
+                                headers,
+                            )
+                        )
+                        continue
+                    raise _request_transport_failure(
+                        timeout=True,
+                        api_provider=self.endpoint.api_provider,
+                        model=self.endpoint.model,
+                        auth_source=self._credential_source.kind,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                    ) from exc
+                except (OSError, http.client.HTTPException) as exc:
+                    if transient_retries < _MAX_TRANSIENT_RETRIES:
+                        transient_retries += 1
+                        recovery.append("stream_transport_retry")
+                        _close_response(response)
+                        response = None
+                        self._retry_sleep(
+                            retry_delay_seconds(
+                                transient_retries,
+                                headers,
+                            )
+                        )
+                        continue
+                    raise _request_transport_failure(
+                        timeout=False,
+                        api_provider=self.endpoint.api_provider,
+                        model=self.endpoint.model,
+                        auth_source=self._credential_source.kind,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                    ) from exc
             except urllib.error.URLError as exc:
-                if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                    raise ModelTimeoutError(str(exc)) from exc
-                raise ModelTransportError(str(exc)) from exc
+                timeout = isinstance(exc.reason, (TimeoutError, socket.timeout))
+                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                    transient_retries += 1
+                    recovery.append(
+                        "request_timeout_retry"
+                        if timeout
+                        else "connection_retry"
+                    )
+                    _close_response(response)
+                    response = None
+                    self._retry_sleep(
+                        retry_delay_seconds(transient_retries)
+                    )
+                    continue
+                raise _request_transport_failure(
+                    timeout=timeout,
+                    api_provider=self.endpoint.api_provider,
+                    model=self.endpoint.model,
+                    auth_source=self._credential_source.kind,
+                    attempt_count=attempts,
+                    recovery=tuple(recovery),
+                ) from exc
             except (TimeoutError, socket.timeout) as exc:
-                raise ModelTimeoutError(str(exc)) from exc
-            except OSError as exc:
-                raise ModelTransportError(str(exc)) from exc
+                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                    transient_retries += 1
+                    recovery.append("request_timeout_retry")
+                    _close_response(response)
+                    response = None
+                    self._retry_sleep(
+                        retry_delay_seconds(transient_retries)
+                    )
+                    continue
+                raise _request_transport_failure(
+                    timeout=True,
+                    api_provider=self.endpoint.api_provider,
+                    model=self.endpoint.model,
+                    auth_source=self._credential_source.kind,
+                    attempt_count=attempts,
+                    recovery=tuple(recovery),
+                ) from exc
+            except (OSError, http.client.HTTPException) as exc:
+                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                    transient_retries += 1
+                    recovery.append("connection_retry")
+                    _close_response(response)
+                    response = None
+                    self._retry_sleep(
+                        retry_delay_seconds(transient_retries)
+                    )
+                    continue
+                raise _request_transport_failure(
+                    timeout=False,
+                    api_provider=self.endpoint.api_provider,
+                    model=self.endpoint.model,
+                    auth_source=self._credential_source.kind,
+                    attempt_count=attempts,
+                    recovery=tuple(recovery),
+                ) from exc
             finally:
-                if response is not None:
-                    close = getattr(response, "close", None)
-                    if callable(close):
-                        close()
+                _close_response(response)
 
 
 class ResponsesOpaqueCompactor:

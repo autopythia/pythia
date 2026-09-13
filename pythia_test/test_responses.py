@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import os
+import socket
 import tempfile
 import unittest
 import urllib.error
@@ -44,6 +46,7 @@ from pythia.interaction import ToolSpec
 from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import X_CODEX_TURN_STATE_HEADER
 from pythia.interaction import create_default_compactor
 from pythia.interaction import load_interaction_save
 from pythia.interaction import save_interaction_save
@@ -188,6 +191,16 @@ class _FakeSSEResponse:
 
     def close(self):
         self.closed = True
+
+
+class _FailingSSEResponse(_FakeSSEResponse):
+    def __init__(self, *payloads, failure, **kwargs):
+        super().__init__(*payloads, **kwargs)
+        self.failure = failure
+
+    def __iter__(self):
+        yield from self._lines
+        raise self.failure
 
 
 class _ScriptedOpener:
@@ -462,6 +475,8 @@ class CodexResponsesConstructionTests(unittest.TestCase):
                 endpoint,
                 model="other-model",
             )
+        with self.assertRaisesRegex(TypeError, "retry_sleep"):
+            CodexResponsesModel(endpoint, retry_sleep=object())
         with self.assertRaisesRegex(
             ModelConfigurationError,
             "auth cannot be combined",
@@ -702,6 +717,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 api_provider="codex",
             ),
             opener=opener,
+            retry_sleep=lambda _delay: None,
         )
 
         result = ResponsesOpaqueCompactor(model).compact(
@@ -715,6 +731,43 @@ class CodexResponsesModelTests(unittest.TestCase):
         self.assertEqual(metadata.provider_response_id, "response-after-retry")
         self.assertEqual(len(opener.calls), 2)
         self.assertTrue(response.closed)
+
+    def test_remote_v2_compaction_retries_interrupted_stream(self):
+        discarded = _FailingSSEResponse(
+            _compaction_event(0, "discarded-checkpoint"),
+            failure=OSError("stream reset"),
+        )
+        accepted = _FakeSSEResponse(
+            _compaction_event(0, "accepted-checkpoint"),
+            _completed_event(response_id="accepted-response"),
+        )
+        opener = _ScriptedOpener(discarded, accepted)
+        sleeps = []
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        result = ResponsesOpaqueCompactor(model).compact(
+            ModelContext((Message("user", "compact me"),))
+        )
+
+        self.assertEqual(
+            result.items[0].prefix_items[-1],
+            OpaqueCompaction.from_responses("accepted-checkpoint"),
+        )
+        self.assertEqual(result.request_attempts, 2)
+        self.assertEqual(result.recovery, ("stream_transport_retry",))
+        self.assertEqual(result.provider_response_id, "accepted-response")
+        self.assertEqual(sleeps, [0.25])
+        self.assertTrue(discarded.closed)
+        self.assertTrue(accepted.closed)
 
     def test_remote_v2_compaction_requires_one_checkpoint_and_completion(self):
         cases = (
@@ -741,6 +794,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         for payloads, message in cases:
             with self.subTest(message=message):
+                attempts = 3 if message == "closed before response.completed" else 1
                 model = CodexResponsesModel(
                     StreamingResponsesEndpoint(
                         api_url=CODEX_RESPONSES_API_URL,
@@ -748,7 +802,11 @@ class CodexResponsesModelTests(unittest.TestCase):
                         bearer_token="token",
                         api_provider="codex",
                     ),
-                    opener=_ScriptedOpener(_FakeSSEResponse(*payloads)),
+                    opener=_ScriptedOpener(*(
+                        _FakeSSEResponse(*payloads)
+                        for _ in range(attempts)
+                    )),
+                    retry_sleep=lambda _delay: None,
                 )
                 with self.assertRaisesRegex(ModelResponseError, message):
                     ResponsesOpaqueCompactor(model).compact(
@@ -1572,7 +1630,12 @@ class CodexResponsesModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelResponseError, "before") as raised:
             CodexResponsesModel(
                 model.endpoint,
-                opener=_ScriptedOpener(incomplete_response),
+                opener=_ScriptedOpener(
+                    incomplete_response,
+                    incomplete_response,
+                    incomplete_response,
+                ),
+                retry_sleep=lambda _delay: None,
             ).sample(
                 ModelContext([Message(role="user", content="hello")])
             )
@@ -1583,6 +1646,11 @@ class CodexResponsesModelTests(unittest.TestCase):
         failure = raised.exception.failure
         self.assertIsNotNone(failure)
         self.assertEqual(failure.category, "stream_closed")
+        self.assertEqual(failure.attempt_count, 3)
+        self.assertEqual(
+            failure.recovery,
+            ("stream_closed_retry", "stream_closed_retry"),
+        )
         self.assertEqual(failure.event_count, 2)
         self.assertEqual(
             failure.event_types,
@@ -1626,13 +1694,15 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
 
     def test_codex_401_is_actionable_and_does_not_expose_token(self):
-        error = urllib.error.HTTPError(
-            CODEX_RESPONSES_API_URL,
-            401,
-            "Unauthorized",
-            {},
-            io.BytesIO(b'{"error":{"message":"expired"}}'),
-        )
+        def error():
+            return urllib.error.HTTPError(
+                CODEX_RESPONSES_API_URL,
+                401,
+                "Unauthorized",
+                {},
+                io.BytesIO(b'{"error":{"message":"expired"}}'),
+            )
+        opener = _ScriptedOpener(error(), error())
         model = CodexResponsesModel(
             StreamingResponsesEndpoint(
                 api_url=CODEX_RESPONSES_API_URL,
@@ -1640,8 +1710,9 @@ class CodexResponsesModelTests(unittest.TestCase):
                 bearer_token="secret-token",
                 api_provider="codex",
             ),
-            opener=_ScriptedOpener(error),
+            opener=opener,
             identifier_factory=iter(("session-1", "turn-1")).__next__,
+            retry_sleep=lambda _delay: None,
         )
 
         with self.assertRaisesRegex(
@@ -1653,6 +1724,35 @@ class CodexResponsesModelTests(unittest.TestCase):
             )
 
         self.assertNotIn("secret-token", str(raised.exception))
+        self.assertEqual(len(opener.calls), 2)
+        self.assertEqual(raised.exception.failure.attempt_count, 2)
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("http_401_retry",),
+        )
+
+    def test_generic_responses_401_is_not_retried(self):
+        opener = _ScriptedOpener(_http_error(401))
+        sleeper = mock.Mock(
+            side_effect=AssertionError("generic 401 must not retry")
+        )
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://api.example.test/v1",
+                model="generic-model",
+                bearer_token="api-key",
+            ),
+            opener=opener,
+            retry_sleep=sleeper,
+        )
+
+        with self.assertRaises(ModelAuthenticationError) as raised:
+            model.sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(len(opener.calls), 1)
+        sleeper.assert_not_called()
+        self.assertEqual(raised.exception.failure.attempt_count, 1)
+        self.assertEqual(raised.exception.failure.recovery, ())
 
     def test_codex_401_reloads_changed_auth_file_before_retry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1699,6 +1799,57 @@ class CodexResponsesModelTests(unittest.TestCase):
         self.assertEqual(_request_headers(opener, 0)["authorization"], "Bearer old-token")
         self.assertEqual(_request_headers(opener, 1)["authorization"], "Bearer new-token")
 
+    def test_spurious_401_retries_unchanged_auth_file_before_refresh(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json.dumps({
+                    "auth_mode": "chatgpt",
+                    "tokens": {
+                        "access_token": "valid-token",
+                        "refresh_token": "unused-refresh-token",
+                        "id_token": _account_id_token("account-1"),
+                        "account_id": "account-1",
+                    },
+                }),
+                encoding="utf-8",
+            )
+            opener = _ScriptedOpener(
+                _http_error(401, headers={"retry-after": "0.75"}),
+                _FakeSSEResponse(
+                    _message_event(0, "accepted unchanged"),
+                    _completed_event(),
+                ),
+            )
+            auth_opener = mock.Mock(
+                side_effect=AssertionError("spurious 401 must not refresh")
+            )
+            sleeps = []
+            model = CodexResponsesModel(
+                model="codex-test",
+                auth_file=auth_file,
+                opener=opener,
+                auth_opener=auth_opener,
+                retry_sleep=sleeps.append,
+            )
+
+            sample = model.sample(
+                ModelContext([Message(role="user", content="hello")])
+            )
+
+        self.assertEqual(sample.last_assistant_text, "accepted unchanged")
+        self.assertEqual(sample.request_attempts, 2)
+        self.assertEqual(
+            sample.recovery,
+            ("credential_reload_unchanged", "http_401_retry"),
+        )
+        self.assertEqual(sleeps, [0.75])
+        auth_opener.assert_not_called()
+        self.assertEqual(
+            [_request_headers(opener, i)["authorization"] for i in range(2)],
+            ["Bearer valid-token", "Bearer valid-token"],
+        )
+
     def test_codex_401_refreshes_oauth_token_and_persists_rotation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             auth_file = Path(tmpdir) / "auth.json"
@@ -1718,6 +1869,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 encoding="utf-8",
             )
             opener = _ScriptedOpener(
+                _http_error(401),
                 _http_error(401),
                 _FakeSSEResponse(
                     _message_event(0, "refreshed"),
@@ -1741,6 +1893,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 auth_file=auth_file,
                 opener=opener,
                 auth_opener=auth_opener,
+                retry_sleep=lambda _delay: None,
             )
 
             sample = model.sample(
@@ -1750,13 +1903,18 @@ class CodexResponsesModelTests(unittest.TestCase):
             saved_mode = auth_file.stat().st_mode & 0o777
 
         self.assertEqual(sample.last_assistant_text, "refreshed")
-        self.assertEqual(sample.request_attempts, 2)
+        self.assertEqual(sample.request_attempts, 3)
         self.assertEqual(
             sample.recovery,
-            ("credential_reload_unchanged", "oauth_refresh"),
+            (
+                "credential_reload_unchanged",
+                "http_401_retry",
+                "oauth_refresh",
+            ),
         )
         self.assertEqual(_request_headers(opener, 0)["authorization"], "Bearer old-token")
-        self.assertEqual(_request_headers(opener, 1)["authorization"], "Bearer new-token")
+        self.assertEqual(_request_headers(opener, 1)["authorization"], "Bearer old-token")
+        self.assertEqual(_request_headers(opener, 2)["authorization"], "Bearer new-token")
         refresh_request = json.loads(auth_opener.calls[0][0].data.decode("utf-8"))
         self.assertEqual(refresh_request["grant_type"], "refresh_token")
         self.assertEqual(refresh_request["refresh_token"], "old-refresh")
@@ -1800,22 +1958,24 @@ class CodexResponsesModelTests(unittest.TestCase):
 
     def test_unchanged_environment_credential_does_not_loop_on_401(self):
         opener = _ScriptedOpener(
-            _http_error(401, headers={"x-request-id": "request-env"})
+            _http_error(401),
+            _http_error(401, headers={"x-request-id": "request-env"}),
         )
         with mock.patch.dict(os.environ, {"META_API_KEY": "meta-key"}, clear=True):
             model = CodexResponsesModel(
                 model="muse-spark-1.3",
                 opener=opener,
+                retry_sleep=lambda _delay: None,
             )
             with self.assertRaises(ModelAuthenticationError) as raised:
                 model.sample(
                     ModelContext([Message(role="user", content="hello")])
                 )
 
-        self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(len(opener.calls), 2)
         self.assertEqual(
             raised.exception.failure.recovery,
-            ("credential_reload_unchanged",),
+            ("credential_reload_unchanged", "http_401_retry"),
         )
         self.assertEqual(raised.exception.failure.request_id, "request-env")
         self.assertIn("restart", str(raised.exception))
@@ -1894,6 +2054,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             ).decode("ascii")
             opener = _ScriptedOpener(
                 _http_error(401),
+                _http_error(401),
                 _http_error(
                     401,
                     body=b'{"error":{"message":"FAKE_BODY_SECRET"}}',
@@ -1921,6 +2082,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 auth_file=auth_file,
                 opener=opener,
                 auth_opener=auth_opener,
+                retry_sleep=lambda _delay: None,
             )
 
             with self.assertRaises(ModelAuthenticationError) as raised:
@@ -1928,17 +2090,21 @@ class CodexResponsesModelTests(unittest.TestCase):
                     ModelContext([Message(role="user", content="hello")])
                 )
 
-        self.assertEqual(len(opener.calls), 2)
+        self.assertEqual(len(opener.calls), 3)
         failure = raised.exception.failure
         self.assertEqual(failure.http_status, 401)
-        self.assertEqual(failure.attempt_count, 2)
+        self.assertEqual(failure.attempt_count, 3)
         self.assertEqual(failure.request_id, "request-final")
         self.assertEqual(failure.cf_ray, "ray-final")
         self.assertEqual(failure.authorization_error, "expired_token")
         self.assertEqual(failure.auth_error_code, "token_expired")
         self.assertEqual(
             failure.recovery,
-            ("credential_reload_unchanged", "oauth_refresh"),
+            (
+                "credential_reload_unchanged",
+                "http_401_retry",
+                "oauth_refresh",
+            ),
         )
         rendered = f"{raised.exception!r}\n{raised.exception}\n{failure!r}"
         for secret in (
@@ -1964,6 +2130,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 bearer_token="api-key",
             ),
             opener=recovered_opener,
+            retry_sleep=lambda _delay: None,
         ).sample(ModelContext([Message(role="user", content="hello")]))
         self.assertEqual(recovered.request_attempts, 2)
         self.assertEqual(recovered.recovery, ("http_503_retry",))
@@ -1993,6 +2160,149 @@ class CodexResponsesModelTests(unittest.TestCase):
         self.assertEqual(raised.exception.failure.error_code, "invalid_request")
         self.assertIsNone(raised.exception.failure.authorization_error)
         self.assertNotIn("FAKE_SECRET", str(raised.exception))
+
+    def test_http_and_midstream_failures_share_two_retry_budget(self):
+        partial = _FailingSSEResponse(
+            _message_event(0, "discarded partial output"),
+            failure=http.client.IncompleteRead(b"truncated stream"),
+            headers={X_CODEX_TURN_STATE_HEADER: "retry-sticky-state"},
+        )
+        success = _FakeSSEResponse(
+            _message_event(0, "final output"),
+            _completed_event(),
+        )
+        opener = _ScriptedOpener(
+            partial,
+            _http_error(503, headers={"retry-after": "1.25"}),
+            success,
+        )
+        sleeps = []
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url=CODEX_RESPONSES_API_URL,
+                model="codex-test",
+                bearer_token="token",
+                api_provider="codex",
+            ),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        sample = model.sample(
+            ModelContext((Init("session"), Message("user", "hello")))
+        )
+
+        self.assertEqual(sample.items, (Message("assistant", "final output"),))
+        self.assertEqual(sample.request_attempts, 3)
+        self.assertEqual(
+            sample.recovery,
+            ("stream_transport_retry", "http_503_retry"),
+        )
+        self.assertEqual(sample.provider_turn_state, "retry-sticky-state")
+        self.assertEqual(sleeps, [0.25, 1.25])
+        self.assertTrue(partial.closed)
+        self.assertTrue(success.closed)
+        self.assertNotIn(
+            "x-codex-turn-state",
+            _request_headers(opener, 0),
+        )
+        self.assertEqual(
+            _request_headers(opener, 1)["x-codex-turn-state"],
+            "retry-sticky-state",
+        )
+        self.assertEqual(
+            tuple(_request_payload(opener, index) for index in range(3)),
+            (_request_payload(opener, 0),) * 3,
+        )
+
+    def test_stream_progress_does_not_reset_retry_budget(self):
+        responses = tuple(
+            _FakeSSEResponse(_message_event(0, text))
+            for text in ("discarded one", "discarded two", "d final")
+        )
+        opener = _ScriptedOpener(*responses)
+        sleeps = []
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://api.example.test/v1",
+                model="generic-model",
+                bearer_token="api-key",
+            ),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelResponseError) as raised:
+            model.sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(len(opener.calls), 3)
+        self.assertEqual(sleeps, [0.25, 0.5])
+        self.assertEqual(
+            raised.exception.completed_items,
+            (Message("assistant", "d final"),),
+        )
+        self.assertEqual(raised.exception.failure.attempt_count, 3)
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("stream_closed_retry", "stream_closed_retry"),
+        )
+        self.assertTrue(all(response.closed for response in responses))
+
+    def test_connection_and_timeout_failures_are_retried(self):
+        opener = _ScriptedOpener(
+            urllib.error.URLError(OSError("connection reset")),
+            socket.timeout("read timed out"),
+            _FakeSSEResponse(
+                _message_event(0, "reconnected"),
+                _completed_event(),
+            ),
+        )
+        sleeps = []
+        sample = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://api.example.test/v1",
+                model="generic-model",
+                bearer_token="api-key",
+            ),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        ).sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(sample.last_assistant_text, "reconnected")
+        self.assertEqual(sample.request_attempts, 3)
+        self.assertEqual(
+            sample.recovery,
+            ("connection_retry", "request_timeout_retry"),
+        )
+        self.assertEqual(sleeps, [0.25, 0.5])
+
+    def test_retryable_http_failure_stops_after_two_retries(self):
+        opener = _ScriptedOpener(*(
+            _http_error(503, headers={"x-request-id": f"request-{index}"})
+            for index in range(1, 4)
+        ))
+        sleeps = []
+        model = CodexResponsesModel(
+            StreamingResponsesEndpoint(
+                api_url="https://api.example.test/v1",
+                model="generic-model",
+                bearer_token="api-key",
+            ),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelTransportError) as raised:
+            model.sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(len(opener.calls), 3)
+        self.assertEqual(sleeps, [0.25, 0.5])
+        self.assertEqual(raised.exception.failure.attempt_count, 3)
+        self.assertEqual(raised.exception.failure.request_id, "request-3")
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("http_503_retry", "http_503_retry"),
+        )
 
 
 class DemoConfigurationTests(unittest.TestCase):

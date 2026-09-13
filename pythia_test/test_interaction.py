@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import socket
 import urllib.error
 import unittest
 from unittest import mock
@@ -24,6 +25,8 @@ from pythia.interaction import ModelContext
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
+from pythia.interaction import ModelTimeoutError
+from pythia.interaction import ModelTransportError
 from pythia.interaction import PromptSummarizingCompactor
 from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
@@ -41,8 +44,9 @@ from pythia.interaction.experimental_tools import create_inject_user_message_too
 
 
 class _FakeHTTPResponse:
-    def __init__(self, payload, *, status=200):
+    def __init__(self, payload, *, status=200, headers=None):
         self.status = status
+        self.headers = dict(headers or {})
         self._payload = json.dumps(payload).encode("utf-8")
         self.closed = False
 
@@ -66,6 +70,30 @@ class _ScriptedOpener:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+
+class _ReadFailureResponse:
+    def __init__(self, failure):
+        self.status = 200
+        self.headers = {}
+        self.failure = failure
+        self.closed = False
+
+    def read(self):
+        raise self.failure
+
+    def close(self):
+        self.closed = True
+
+
+def _http_error(status, *, body=b"", headers=None):
+    return urllib.error.HTTPError(
+        "https://api.example.test/v1/chat/completions",
+        status,
+        "HTTP failure",
+        dict(headers or {}),
+        io.BytesIO(body),
+    )
 
 
 def _request_payload(opener, index=0):
@@ -396,6 +424,11 @@ class EndpointTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ModelConfigurationError):
                     ChatCompletionsEndpoint(**kwargs)
+        with self.assertRaisesRegex(TypeError, "retry_sleep"):
+            ChatCompletionsModel(
+                ChatCompletionsEndpoint(api_url="http://localhost"),
+                retry_sleep=object(),
+            )
 
     def test_endpoint_validates_and_redacts_api_key(self):
         endpoint = ChatCompletionsEndpoint(
@@ -932,6 +965,95 @@ class ChatCompletionsModelTests(unittest.TestCase):
 
         with self.assertRaises(ModelContextWindowError):
             model.sample(ModelContext([Message(role="user", content="hello")]))
+
+    def test_retryable_http_statuses_use_two_retries_and_metadata(self):
+        returned_error = _FakeHTTPResponse(
+            {"error": {"message": "temporary"}},
+            status=503,
+        )
+        success = _FakeHTTPResponse({
+            "choices": [{
+                "message": {"role": "assistant", "content": "recovered"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        })
+        opener = _ScriptedOpener(
+            _http_error(429, headers={"Retry-After": "0.75"}),
+            returned_error,
+            success,
+        )
+        sleeps = []
+        model = ChatCompletionsModel(
+            ChatCompletionsEndpoint(api_url="https://api.example.test"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        sample = model.sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(sample.last_assistant_text, "recovered")
+        self.assertEqual(sample.request_attempts, 3)
+        self.assertEqual(
+            sample.recovery,
+            ("http_429_retry", "http_503_retry"),
+        )
+        self.assertEqual(sleeps, [0.75, 0.5])
+        self.assertTrue(returned_error.closed)
+        self.assertTrue(success.closed)
+        request_bodies = tuple(call[0].data for call in opener.calls)
+        self.assertEqual(request_bodies, (request_bodies[0],) * 3)
+
+    def test_connection_and_body_read_failures_are_retried(self):
+        failed_read = _ReadFailureResponse(OSError("body disconnected"))
+        success = _FakeHTTPResponse({
+            "choices": [{
+                "message": {"role": "assistant", "content": "recovered"},
+                "finish_reason": "stop",
+            }],
+        })
+        opener = _ScriptedOpener(
+            urllib.error.URLError(OSError("connection reset")),
+            failed_read,
+            success,
+        )
+        sleeps = []
+        sample = ChatCompletionsModel(
+            ChatCompletionsEndpoint(api_url="https://api.example.test"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        ).sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(sample.request_attempts, 3)
+        self.assertEqual(
+            sample.recovery,
+            ("connection_retry", "connection_retry"),
+        )
+        self.assertEqual(sleeps, [0.25, 0.5])
+        self.assertTrue(failed_read.closed)
+
+    def test_timeout_retry_exhaustion_has_safe_attempt_metadata(self):
+        opener = _ScriptedOpener(*(
+            socket.timeout("private timeout detail") for _ in range(3)
+        ))
+        sleeps = []
+        model = ChatCompletionsModel(
+            ChatCompletionsEndpoint(api_url="https://api.example.test"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelTimeoutError) as raised:
+            model.sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(len(opener.calls), 3)
+        self.assertEqual(sleeps, [0.25, 0.5])
+        self.assertEqual(raised.exception.failure.attempt_count, 3)
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("request_timeout_retry", "request_timeout_retry"),
+        )
+        self.assertNotIn("private timeout detail", str(raised.exception))
 
 
 class UserMessageOutcomeTests(unittest.TestCase):

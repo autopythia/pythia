@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
+import socket
 import urllib.error
 import unittest
 from typing import Any
@@ -20,6 +22,8 @@ from pythia.interaction import ModelContext
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSample
+from pythia.interaction import ModelTimeoutError
+from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
 from pythia.interaction import SamplingOptions
@@ -34,8 +38,9 @@ from pythia.interaction.experimental_tools import create_inject_user_message_too
 
 
 class _FakeResponse:
-    def __init__(self, payload: Any, *, status: int = 200):
+    def __init__(self, payload: Any, *, status: int = 200, headers=None):
         self.status = status
+        self.headers = dict(headers or {})
         self.payload = payload
         self.closed = False
 
@@ -69,7 +74,25 @@ class _ScriptedOpener:
         self.calls.append((request, timeout))
         if not self.responses:
             raise AssertionError("unexpected HTTP request")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class _ReadFailureResponse(_FakeResponse):
+    def read(self) -> bytes:
+        raise self.payload
+
+
+def _http_error(status, *, body=b"", headers=None):
+    return urllib.error.HTTPError(
+        "https://api.anthropic.com/v1/messages",
+        status,
+        "HTTP failure",
+        dict(headers or {}),
+        io.BytesIO(body),
+    )
 
 
 def _payload(opener: _Opener) -> dict[str, Any]:
@@ -151,6 +174,11 @@ class MessagesEndpointTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ModelConfigurationError):
                     _endpoint(**kwargs)
+        with self.assertRaisesRegex(TypeError, "retry_sleep"):
+            MessagesModel(
+                _endpoint(api_url="http://localhost", model="model"),
+                retry_sleep=object(),
+            )
 
     def test_server_compaction_configuration_is_validated(self):
         default = MessagesServerCompaction()
@@ -726,6 +754,100 @@ class MessagesModelTests(unittest.TestCase):
         )
         with self.assertRaises(ModelContextWindowError):
             model.sample(ModelContext((Message(role="user", content="hello"),)))
+
+    def test_retryable_http_statuses_use_two_retries_and_metadata(self):
+        returned_overload = _FakeResponse(
+            {"type": "error"},
+            status=503,
+        )
+        success = _FakeResponse({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "recovered"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 2, "output_tokens": 1},
+        })
+        opener = _ScriptedOpener(
+            _http_error(529, headers={"retry-after": "0.75"}),
+            returned_overload,
+            success,
+        )
+        sleeps = []
+        model = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        sample = model.sample(
+            ModelContext((Message(role="user", content="hello"),))
+        )
+
+        self.assertEqual(sample.last_assistant_text, "recovered")
+        self.assertEqual(sample.request_attempts, 3)
+        self.assertEqual(
+            sample.recovery,
+            ("http_529_retry", "http_503_retry"),
+        )
+        self.assertEqual(sleeps, [0.75, 0.5])
+        self.assertTrue(returned_overload.closed)
+        self.assertTrue(success.closed)
+        request_bodies = tuple(call[0].data for call in opener.calls)
+        self.assertEqual(request_bodies, (request_bodies[0],) * 3)
+
+    def test_connection_and_body_read_failures_are_retried(self):
+        failed_read = _ReadFailureResponse(
+            http.client.IncompleteRead(b"truncated body")
+        )
+        success = _FakeResponse({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "recovered"}],
+            "stop_reason": "end_turn",
+            "usage": {},
+        })
+        opener = _ScriptedOpener(
+            urllib.error.URLError(OSError("connection reset")),
+            failed_read,
+            success,
+        )
+        sleeps = []
+        sample = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        ).sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(sample.request_attempts, 3)
+        self.assertEqual(
+            sample.recovery,
+            ("connection_retry", "connection_retry"),
+        )
+        self.assertEqual(sleeps, [0.25, 0.5])
+        self.assertTrue(failed_read.closed)
+
+    def test_timeout_retry_exhaustion_has_safe_attempt_metadata(self):
+        opener = _ScriptedOpener(*(
+            socket.timeout("private timeout detail") for _ in range(3)
+        ))
+        sleeps = []
+        model = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelTimeoutError) as raised:
+            model.sample(ModelContext((Message("user", "hello"),)))
+
+        self.assertEqual(len(opener.calls), 3)
+        self.assertEqual(sleeps, [0.25, 0.5])
+        self.assertEqual(raised.exception.failure.attempt_count, 3)
+        self.assertEqual(
+            raised.exception.failure.recovery,
+            ("request_timeout_retry", "request_timeout_retry"),
+        )
+        self.assertNotIn("private timeout detail", str(raised.exception))
 
 
 class ReasoningSignatureTests(unittest.TestCase):

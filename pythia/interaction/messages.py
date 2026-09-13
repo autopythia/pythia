@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +21,8 @@ from typing import Literal
 from typing import Optional
 from typing import Tuple
 
+from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
+from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
 from .context import ModelContext
 from .items import CompactionMetadata
@@ -38,6 +42,7 @@ from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
+from .model import ModelError
 from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
@@ -52,6 +57,9 @@ from .usage import TokenUsage
 
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
+_RETRYABLE_HTTP_STATUSES = frozenset(
+    {408, 409, 425, 429, 500, 502, 503, 504, 529}
+)
 
 
 def resolve_messages_max_output_tokens(
@@ -766,17 +774,84 @@ def _is_context_window_error(text: str) -> bool:
     )
 
 
+def _messages_http_failure(
+    status: int,
+    detail: str,
+    *,
+    model: str,
+    attempt_count: int,
+    recovery: Tuple[str, ...],
+) -> ModelError:
+    context_window = status == 413 or _is_context_window_error(detail)
+    message = (
+        f"Messages HTTP {status}: {detail}"
+        if detail
+        else f"Messages HTTP {status}: request failed"
+    )
+    failure = ModelFailure(
+        category="context_window" if context_window else "http_error",
+        message=(
+            f"Messages HTTP {status}: context window exceeded"
+            if context_window
+            else f"Messages HTTP {status}: request failed"
+        ),
+        provider="messages",
+        model=model,
+        http_status=status,
+        attempt_count=attempt_count,
+        recovery=recovery,
+    )
+    error_type = ModelContextWindowError if context_window else ModelTransportError
+    return error_type(message, failure=failure)
+
+
+def _messages_transport_failure(
+    *,
+    timeout: bool,
+    model: str,
+    attempt_count: int,
+    recovery: Tuple[str, ...],
+) -> ModelTransportError:
+    message = (
+        "Messages request timed out"
+        if timeout
+        else "Messages request failed before a response was completed"
+    )
+    failure = ModelFailure(
+        category="request_timeout" if timeout else "request_transport",
+        message=message,
+        provider="messages",
+        model=model,
+        attempt_count=attempt_count,
+        recovery=recovery,
+    )
+    error_type = ModelTimeoutError if timeout else ModelTransportError
+    return error_type(message, failure=failure)
+
+
+def _close_response(response: Any) -> None:
+    if response is None:
+        return
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
 class MessagesModel:
     def __init__(
         self,
         endpoint: MessagesEndpoint,
         *,
         opener: Optional[Callable[..., Any]] = None,
+        retry_sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         if not isinstance(endpoint, MessagesEndpoint):
             raise TypeError("endpoint must be MessagesEndpoint")
+        if retry_sleep is not None and not callable(retry_sleep):
+            raise TypeError("retry_sleep must be callable or None")
         self.endpoint = endpoint
         self._opener = opener or urllib.request.urlopen
+        self._retry_sleep = time.sleep if retry_sleep is None else retry_sleep
 
     @property
     def max_context_tokens(self) -> Optional[int]:
@@ -881,68 +956,148 @@ class MessagesModel:
             headers["Anthropic-Beta"] = MESSAGES_COMPACTION_BETA
         if self.endpoint.api_key is not None:
             headers["X-API-Key"] = self.endpoint.api_key
-        request = urllib.request.Request(
-            self.endpoint.url,
-            data=request_data,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            response = self._opener(
-                request,
-                timeout=self.endpoint.request_timeout_seconds,
+        attempts = 0
+        retries = 0
+        recovery: List[str] = []
+        while True:
+            attempts += 1
+            request = urllib.request.Request(
+                self.endpoint.url,
+                data=request_data,
+                headers=headers,
+                method="POST",
             )
-        except urllib.error.HTTPError as exc:
-            detail = _read_http_error_body(exc) or str(exc)
-            if exc.code == 413 or _is_context_window_error(detail):
-                raise ModelContextWindowError(detail) from exc
-            raise ModelTransportError(
-                f"Messages HTTP {exc.code}: {detail}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise ModelTimeoutError(str(exc)) from exc
-            raise ModelTransportError(str(exc)) from exc
-        except (TimeoutError, socket.timeout) as exc:
-            raise ModelTimeoutError(str(exc)) from exc
-        except OSError as exc:
-            raise ModelTransportError(str(exc)) from exc
+            response = None
+            try:
+                try:
+                    response = self._opener(
+                        request,
+                        timeout=self.endpoint.request_timeout_seconds,
+                    )
+                except urllib.error.HTTPError as exc:
+                    detail = _read_http_error_body(exc) or str(exc)
+                    status = exc.code
+                    response_headers = exc.headers
+                    exc.close()
+                    if (
+                        status in _RETRYABLE_HTTP_STATUSES
+                        and not _is_context_window_error(detail)
+                        and retries < DEFAULT_MAX_TRANSIENT_RETRIES
+                    ):
+                        retries += 1
+                        recovery.append(f"http_{status}_retry")
+                        self._retry_sleep(
+                            retry_delay_seconds(retries, response_headers)
+                        )
+                        continue
+                    raise _messages_http_failure(
+                        status,
+                        detail,
+                        model=self.endpoint.model,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                    ) from exc
 
-        try:
-            status = getattr(response, "status", None)
-            raw = response.read()
-        except (TimeoutError, socket.timeout) as exc:
-            raise ModelTimeoutError(str(exc)) from exc
-        except OSError as exc:
-            raise ModelTransportError(str(exc)) from exc
-        finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
-
-        if not isinstance(raw, (bytes, bytearray)):
-            raise ModelResponseError("HTTP response body must be bytes")
-        if isinstance(status, int) and not 200 <= status < 300:
-            detail = bytes(raw).decode("utf-8", errors="replace")[:4096]
-            if status == 413 or _is_context_window_error(detail):
-                raise ModelContextWindowError(detail)
-            raise ModelTransportError(f"Messages HTTP {status}: {detail}")
-        try:
-            text = bytes(raw).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ModelResponseError("response is not UTF-8 JSON") from exc
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ModelResponseError("response is not valid JSON") from exc
-        try:
-            return _decode_response(decoded)
-        except ContextValidationError as exc:
-            raise ModelResponseError(str(exc)) from exc
-        except ModelResponseError:
-            raise
-        except (TypeError, ValueError) as exc:
-            raise ModelResponseError(str(exc)) from exc
+                status = getattr(response, "status", None)
+                response_headers = getattr(response, "headers", None)
+                raw = response.read()
+                if not isinstance(raw, (bytes, bytearray)):
+                    raise ModelResponseError("HTTP response body must be bytes")
+                if isinstance(status, int) and not 200 <= status < 300:
+                    detail = bytes(raw).decode("utf-8", errors="replace")[:4096]
+                    if (
+                        status in _RETRYABLE_HTTP_STATUSES
+                        and not _is_context_window_error(detail)
+                        and retries < DEFAULT_MAX_TRANSIENT_RETRIES
+                    ):
+                        retries += 1
+                        recovery.append(f"http_{status}_retry")
+                        _close_response(response)
+                        response = None
+                        self._retry_sleep(
+                            retry_delay_seconds(retries, response_headers)
+                        )
+                        continue
+                    raise _messages_http_failure(
+                        status,
+                        detail,
+                        model=self.endpoint.model,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                    )
+                try:
+                    text = bytes(raw).decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ModelResponseError("response is not UTF-8 JSON") from exc
+                try:
+                    decoded = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise ModelResponseError("response is not valid JSON") from exc
+                try:
+                    sample = _decode_response(decoded)
+                except ContextValidationError as exc:
+                    raise ModelResponseError(str(exc)) from exc
+                except ModelResponseError:
+                    raise
+                except (TypeError, ValueError) as exc:
+                    raise ModelResponseError(str(exc)) from exc
+                return replace(
+                    sample,
+                    request_attempts=attempts,
+                    recovery=tuple(recovery),
+                )
+            except urllib.error.URLError as exc:
+                timeout = isinstance(
+                    exc.reason,
+                    (TimeoutError, socket.timeout),
+                )
+                if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
+                    retries += 1
+                    recovery.append(
+                        "request_timeout_retry"
+                        if timeout
+                        else "connection_retry"
+                    )
+                    _close_response(response)
+                    response = None
+                    self._retry_sleep(retry_delay_seconds(retries))
+                    continue
+                raise _messages_transport_failure(
+                    timeout=timeout,
+                    model=self.endpoint.model,
+                    attempt_count=attempts,
+                    recovery=tuple(recovery),
+                ) from exc
+            except (TimeoutError, socket.timeout) as exc:
+                if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
+                    retries += 1
+                    recovery.append("request_timeout_retry")
+                    _close_response(response)
+                    response = None
+                    self._retry_sleep(retry_delay_seconds(retries))
+                    continue
+                raise _messages_transport_failure(
+                    timeout=True,
+                    model=self.endpoint.model,
+                    attempt_count=attempts,
+                    recovery=tuple(recovery),
+                ) from exc
+            except (OSError, http.client.HTTPException) as exc:
+                if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
+                    retries += 1
+                    recovery.append("connection_retry")
+                    _close_response(response)
+                    response = None
+                    self._retry_sleep(retry_delay_seconds(retries))
+                    continue
+                raise _messages_transport_failure(
+                    timeout=False,
+                    model=self.endpoint.model,
+                    attempt_count=attempts,
+                    recovery=tuple(recovery),
+                ) from exc
+            finally:
+                _close_response(response)
 
 
 __all__ = [
