@@ -71,6 +71,7 @@ def run(
     options: Optional[SamplingOptions] = None,
     save_path: Optional[Union[str, Path]] = None,
     resume: bool = False,
+    enable_auto_compaction: bool = True,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
@@ -78,6 +79,8 @@ def run(
         raise TypeError("environment must be Environment")
     if not isinstance(resume, bool):
         raise TypeError("resume must be a bool")
+    if not isinstance(enable_auto_compaction, bool):
+        raise TypeError("enable_auto_compaction must be a bool")
     if prompt is not None and (
         not isinstance(prompt, str) or not prompt.strip()
     ):
@@ -175,7 +178,8 @@ def run(
     while max_samples is None or sample_count < max_samples:
         threshold = getattr(model, "auto_compact_context_tokens", None)
         if (
-            isinstance(threshold, int)
+            enable_auto_compaction
+            and isinstance(threshold, int)
             and not isinstance(threshold, bool)
             and threshold > 0
             and should_auto_compact(context, threshold)
@@ -370,6 +374,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 options=options,
                 save_path=save_path,
                 resume=args.resume,
+                enable_auto_compaction=args.enable_auto_compaction,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

@@ -401,6 +401,47 @@ class SampleMetadataTests(unittest.TestCase):
             1,
         )
 
+    def test_demo_auto_compaction_can_be_disabled(self):
+        class Model:
+            auto_compact_context_tokens = 100
+
+            def __init__(self):
+                self.contexts = []
+
+            def sample(self, context, *, tools=(), options=None):
+                del tools, options
+                self.contexts.append(context.copy())
+                return ModelSample((Message("assistant", "Done."),))
+
+        model = Model()
+        original = ModelContext((
+            Message("assistant", "uncompacted"),
+            SampleMetadata(TokenUsage(total_tokens=100)),
+            ModelSampleBoundary(),
+            TurnSummary(sample_count=1, context_tokens=100),
+        ))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "interaction.jsonl"
+            save_interaction_save(path, original)
+            with mock.patch("builtins.print"):
+                with mock.patch.object(demo, "create_default_compactor") as create:
+                    answer = demo.run(
+                        model,
+                        Environment(),
+                        prompt="follow up",
+                        save_path=path,
+                        resume=True,
+                        enable_auto_compaction=False,
+                    )
+
+        self.assertEqual(answer, "Done.")
+        create.assert_not_called()
+        self.assertEqual(len(model.contexts), 1)
+        self.assertIn(
+            Message("assistant", "uncompacted"),
+            model.contexts[0].model_items(),
+        )
+
 
 class _Clock:
     def __init__(self):

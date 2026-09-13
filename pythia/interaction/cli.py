@@ -471,7 +471,8 @@ async def _turn(
             )
         threshold = getattr(model, "auto_compact_context_tokens", None)
         if (
-            isinstance(threshold, int)
+            args.enable_auto_compaction
+            and isinstance(threshold, int)
             and not isinstance(threshold, bool)
             and threshold > 0
             and should_auto_compact(context, threshold)

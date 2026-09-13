@@ -190,13 +190,14 @@ for module in (cli, demo):
             ["--model-api", "codex", "--model", "gpt-6-astra", "--resume",
              "--prompt", "/quit\nA literal query", "--instructions", "",
              "--max-samples", "3", "--max-tokens", "77", "--cwd", "work",
-             "--save", "chosen.jsonl", "--enable-workspace=False"],
+             "--save", "chosen.jsonl", "--enable-auto-compaction=False",
+             "--enable-workspace=False"],
         ):
             demo_args = vars(demo._build_parser().parse_args(argv))
             self.assertFalse(demo_args.pop("experimental_user_message_injection"))
             self.assertEqual(vars(cli._build_parser().parse_args(argv)), demo_args)
 
-    def test_workspace_argument_accepts_bare_and_explicit_booleans(self):
+    def test_enable_arguments_accept_bare_and_explicit_booleans(self):
         cases = (
             ((), True),
             (("--enable-workspace",), True),
@@ -205,21 +206,36 @@ for module in (cli, demo):
             (("--enable-workspace", "false"), False),
         )
         for frontend in (cli, demo):
-            for argv, expected in cases:
-                with self.subTest(frontend=frontend.__name__, argv=argv):
-                    args = frontend._build_parser().parse_args(argv)
-                    self.assertIs(args.enable_workspace, expected)
+            for option in ("enable-auto-compaction", "enable-workspace"):
+                attribute = option.replace("-", "_")
+                for suffix, expected in cases:
+                    argv = tuple(
+                        value.replace("enable-workspace", option)
+                        for value in suffix
+                    )
+                    with self.subTest(
+                        frontend=frontend.__name__,
+                        option=option,
+                        argv=argv,
+                    ):
+                        args = frontend._build_parser().parse_args(argv)
+                        self.assertIs(getattr(args, attribute), expected)
 
-    def test_workspace_argument_rejects_other_boolean_spellings(self):
+    def test_enable_arguments_reject_other_boolean_spellings(self):
         for frontend in (cli, demo):
-            for value in ("", "0", "1", "yes", "no", "enabled"):
-                with self.subTest(frontend=frontend.__name__, value=value):
-                    with mock.patch("sys.stderr", new=io.StringIO()):
-                        with self.assertRaises(SystemExit) as raised:
-                            frontend._build_parser().parse_args([
-                                f"--enable-workspace={value}",
-                            ])
-                    self.assertEqual(raised.exception.code, 2)
+            for option in ("enable-auto-compaction", "enable-workspace"):
+                for value in ("", "0", "1", "yes", "no", "enabled"):
+                    with self.subTest(
+                        frontend=frontend.__name__,
+                        option=option,
+                        value=value,
+                    ):
+                        with mock.patch("sys.stderr", new=io.StringIO()):
+                            with self.assertRaises(SystemExit) as raised:
+                                frontend._build_parser().parse_args([
+                                    f"--{option}={value}",
+                                ])
+                        self.assertEqual(raised.exception.code, 2)
 
     def test_user_message_experiment_is_demo_only(self):
         with mock.patch("sys.stderr", new=io.StringIO()):
@@ -678,6 +694,47 @@ class CLIControllerTests(_ControllerTestCase):
             "[compaction] protocol=responses_compaction_v2",
             transcript,
         )
+
+    async def test_auto_compaction_can_be_disabled(self):
+        original = (
+            Init("saved"),
+            Message("assistant", "uncompacted answer"),
+            SampleMetadata(TokenUsage(total_tokens=100)),
+            ModelSampleBoundary(),
+            TurnSummary(sample_count=1, context_tokens=100),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        model = _Model(self.path, _answer("done"))
+        model.auto_compact_context_tokens = 100
+        terminal = _Terminal(
+            lambda t, e, s: t.key("c-d") if s == "idle" else None
+        )
+
+        with mock.patch.object(cli, "create_default_compactor") as create:
+            self.assertEqual(
+                await self._run(
+                    model,
+                    terminal,
+                    [
+                        "--resume",
+                        "--prompt",
+                        "follow up",
+                        "--enable-auto-compaction=False",
+                    ],
+                ),
+                0,
+            )
+
+        create.assert_not_called()
+        self.assertEqual(len(model.calls), 1)
+        self.assertIn(
+            Message("assistant", "uncompacted answer"),
+            model.calls[0][0].model_items(),
+        )
+        self.assertFalse(any(
+            isinstance(item, CompactionMetadata)
+            for item in load_interaction_save(self.path)
+        ))
 
     async def test_failure_after_tool_keeps_checkpoint_and_tui_alive(self):
         called = []

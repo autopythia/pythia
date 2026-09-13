@@ -45,6 +45,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "messages_pause_after_compaction": False,
     "messages_compaction_instructions": None,
     "cwd": ".",
+    "enable_auto_compaction": True,
     "enable_workspace": True,
     "max_samples": None,
     "max_tokens": None,

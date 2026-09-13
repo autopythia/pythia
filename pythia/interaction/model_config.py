@@ -231,6 +231,19 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--messages-compaction-instructions")
     parser.add_argument("--cwd", default=".")
     parser.add_argument(
+        "--enable-auto-compaction",
+        nargs="?",
+        const=True,
+        default=True,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "automatically compact before sampling when the latest context "
+            "reaches the model threshold; a bare flag means True "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--enable-workspace",
         nargs="?",
         const=True,
