@@ -1,3 +1,4 @@
+from ._http import USER_AGENT
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
 from .codex_auth import CodexAuth
@@ -186,6 +187,7 @@ __all__ = [
     "TurnSummary",
     "UserInteraction",
     "UserInteractionBoundary",
+    "USER_AGENT",
     "X_CODEX_TURN_STATE_HEADER",
     "create_apply_patch_tool",
     "create_default_compactor",

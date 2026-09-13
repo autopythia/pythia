@@ -6,6 +6,8 @@ import json
 import urllib.error
 import urllib.request
 
+from ._http import USER_AGENT
+
 
 class AccountServiceError(ValueError):
     """Only application-authored, credential-free messages belong here."""
@@ -48,6 +50,8 @@ def _http_diagnostic_suffix(headers):
 
 
 def request_json(request, timeout_seconds, *, opener=None):
+    if request.get_header("User-agent") is None:
+        request.add_header("User-Agent", USER_AGENT)
     open_request = opener or urllib.request.build_opener(_NoRedirect()).open
     try:
         response = open_request(request, timeout=timeout_seconds)

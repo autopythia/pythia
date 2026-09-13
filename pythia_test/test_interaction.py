@@ -4,6 +4,7 @@ import io
 import json
 import socket
 import urllib.error
+import urllib.request
 import unittest
 from unittest import mock
 
@@ -42,6 +43,7 @@ from pythia.interaction import ToolSpec
 from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import USER_AGENT
 from pythia.interaction import should_auto_compact
 from pythia.interaction.experimental_tools import create_inject_user_message_tool
 
@@ -393,6 +395,10 @@ class UserInteractionTests(unittest.TestCase):
 
 
 class EndpointTests(unittest.TestCase):
+    def test_user_agent_matches_urllib_default(self):
+        urllib_headers = dict(urllib.request.OpenerDirector().addheaders)
+        self.assertEqual(USER_AGENT, urllib_headers["User-agent"])
+
     def test_endpoint_builds_url_after_path_prefix(self):
         endpoint = ChatCompletionsEndpoint(
             api_url=" HTTPS://api.example.test:8443/proxy/root/ ",
@@ -619,6 +625,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             request.full_url,
             "http://localhost:8000/v1/chat/completions",
         )
+        self.assertEqual(request.get_header("User-agent"), USER_AGENT)
         self.assertIsNone(request.get_header("Authorization"))
         self.assertEqual(payload["model"], "demo")
         self.assertFalse(payload["stream"])

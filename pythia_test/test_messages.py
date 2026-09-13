@@ -31,6 +31,7 @@ from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import USER_AGENT
 from pythia.interaction.demo import _build_model
 from pythia.interaction.demo import _build_parser
 from pythia.interaction.demo import run
@@ -361,6 +362,7 @@ class MessagesModelTests(unittest.TestCase):
             request.full_url,
             "https://api.example.test/anthropic/v1/messages",
         )
+        self.assertEqual(request.get_header("User-agent"), USER_AGENT)
         self.assertEqual(request.get_header("X-api-key"), "secret-key")
         self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
         self.assertEqual(payload["model"], "claude-sonnet-5")

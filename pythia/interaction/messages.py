@@ -21,6 +21,7 @@ from typing import Literal
 from typing import Optional
 from typing import Tuple
 
+from ._http import USER_AGENT
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
@@ -950,7 +951,7 @@ class MessagesModel:
             "Accept": "application/json",
             "Anthropic-Version": self.endpoint.anthropic_version,
             "Content-Type": "application/json",
-            "User-Agent": "pythia-interaction/0.1",
+            "User-Agent": USER_AGENT,
         }
         if "context_management" in payload:
             headers["Anthropic-Beta"] = MESSAGES_COMPACTION_BETA

@@ -21,6 +21,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from ._http import USER_AGENT
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
@@ -666,7 +667,7 @@ class ChatCompletionsModel:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "pythia-interaction/0.1",
+            "User-Agent": USER_AGENT,
         }
         if self.endpoint.api_key is not None:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"

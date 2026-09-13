@@ -46,6 +46,7 @@ from pythia.interaction import ToolSpec
 from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import USER_AGENT
 from pythia.interaction import X_CODEX_TURN_STATE_HEADER
 from pythia.interaction import create_default_compactor
 from pythia.interaction import load_interaction_save
@@ -1195,6 +1196,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             request.full_url,
             f"{CODEX_RESPONSES_API_URL}/responses",
         )
+        self.assertEqual(headers["user-agent"], USER_AGENT)
         self.assertEqual(headers["authorization"], "Bearer secret-token")
         self.assertEqual(headers["chatgpt-account-id"], "account-1")
         self.assertEqual(headers["session_id"], "session-1")

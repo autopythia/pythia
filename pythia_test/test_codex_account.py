@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from pythia.interaction import cli, CodexAuth, load_codex_auth, ToolCall
 from pythia.interaction import load_codex_credentials
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from pythia.interaction import USER_AGENT
 from pythia.interaction import codex_login, codex_quota, user_tools
 from pythia.interaction._account_http import AccountServiceError
 
@@ -72,6 +73,7 @@ class LoginServiceTests(unittest.TestCase):
 
         def opener(request, *, timeout):
             self.assertEqual(request.full_url, "https://auth.openai.com/oauth/token")
+            self.assertEqual(request.get_header("User-agent"), USER_AGENT)
             http_timeout = (
                 DEFAULT_REQUEST_TIMEOUT_SECONDS
                 if request_timeout_seconds is None else request_timeout_seconds
@@ -290,6 +292,7 @@ class QuotaServiceTests(unittest.TestCase):
         def opener(request, *, timeout):
             self.assertEqual(request.full_url, "https://chatgpt.com/backend-api/wham/usage")
             self.assertEqual(request.get_method(), "GET")
+            self.assertEqual(request.get_header("User-agent"), USER_AGENT)
             self.assertEqual(request.get_header("Authorization"), "Bearer FAKE_SECRET")
             self.assertEqual(request.get_header("Chatgpt-account-id"), "account")
             self.assertEqual(timeout, 17)

@@ -26,6 +26,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from ._http import USER_AGENT
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .codex_auth import CodexAuth
@@ -1863,7 +1864,7 @@ class CodexResponsesModel:
             "Accept": "text/event-stream",
             "Authorization": f"Bearer {auth.access_token}",
             "Content-Type": "application/json",
-            "User-Agent": "pythia-interaction/0.1",
+            "User-Agent": USER_AGENT,
         }
         normalized_beta_features = tuple(
             feature.strip()
