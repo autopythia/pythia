@@ -74,6 +74,7 @@ from .model import TokenUsage
 from .model_catalog import ModelLimits
 from .model_catalog import ModelRoute
 from .model_catalog import ModelSpec
+from .model_catalog import MessagesDefaults
 from .model_catalog import ResponsesDefaults
 from .model_catalog import get_model_route
 from .model_catalog import get_model_spec
@@ -129,6 +130,7 @@ __all__ = [
     "MESSAGES_COMPACTION_BETA",
     "META_RESPONSES_API_URL",
     "MessagesEndpoint",
+    "MessagesDefaults",
     "MessagesModel",
     "MessagesPromptCaching",
     "MessagesServerCompaction",

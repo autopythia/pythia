@@ -109,6 +109,17 @@ class ResponsesDefaults:
 
 
 @dataclass(frozen=True)
+class MessagesDefaults:
+    """Pythia Messages request preferences, not native model defaults."""
+
+    output_effort: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.output_effort is not None:
+            _require_identifier(self.output_effort, "output_effort")
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     """One selectable preset, plus any spellings with identical semantics."""
 
@@ -120,6 +131,7 @@ class ModelSpec:
     responses: Optional[ResponsesDefaults] = None
     aliases: Tuple[str, ...] = ()
     source: Optional[str] = None
+    messages: Optional[MessagesDefaults] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "profile", _normalize_profile(self.profile))
@@ -134,6 +146,13 @@ class ModelSpec:
                 raise TypeError("responses must be ResponsesDefaults or None")
             if self.profile not in {"codex", "responses"}:
                 raise ValueError("Responses defaults require a Responses routing profile")
+        if self.messages is not None:
+            if not isinstance(self.messages, MessagesDefaults):
+                raise TypeError("messages must be MessagesDefaults or None")
+            if self.profile != "messages":
+                raise ValueError(
+                    "Messages defaults require a Messages routing profile"
+                )
         if isinstance(self.aliases, (str, bytes)):
             raise TypeError("aliases must be an iterable of strings")
         aliases = tuple(self.aliases)
@@ -189,7 +208,10 @@ _FABLE = ModelSpec(
         max_output_tokens=128_000,
     ),
     aliases=("claude-fable-5.1",),
-    source="https://platform.claude.com/docs/en/models/fable-5-1/overview",
+    source=(
+        "https://platform.claude.com/docs/en/models/fable-5-1/overview; "
+        "https://platform.claude.com/docs/en/build-with-claude/effort"
+    ),
 )
 
 
@@ -197,6 +219,23 @@ def _with_effort(base: ModelSpec, name: str, effort: str) -> ModelSpec:
     return replace(
         base, name=name, aliases=(),
         responses=replace(base.responses or ResponsesDefaults(), reasoning_effort=effort),
+    )
+
+
+def _with_messages_effort(
+    base: ModelSpec,
+    name: str,
+    effort: str,
+    *,
+    aliases: Tuple[str, ...] = (),
+) -> ModelSpec:
+    return replace(
+        base,
+        name=name,
+        aliases=aliases,
+        messages=MessagesDefaults(
+            output_effort=effort,
+        ),
     )
 
 
@@ -210,6 +249,12 @@ _MODEL_SPECS = (
     _SPARK,
     _with_effort(_SPARK, "muse-spark-1.3-xhigh", "xhigh"),
     _FABLE,
+    _with_messages_effort(
+        _FABLE,
+        "claude-fable-5-1-max",
+        "max",
+        aliases=("claude-fable-5.1-max",),
+    ),
 )
 
 
@@ -267,6 +312,7 @@ __all__ = [
     "ModelLimits",
     "ModelRoute",
     "ModelSpec",
+    "MessagesDefaults",
     "ResponsesDefaults",
     "get_model_route",
     "get_model_spec",

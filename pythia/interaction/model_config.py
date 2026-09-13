@@ -179,6 +179,11 @@ def _model_argument_help() -> str:
             ):
                 if value is not None:
                     details.append(f"{label}={value}")
+        if spec.messages is not None:
+            if spec.messages.output_effort is not None:
+                details.append(
+                    f"effort={spec.messages.output_effort}"
+                )
         if spec.route.api_key_environment_variable is not None:
             details.append(spec.route.api_key_environment_variable)
         if spec.aliases:

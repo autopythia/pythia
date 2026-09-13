@@ -15,6 +15,9 @@ from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
 from pythia.interaction import Init
 from pythia.interaction import Message
+from pythia.interaction import MessagesDefaults
+from pythia.interaction import MessagesEndpoint
+from pythia.interaction import MessagesModel
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import ModelContext
 from pythia.interaction import ModelLimits
@@ -113,7 +116,25 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(fable.route.auth_source, "environment")
         self.assertEqual(fable.route.api_key_environment_variable, "ANTHROPIC_API_KEY")
         self.assertIsNone(fable.responses)
-        self.assertEqual(len(list_model_specs()), 9)
+        self.assertIsNone(fable.messages)
+
+        fable_max = get_model_spec("messages", "claude-fable-5-1-max")
+        self.assertIs(
+            get_model_spec("messages", " claude-fable-5.1-max "),
+            fable_max,
+        )
+        self.assertEqual(fable_max.aliases, ("claude-fable-5.1-max",))
+        self.assertEqual(fable_max.api_model, "claude-fable-5-1")
+        self.assertIs(fable_max.limits, fable.limits)
+        self.assertIs(fable_max.route, fable.route)
+        self.assertEqual(
+            fable_max.messages,
+            MessagesDefaults(
+                output_effort="max",
+            ),
+        )
+
+        self.assertEqual(len(list_model_specs()), 10)
         for base_name, preset_name in (("gpt-5.6-sol", "gpt-5.6-sol-medium"),
                                        ("gpt-6-astra", "gpt-6-astra-max"),
                                        ("muse-spark-1.3", "muse-spark-1.3-xhigh")):
@@ -126,6 +147,35 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertIs(get_model_spec("codex-responses", "gpt-6-astra"),
                       get_model_spec("codex", "gpt-6-astra"))
 
+    def test_fable_max_uses_output_effort(self):
+        context = ModelContext((Message("user", "Hello."),))
+        cases = (
+            ("claude-fable-5-1", None),
+            ("claude-fable-5.1", None),
+            ("claude-fable-5-1-max", "max"),
+            ("claude-fable-5.1-max", "max"),
+        )
+        for name, effort in cases:
+            with self.subTest(name=name):
+                model = MessagesModel(MessagesEndpoint(
+                    api_url="https://api.anthropic.com",
+                    model=name,
+                    api_key="FAKE",
+                ))
+
+                payload = model._build_request_payload(context, (), None)
+
+                self.assertEqual(payload["model"], "claude-fable-5-1")
+                self.assertNotIn("reasoning", payload)
+                self.assertNotIn("thinking", payload)
+                if effort is None:
+                    self.assertNotIn("output_config", payload)
+                else:
+                    self.assertEqual(
+                        payload["output_config"],
+                        {"effort": effort},
+                    )
+
     def test_unknown_models_and_other_profiles_do_not_inherit_presets(self):
         for profile in ("responses", "chat-completions"):
             self.assertEqual(list_model_specs(profile), ())
@@ -137,7 +187,8 @@ class ModelCatalogTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIsNone(get_model_spec("codex", name))
                 self.assertEqual(get_model_route("codex", name).api_url, model_catalog.CODEX_RESPONSES_API_URL)
-        for name in ("claude-fable-5.2", "claude-fable-5-1-20260901", "gpt-6-astra"):
+        for name in ("claude-fable-5.2", "claude-fable-5-1-20260901",
+                     "claude-fable-5-1-high", "gpt-6-astra"):
             self.assertIsNone(get_model_spec("messages", name))
         self.assertIsNone(get_model_spec("codex", "claude-fable-5.1"))
 
@@ -195,6 +246,20 @@ class ModelCatalogTests(unittest.TestCase):
                        {"responses": ResponsesDefaults(reasoning_effort="max")}):
             with self.assertRaises((TypeError, ValueError)):
                 replace(spec, **fields)
+        with self.assertRaises((TypeError, ValueError)):
+            replace(
+                get_model_spec("codex", "gpt-6-astra"),
+                messages=MessagesDefaults(
+                    output_effort="max",
+                ),
+            )
+        for fields in (
+            {"output_effort": ""},
+            {"output_effort": "max effort"},
+            {"output_effort": True},
+        ):
+            with self.assertRaises((TypeError, ValueError)):
+                MessagesDefaults(**fields)
         with self.assertRaises(TypeError):
             ModelRoute("meta", "https://example.test", "environment")
         with self.assertRaises(ValueError):
@@ -212,7 +277,7 @@ class ModelCatalogTests(unittest.TestCase):
                            "urllib.request.urlopen"):
                 stack.enter_context(mock.patch(target, side_effect=AssertionError("unexpected effect")))
             module_spec.loader.exec_module(module)
-            self.assertEqual(len(module.list_model_specs()), 9)
+            self.assertEqual(len(module.list_model_specs()), 10)
             self.assertEqual(module.get_model_route("codex", "muse-spark-1.3").api_key_environment_variable,
                              "META_API_KEY")
             self.assertIsNone(module.get_model_spec("responses", "gpt-6-astra"))
