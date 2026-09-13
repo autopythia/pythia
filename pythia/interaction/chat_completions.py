@@ -320,8 +320,8 @@ def _apply_sampling_options(
 ) -> None:
     if options is None:
         return
-    if options.max_tokens is not None:
-        payload["max_tokens"] = options.max_tokens
+    if options.max_output_tokens is not None:
+        payload["max_tokens"] = options.max_output_tokens
     if options.temperature is not None:
         payload["temperature"] = options.temperature
     if options.top_p is not None:

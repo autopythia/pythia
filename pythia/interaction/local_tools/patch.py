@@ -15,6 +15,7 @@ from typing import Union
 from ..environment import Tool
 from ..environment import ToolOutcome
 from ..environment import ToolSpec
+from ._workspace import WorkspacePolicy
 
 
 @dataclass(frozen=True)
@@ -686,6 +687,7 @@ def create_apply_patch_tool(
     *,
     enable_workspace: bool = True,
     timeout_seconds: Optional[float] = None,
+    _workspace_policy: Optional[WorkspacePolicy] = None,
 ) -> Tool:
     root = Path(workspace_root).expanduser().resolve()
     if not root.exists():
@@ -694,6 +696,12 @@ def create_apply_patch_tool(
         raise ValueError(f"workspace_root is not a directory: {root}")
     if not isinstance(enable_workspace, bool):
         raise TypeError("enable_workspace must be a bool")
+    if _workspace_policy is not None and not isinstance(
+        _workspace_policy,
+        WorkspacePolicy,
+    ):
+        raise TypeError("_workspace_policy must be WorkspacePolicy or None")
+    workspace_policy = _workspace_policy or WorkspacePolicy(enable_workspace)
     apply_lock = Lock()
 
     def apply_patch(
@@ -712,7 +720,7 @@ def create_apply_patch_tool(
                 output=_apply_patch_text(
                     root,
                     patch_text,
-                    enable_workspace=enable_workspace,
+                    enable_workspace=workspace_policy.enabled,
                 )
             )
 

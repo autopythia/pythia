@@ -54,6 +54,34 @@ DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
 
 
+def resolve_messages_max_output_tokens(
+    model: str,
+    explicit_value: Optional[int],
+) -> int:
+    """Resolve an explicit request limit or a catalogued model maximum."""
+    if explicit_value is not None:
+        if (
+            isinstance(explicit_value, bool)
+            or not isinstance(explicit_value, int)
+            or explicit_value <= 0
+        ):
+            raise ModelConfigurationError(
+                "max_output_tokens must be a positive integer"
+            )
+        return explicit_value
+    spec = get_model_spec("messages", model)
+    catalog_value = (
+        None if spec is None else spec.limits.max_output_tokens
+    )
+    if catalog_value is None:
+        raise ModelConfigurationError(
+            "Messages max_output_tokens is not available from the model "
+            "catalog; provide it explicitly (--max-output-tokens in "
+            "CLI/demo)"
+        )
+    return catalog_value
+
+
 @dataclass(frozen=True)
 class MessagesPromptCaching:
     """Automatic prompt caching at the last cacheable block of each request."""
@@ -127,7 +155,7 @@ class MessagesEndpoint:
     model: str
     api_key: Optional[str] = field(default=None, repr=False)
     anthropic_version: str = DEFAULT_ANTHROPIC_VERSION
-    default_max_tokens: int = 4096
+    max_output_tokens: Optional[int] = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     server_compaction: Optional[MessagesServerCompaction] = None
     prompt_caching: Optional[MessagesPromptCaching] = None
@@ -214,14 +242,14 @@ class MessagesEndpoint:
             )
         object.__setattr__(self, "anthropic_version", anthropic_version)
 
-        if (
-            isinstance(self.default_max_tokens, bool)
-            or not isinstance(self.default_max_tokens, int)
-            or self.default_max_tokens <= 0
-        ):
-            raise ModelConfigurationError(
-                "default_max_tokens must be a positive integer"
-            )
+        object.__setattr__(
+            self,
+            "max_output_tokens",
+            resolve_messages_max_output_tokens(
+                model,
+                self.max_output_tokens,
+            ),
+        )
 
         timeout = self.request_timeout_seconds
         if (
@@ -493,8 +521,8 @@ def _apply_sampling_options(
         raise ModelConfigurationError(
             "Messages does not support the seed sampling option"
         )
-    if options.max_tokens is not None:
-        payload["max_tokens"] = options.max_tokens
+    if options.max_output_tokens is not None:
+        payload["max_tokens"] = options.max_output_tokens
     if options.temperature is not None:
         payload["temperature"] = options.temperature
     if options.top_p is not None:
@@ -777,7 +805,7 @@ class MessagesModel:
             "model": (
                 self.endpoint.model if spec is None else spec.api_model
             ),
-            "max_tokens": self.endpoint.default_max_tokens,
+            "max_tokens": self.endpoint.max_output_tokens,
             "messages": messages,
             "stream": False,
         }
@@ -798,9 +826,12 @@ class MessagesModel:
                 self.endpoint.prompt_caching.request_cache_control()
             )
         compaction = self.endpoint.server_compaction
-        enable_auto_compaction = (
-            options is None or options.enable_auto_compaction is not False
+        auto_compaction_override = (
+            None if options is None else options.enable_auto_compaction
         )
+        if compaction is None and auto_compaction_override is True:
+            compaction = MessagesServerCompaction()
+        enable_auto_compaction = auto_compaction_override is not False
         if compaction is not None and enable_auto_compaction:
             auto_compact_context = (
                 None
@@ -922,4 +953,5 @@ __all__ = [
     "MessagesModel",
     "MessagesPromptCaching",
     "MessagesServerCompaction",
+    "resolve_messages_max_output_tokens",
 ]

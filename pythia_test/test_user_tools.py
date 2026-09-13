@@ -13,9 +13,9 @@ from unittest import mock
 from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
     CodexResponsesModel, CompactionError, CompactionMetadata, CompactionResult, ContextPrefix,
-    ContextValidationError, Environment,
-    Instructions, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
-    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, Init,
+    ContextValidationError, DefaultEnvironment, Environment,
+    Instructions, InteractionConfig, Message, MessagesEndpoint, MessagesModel, ModelContext, ModelSample,
+    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, SamplingOptions, Init,
     TokenUsage, ToolCall, ToolResult, SampleMetadata, TurnSummary, UserInteraction,
     UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_save,
     render_interaction_items, save_interaction_save,
@@ -32,6 +32,105 @@ def _records(name="quota", call_id="user_one"):
 
 
 class UserToolValueTests(unittest.TestCase):
+    def test_config_command_parses_python_and_json_forms_canonically(self):
+        cases = (
+            ("/config", "{}"),
+            ("/config.json", '{"format":"json"}'),
+            (
+                "/config enable_workspace False",
+                '{"key":"enable_workspace","value":false}',
+            ),
+            (
+                "/config.json enable_auto_compaction True",
+                '{"key":"enable_auto_compaction","value":true,"format":"json"}',
+            ),
+            (
+                "/config max_output_tokens None",
+                '{"key":"max_output_tokens","value":null}',
+            ),
+            (
+                "/config.json max_samples 3",
+                '{"key":"max_samples","value":3,"format":"json"}',
+            ),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command):
+                intent = user_tools.parse_user_tool(command)
+                self.assertEqual(intent.name, "config")
+                self.assertEqual(intent.arguments_json, expected)
+
+    def test_config_parser_rejects_unknown_or_invalid_values_without_echo(self):
+        for command, private in (
+            ("/config unknown_key", "unknown_key"),
+            ("/config enable_workspace None", "None"),
+            ("/config max_output_tokens True", "True"),
+            ("/config max_samples FAKE_SECRET", "FAKE_SECRET"),
+            ("/config max_output_tokens 1 extra", "1 extra"),
+            ("/config.json\nFAKE_SECRET", "FAKE_SECRET"),
+        ):
+            with self.subTest(command=command):
+                with self.assertRaises(ValueError) as raised:
+                    user_tools.parse_user_tool(command)
+                self.assertNotIn(private, str(raised.exception))
+
+    def test_config_user_tool_reads_and_writes_without_account_support(self):
+        args = cli._build_parser().parse_args([])
+        workspace_update = mock.Mock()
+        config = InteractionConfig(
+            on_enable_workspace=workspace_update,
+        )
+        environment = user_tools.create_user_environment(
+            args,
+            notify=mock.Mock(),
+            cancel=threading.Event(),
+            config=config,
+        )
+
+        def execute(command):
+            intent = user_tools.parse_user_tool(command)
+            return environment.execute_tool_calls((ToolCall(
+                intent.name,
+                "config-call",
+                intent.arguments_json,
+            ),)).items[0]
+
+        python_dump = execute("/config")
+        self.assertTrue(python_dump.success)
+        self.assertEqual(python_dump.output, "\n".join((
+            "enable_workspace = True",
+            "max_samples = None",
+            "max_output_tokens = None",
+            "enable_auto_compaction = True",
+        )))
+        json_dump = execute("/config.json")
+        self.assertTrue(json_dump.success)
+        self.assertEqual(json.loads(json_dump.output), config.values())
+
+        updated = execute("/config max_output_tokens 2048")
+        self.assertTrue(updated.success)
+        self.assertEqual(updated.output, "max_output_tokens = 2048")
+        self.assertEqual(config.get("max_output_tokens"), 2048)
+        cleared = execute("/config.json max_output_tokens None")
+        self.assertTrue(cleared.success)
+        self.assertEqual(json.loads(cleared.output), {"max_output_tokens": None})
+        self.assertIsNone(config.get("max_output_tokens"))
+        workspace = execute("/config enable_workspace False")
+        self.assertTrue(workspace.success)
+        workspace_update.assert_called_once_with(False)
+
+        login = environment.execute_tool_calls((
+            ToolCall("login", "login-call", "{}"),
+        )).items[0]
+        self.assertFalse(login.success)
+
+        forged = environment.execute_tool_calls((ToolCall(
+            "config",
+            "forged-config",
+            '{"key":"max_output_tokens","value":"FAKE_SECRET"}',
+        ),)).items[0]
+        self.assertFalse(forged.success)
+        self.assertNotIn("FAKE_SECRET", forged.output)
+
     def test_empty_user_tool_arguments_are_elided_only_from_display(self):
         for name in ("quota", "login"):
             for raw_arguments in ("{}", "{ }", " \n{\n}\t "):
@@ -116,7 +215,12 @@ class UserToolValueTests(unittest.TestCase):
         self.assertEqual(context.model_items(), ModelContext(base).model_items())
         models = (
             ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost:8000")),
-            MessagesModel(MessagesEndpoint(api_url="https://api.anthropic.com", model="test", api_key="fake")),
+            MessagesModel(MessagesEndpoint(
+                api_url="https://api.anthropic.com",
+                model="test",
+                max_output_tokens=100,
+                api_key="fake",
+            )),
             CodexResponsesModel(model="test", auth=CodexAuth("fake")),
         )
         for model in models:
@@ -174,7 +278,7 @@ class UserToolValueTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError) as error:
                 user_tools.parse_user_tool(text)
             self.assertNotIn("secret", str(error.exception))
-        for name in ("compact", "login", "quota"):
+        for name in ("compact", "config", "login", "quota"):
             result = Environment().execute_tool_calls((ToolCall(name, "model", "{}"),))
             self.assertFalse(result.items[0].success)
             self.assertIn("Unknown tool", result.items[0].output)
@@ -261,6 +365,291 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(cli._run(model, Environment(), terminal, self.args, self.path), 4)
         self.assertTrue(terminal.exited)
         return result
+
+    async def test_config_updates_next_turn_sampling_and_is_durable_but_hidden(self):
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if status != "idle":
+                return
+            if step == 0:
+                terminal.submit("/config.json")
+                step = 1
+            elif step == 1 and sum(
+                item.text.startswith("[user-tool-ret]  config")
+                for item in terminal.items
+            ) >= 1:
+                terminal.submit("/config max_output_tokens 17")
+                step = 2
+            elif step == 2 and sum(
+                item.text.startswith("[user-tool-ret]  config")
+                for item in terminal.items
+            ) >= 2:
+                terminal.submit("next query")
+                step = 3
+            elif step == 3 and any(
+                item.text == "[assistant] configured"
+                for item in terminal.items
+            ):
+                terminal.key("c-d")
+
+        model = _Model(self.path, _answer("configured"))
+        terminal = _Terminal(frame)
+
+        self.assertEqual(await self.run_cli(model, terminal), 0)
+
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(model.calls[0][2], SamplingOptions(max_output_tokens=17))
+        self.assertFalse(any(
+            isinstance(item, (UserToolCall, UserToolResult))
+            for item in model.calls[0][0].model_items()
+        ))
+        saved = load_interaction_save(self.path)
+        config_calls = [
+            item for item in saved if isinstance(item, UserToolCall)
+            and item.call.name == "config"
+        ]
+        config_results = [
+            item for item in saved if isinstance(item, UserToolResult)
+            and item.result.call_id in {call.call.call_id for call in config_calls}
+        ]
+        self.assertEqual(len(config_calls), 2)
+        self.assertEqual(len(config_results), 2)
+        self.assertEqual(
+            json.loads(config_results[0].result.output),
+            {
+                "enable_workspace": True,
+                "max_samples": None,
+                "max_output_tokens": None,
+                "enable_auto_compaction": True,
+            },
+        )
+        self.assertEqual(config_results[1].result.output, "max_output_tokens = 17")
+
+    async def test_config_is_available_without_an_authenticated_model(self):
+        submitted = False
+
+        def frame(terminal, editor, status):
+            nonlocal submitted
+            if status == "auth needed" and not submitted:
+                submitted = True
+                terminal.submit("/config enable_workspace")
+            elif status == "auth needed" and submitted and self.path.exists():
+                saved = load_interaction_save(self.path)
+                if isinstance(saved.items[-1], UserToolResult):
+                    terminal.key("c-d")
+
+        self.assertEqual(
+            await self.run_cli(None, _Terminal(frame)),
+            0,
+        )
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.items[-1].result.output, "enable_workspace = True")
+        self.assertTrue(saved.items[-1].result.success)
+
+    async def test_unfinished_config_is_closed_without_replay(self):
+        call = UserToolCall(ToolCall(
+            "config",
+            "pending-config",
+            '{"key":"max_output_tokens","value":17}',
+        ))
+        save_interaction_save(
+            self.path,
+            ModelContext((Init("saved"), call)),
+        )
+        self.args.resume = True
+        terminal = _Terminal(
+            lambda terminal, editor, status: (
+                terminal.key("c-d") if status == "idle" else None
+            )
+        )
+
+        self.assertEqual(await self.run_cli(_Model(self.path), terminal), 0)
+
+        result = load_interaction_save(self.path).items[-1]
+        self.assertIsInstance(result, UserToolResult)
+        self.assertFalse(result.result.success)
+        self.assertIn("was not rerun", result.result.output)
+        self.assertIn("current launch arguments", result.result.output)
+        self.assertNotIn("credential", result.result.output)
+
+    async def test_resume_does_not_replay_in_memory_config(self):
+        first_submitted = False
+
+        def first_frame(terminal, editor, status):
+            nonlocal first_submitted
+            if status == "idle" and not first_submitted:
+                first_submitted = True
+                terminal.submit("/config max_output_tokens 17")
+            elif status == "idle" and first_submitted and self.path.exists():
+                if isinstance(
+                    load_interaction_save(self.path).items[-1],
+                    UserToolResult,
+                ):
+                    terminal.key("c-d")
+
+        self.assertEqual(
+            await self.run_cli(_Model(self.path), _Terminal(first_frame)),
+            0,
+        )
+
+        self.args.resume = True
+        second_submitted = False
+
+        def second_frame(terminal, editor, status):
+            nonlocal second_submitted
+            if status == "idle" and not second_submitted:
+                second_submitted = True
+                terminal.submit("after restart")
+            elif status == "idle" and any(
+                item.text == "[assistant] default config"
+                for item in terminal.items
+            ):
+                terminal.key("c-d")
+
+        model = _Model(self.path, _answer("default config"))
+        terminal = _Terminal(second_frame)
+        self.assertEqual(await self.run_cli(model, terminal), 0)
+
+        self.assertIsNone(model.calls[0][2])
+        self.assertTrue(any(
+            "saved config commands were not replayed" in item.text
+            for item in terminal.items
+        ))
+
+    async def test_config_disables_auto_compaction_for_the_next_turn(self):
+        original = (
+            Init("saved"),
+            Message("assistant", "old answer"),
+            SampleMetadata(TokenUsage(total_tokens=100)),
+            ModelSampleBoundary(),
+            TurnSummary(sample_count=1, context_tokens=100),
+        )
+        save_interaction_save(self.path, ModelContext(original))
+        self.args.resume = True
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if status != "idle":
+                return
+            if step == 0:
+                terminal.submit("/config enable_auto_compaction False")
+                step = 1
+            elif step == 1 and any(
+                item.text.startswith("[user-tool-ret]  config")
+                for item in terminal.items
+            ):
+                terminal.submit("follow up")
+                step = 2
+            elif step == 2 and any(
+                item.text == "[assistant] uncompacted"
+                for item in terminal.items
+            ):
+                terminal.key("c-d")
+
+        model = _Model(self.path, _answer("uncompacted"))
+        model.auto_compact_context_tokens = 100
+        with mock.patch.object(cli, "create_default_compactor") as create:
+            self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
+
+        create.assert_not_called()
+        self.assertEqual(
+            model.calls[0][2],
+            SamplingOptions(enable_auto_compaction=False),
+        )
+
+    async def test_config_max_samples_applies_to_the_next_turn(self):
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if status == "idle" and step == 0:
+                terminal.submit("/config max_samples 1")
+                step = 1
+            elif status == "idle" and step == 1 and any(
+                item.text.startswith("[user-tool-ret]  config")
+                for item in terminal.items
+            ):
+                terminal.submit("one sample only")
+                step = 2
+            elif status == "failed":
+                terminal.key("c-d")
+
+        model = _Model(
+            self.path,
+            ModelSample(items=(ToolCall("missing", "model-call", "{}"),)),
+        )
+        terminal = _Terminal(frame)
+
+        self.assertEqual(await self.run_cli(model, terminal), 1)
+
+        self.assertEqual(len(model.calls), 1)
+        self.assertTrue(any(
+            "within 1 samples" in item.text
+            for item in terminal.items
+        ))
+
+    async def test_config_changes_live_workspace_policy_without_rebuilding(self):
+        workspace = self.root / "workspace"
+        outside = self.root / "outside"
+        workspace.mkdir()
+        outside.mkdir()
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if status != "idle":
+                return
+            if step == 0:
+                terminal.submit("/config enable_workspace False")
+                step = 1
+            elif step == 1 and any(
+                item.text.startswith("[user-tool-ret]  config")
+                for item in terminal.items
+            ):
+                terminal.submit("inspect outside")
+                step = 2
+            elif step == 2 and any(
+                item.text == "[assistant] inspected"
+                for item in terminal.items
+            ):
+                terminal.key("c-d")
+
+        model = _Model(
+            self.path,
+            ModelSample(items=(ToolCall(
+                "exec_command",
+                "outside-command",
+                json.dumps({
+                    "cmd": "pwd",
+                    "workdir": str(outside),
+                    "yield_time_ms": 1_000,
+                }),
+            ),)),
+            _answer("inspected"),
+        )
+        with DefaultEnvironment(cwd=workspace) as environment:
+            result = await asyncio.wait_for(
+                cli._run(
+                    model,
+                    environment,
+                    _Terminal(frame),
+                    self.args,
+                    self.path,
+                ),
+                4,
+            )
+
+        self.assertEqual(result, 0)
+        tool_result = next(
+            item for item in load_interaction_save(self.path)
+            if isinstance(item, ToolResult)
+            and item.call_id == "outside-command"
+        )
+        self.assertTrue(tool_result.success)
+        self.assertIn(str(outside), tool_result.output)
 
     async def test_quota_plan_propagates_http_to_log_and_replay_without_empty_argument_block(self):
         token = "FAKE_BEARER"

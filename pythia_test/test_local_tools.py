@@ -1041,6 +1041,81 @@ class DefaultEnvironmentTests(unittest.TestCase):
                 patch_spec.description,
             )
 
+    def test_workspace_policy_can_change_without_rebuilding_tools(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+
+            with DefaultEnvironment(cwd=workspace) as environment:
+                descriptions = tuple(
+                    spec.description for spec in environment.tool_specs
+                )
+                restricted = _execute(
+                    environment,
+                    "exec_command",
+                    "restricted",
+                    {"cmd": "pwd", "workdir": str(outside)},
+                )
+                self.assertFalse(restricted.success)
+
+                environment.set_enable_workspace(False)
+                self.assertFalse(environment.enable_workspace)
+                unrestricted = _execute(
+                    environment,
+                    "exec_command",
+                    "unrestricted",
+                    {
+                        "cmd": "pwd",
+                        "workdir": str(outside),
+                        "yield_time_ms": 1_000,
+                    },
+                )
+                allowed_target = outside / "allowed.txt"
+                allowed = _execute(
+                    environment,
+                    "apply_patch",
+                    "allowed",
+                    {"patch": "\n".join((
+                        "*** Begin Patch",
+                        f"*** Add File: {allowed_target}",
+                        "+allowed",
+                        "*** End Patch",
+                    ))},
+                )
+
+                environment.set_enable_workspace(True)
+                self.assertTrue(environment.enable_workspace)
+                denied_target = outside / "denied.txt"
+                denied = _execute(
+                    environment,
+                    "apply_patch",
+                    "denied",
+                    {"patch": "\n".join((
+                        "*** Begin Patch",
+                        f"*** Add File: {denied_target}",
+                        "+denied",
+                        "*** End Patch",
+                    ))},
+                )
+
+                self.assertEqual(
+                    tuple(spec.description for spec in environment.tool_specs),
+                    descriptions,
+                )
+
+            self.assertTrue(unrestricted.success)
+            self.assertIn(str(outside), unrestricted.output)
+            self.assertTrue(allowed.success)
+            self.assertEqual(
+                allowed_target.read_text(encoding="utf-8"),
+                "allowed\n",
+            )
+            self.assertFalse(denied.success)
+            self.assertFalse(denied_target.exists())
+
     def test_workspace_flags_require_real_booleans(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             for value in (None, 0, 1, "False"):

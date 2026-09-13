@@ -41,7 +41,12 @@ def _models(opener, **options):
             opener=opener,
         )),
         ("messages", MessagesModel(
-            MessagesEndpoint(api_url="http://localhost", model="model", **options),
+            MessagesEndpoint(
+                api_url="http://localhost",
+                model="model",
+                max_output_tokens=100,
+                **options,
+            ),
             opener=opener,
         )),
         ("responses endpoint", CodexResponsesModel(
@@ -119,7 +124,7 @@ class InteractionTimeoutTests(unittest.TestCase):
     def test_endpoint_timeout_validation_is_unchanged(self):
         for endpoint_type, fields in (
             (ChatCompletionsEndpoint, {}),
-            (MessagesEndpoint, {"model": "model"}),
+            (MessagesEndpoint, {"model": "model", "max_output_tokens": 100}),
             (StreamingResponsesEndpoint, {"model": "model", "bearer_token": "FAKE"}),
         ):
             for value in (None, True, 0, -1, float("inf"), float("nan"), "300"):
@@ -136,7 +141,13 @@ class InteractionTimeoutTests(unittest.TestCase):
                 ):
                     with self.subTest(frontend=frontend.__name__, api=api, flags=flags):
                         args = frontend._build_parser().parse_args([
-                            "--model-api", api, "--model", "model", *flags,
+                            "--model-api", api, "--model", "model",
+                            *(
+                                ("--max-output-tokens", "100")
+                                if api == "messages"
+                                else ()
+                            ),
+                            *flags,
                         ])
                         with mock.patch(
                             "pythia.interaction.responses._load_default_model_auth",

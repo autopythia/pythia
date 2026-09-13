@@ -63,6 +63,7 @@ from .model_config import build_parser
 from .model_config import initial_model_name
 from .model_config import resolve_save_path
 from .model_config import supports_account_services
+from .runtime_config import InteractionConfig
 from .save import load_interaction_save
 from .save import save_interaction_save
 from .user import UserInteraction
@@ -209,6 +210,12 @@ async def _fail_pending_user_tools(
             output = (
                 "Compaction outcome unavailable after interruption. The command "
                 "was not rerun; no durable compaction checkpoint was installed."
+            )
+        elif call.call.name == "config":
+            output = (
+                "Config outcome unavailable after interruption. The command "
+                "was not rerun; in-memory configuration was initialized from "
+                "the current launch arguments."
             )
         else:
             output = (
@@ -388,7 +395,7 @@ async def _compact_user_tool(
 async def _user_tool(
     intent: UserToolIntent, model: Optional[Model], context: ModelContext,
     state: _UIState, path: Path, args: argparse.Namespace,
-    model_environment: Environment,
+    model_environment: Environment, config: InteractionConfig,
 ) -> Optional[Model]:
     if intent.name == "compact":
         return await _compact_user_tool(
@@ -417,6 +424,7 @@ async def _user_tool(
     try:
         environment = create_user_environment(
             args, notify=notify, cancel=state.login_cancel,
+            config=config,
             expected_account=expected_account,
             provider_history=_has_provider_history(context),
         )
@@ -458,20 +466,24 @@ async def _turn(
     environment: Environment,
     state: _UIState,
     path: Path,
-    args: argparse.Namespace,
-    options: Optional[SamplingOptions],
+    config: InteractionConfig,
 ) -> None:
+    turn_config = config.snapshot()
+    options = turn_config.sampling_options()
     turn_started = time.perf_counter()
     samples = 0
     while not state.closing:
-        if args.max_samples is not None and samples >= args.max_samples:
+        if (
+            turn_config.max_samples is not None
+            and samples >= turn_config.max_samples
+        ):
             raise RuntimeError(
                 "model did not produce a final answer within "
-                f"{args.max_samples} samples"
+                f"{turn_config.max_samples} samples"
             )
         threshold = getattr(model, "auto_compact_context_tokens", None)
         if (
-            args.enable_auto_compaction
+            turn_config.enable_auto_compaction
             and isinstance(threshold, int)
             and not isinstance(threshold, bool)
             and threshold > 0
@@ -633,7 +645,7 @@ async def _drive_interaction(
     state: _UIState,
     args: argparse.Namespace,
     path: Path,
-    options: Optional[SamplingOptions],
+    config: InteractionConfig,
 ) -> None:
     existing = args.resume and await asyncio.to_thread(path.exists)
     if existing:
@@ -643,6 +655,15 @@ async def _drive_interaction(
             "Command sessions and plan state were not restored. "
             "Old command session IDs are not resumable; use only IDs from this run."
         )
+        if any(
+            isinstance(item, UserToolCall)
+            and item.call.name == "config"
+            for item in context.items
+        ):
+            state.notice(
+                "In-memory configuration was reset from the current launch "
+                "arguments; saved config commands were not replayed."
+            )
     else:
         if args.resume:
             state.notice(
@@ -717,6 +738,7 @@ async def _drive_interaction(
                         path,
                         args,
                         environment,
+                        config,
                     )
                     state.set_phase("auth needed" if state.auth_required else "idle")
                     continue
@@ -733,7 +755,14 @@ async def _drive_interaction(
                 await _append(context, user.context_items(), state, path)
                 state.displays.extend(user.display_items())
             if should_sample:
-                await _turn(context, model, environment, state, path, args, options)
+                await _turn(
+                    context,
+                    model,
+                    environment,
+                    state,
+                    path,
+                    config,
+                )
             state.set_phase("auth needed" if state.auth_required else "idle")
         except Exception as exc:
             state.exit_code = 1
@@ -769,23 +798,22 @@ async def _run(
     path: Path = DEFAULT_SAVE_PATH,
 ) -> int:
     path = Path(path).absolute()
-    options = (
-        SamplingOptions(
-            max_tokens=args.max_tokens,
-            enable_auto_compaction=(
-                False if not args.enable_auto_compaction else None
-            ),
-        )
-        if args.max_tokens is not None or not args.enable_auto_compaction
-        else None
+    workspace_update = getattr(environment, "set_enable_workspace", None)
+    config = InteractionConfig.from_namespace(
+        args,
+        on_enable_workspace=(
+            workspace_update if callable(workspace_update) else None
+        ),
     )
+    if callable(workspace_update):
+        workspace_update(config.get("enable_workspace"))
     prompt = args.prompt or ""
     state = _UIState(
         editor=Editor(prompt, len(prompt)), auth_required=model is None,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
     )
     state.notice(
-        "pythia.interaction — /compact, /login, /quota; "
+        "pythia.interaction — /compact, /config, /config.json, /login, /quota; "
         "/quit or /exit; Ctrl-C/Ctrl-D exit."
     )
     state.notice(f"Save log: {path}")
@@ -806,7 +834,7 @@ async def _run(
             terminal.render(state.editor, "starting", tuple(state.displays))
             state.displays.clear()
             worker = asyncio.create_task(
-                _drive_interaction(model, environment, state, args, path, options)
+                _drive_interaction(model, environment, state, args, path, config)
             )
             while True:
                 for key in terminal.read_keys():
@@ -866,8 +894,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ValueError("prompt must be a non-empty string or None")
         if args.max_samples is not None and args.max_samples <= 0:
             raise ValueError("max_samples must be a positive integer or None")
-        if args.max_tokens is not None:
-            SamplingOptions(max_tokens=args.max_tokens)
+        if args.max_output_tokens is not None:
+            SamplingOptions(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
         try:
             model = build_model(args)

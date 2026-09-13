@@ -12,6 +12,10 @@ from .codex_login import login
 from .codex_quota import query_quota
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
 from .model_config import supports_account_services
+from .runtime_config import CONFIG_KEYS
+from .runtime_config import ConfigError
+from .runtime_config import InteractionConfig
+from .runtime_config import parse_config_literal
 from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 
 
@@ -22,14 +26,45 @@ class UserToolIntent:
 
 
 def parse_user_tool(text: str) -> UserToolIntent:
-    words = text.split()
-    if not words or words[0] not in {"/compact", "/login", "/quota"}:
-        raise ValueError(
-            "Unsupported command. Use /compact, /login, /quota, /quit, or /exit."
-        )
-    name = words[0][1:]
     if "\n" in text or "\r" in text:
         raise ValueError("User-tool commands must be a single line.")
+    words = text.split()
+    if not words or words[0] not in {
+        "/compact",
+        "/config",
+        "/config.json",
+        "/login",
+        "/quota",
+    }:
+        raise ValueError(
+            "Unsupported command. Use /compact, /config, /config.json, "
+            "/login, /quota, /quit, or /exit."
+        )
+    command = words[0]
+    if command in {"/config", "/config.json"}:
+        if len(words) > 3:
+            raise ValueError("Usage: /config[.json] [KEY [VALUE]].")
+        arguments = {}
+        if len(words) >= 2:
+            key = words[1]
+            if key not in CONFIG_KEYS:
+                raise ValueError(
+                    "Unknown config key; use /config to list supported keys."
+                )
+            arguments["key"] = key
+            if len(words) == 3:
+                try:
+                    arguments["value"] = parse_config_literal(key, words[2])
+                except ConfigError as exc:
+                    raise ValueError(str(exc)) from None
+        if command == "/config.json":
+            arguments["format"] = "json"
+        return UserToolIntent(
+            "config",
+            json.dumps(arguments, separators=(",", ":")),
+        )
+
+    name = command[1:]
     if name in {"compact", "quota"}:
         if len(words) != 1:
             raise ValueError(f"Usage: /{name} (no arguments).")
@@ -41,9 +76,21 @@ def parse_user_tool(text: str) -> UserToolIntent:
     return UserToolIntent(name, json.dumps(arguments, sort_keys=True))
 
 
-def create_user_environment(args, *, notify, cancel, expected_account=None, provider_history=False):
+def create_user_environment(
+    args,
+    *,
+    notify,
+    cancel,
+    config=None,
+    expected_account=None,
+    provider_history=False,
+):
     """Create invocation-scoped adapters with a safe error boundary and notice sink."""
     supported = supports_account_services(args)
+    if config is None:
+        config = InteractionConfig.from_namespace(args)
+    if not isinstance(config, InteractionConfig):
+        raise TypeError("config must be InteractionConfig")
 
     def guard(handler):
         def execute(arguments, *, timeout_seconds=None):
@@ -85,7 +132,45 @@ def create_user_environment(args, *, notify, cancel, expected_account=None, prov
             return ToolOutcome("Credential account changed; start a fresh session before using it.", False)
         return ToolOutcome(query_quota(auth, timeout_seconds=timeout_seconds))
 
+    def configure(arguments, timeout_seconds):
+        del timeout_seconds
+        try:
+            if set(arguments) - {"key", "value", "format"}:
+                raise ConfigError("Unexpected config arguments.")
+            output_format = arguments.get("format", "python")
+            if output_format not in {"python", "json"}:
+                raise ConfigError("Config format must be python or json.")
+            if "key" not in arguments:
+                key = None
+                if "value" in arguments:
+                    raise ConfigError("A config value requires a key.")
+            else:
+                key = arguments["key"]
+                if not isinstance(key, str) or key not in CONFIG_KEYS:
+                    raise ConfigError(
+                        "Unknown config key; use /config to list supported keys."
+                    )
+            if "value" in arguments:
+                assert key is not None
+                config.set(key, arguments["value"])
+            return ToolOutcome(
+                config.render(key, json_output=output_format == "json")
+            )
+        except ConfigError as exc:
+            return ToolOutcome(str(exc), False)
+        except Exception:
+            return ToolOutcome("Config operation failed; details were withheld.", False)
+
     return Environment((
+        Tool(ToolSpec("config", "Read or update in-memory interaction configuration.", {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "enum": list(CONFIG_KEYS)},
+                "value": {},
+                "format": {"type": "string", "enum": ["python", "json"]},
+            },
+            "additionalProperties": False,
+        }), configure),
         Tool(ToolSpec("login", "Sign in to the selected ChatGPT/Codex account.", {
             "type": "object", "properties": {"workspace_id": {"type": "string"}},
             "additionalProperties": False,

@@ -160,6 +160,7 @@ class ModelCatalogTests(unittest.TestCase):
                 model = MessagesModel(MessagesEndpoint(
                     api_url="https://api.anthropic.com",
                     model=name,
+                    max_output_tokens=100,
                     api_key="FAKE",
                 ))
 
@@ -334,7 +335,8 @@ class CatalogAuthParityTests(unittest.TestCase):
                                             "META_API_KEY": "meta-token"}, clear=True):
             for flags, expected in (([], "anthropic-token"), (["--api-key", "explicit"], "explicit")):
                 args = demo._build_parser().parse_args([
-                    "--model-api", "messages", "--model", "claude-fable-5.1", *flags,
+                    "--model-api", "messages", "--model", "claude-fable-5.1",
+                    "--max-output-tokens", "100", *flags,
                 ])
                 self.assertEqual(build_model(args).endpoint.api_key, expected)
             args = demo._build_parser().parse_args(["--model", "muse-spark-1.3"])

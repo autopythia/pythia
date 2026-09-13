@@ -15,6 +15,7 @@ from .local_tools import create_apply_patch_tool
 from .local_tools import create_exec_command_tool
 from .local_tools import create_update_plan_tool
 from .local_tools import create_write_stdin_tool
+from .local_tools._workspace import WorkspacePolicy
 
 
 class DefaultEnvironment(Environment):
@@ -45,10 +46,12 @@ class DefaultEnvironment(Environment):
 
         extra_tools = tuple(extra_tools)
         root = Path(cwd).expanduser().resolve()
+        self._workspace_policy = WorkspacePolicy(enable_workspace)
         self._command_runtime = CommandRuntime(
             root,
             shell=shell,
             enable_workspace=enable_workspace,
+            _workspace_policy=self._workspace_policy,
         )
         self._plan_store = PlanStore(on_update=on_plan_update)
         self._closed = False
@@ -65,6 +68,7 @@ class DefaultEnvironment(Environment):
                 create_apply_patch_tool(
                     root,
                     enable_workspace=enable_workspace,
+                    _workspace_policy=self._workspace_policy,
                 )
             )
         try:
@@ -80,6 +84,13 @@ class DefaultEnvironment(Environment):
     @property
     def command_runtime(self) -> CommandRuntime:
         return self._command_runtime
+
+    @property
+    def enable_workspace(self) -> bool:
+        return self._workspace_policy.enabled
+
+    def set_enable_workspace(self, enabled: bool) -> None:
+        self._workspace_policy.set_enabled(enabled)
 
     def close(self) -> None:
         if self._closed:

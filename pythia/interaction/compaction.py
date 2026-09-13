@@ -32,6 +32,11 @@ if TYPE_CHECKING:
     from .display import DisplayItem
 
 
+DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS = 2_000
+# TODO: Add a nullable ``compaction_max_output_tokens`` runtime-config key.
+# ``None`` should inherit the interaction's resolved ``max_output_tokens``
+# instead of selecting this independent prompt-compaction policy default.
+
 DEFAULT_COMPACTION_PROMPT = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff "
     "summary for another LLM that will resume the task.\n\n"
@@ -183,12 +188,14 @@ def create_default_compactor(model: Model) -> Compactor:
     if isinstance(model, CodexResponsesModel):
         if model.supports_remote_compaction:
             return ResponsesOpaqueCompactor(model)
-        # Responses intentionally supports only max_tokens from the generic
-        # SamplingOptions surface. Do not give its local fallback the prompt
-        # compactor's temperature=0 default.
+        # Responses intentionally supports only max_output_tokens from the
+        # generic SamplingOptions surface. Do not give its local fallback the
+        # prompt compactor's temperature=0 default.
         return PromptSummarizingCompactor(
             model,
-            options=SamplingOptions(max_tokens=2_000),
+            options=SamplingOptions(
+                max_output_tokens=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+            ),
         )
     return PromptSummarizingCompactor(model)
 
@@ -314,7 +321,7 @@ class PromptSummarizingCompactor:
         self._retained_user_message_tokens = retained_user_message_tokens
         self._options = options or SamplingOptions(
             temperature=0.0,
-            max_tokens=2_000,
+            max_output_tokens=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
         )
         self._retain_user_message = retain_user_message
 
@@ -432,6 +439,7 @@ __all__ = [
     "CompactionError",
     "CompactionResult",
     "Compactor",
+    "DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS",
     "DEFAULT_COMPACTION_PROMPT",
     "DEFAULT_SUMMARY_PREFIX",
     "PromptSummarizingCompactor",

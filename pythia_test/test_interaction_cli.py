@@ -189,7 +189,7 @@ for module in (cli, demo):
             [],
             ["--model-api", "codex", "--model", "gpt-6-astra", "--resume",
              "--prompt", "/quit\nA literal query", "--instructions", "",
-             "--max-samples", "3", "--max-tokens", "77", "--cwd", "work",
+             "--max-samples", "3", "--max-output-tokens", "77", "--cwd", "work",
              "--save", "chosen.jsonl", "--enable-auto-compaction=False",
              "--enable-workspace=False"],
         ):
@@ -303,7 +303,11 @@ for module in (cli, demo):
         self.assertIn("--save PATH", result.stdout)
 
     def test_invalid_initial_options_fail_before_effects_even_with_a_tty(self):
-        for argv in (["--prompt", " "], ["--max-samples", "0"], ["--max-tokens", "0"]):
+        for argv in (
+            ["--prompt", " "],
+            ["--max-samples", "0"],
+            ["--max-output-tokens", "0"],
+        ):
             with self.subTest(argv=argv):
                 terminal_stream = SimpleNamespace(isatty=lambda: True)
                 with mock.patch.object(cli.sys, "stdin", terminal_stream):
@@ -408,7 +412,13 @@ class CLIControllerTests(_ControllerTestCase):
         terminal = _Terminal(frame)
         model = _Model(self.path, _answer("first"), _answer("second"))
         code = await self._run(
-            model, terminal, ["--prompt", query, "--max-samples", "1", "--max-tokens", "77"]
+            model,
+            terminal,
+            [
+                "--prompt", query,
+                "--max-samples", "1",
+                "--max-output-tokens", "77",
+            ],
         )
         self.assertEqual(code, 0)
         self.assertEqual(terminal.frames[0][0], Editor(query, len(query)))
@@ -420,7 +430,10 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(
             tuple(i.sample_count for i in saved if isinstance(i, TurnSummary)), (1, 2)
         )
-        self.assertEqual([call[2] for call in model.calls], [SamplingOptions(max_tokens=77)] * 2)
+        self.assertEqual(
+            [call[2] for call in model.calls],
+            [SamplingOptions(max_output_tokens=77)] * 2,
+        )
         texts = [item.text for item in terminal.items]
         self.assertEqual(texts.count("[assistant] first"), 1)
         self.assertEqual(texts.count("[assistant] second"), 1)

@@ -77,9 +77,33 @@ def _payload(opener: _Opener) -> dict[str, Any]:
     return json.loads(request.data.decode("utf-8"))
 
 
+def _endpoint(*args, **kwargs) -> MessagesEndpoint:
+    kwargs.setdefault("max_output_tokens", 100)
+    return MessagesEndpoint(*args, **kwargs)
+
+
 class MessagesEndpointTests(unittest.TestCase):
+    def test_output_limit_prefers_explicit_then_catalog_and_requires_a_source(self):
+        catalogued = MessagesEndpoint(
+            api_url="http://localhost",
+            model="claude-fable-5-1",
+        )
+        explicit = MessagesEndpoint(
+            api_url="http://localhost",
+            model="claude-fable-5-1",
+            max_output_tokens=100,
+        )
+        self.assertEqual(catalogued.max_output_tokens, 128_000)
+        self.assertEqual(explicit.max_output_tokens, 100)
+
+        with self.assertRaisesRegex(
+            ModelConfigurationError,
+            "model catalog.*--max-output-tokens",
+        ):
+            MessagesEndpoint(api_url="http://localhost", model="model")
+
     def test_normalizes_url_and_redacts_key(self):
-        endpoint = MessagesEndpoint(
+        endpoint = _endpoint(
             api_url=" HTTPS://api.example.test:8443/proxy/ ",
             model=" model-name ",
             api_key=" secret-key ",
@@ -115,7 +139,7 @@ class MessagesEndpointTests(unittest.TestCase):
             {
                 "api_url": "http://localhost",
                 "model": "model",
-                "default_max_tokens": 0,
+                "max_output_tokens": 0,
             },
             {
                 "api_url": "http://localhost",
@@ -126,7 +150,7 @@ class MessagesEndpointTests(unittest.TestCase):
         for kwargs in cases:
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ModelConfigurationError):
-                    MessagesEndpoint(**kwargs)
+                    _endpoint(**kwargs)
 
     def test_server_compaction_configuration_is_validated(self):
         default = MessagesServerCompaction()
@@ -153,7 +177,7 @@ class MessagesEndpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelConfigurationError, "instructions"):
             MessagesServerCompaction(instructions=" ")
         with self.assertRaisesRegex(TypeError, "server_compaction"):
-            MessagesEndpoint(
+            _endpoint(
                 api_url="http://localhost:8000",
                 model="model",
                 server_compaction=object(),
@@ -161,7 +185,7 @@ class MessagesEndpointTests(unittest.TestCase):
 
     def test_server_compaction_uses_catalog_auto_compact_threshold(self):
         policy = MessagesServerCompaction()
-        model = MessagesModel(MessagesEndpoint(
+        model = MessagesModel(_endpoint(
             api_url="https://api.anthropic.com",
             model="claude-fable-5-1",
             api_key="test-key",
@@ -192,6 +216,22 @@ class MessagesEndpointTests(unittest.TestCase):
             SamplingOptions(enable_auto_compaction=False),
         )
         self.assertNotIn("context_management", disabled)
+
+        runtime_enabled = MessagesModel(_endpoint(
+            api_url="https://api.anthropic.com",
+            model="claude-fable-5-1",
+            api_key="test-key",
+        ))
+        enabled_after_startup = runtime_enabled._build_request_payload(
+            ModelContext((Message("user", "Hello."),)),
+            (),
+            SamplingOptions(enable_auto_compaction=True),
+        )
+        self.assertEqual(
+            enabled_after_startup["context_management"],
+            payload["context_management"],
+        )
+        self.assertIsNone(runtime_enabled.endpoint.server_compaction)
 
         response = _FakeResponse({
             "type": "message",
@@ -241,11 +281,11 @@ class MessagesModelTests(unittest.TestCase):
         )
         opener = _Opener(response)
         model = MessagesModel(
-            MessagesEndpoint(
+            _endpoint(
                 api_url="https://api.example.test/anthropic",
                 model="claude-sonnet-5",
                 api_key="secret-key",
-                default_max_tokens=2048,
+                max_output_tokens=2048,
             ),
             opener=opener,
         )
@@ -279,7 +319,7 @@ class MessagesModelTests(unittest.TestCase):
             context,
             tools=(tool,),
             options=SamplingOptions(
-                max_tokens=100,
+                max_output_tokens=100,
                 temperature=0.25,
                 top_p=0.9,
                 stop=("END",),
@@ -392,7 +432,7 @@ class MessagesModelTests(unittest.TestCase):
             "stop_reason": "end_turn",
         }))
         model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=opener,
         )
         model.sample(context, tools=environment.tool_specs)
@@ -409,7 +449,7 @@ class MessagesModelTests(unittest.TestCase):
             ],
         })
 
-    def test_uses_default_tokens_and_omits_optional_fields(self):
+    def test_uses_configured_tokens_and_omits_optional_fields(self):
         opener = _Opener(
             _FakeResponse(
                 {
@@ -421,10 +461,10 @@ class MessagesModelTests(unittest.TestCase):
             )
         )
         model = MessagesModel(
-            MessagesEndpoint(
+            _endpoint(
                 api_url="http://localhost:8000",
                 model="model",
-                default_max_tokens=77,
+                max_output_tokens=77,
             ),
             opener=opener,
         )
@@ -442,7 +482,7 @@ class MessagesModelTests(unittest.TestCase):
 
     def test_rejects_unsupported_or_unsafe_context(self):
         model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=_Opener(_FakeResponse({})),
         )
         cases = [
@@ -484,7 +524,7 @@ class MessagesModelTests(unittest.TestCase):
 
     def test_rejects_unknown_response_blocks(self):
         model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=_Opener(
                 _FakeResponse(
                     {
@@ -507,7 +547,7 @@ class MessagesModelTests(unittest.TestCase):
             fp=io.BytesIO(b'{"error":{"message":"context window exceeded"}}'),
         )
         model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=_Opener(error),
         )
 
@@ -558,7 +598,7 @@ class MessagesModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(first_response, second_response)
         model = MessagesModel(
-            MessagesEndpoint(
+            _endpoint(
                 api_url="http://localhost:8000",
                 model="claude-sonnet-5",
                 server_compaction=MessagesServerCompaction(),
@@ -637,7 +677,7 @@ class MessagesModelTests(unittest.TestCase):
 
     def test_rejects_null_compaction_and_responses_subtype(self):
         null_model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=_Opener(
                 _FakeResponse(
                     {
@@ -656,7 +696,7 @@ class MessagesModelTests(unittest.TestCase):
             )
 
         wrong_protocol_model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=_Opener(_FakeResponse({})),
         )
         with self.assertRaisesRegex(
@@ -681,7 +721,7 @@ class MessagesModelTests(unittest.TestCase):
             fp=io.BytesIO(b'{"type":"error","error":{"type":"request_too_large"}}'),
         )
         model = MessagesModel(
-            MessagesEndpoint(api_url="http://localhost:8000", model="model"),
+            _endpoint(api_url="http://localhost:8000", model="model"),
             opener=_Opener(error),
         )
         with self.assertRaises(ModelContextWindowError):
@@ -700,6 +740,29 @@ class ReasoningSignatureTests(unittest.TestCase):
 
 
 class MessagesDemoTests(unittest.TestCase):
+    def test_uncatalogued_frontend_model_requires_an_explicit_output_limit(self):
+        args = _build_parser().parse_args([
+            "--model-api",
+            "messages",
+            "--model",
+            "claude-sonnet-5",
+        ])
+
+        with self.assertRaisesRegex(ValueError, "--max-output-tokens"):
+            _build_model(args)
+
+    def test_frontend_uses_catalogued_output_limit_when_omitted(self):
+        args = _build_parser().parse_args([
+            "--model-api",
+            "messages",
+            "--model",
+            "claude-fable-5-1",
+        ])
+
+        model = _build_model(args)
+
+        self.assertEqual(model.endpoint.max_output_tokens, 128_000)
+
     def test_builds_anthropic_messages_model(self):
         args = _build_parser().parse_args(
             [
@@ -707,6 +770,8 @@ class MessagesDemoTests(unittest.TestCase):
                 "messages",
                 "--model",
                 "claude-sonnet-5",
+                "--max-output-tokens",
+                "100",
             ]
         )
 
@@ -730,6 +795,8 @@ class MessagesDemoTests(unittest.TestCase):
             "messages",
             "--model",
             "claude-sonnet-5",
+            "--max-output-tokens",
+            "100",
         ]
         enabled = _build_model(_build_parser().parse_args(base))
         disabled = _build_model(_build_parser().parse_args([

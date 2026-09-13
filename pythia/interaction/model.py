@@ -93,7 +93,7 @@ def _validate_optional_finite_number(
 
 @dataclass(frozen=True)
 class SamplingOptions:
-    max_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     stop: Tuple[str, ...] = ()
@@ -102,13 +102,15 @@ class SamplingOptions:
     enable_auto_compaction: Optional[bool] = None
 
     def __post_init__(self) -> None:
-        if self.max_tokens is not None:
+        if self.max_output_tokens is not None:
             if (
-                isinstance(self.max_tokens, bool)
-                or not isinstance(self.max_tokens, int)
-                or self.max_tokens <= 0
+                isinstance(self.max_output_tokens, bool)
+                or not isinstance(self.max_output_tokens, int)
+                or self.max_output_tokens <= 0
             ):
-                raise ValueError("max_tokens must be a positive integer or None")
+                raise ValueError(
+                    "max_output_tokens must be a positive integer or None"
+                )
 
         temperature = _validate_optional_finite_number(
             self.temperature,

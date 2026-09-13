@@ -12,6 +12,7 @@ from pythia.interaction import CompactionError
 from pythia.interaction import CompactionMetadata
 from pythia.interaction import ContextPrefix
 from pythia.interaction import ContextValidationError
+from pythia.interaction import DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import DEFAULT_SUMMARY_PREFIX
 from pythia.interaction import Environment
@@ -518,7 +519,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             context,
             tools=(spec,),
             options=SamplingOptions(
-                max_tokens=100,
+                max_output_tokens=100,
                 temperature=0.25,
                 stop=("END",),
                 seed=7,
@@ -1194,6 +1195,14 @@ class _ScriptedModel:
 
 
 class CompactionTests(unittest.TestCase):
+    def test_prompt_compaction_output_limit_can_be_overridden(self):
+        model = mock.Mock()
+        options = SamplingOptions(max_output_tokens=321)
+
+        compactor = PromptSummarizingCompactor(model, options=options)
+
+        self.assertIs(compactor._options, options)
+
     def test_prompt_compactor_returns_append_only_checkpoint(self):
         usage = TokenUsage(input_tokens=80, output_tokens=20, total_tokens=100)
         model = _ScriptedModel(
@@ -1254,7 +1263,14 @@ class CompactionTests(unittest.TestCase):
         )
         temporary_context, tools, options = model.calls[0]
         self.assertEqual(tools, ())
-        self.assertIsInstance(options, SamplingOptions)
+        self.assertEqual(
+            options,
+            SamplingOptions(
+                temperature=0.0,
+                max_output_tokens=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+            ),
+        )
+        self.assertEqual(DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS, 2_000)
         self.assertNotEqual(temporary_context.items, context.items)
         self.assertIn("CONTEXT CHECKPOINT COMPACTION", temporary_context[-1].content)
 

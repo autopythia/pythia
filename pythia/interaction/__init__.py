@@ -9,6 +9,7 @@ from .codex_auth import load_codex_credentials
 from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import Compactor
+from .compaction import DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS
 from .compaction import DEFAULT_COMPACTION_PROMPT
 from .compaction import DEFAULT_SUMMARY_PREFIX
 from .compaction import PromptSummarizingCompactor
@@ -87,6 +88,10 @@ from .responses import REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
 from .responses import ResponsesOpaqueCompactor
 from .responses import StreamingResponsesEndpoint
 from .responses import X_CODEX_TURN_STATE_HEADER
+from .runtime_config import CONFIG_KEYS
+from .runtime_config import ConfigError
+from .runtime_config import InteractionConfig
+from .runtime_config import InteractionConfigSnapshot
 from .save import SaveError
 from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
@@ -111,10 +116,13 @@ __all__ = [
     "CompactionMetadata",
     "CompactionResult",
     "Compactor",
+    "CONFIG_KEYS",
+    "ConfigError",
     "ContextPrefix",
     "ContextValidationError",
     "DefaultEnvironment",
     "DEFAULT_ANTHROPIC_VERSION",
+    "DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS",
     "DEFAULT_COMPACTION_PROMPT",
     "DEFAULT_LOGIN_TIMEOUT_SECONDS",
     "DEFAULT_REQUEST_TIMEOUT_SECONDS",
@@ -125,6 +133,8 @@ __all__ = [
     "EnvironmentResult",
     "InteractionItem",
     "InteractionItemRenderer",
+    "InteractionConfig",
+    "InteractionConfigSnapshot",
     "Instructions",
     "Message",
     "MESSAGES_COMPACTION_BETA",

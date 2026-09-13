@@ -548,8 +548,8 @@ def _apply_sampling_options(
             "Codex Responses does not support these sampling options yet: "
             + ", ".join(unsupported)
         )
-    if options.max_tokens is not None:
-        payload["max_output_tokens"] = options.max_tokens
+    if options.max_output_tokens is not None:
+        payload["max_output_tokens"] = options.max_output_tokens
 
 
 def _new_identifier(factory: Callable[[], Any], field_name: str) -> str:

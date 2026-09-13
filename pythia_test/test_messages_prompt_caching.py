@@ -68,12 +68,17 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, "prompt_caching"):
                     MessagesEndpoint(
                         api_url="http://localhost", model="model",
+                        max_output_tokens=100,
                         prompt_caching=policy,
                     )
 
     def test_direct_endpoint_caching_is_off_by_default(self):
         opener = _ScriptedOpener(_response())
-        endpoint = MessagesEndpoint(api_url="http://localhost", model="model")
+        endpoint = MessagesEndpoint(
+            api_url="http://localhost",
+            model="model",
+            max_output_tokens=100,
+        )
         self.assertIsNone(endpoint.prompt_caching)
         MessagesModel(endpoint, opener=opener).sample(
             ModelContext((Message("user", "Hello."),))
@@ -88,6 +93,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
         )
         model = MessagesModel(MessagesEndpoint(
             api_url="http://localhost", model="model",
+            max_output_tokens=100,
             prompt_caching=MessagesPromptCaching(),
         ), opener=opener)
         with self.assertRaisesRegex(ModelTransportError, "cache_control"):
@@ -107,6 +113,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 )
                 endpoint = MessagesEndpoint(
                     api_url="http://localhost", model="model",
+                    max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(ttl=ttl),
                 )
                 model = MessagesModel(endpoint, opener=opener)
@@ -115,7 +122,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                     Instructions("Be concise."), Message("user", "Check facts."),
                 ))
                 tools = (ToolSpec("lookup", "Look up facts.", {"type": "object"}),)
-                options = SamplingOptions(max_tokens=128)
+                options = SamplingOptions(max_output_tokens=128)
                 control = {"type": "ephemeral", "ttl": ttl}
 
                 for turn in range(2):
@@ -154,6 +161,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 opener = _ScriptedOpener(_response())
                 endpoint = MessagesEndpoint(
                     api_url="http://localhost", model="model",
+                    max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
                 )
                 model = MessagesModel(endpoint, opener=opener)
@@ -179,6 +187,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 opener = _ScriptedOpener(_response())
                 model = MessagesModel(MessagesEndpoint(
                     api_url="http://localhost", model="model",
+                    max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(ttl="1h"),
                     server_compaction=MessagesServerCompaction(),
                 ), opener=opener)
@@ -223,6 +232,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 opener = _ScriptedOpener(_response(usage=usage))
                 model = MessagesModel(MessagesEndpoint(
                     api_url="http://localhost", model="model",
+                    max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
                 ), opener=opener)
                 sample = model.sample(ModelContext((Message("user", "Hello."),)))
@@ -251,6 +261,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 }))
                 model = MessagesModel(MessagesEndpoint(
                     api_url="http://localhost", model="model",
+                    max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
                     server_compaction=MessagesServerCompaction(),
                 ), opener=opener)
@@ -270,7 +281,8 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
             ):
                 with self.subTest(frontend=frontend.__name__, flags=flags):
                     args = frontend._build_parser().parse_args([
-                        "--model-api", "messages", "--model", "model", *flags,
+                        "--model-api", "messages", "--model", "model",
+                        "--max-output-tokens", "100", *flags,
                     ])
                     model = build_model(args)
                     self.assertEqual(model.endpoint.prompt_caching, MessagesPromptCaching())

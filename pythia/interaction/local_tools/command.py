@@ -19,6 +19,7 @@ from typing import Union
 from ..environment import Tool
 from ..environment import ToolOutcome
 from ..environment import ToolSpec
+from ._workspace import WorkspacePolicy
 
 
 @dataclass
@@ -119,6 +120,7 @@ class CommandRuntime:
         default_write_yield_time_ms: int = 250,
         default_max_output_tokens: Optional[int] = 4_000,
         max_yield_time_ms: int = 60_000,
+        _workspace_policy: Optional[WorkspacePolicy] = None,
     ) -> None:
         root = Path(cwd).expanduser().resolve()
         if not root.exists():
@@ -139,7 +141,14 @@ class CommandRuntime:
 
         self.cwd = root
         self.shell = resolved_shell
-        self._enable_workspace = enable_workspace
+        if _workspace_policy is not None and not isinstance(
+            _workspace_policy,
+            WorkspacePolicy,
+        ):
+            raise TypeError("_workspace_policy must be WorkspacePolicy or None")
+        self._workspace_policy = (
+            _workspace_policy or WorkspacePolicy(enable_workspace)
+        )
         self.default_exec_yield_time_ms = _require_nonnegative_integer(
             default_exec_yield_time_ms,
             "default_exec_yield_time_ms",
@@ -192,7 +201,7 @@ class CommandRuntime:
             candidate = self.cwd / candidate
         resolved = candidate.resolve()
         if (
-            self._enable_workspace
+            self._workspace_policy.enabled
             and resolved != self.cwd
             and self.cwd not in resolved.parents
         ):

@@ -341,12 +341,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     prompt = args.prompt
     options = (
         SamplingOptions(
-            max_tokens=args.max_tokens,
+            max_output_tokens=args.max_output_tokens,
             enable_auto_compaction=(
                 False if not args.enable_auto_compaction else None
             ),
         )
-        if args.max_tokens is not None or not args.enable_auto_compaction
+        if args.max_output_tokens is not None or not args.enable_auto_compaction
         else None
     )
 

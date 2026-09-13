@@ -542,7 +542,14 @@ def _timing_case(name, clock, *, fail=False):
         model = ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost"), opener=opener)
         return model, response, chat_completions, "_decode_response"
     if name == "messages":
-        model = MessagesModel(MessagesEndpoint("http://localhost", "model"), opener=opener)
+        model = MessagesModel(
+            MessagesEndpoint(
+                "http://localhost",
+                "model",
+                max_output_tokens=100,
+            ),
+            opener=opener,
+        )
         return model, response, messages, "_decode_response"
     identifiers = iter(("session-private", "turn-private"))
     model = CodexResponsesModel(StreamingResponsesEndpoint(

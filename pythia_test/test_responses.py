@@ -17,6 +17,7 @@ from pythia.interaction import CodexResponsesModel
 from pythia.interaction import CompactionError
 from pythia.interaction import CompactionMetadata
 from pythia.interaction import ContextPrefix
+from pythia.interaction import DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS
 from pythia.interaction import DEFAULT_SUMMARY_PREFIX
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import Environment
@@ -795,6 +796,10 @@ class CodexResponsesModelTests(unittest.TestCase):
             compactor = create_default_compactor(model)
             self.assertIsInstance(compactor, PromptSummarizingCompactor)
             self.assertIsNone(compactor._options.temperature)
+            self.assertEqual(
+                compactor._options.max_output_tokens,
+                DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+            )
 
     def test_remote_compactor_rejects_pending_calls_without_network(self):
         opener = _ScriptedOpener()
@@ -1087,7 +1092,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         sample = model.sample(
             context,
             tools=(tool,),
-            options=SamplingOptions(max_tokens=200),
+            options=SamplingOptions(max_output_tokens=200),
         )
 
         self.assertEqual(context.items, before)

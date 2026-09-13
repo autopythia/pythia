@@ -104,6 +104,7 @@ def build_model(args: argparse.Namespace) -> Model:
         endpoint = MessagesEndpoint(
             api_url=args.api_url or route.api_url,
             model=args.model,
+            max_output_tokens=args.max_output_tokens,
             request_timeout_seconds=args.request_timeout_seconds,
             api_key=args.api_key or (
                 os.environ.get(route.api_key_environment_variable)
@@ -215,7 +216,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         default=None,
         help="maximum model samples; unlimited when omitted",
     )
-    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--max-output-tokens", type=int)
     parser.add_argument(
         "--request-timeout-seconds",
         type=float,

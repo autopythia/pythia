@@ -44,7 +44,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "enable_auto_compaction": True,
     "enable_workspace": True,
     "max_samples": None,
-    "max_tokens": None,
+    "max_output_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
     "prompt": None,
     "instructions": None,
@@ -145,7 +145,7 @@ class DemoArgumentBaselineTests(unittest.TestCase):
                 "--cwd", "workspace",
                 "--save", "custom.jsonl",
                 "--max-samples", "2",
-                "--max-tokens", "77",
+                "--max-output-tokens", "77",
                 "--request-timeout-seconds", "9",
                 "--instructions", "",
                 "--prompt", query,
@@ -163,7 +163,7 @@ class DemoArgumentBaselineTests(unittest.TestCase):
                 "cwd": "workspace",
                 "save_path": Path("custom.jsonl"),
                 "max_samples": 2,
-                "max_tokens": 77,
+                "max_output_tokens": 77,
                 "request_timeout_seconds": 9.0,
                 "instructions": "",
                 "prompt": query,
@@ -268,7 +268,11 @@ class DemoStartupBaselineTests(unittest.TestCase):
             side_effect=(10.0, 12.5),
         ):
             status, model, printed = self._run_demo(
-                ["--prompt", query, "--max-samples", "2", "--max-tokens", "77"],
+                [
+                    "--prompt", query,
+                    "--max-samples", "2",
+                    "--max-output-tokens", "77",
+                ],
                 samples,
             )
 
@@ -279,7 +283,10 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 tuple(item for item in context if isinstance(item, Message)),
                 (Message(role="user", content=query),),
             )
-            self.assertEqual(options, SamplingOptions(max_tokens=77))
+            self.assertEqual(
+                options,
+                SamplingOptions(max_output_tokens=77),
+            )
         self.assertEqual(
             tuple(
                 item.text for item in printed if isinstance(item, DisplayItem)
