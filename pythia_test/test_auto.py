@@ -213,6 +213,81 @@ class ConfigTests(unittest.TestCase):
                     resolve_config(path)
 
 
+class InstructionTests(unittest.TestCase):
+    def setUp(self):
+        self.settings = resolve_config()
+        self.base_url = "http://127.0.0.1:54321"
+
+    def text(self, index):
+        return auto._instructions(index, self.settings[index], self.base_url).text
+
+    def test_cooperation_paragraph_precedes_each_default_role(self):
+        preambles = []
+        for index, name in ((1, "main"), (2, "worker"), (-1, "watcher")):
+            with self.subTest(index=index):
+                text = self.text(index)
+                preamble, rest = text.split("\n\n", 1)
+                preambles.append(preamble)
+                self.assertIn("cooperative effort to complete the user's task", preamble)
+                self.assertIn("shared message board", preamble)
+                self.assertIn("iterative revisions toward a verified result", preamble)
+                self.assertTrue(rest.startswith(f"You are {name}"))
+                self.assertEqual(text.count("# Shared message board instructions"), 1)
+                self.assertIn(f"Address: {self.base_url}\n", text)
+                self.assertIn(f"Read {self.base_url}/README.md", text)
+        self.assertEqual(len(set(preambles)), 1)
+        self.assertIn("The host displays a debug event", self.text(-1))
+        self.assertIn("No model polling is needed", self.text(-1))
+
+    def test_main_delegates_implementation_and_reviews_iteratively(self):
+        text = self.text(1)
+        for requirement in (
+            "You are main, the user-facing planner and reviewer",
+            "acceptance criteria, and required checks",
+            "Call board_post_plan to assign implementation and tests to worker #2",
+            "Worker owns code and test edits",
+            "do not instead assign worker a read-only review and implement the change yourself",
+            "Use board_read_thread to obtain the result for each plan",
+            "Review the diff and reported checks against the user's requirements",
+            "post a concrete follow-up execution plan in the same thread",
+            "review the revised work",
+            "remain active through worker execution and your review",
+            "later worker results do not automatically restart it",
+            "If blocked, report what remains unresolved",
+            "Respect explicitly planning-only or review-only user requests",
+            "Do not resubmit a plan after an uncertain tool outcome without checking the board",
+            "Local update_plan only maintains your checklist; it does not delegate work",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, text)
+
+    def test_worker_implements_revises_and_reports_checks(self):
+        text = self.text(2)
+        for requirement in (
+            "You are worker, the implementer",
+            "including code changes and tests when implementation is requested",
+            "Do not substitute another implementation proposal",
+            "For follow-up assignments, revise the existing work according to main's review",
+            "Respect explicit read-only assignments",
+            "Finish relevant commands before handing work back to main for review",
+            "changed files, checks and their outcomes, and remaining blockers",
+            "do not claim unperformed work",
+            "The host will publish your final outcome",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, text)
+
+    def test_custom_instructions_replace_defaults_but_keep_board_discovery(self):
+        for index in (1, 2, -1):
+            for custom in ("Use my custom role contract.", "", " \n"):
+                with self.subTest(index=index, custom=custom):
+                    self.settings[index]["instructions"] = custom
+                    body, board = self.text(index).split("\n\n# Shared message board instructions\n\n", 1)
+                    self.assertEqual(body, custom)
+                    self.assertIn(f"Address: {self.base_url}\n", board)
+                    self.assertIn(f"Read {self.base_url}/README.md", board)
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
