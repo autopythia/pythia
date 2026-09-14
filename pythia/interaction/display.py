@@ -95,10 +95,16 @@ class DisplayItem:
     ``text`` is the canonical, undecorated block contents.  Printing an item
     applies the Autopythia/Contradex left-hand quote gutter and, for diff
     blocks, the Contradex diff colorscheme.
+
+    ``label`` optionally identifies the renderer-owned leading ``[label]``
+    token in ``text``. It does not affect printing or equality; frontends can
+    use it to add attribution without mistaking bracket-leading payloads for
+    labels.
     """
 
     text: str
     is_diff: bool = field(default=False)
+    label: Optional[str] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
@@ -111,6 +117,11 @@ class DisplayItem:
             )
         if not isinstance(self.is_diff, bool):
             raise TypeError("display item is_diff must be a bool")
+        if self.label is not None:
+            if not isinstance(self.label, str):
+                raise TypeError("display item label must be a string or None")
+            if not self.label or not self.text.startswith(f"[{self.label}]"):
+                raise ValueError("display item label must match its leading [label] token")
 
     def __str__(self) -> str:
         text = _colorize_diff_text(self.text) if self.is_diff else self.text
@@ -149,40 +160,52 @@ class InteractionItemRenderer:
                 )
 
             blocks: Tuple[str, ...]
+            label: Optional[str] = None
             diff_block_indices: Set[int] = set()
             if isinstance(item, UserToolCall):
+                label = "user-tool-call"
                 user_call_by_id[item.call.call_id] = item.call
                 blocks = self._render_tool_call(item.call, diff_block_indices, user=True)
             elif isinstance(item, UserToolResult):
+                label = "user-tool-ret"
                 blocks = self._render_tool_result(
                     item.result, user_call_by_id.get(item.result.call_id),
                     diff_block_indices, user=True,
                 )
             elif isinstance(item, Instructions):
+                label = "instructions"
                 blocks = _render_instructions(item)
             elif isinstance(item, Message):
+                label = item.role.strip() or "message"
                 blocks = _render_message(item)
             elif isinstance(item, Reasoning):
+                label = "reasoning"
                 blocks = _render_reasoning(item)
             elif isinstance(item, ToolCall):
+                label = "tool-call"
                 call_by_id[item.call_id] = item
                 blocks = self._render_tool_call(
                     item,
                     diff_block_indices,
                 )
             elif isinstance(item, ToolResult):
+                label = "tool-ret"
                 blocks = self._render_tool_result(
                     item,
                     call_by_id.get(item.call_id),
                     diff_block_indices,
                 )
             elif isinstance(item, SampleMetadata):
+                label = "sample"
                 blocks = _render_sample_metadata(item)
             elif isinstance(item, CompactionMetadata):
+                label = "compaction"
                 blocks = _render_compaction_metadata(item)
             elif isinstance(item, ModelFailure):
+                label = "model failure"
                 blocks = _render_model_failure(item)
             elif isinstance(item, TurnSummary):
+                label = "turn"
                 blocks = _render_turn_summary(item)
             elif isinstance(
                 item,
@@ -190,8 +213,10 @@ class InteractionItemRenderer:
             ):
                 blocks = ()
             elif isinstance(item, OpaqueCompaction):
+                label = "compaction"
                 blocks = ("[compaction] opaque checkpoint",)
             elif isinstance(item, ContextPrefix):
+                label = "context prefix"
                 item_count = len(item.prefix_items)
                 noun = "item" if item_count == 1 else "items"
                 blocks = (
@@ -212,6 +237,11 @@ class InteractionItemRenderer:
                                 self.color
                                 and block_index in diff_block_indices
                             ),
+                            # Extra tool-call blocks are literal payloads, even
+                            # when their text happens to start with [a label].
+                            label=(None if block_index > 0 and isinstance(
+                                item, (ToolCall, UserToolCall)
+                            ) else label),
                         )
                     )
 

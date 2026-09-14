@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from pythia.interaction import Environment, Message, ModelSample, Tool, ToolCall
+from pythia.interaction import DisplayItem, Environment, Message, ModelSample, Tool, ToolCall
 from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary
 from pythia.interaction import ModelFailure, ModelTransportError, Reasoning, OpaqueCompaction
 from pythia.interaction import load_interaction_save
@@ -38,6 +38,93 @@ def wait_for(predicate, timeout=5):
             return value
         time.sleep(0.005)
     raise AssertionError("timed out waiting for test condition")
+
+
+class DisplayTests(unittest.TestCase):
+    def setUp(self):
+        self.session = SimpleNamespace(names={1: "main", 2: "custom worker", -1: "watcher"})
+
+    def test_context_is_folded_into_every_item_label(self):
+        sample = ModelSample((
+            Reasoning("", summary=("first thought", "second thought")),
+            Message("assistant", "answer\n[reasoning] quoted body stays unchanged"),
+        ))
+        original = sample.display_items()
+        rendered = auto._display_events(self.session, (
+            auto._Event(1, original),
+            auto._Event(2, answer("worker answer").display_items()),
+            auto._Event(-1, (DisplayItem("[debug] condition fired", label="debug"),), "debug"),
+        ))
+        self.assertEqual([item.text for item in rendered], [
+            "[#1 (main) - reasoning] first thought",
+            "[#1 (main) - reasoning] second thought",
+            "[#1 (main) - assistant] answer\n[reasoning] quoted body stays unchanged",
+            "[#1 (main) - sample] input=0 output=0 total=0 cached=0",
+            "[#2 (custom worker) - assistant] worker answer",
+            "[#2 (custom worker) - sample] input=0 output=0 total=0 cached=0",
+            "[#-1 (watcher) - debug] condition fired",
+        ])
+        self.assertEqual(original, sample.display_items())
+        self.assertEqual(original[0].text, "[reasoning] first thought")
+
+    def test_global_events_and_empty_batches_have_no_context_heading(self):
+        global_items = (DisplayItem("Board: http://localhost/README.md"),
+                        DisplayItem("[assistant] global notice", label="assistant"),
+                        DisplayItem("-old\n+new", is_diff=True))
+        rendered = auto._display_events(self.session, (
+            auto._Event(1, ()),
+            auto._Event(None, global_items),
+            auto._Event(-1, ()),
+        ))
+        self.assertEqual(rendered, list(global_items))
+        self.assertTrue(all(a is b for a, b in zip(rendered, global_items)))
+
+    def test_unlabeled_context_notice_stays_in_one_item(self):
+        notice = DisplayItem("Task failed; details withheld.")
+        rendered = auto._display_events(self.session, (auto._Event(1, (notice,), "error"),))
+        self.assertEqual(rendered, [DisplayItem("[#1 (main)]\nTask failed; details withheld.")])
+
+    def test_arbitrary_message_role_is_not_parsed_as_bracket_syntax(self):
+        original = auto.render_interaction_items((Message("custom] role", "body"),))
+        rendered = auto._display_events(self.session, (auto._Event(1, original),))
+        self.assertEqual(rendered[0].text, "[#1 (main) - custom] role] body")
+        self.assertEqual(rendered[0].label, "#1 (main) - custom] role")
+
+    def test_tool_payloads_keep_their_body_and_diff_colors(self):
+        patch = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new"
+        for name, payload in (("apply_patch", patch),
+                              ("write_file", "[reasoning]\nthis is file content"),
+                              ("write_file", '["a", "b"]')):
+            with self.subTest(name=name, payload=payload):
+                call = ToolCall(name, "edit", json.dumps({"content": payload}))
+                original = auto.render_interaction_items((call,))
+                rendered = auto._display_events(self.session, (auto._Event(2, original),))
+                self.assertEqual(len(rendered), 2)
+                self.assertEqual(rendered[0].text, f"[#2 (custom worker) - tool-call] {name} (edit)")
+                self.assertEqual(rendered[1].text, f"[#2 (custom worker)]\n{payload}")
+                self.assertEqual([item.is_diff for item in rendered],
+                                 [item.is_diff for item in original])
+                self.assertEqual(original[1].text, payload)
+                if name == "apply_patch":
+                    printed = str(rendered[1])
+                    self.assertIn("\x1b[31m-old\x1b[0m", printed)
+                    self.assertIn("\x1b[32m+new\x1b[0m", printed)
+                    self.assertNotIn("\x1b[31m---", printed)
+                    self.assertNotIn("\x1b[32m+++", printed)
+
+    def test_tool_result_label_is_folded_without_rewriting_body_labels(self):
+        call = ToolCall("exec_command", "diff", '{"cmd":"git diff"}')
+        original = auto.render_interaction_items((
+            ToolResult("diff", "[assistant] literal output\n@@ -1 +1 @@\n-old\n+new"),
+        ), source_calls=(call,))
+        rendered = auto._display_events(self.session, (auto._Event(1, original),))
+        self.assertEqual(len(rendered), 1)
+        self.assertEqual(rendered[0].text,
+                         "[#1 (main) - tool-ret]  exec_command (diff) [ok]\n"
+                         "[assistant] literal output\n@@ -1 +1 @@\n-old\n+new")
+        self.assertTrue(rendered[0].is_diff)
+        self.assertIn("\x1b[31m-old\x1b[0m", str(rendered[0]))
+        self.assertIn("\x1b[32m+new\x1b[0m", str(rendered[0]))
 
 
 class ConfigTests(unittest.TestCase):
@@ -503,6 +590,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual([r.kind for r in session.service.board.records()], ["user", "answer"])
             self.assertTrue(any(s.startswith("#1 (main) - sampling") for s in terminal.frames))
             self.assertTrue(any(s.startswith("#-1") for s in terminal.frames))
+            self.assertTrue(any(i.text == "[#1 (main) - assistant] interactive done" for i in terminal.items))
+            self.assertTrue(any(i.text.startswith("[#-1 (watcher) - debug]") for i in terminal.items))
+            self.assertFalse(any(i.text == "[#1 (main)]" for i in terminal.items))
             self.assertFalse(any(t.is_alive() for t in session._threads.values()))
         finally:
             release.set()
@@ -713,8 +803,10 @@ class EntryPointTests(unittest.TestCase):
                     env={**os.environ, "AUTO_TEST_KEY": "FAKE_PROVIDER_SECRET"},
                     capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("main answer", result.stdout)
-                self.assertIn("worker proof", result.stdout)
+                self.assertIn("[#1 (main) - assistant] main answer", result.stdout)
+                self.assertIn("[#2 (worker) - assistant] worker proof", result.stdout)
+                self.assertIn("[#-1 (watcher) - debug]", result.stdout)
+                self.assertNotIn("[#1 (main)]", result.stdout)
                 self.assertEqual((root / "proof.txt").read_text(), "proof")
                 self.assertIn("condition fired", result.stdout)
                 self.assertIn("#1 (main)", result.stdout)

@@ -323,7 +323,8 @@ class _Session:
                     continue
                 self._emit(-1, (DisplayItem(
                     "[debug] main end-of-turn condition fired: "
-                    f"#1 thread={completion.thread_id} source={completion.record_id}"
+                    f"#1 thread={completion.thread_id} source={completion.record_id}",
+                    label="debug",
                 ),), "debug")
                 self._watched.add(completion.record_id)
                 self._changed.notify_all()
@@ -477,9 +478,20 @@ class _Session:
 def _display_events(session, events):
     items = []
     for event in events:
-        if event.index is not None:
-            items.append(DisplayItem(f"[#{event.index} ({session.names[event.index]})]"))
-        items.extend(event.items)
+        if event.index is None:
+            items.extend(event.items)
+            continue
+        context = f"#{event.index} ({session.names[event.index]})"
+        for item in event.items:
+            if item.label is not None:
+                label = f"{context} - {item.label}"
+                text = f"[{label}]{item.text[len(item.label) + 2:]}"
+            else:
+                # Keep raw payload lines intact, including diff headers and
+                # code that starts with brackets. This is still one item.
+                label = context
+                text = f"[{label}]\n{item.text}"
+            items.append(DisplayItem(text, is_diff=item.is_diff, label=label))
     return items
 
 

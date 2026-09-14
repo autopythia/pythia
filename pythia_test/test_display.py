@@ -31,6 +31,21 @@ ANSI_RESET = "\x1b[0m"
 
 
 class DisplayItemTests(unittest.TestCase):
+    def test_label_is_validated_non_rendering_metadata(self):
+        plain = DisplayItem("[reasoning] inspect")
+        labeled = DisplayItem(plain.text, label="reasoning")
+        self.assertIsNone(plain.label)
+        self.assertEqual(labeled.label, "reasoning")
+        self.assertEqual(labeled, plain)
+        self.assertEqual(str(labeled), str(plain))
+        self.assertEqual(repr(labeled), repr(plain))
+        for invalid in (1, False):
+            with self.subTest(invalid=invalid), self.assertRaises(TypeError):
+                DisplayItem(plain.text, label=invalid)
+        for invalid in ("", "assistant"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                DisplayItem(plain.text, label=invalid)
+
     def test_display_item_is_nominal_printable_text(self):
         item = DisplayItem("line one\nline two")
 
@@ -147,6 +162,16 @@ class InteractionItemRendererTests(unittest.TestCase):
             ),
         )
         self.assertTrue(all(isinstance(item, DisplayItem) for item in rendered))
+        self.assertEqual(tuple(item.label for item in rendered), (
+            "system", "developer", "user", "assistant",
+            "reasoning", "reasoning", "reasoning", "reasoning",
+            "model failure", "sample", "compaction", "context prefix",
+        ))
+
+    def test_message_label_retains_the_full_role(self):
+        rendered = render_interaction_items((Message("  custom] role  ", "body"),))
+        self.assertEqual(rendered[0].label, "custom] role")
+        self.assertEqual(rendered[0].text, "[custom] role] body")
 
     def test_producer_display_items_and_compaction_context_items(self):
         user = UserInteraction(
@@ -250,6 +275,10 @@ class InteractionItemRendererTests(unittest.TestCase):
 
         renderer = InteractionItemRenderer(
             show_generic_arguments=True,
+        )
+        self.assertEqual(
+            tuple(item.label for item in renderer.render_items((generic_call, malformed_call))),
+            ("tool-call", None, "tool-call", None),
         )
         self.assertEqual(
             renderer.render_items((generic_call, malformed_call)),
@@ -411,6 +440,7 @@ class InteractionItemRendererTests(unittest.TestCase):
         )
 
         rendered = render_interaction_items((call,))
+        self.assertEqual(tuple(item.label for item in rendered), ("tool-call", None))
         self.assertEqual(
             rendered,
             (
