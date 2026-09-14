@@ -341,6 +341,23 @@ class TerminalRenderTests(unittest.TestCase):
             self.assertEqual(output.getvalue(), rendered)
         self.assertEqual(item.text, "-old\n+new\x1b[2J")
 
+    def test_prompt_change_redraws_without_mutating_editor_or_cursor(self):
+        class Output(io.StringIO):
+            def fileno(self):
+                return 1
+
+        output = Output()
+        terminal = PosixTerminal(io.StringIO(), output)
+        editor = Editor("editable draft", 8)
+        with mock.patch("os.get_terminal_size", return_value=os.terminal_size((40, 8))):
+            terminal.render(editor, "sampling", (), "⠋> ")
+            first = output.getvalue()
+            terminal.render(editor, "sampling", (), "⠙> ")
+        self.assertGreater(len(output.getvalue()), len(first))
+        self.assertIn("⠋> editable draft", first)
+        self.assertIn("⠙> editable draft", output.getvalue()[len(first):])
+        self.assertEqual(editor, Editor("editable draft", 8))
+
 
 class _ControllerTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -364,6 +381,33 @@ class _ControllerTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class CLIControllerTests(_ControllerTestCase):
+    async def test_sampling_spinner_changes_and_returns_to_idle_prompt(self):
+        release = threading.Event()
+        sampling_prompts = []
+
+        def sample(_context):
+            self.assertTrue(release.wait(3))
+            return _answer("done")
+
+        def frame(terminal, _editor, status):
+            prompt = terminal.frames[-1][2]
+            if status.startswith("sampling"):
+                sampling_prompts.append(prompt)
+                if len(sampling_prompts) == 18:
+                    release.set()
+            elif status == "idle" and release.is_set():
+                self.assertEqual(prompt, ":> ")
+                terminal.key("c-d")
+
+        terminal = _Terminal(frame)
+        try:
+            self.assertEqual(await self._run(
+                _Model(self.path, sample), terminal, ["--prompt", "spin"]), 0)
+        finally:
+            release.set()
+        self.assertGreaterEqual(len(set(sampling_prompts)), 2)
+        self.assertNotIn(":> ", sampling_prompts)
+
     async def test_empty_start_keeps_timer_and_never_submits_demo_default(self):
         ticks = 0
 

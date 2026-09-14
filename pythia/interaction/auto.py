@@ -38,6 +38,11 @@ from .save import SaveError, save_interaction_save
 from .user import UserInteraction
 
 
+_FRAME_INTERVAL = 1 / 128
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_ACTIVE_PHASES = {"starting", "sampling", "compacting", "executing tools", "saving"}
+
+
 _COOPERATION_PREAMBLE = (
     "This session is a cooperative effort to complete the user's task through a "
     "shared message board. Main plans and reviews, worker carries out assigned "
@@ -231,8 +236,11 @@ class _Session:
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
                               DisplayItem(f"Board: {self.service.base_url}/README.md"),
                               DisplayItem("Warning: local tools are unsandboxed; use a trusted model and workspace.")))
-            for i, s in self.settings.items():
-                self._emit(None, (DisplayItem(f"#{i} ({s['name']}): {s['model_api']} / {s['model'] or '(server default)'}"),))
+            summaries = "\n".join(
+                f"#{i} ({s['name']}): {s['model_api']} / {s['model'] or '(server default)'}"
+                for i, s in self.settings.items()
+            )
+            self._emit(None, (DisplayItem(summaries),))
             return self
         except BaseException:
             self.close()
@@ -275,6 +283,10 @@ class _Session:
         if phase in {"sampling", "compacting", "executing tools", "saving"}:
             text += f"... {int(time.monotonic() - started)}s"
         return text
+
+    def _is_busy(self, index):
+        with self._changed:
+            return self._states[index][0] in _ACTIVE_PHASES
 
     @property
     def has_errors(self):
@@ -551,7 +563,10 @@ def _local_command(text, selected, session):
     if words in (["/quit"], ["/exit"]):
         return selected, (), True
     if words == ["/contexts"]:
-        return selected, tuple(DisplayItem(("* " if i == selected else "  ") + session.status(i)) for i in NAMES), False
+        summaries = "\n".join(
+            ("* " if i == selected else "  ") + session.status(i) for i in NAMES
+        )
+        return selected, (DisplayItem(summaries),), False
     if words and words[0] == "/context" and len(words) in {1, 2}:
         target = selected
         if len(words) == 2:
@@ -565,6 +580,7 @@ def _local_command(text, selected, session):
 
 async def _interactive(session, terminal):
     editor, selected = Editor(), 1
+    frame = 0
     pending = None
     submitted_text = None
     retry = None
@@ -621,12 +637,16 @@ async def _interactive(session, terminal):
                     notices.append(DisplayItem("Use /quit to close the failed session."))
                     board_failure_shown = True
                 status = "closing - waiting for current work..." if closing else session.status(selected)
-                terminal.render(editor, status, tuple(notices))
+                busy = (session._is_busy(selected) or pending is not None
+                        or (closing is not None and not closing.done()))
+                prompt = f"{_SPINNER[(frame // 16) % len(_SPINNER)]}> " if busy else ":> "
+                terminal.render(editor, status, tuple(notices), prompt)
                 notices.clear()
                 if closing is not None and closing.done():
                     closing.result()
                     break
-                await asyncio.sleep(1 / 128)
+                frame += 1
+                await asyncio.sleep(_FRAME_INTERVAL)
     finally:
         session.request_stop()
         try:

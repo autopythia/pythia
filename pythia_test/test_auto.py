@@ -79,6 +79,27 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(rendered, list(global_items))
         self.assertTrue(all(a is b for a, b in zip(rendered, global_items)))
 
+    def test_context_listing_is_one_multiline_item_for_each_selection(self):
+        statuses = {
+            1: "#1 (main custom) - quiescent",
+            2: "#2 (worker custom) - sampling (1.2s)",
+            -1: "#-1 (watcher custom) - waiting",
+        }
+        session = SimpleNamespace(status=lambda index: statuses[index])
+        for selected in (1, 2, -1):
+            with self.subTest(selected=selected):
+                actual_selected, items, stop = auto._local_command("/contexts", selected, session)
+                self.assertEqual(actual_selected, selected)
+                self.assertFalse(stop)
+                self.assertEqual(len(items), 1)
+                expected = [
+                    ("* " if index == selected else "  ") + statuses[index]
+                    for index in (1, 2, -1)
+                ]
+                self.assertEqual(items[0].text.splitlines(), expected)
+                self.assertEqual(len(items[0].text.split("\n")), 3)
+                self.assertFalse(items[0].text.endswith("\n"))
+
     def test_unlabeled_context_notice_stays_in_one_item(self):
         notice = DisplayItem("Task failed; details withheld.")
         rendered = auto._display_events(self.session, (auto._Event(1, (notice,), "error"),))
@@ -299,7 +320,8 @@ class RuntimeTests(unittest.TestCase):
         self.threads = {i: [] for i in (1, 2, -1)}
         self.closed = []
 
-    def session(self, scripts, extra_tools=(), *, settings_overrides=None, **kwargs):
+    def session(self, scripts, extra_tools=(), *, settings_overrides=None,
+                settings_updates=None, **kwargs):
         test = self
         class Model:
             def __init__(self, index):
@@ -336,6 +358,8 @@ class RuntimeTests(unittest.TestCase):
                 test.closed.append(self.index)
 
         settings = resolve_config(overrides={"cwd": self.temp.name, **(settings_overrides or {})})
+        for index, updates in (settings_updates or {}).items():
+            settings[index].update(updates)
         session = auto._Session(self.path, settings,
                                model_factory=lambda i, args: Model(i),
                                environment_factory=lambda i, args, tools: Tools(i, tools), **kwargs).start()
@@ -345,6 +369,43 @@ class RuntimeTests(unittest.TestCase):
     def finished(self, session, thread):
         wait_for(lambda: session.thread_result(thread) is not None)
         return session.thread_result(thread)
+
+    def test_startup_context_summaries_share_one_global_display_item(self):
+        session = self.session({}, settings_updates={
+            1: {"name": "lead custom"},
+            2: {"name": "builder custom", "model_api": "messages", "model": "worker-model",
+                "max_output_tokens": 128},
+            -1: {"name": "observer custom", "model": "watch-model"},
+        })
+        events = session.drain_events()
+        self.assertEqual(len(events), 2)
+        self.assertTrue(all(event.index is None for event in events))
+        self.assertEqual([item.text for item in events[0].items], [
+            f"Save directory: {self.path}",
+            f"Board: {session.service.base_url}/README.md",
+            "Warning: local tools are unsandboxed; use a trusted model and workspace.",
+        ])
+        self.assertEqual(len(events[1].items), 1)
+        summary = events[1].items[0].text
+        self.assertEqual(summary.splitlines(), [
+            "#1 (lead custom): chat-completions / (server default)",
+            "#2 (builder custom): messages / worker-model",
+            "#-1 (observer custom): chat-completions / watch-model",
+        ])
+        self.assertEqual(len(summary.split("\n")), 3)
+        self.assertFalse(summary.endswith("\n"))
+        self.assertEqual(auto._display_events(session, events)[-1], events[1].items[0])
+
+    def test_busy_phase_classification(self):
+        session = self.session({})
+        for phase in ("starting", "sampling", "compacting", "executing tools", "saving"):
+            with self.subTest(phase=phase):
+                session._phase(2, phase)
+                self.assertTrue(session._is_busy(2))
+        for phase in ("quiescent", "closed"):
+            with self.subTest(phase=phase):
+                session._phase(2, phase)
+                self.assertFalse(session._is_busy(2))
 
     def test_main_and_worker_can_run_past_eight_samples_by_default(self):
         tool = Tool(ToolSpec("noop", "continue the test", {}),
@@ -616,6 +677,10 @@ class RuntimeTests(unittest.TestCase):
                 self.keys = deque()
                 self.frames, self.items = [], []
                 self.stage = 0
+                self.busy_frames = 0
+                self.closing_frames = 0
+                self.main_busy_prompts = []
+                self.waiting_close_prompts = []
             def __enter__(self):
                 return self
             def __exit__(self, *args):
@@ -628,7 +693,7 @@ class RuntimeTests(unittest.TestCase):
                 self.keys.clear()
                 return keys
             def render(self, editor, status, items, prompt=":> "):
-                self.frames.append(status)
+                self.frames.append((editor, status, prompt))
                 self.items.extend(items)
                 if self.stage == 0:
                     self.submit("/context 2")
@@ -645,17 +710,38 @@ class RuntimeTests(unittest.TestCase):
                     self.submit("actual task")
                     self.stage = 4
                 elif self.stage == 4 and reached.is_set():
+                    self.busy_frames += 1
+                    self.main_busy_prompts.append(prompt)
+                    if self.busy_frames == 18:
+                        self.submit("/context 2")
+                        self.stage = 5
+                elif self.stage == 5 and status.startswith("#2"):
+                    test.assertEqual(prompt, ":> ")
                     self.submit("/context #-1")
-                    self.stage = 5
-                elif self.stage == 5 and status.startswith("#-1"):
-                    self.submit("/contexts")
-                    release.set()
                     self.stage = 6
-                elif self.stage == 6 and any("condition fired" in i.text for i in self.items):
-                    source = session.service.board.records()[0]
-                    if session.thread_result(source.thread_id) is not None:
-                        self.submit("/quit")
-                        self.stage = 7
+                elif self.stage == 6 and status.startswith("#-1"):
+                    test.assertEqual(prompt, ":> ")
+                    self.submit("/context 1")
+                    self.stage = 7
+                elif self.stage == 7 and status.startswith("#1"):
+                    test.assertNotEqual(prompt, ":> ")
+                    self.keys.extend((SimpleNamespace(key="<bracketed-paste>", data="draft"),
+                                      SimpleNamespace(key="left", data="")))
+                    self.stage = 8
+                elif self.stage == 8 and editor.text == "draft":
+                    test.assertEqual(editor.cursor, 4)
+                    test.assertNotEqual(prompt, ":> ")
+                    self.keys.append(SimpleNamespace(key="c-c", data=""))
+                    self.stage = 9
+                elif self.stage == 9 and status.startswith("closing"):
+                    test.assertEqual(editor.text, "draft")
+                    test.assertEqual(editor.cursor, 4)
+                    test.assertNotEqual(prompt, ":> ")
+                    self.closing_frames += 1
+                    self.waiting_close_prompts.append(prompt)
+                    if self.closing_frames == 18:
+                        release.set()
+                        self.stage = 10
         terminal = Terminal()
         try:
             result = asyncio.run(asyncio.wait_for(auto._interactive(session, terminal), timeout=6))
@@ -663,12 +749,168 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(len(self.calls[1]), 1)
             self.assertEqual(self.calls[2], [])
             self.assertEqual([r.kind for r in session.service.board.records()], ["user", "answer"])
-            self.assertTrue(any(s.startswith("#1 (main) - sampling") for s in terminal.frames))
-            self.assertTrue(any(s.startswith("#-1") for s in terminal.frames))
+            self.assertTrue(any(s.startswith("#1 (main) - sampling") for _, s, _ in terminal.frames))
+            self.assertTrue(any(s.startswith("#-1") for _, s, _ in terminal.frames))
+            busy_prompts = set(terminal.main_busy_prompts)
+            closing_prompts = set(terminal.waiting_close_prompts)
+            self.assertGreaterEqual(len(busy_prompts), 2)
+            self.assertGreaterEqual(len(closing_prompts), 2)
+            self.assertNotIn(":> ", busy_prompts | closing_prompts)
             self.assertTrue(any(i.text == "[#1 (main) - assistant] interactive done" for i in terminal.items))
             self.assertTrue(any(i.text.startswith("[#-1 (watcher) - debug]") for i in terminal.items))
             self.assertFalse(any(i.text == "[#1 (main)]" for i in terminal.items))
             self.assertFalse(any(t.is_alive() for t in session._threads.values()))
+        finally:
+            release.set()
+            session.close()
+
+    def test_interactive_pending_submission_animates_before_context_work(self):
+        session = self.session({1: [answer("accepted")]})
+        entered, release = threading.Event(), threading.Event()
+        submit = session.submit
+
+        def delayed_submit(text, *, request_id):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return submit(text, request_id=request_id)
+
+        session.submit = delayed_submit
+        test = self
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys = deque()
+                self.prompts = []
+                self.stage = 0
+                self.completed_thread = None
+                self.submission_complete = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def submit(self, text):
+                self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                    ("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")))
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                self.submission_complete |= any(
+                    item.text.startswith("Posted user thread ") for item in items
+                )
+                if self.stage == 0:
+                    self.submit("pending draft")
+                    self.stage = 1
+                elif self.stage == 1 and entered.is_set():
+                    test.assertFalse(session._is_busy(1))
+                    test.assertEqual(editor.text, "pending draft")
+                    self.prompts.append(prompt)
+                    if len(self.prompts) == 18:
+                        release.set()
+                        self.stage = 2
+                elif self.stage == 2:
+                    users = [record for record in session.service.board.records()
+                             if record.kind == "user"]
+                    if (self.submission_complete
+                            and len(users) == 1
+                            and session.thread_result(users[0].thread_id) is True
+                            and status.startswith("#1 (main) - quiescent")):
+                        test.assertEqual(prompt, ":> ")
+                        self.completed_thread = users[0].thread_id
+                        self.submit("/quit")
+                        self.stage = 3
+
+        terminal = Terminal()
+        try:
+            self.assertEqual(asyncio.run(asyncio.wait_for(
+                auto._interactive(session, terminal), timeout=6)), 0)
+            self.assertGreaterEqual(len(set(terminal.prompts)), 2)
+            self.assertNotIn(":> ", terminal.prompts)
+            records = session.service.board.records(terminal.completed_thread)
+            self.assertEqual([record.kind for record in records], ["user", "answer"])
+            self.assertTrue(session.thread_result(terminal.completed_thread))
+            self.assertEqual(len(self.calls[1]), 1)
+            self.assertFalse(any(thread.is_alive() for thread in session._threads.values()))
+        finally:
+            release.set()
+            session.close()
+
+    def test_interactive_global_close_animates_on_idle_selected_context(self):
+        session = self.session({})
+        entered, release = threading.Event(), threading.Event()
+        close = session.close
+
+        def delayed_close():
+            entered.set()
+            self.assertTrue(release.wait(5))
+            close()
+
+        session.close = delayed_close
+        test = self
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys = deque()
+                self.closing_prompts = []
+                self.stage = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def submit(self, text):
+                self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                    ("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")))
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                if self.stage == 0:
+                    self.submit("/context -1")
+                    self.stage = 1
+                elif self.stage == 1 and status.startswith("#-1"):
+                    test.assertFalse(session._is_busy(-1))
+                    test.assertEqual(prompt, ":> ")
+                    self.keys.extend((SimpleNamespace(key="<bracketed-paste>", data="draft"),
+                                      SimpleNamespace(key="left", data="")))
+                    self.stage = 2
+                elif self.stage == 2 and editor.text == "draft":
+                    test.assertEqual(editor.cursor, 4)
+                    self.keys.append(SimpleNamespace(key="c-c", data=""))
+                    self.stage = 3
+                elif self.stage == 3 and status.startswith("closing") and entered.is_set():
+                    test.assertFalse(session._is_busy(-1))
+                    test.assertEqual((editor.text, editor.cursor), ("draft", 4))
+                    test.assertNotEqual(prompt, ":> ")
+                    self.closing_prompts.append(prompt)
+                    if len(self.closing_prompts) == 18:
+                        release.set()
+                        self.stage = 4
+
+        terminal = Terminal()
+        try:
+            self.assertEqual(asyncio.run(asyncio.wait_for(
+                auto._interactive(session, terminal), timeout=6)), 0)
+            self.assertGreaterEqual(len(set(terminal.closing_prompts)), 2)
+            self.assertNotIn(":> ", terminal.closing_prompts)
+            self.assertEqual(session.service.board.records(), ())
+            self.assertEqual(self.calls, {1: [], 2: []})
+            self.assertFalse(any(thread.is_alive() for thread in session._threads.values()))
         finally:
             release.set()
             session.close()
