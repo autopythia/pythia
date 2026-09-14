@@ -1,0 +1,637 @@
+"""Board-first fixed-role MVP. Run ``python3 -m pythia.interaction.auto --help``.
+
+All contexts initially wait. User board threads wake #1 (main), its plans wake
+#2 (worker), and finalized main turns produce a debug event from #-1 (watcher).
+This module deliberately does not change the existing CLI or demo.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import queue
+import sys
+import threading
+import time
+from typing import Optional
+import uuid
+
+from ._auto_board import BoardError, BoardService, atomic_text
+from ._auto_config import DEFAULTS, NAMES, build_parser, namespace, resolve_config
+from ._cli_editor import Editor, safe_text
+from ._cli_terminal import PosixTerminal
+from .compaction import CompactionResult, create_default_compactor, should_auto_compact
+from .context import InteractionContext
+from .default_environment import DefaultEnvironment
+from .display import DisplayItem, render_interaction_items
+from .environment import Environment, Tool, ToolOutcome, ToolSpec
+from .items import Init, Instructions, Message, ModelSampleBoundary, ToolCall, ToolResult
+from .items import summarize_turn_usage
+from .model import ModelError, ModelSample
+from .model_config import build_model
+from .runtime_config import InteractionConfig
+from .save import SaveError, save_interaction_save
+from .user import UserInteraction
+
+
+_ROLE_INSTRUCTIONS = {
+    1: (
+        "You are main, the user-facing planner. Your input is a shared-board task "
+        "thread. For work to delegate, call board_post_plan with a self-contained, "
+        "bounded plan for worker #2. Use board_read_thread to inspect its progress "
+        "and results. The host publishes your final answer to the board. Posting "
+        "a plan is not completion of that work: report what is actually known. "
+        "Do not resubmit a plan after an uncertain tool outcome without checking "
+        "the board. Local update_plan only maintains your checklist."
+    ),
+    2: (
+        "You are worker. Execute the assigned main-authored plan with the allowed "
+        "local tools. board_read_thread supplies its shared task context. Return "
+        "a concrete account of work, checks, and unresolved issues. The host will "
+        "publish your final outcome; do not create new tasks or invent credentials."
+    ),
+    -1: "You are watcher. The host displays a debug event when main's end-of-turn condition fires. No model polling is needed.",
+}
+
+
+def _instructions(index, settings, base_url):
+    body = settings["instructions"]
+    if body is None:
+        body = _ROLE_INSTRUCTIONS[index]
+    return Instructions(body + "\n\n# Shared message board instructions\n\n"
+                        "<INSTRUCTIONS>\n"
+                        "This session has a shared message board for user task threads, plans, and results.\n"
+                        f"Address: {base_url}\n"
+                        f"Read {base_url}/README.md for API and usage instructions.\n"
+                        "Use the bound board tools; the host supplies their credentials privately.\n"
+                        "</INSTRUCTIONS>")
+
+
+@dataclass(frozen=True)
+class _Event:
+    index: Optional[int]
+    items: tuple[DisplayItem, ...]
+    kind: str = "output"
+
+
+@dataclass(frozen=True)
+class _Completion:
+    record_id: str
+    thread_id: str
+
+
+class _Stopping(RuntimeError):
+    pass
+
+
+class _Binding:
+    """Only touched on its context's owner thread; credentials never reach a model."""
+    def __init__(self, index, client):
+        self.index, self.client = index, client
+        self.source = None
+
+    def tools(self):
+        def read(arguments, *, timeout_seconds=None):
+            del timeout_seconds
+            if self.source is None or set(arguments) - {"after", "limit"}:
+                raise BoardError("Invalid board_read_thread arguments or no active task.")
+            after, limit = arguments.get("after", 0), arguments.get("limit", 20)
+            if (type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 100):
+                raise BoardError("Expected after >= 0 and 1 <= limit <= 100.")
+            value = self.client.read(self.source.thread_id, after=after, limit=limit)
+            return ToolOutcome(json.dumps(value, ensure_ascii=False))
+
+        def post(arguments, *, timeout_seconds=None):
+            del timeout_seconds
+            if self.source is None or set(arguments) != {"content"}:
+                raise BoardError("board_post_plan requires only content and an active task.")
+            value = self.client.post(self.source.thread_id, "plan", arguments["content"],
+                                     self.source.record_id)
+            return ToolOutcome(json.dumps({"thread_id": value["thread_id"],
+                                           "plan_id": value["record_id"], "status": "accepted"}))
+
+        tools = [Tool(ToolSpec(
+            "board_read_thread", "Read this task's board thread, including plans/results. Follow next_after when has_more is true.",
+            {"type": "object", "properties": {
+                "after": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+             "additionalProperties": False}), read, timeout_seconds=10)]
+        if self.index == 1:
+            tools.append(Tool(ToolSpec(
+                "board_post_plan", "Submit a self-contained plan to worker #2 in this task thread. Returns a plan ID, not a completed result. Author/thread/credentials are supplied by the host.",
+                {"type": "object", "properties": {"content": {"type": "string"}},
+                 "required": ["content"], "additionalProperties": False}),
+                post, timeout_seconds=10))
+        return tuple(tools)
+
+
+def _model_factory(index, args):
+    del index
+    variable = args.api_key_env
+    if variable is not None:
+        value = os.environ.get(variable)
+        if not value or not value.strip():
+            raise ValueError("Configured API-key environment variable is unavailable.")
+        args.api_key = value
+    return build_model(args)
+
+
+def _environment_factory(index, args, tools):
+    if index == -1:
+        return Environment()
+    return DefaultEnvironment(cwd=args.cwd, enable_workspace=args.enable_workspace,
+                              extra_tools=tools)
+
+
+class _Session:
+    """Private fixed-role runtime; no dynamic manager/template API or resume."""
+    def __init__(self, path, settings, *, board_port=0,
+                 model_factory=_model_factory, environment_factory=_environment_factory):
+        self.path = Path(path).expanduser().absolute()
+        self.settings = {i: dict(s) for i, s in settings.items()}
+        self.names = {i: self.settings[i]["name"] for i in NAMES}
+        self._model_factory, self._environment_factory = model_factory, environment_factory
+        self._port = board_port
+        self._stop = threading.Event()
+        self._changed = threading.Condition()
+        self._states = {i: ("starting", time.monotonic()) for i in NAMES}
+        self._events = deque(maxlen=512)
+        self._dropped = 0
+        self._board_failure_shown = False
+        self._view_stale_shown = False
+        self._done = {}
+        self._expected_watches = set()
+        self._watched = set()
+        self._watch_queue = queue.Queue()
+        self._ready = {i: threading.Event() for i in NAMES}
+        self._threads = {}
+        self._errors = []
+        self._fatal = False
+        self._close_lock = threading.Lock()
+        self._closed = False
+        self.service = None
+
+    def start(self):
+        if self.service is not None or self._closed:
+            raise RuntimeError("Auto session cannot be started twice.")
+        # mkdir is the fresh-run claim: never overwrite or join an existing save.
+        self.path.mkdir(mode=0o700)
+        try:
+            (self.path / "contexts").mkdir(mode=0o700)
+            atomic_text(self.path / "config.json", json.dumps({
+                "version": 1, "contexts": {str(i): s for i, s in self.settings.items()}
+            }, indent=2, ensure_ascii=False) + "\n")
+            self.service = BoardService(self.path, port=self._port)
+            for index in NAMES:
+                thread = threading.Thread(target=self._owner, args=(index,),
+                                          name=f"auto-context-{index}")
+                self._threads[index] = thread
+                thread.start()
+            for ready in self._ready.values():
+                ready.wait()
+            if self._fatal:
+                raise RuntimeError("Auto context initialization failed (see context error notices).")
+            with self.service.board.changed:
+                self.service.board.accepting = True
+            self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
+                              DisplayItem(f"Board: {self.service.base_url}/README.md"),
+                              DisplayItem("Warning: local tools are unsandboxed; use a trusted model and workspace.")))
+            for i, s in self.settings.items():
+                self._emit(None, (DisplayItem(f"#{i} ({s['name']}): {s['model_api']} / {s['model'] or '(server default)'}"),))
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def _emit(self, index, items, kind="output"):
+        with self._changed:
+            if len(self._events) == self._events.maxlen:
+                self._dropped += 1
+            self._events.append(_Event(index, tuple(items), kind))
+            self._changed.notify_all()
+
+    def drain_events(self):
+        with self._changed:
+            events = list(self._events)
+            self._events.clear()
+            if self._dropped:
+                events.insert(0, _Event(None, (DisplayItem(
+                    f"{self._dropped} display events omitted; consult the saved context/board logs."),)))
+                self._dropped = 0
+            if self.service is not None:
+                if self.service.board.failed and not self._board_failure_shown:
+                    events.append(_Event(None, (DisplayItem("Board persistence failed; no further work will run."),), "error"))
+                    self._board_failure_shown = True
+                stale = self.service.board.view_stale
+                if stale and not self._view_stale_shown:
+                    events.append(_Event(None, (DisplayItem("Board Markdown view is stale; index.jsonl remains authoritative."),)))
+                self._view_stale_shown = stale
+            return events
+
+    def _phase(self, index, phase):
+        with self._changed:
+            self._states[index] = (phase, time.monotonic())
+            self._changed.notify_all()
+
+    def status(self, index):
+        with self._changed:
+            phase, started = self._states[index]
+        text = f"#{index} ({self.names[index]}) - {phase}"
+        if phase in {"sampling", "compacting", "executing tools", "saving"}:
+            text += f"... {int(time.monotonic() - started)}s"
+        return text
+
+    @property
+    def has_errors(self):
+        with self._changed:
+            return bool(self._errors) or (self.service is not None and self.service.board.failed)
+
+    def _error(self, index, message, *, fatal=False):
+        with self._changed:
+            self._errors.append(message)
+            self._fatal = self._fatal or fatal
+        self._emit(index, (DisplayItem(message),), "error")
+        if fatal:
+            self.request_stop()
+
+    def _checkpoint(self, index, context, items=()):
+        self._phase(index, "saving")
+        context.extend(items)
+        try:
+            save_interaction_save(self.path / "contexts" / f"{index}.jsonl", context)
+        except Exception:
+            # Serialization/encoding failures are persistence failures too, not
+            # permission to continue from accepted-but-unsaved state.
+            raise SaveError("Auto context checkpoint failed; further effects are blocked.") from None
+
+    def _owner(self, index):
+        environment = None
+        try:
+            args = namespace(self.settings[index])
+            config = InteractionConfig.from_namespace(args).snapshot()
+            binding = _Binding(index, self.service.client(str(index)))
+            environment = self._environment_factory(index, args, () if index == -1 else binding.tools())
+            if not isinstance(environment, Environment):
+                raise TypeError("Environment factory must return an Environment.")
+            # The watcher is host control, so no provider/auth initialization is
+            # needed to display its debug event. Its settings remain independent.
+            model = None if index == -1 else self._model_factory(index, args)
+            if index != -1 and not callable(getattr(model, "sample", None)):
+                raise TypeError("Model factory must return a model with sample().")
+            context = InteractionContext((Init(model=args.model),
+                                          _instructions(index, self.settings[index], self.service.base_url)))
+            self._checkpoint(index, context)
+            self._phase(index, "quiescent")
+            self._ready[index].set()
+            if index == -1:
+                self._watch()
+                return
+            cursor = 0
+            while not self._stop.is_set():
+                source = self.service.board.wait_input("user" if index == 1 else "plan", cursor, self._stop)
+                if source is None or self._stop.is_set():
+                    break
+                cursor = source.sequence
+                binding.source = source
+                self._job(index, source, model, environment, config, context, binding)
+                binding.source = None
+                self._phase(index, "quiescent")
+        except BaseException as exc:
+            self._error(index, f"Auto context failed ({type(exc).__name__}); details withheld.", fatal=True)
+        finally:
+            self._ready[index].set()
+            if environment is not None:
+                close = getattr(environment, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as exc:
+                        self._error(index, f"Environment cleanup failed ({type(exc).__name__}).", fatal=True)
+            self._phase(index, "closed")
+
+    def _watch(self):
+        while True:
+            completion = self._watch_queue.get()
+            if completion is None:
+                return
+            with self._changed:
+                if completion.record_id in self._watched:
+                    continue
+                self._emit(-1, (DisplayItem(
+                    "[debug] main end-of-turn condition fired: "
+                    f"#1 thread={completion.thread_id} source={completion.record_id}"
+                ),), "debug")
+                self._watched.add(completion.record_id)
+                self._changed.notify_all()
+
+    def _job(self, index, source, model, environment, config, context, binding):
+        success = False
+        try:
+            if index == 2:
+                binding.client.post(source.thread_id, "started", "Worker started this plan.", source.record_id)
+            label = "User task" if index == 1 else "Assigned plan from main (#1)"
+            user = UserInteraction((Message("user", f"{label}\nBoard thread: {source.thread_id}\nSource record: {source.record_id}\n\n{source.content}"),))
+            self._checkpoint(index, context, user.context_items())
+            self._emit(index, user.display_items())
+            final = self._turn(index, model, environment, config, context)
+            if index == 1:
+                with self._changed:
+                    self._expected_watches.add(source.record_id)
+                    self._watch_queue.put(_Completion(source.record_id, source.thread_id))
+            binding.client.post(source.thread_id, "answer" if index == 1 else "result",
+                                final, source.record_id, success=True)
+            success = True
+        except Exception as exc:
+            message = ("Stopped before further effects; prior effects may have occurred."
+                       if isinstance(exc, _Stopping) else
+                       f"Task failed ({type(exc).__name__}); effects may have occurred. Details withheld.")
+            fatal = (isinstance(exc, SaveError) or self.service.board.failed or
+                     bool(context.pending_tool_calls()))
+            self._error(index, message, fatal=fatal)
+            try:
+                binding.client.post(source.thread_id, "answer" if index == 1 else "result",
+                                    message, source.record_id, success=False)
+            except BoardError:
+                self._error(index, "Outcome could not be published; inspect the saved logs. No automatic retry will run.", fatal=True)
+        finally:
+            with self._changed:
+                self._done[source.record_id] = success
+                self._changed.notify_all()
+
+    def _turn(self, index, model, environment, config, context):
+        started = time.perf_counter()
+        options = config.sampling_options()
+        samples = 0
+        while config.max_samples is None or samples < config.max_samples:
+            self._check_running()
+            threshold = getattr(model, "auto_compact_context_tokens", None)
+            if (config.enable_auto_compaction and type(threshold) is int and threshold > 0
+                    and should_auto_compact(context, threshold)):
+                self._phase(index, "compacting")
+                result = create_default_compactor(model).compact(context.copy(), tools=environment.tool_specs)
+                if not isinstance(result, CompactionResult):
+                    raise TypeError("Expected CompactionResult.")
+                self._checkpoint(index, context, result.context_items())
+                self._emit(index, result.display_items())
+                self._check_running()
+            self._phase(index, "sampling")
+            samples += 1
+            try:
+                sample = model.sample(context.copy(), tools=environment.tool_specs, options=options)
+            except ModelError as exc:
+                contribution = (*exc.completed_items, *((exc.failure,) if exc.failure is not None else ()))
+                if contribution:
+                    self._checkpoint(index, context, (*contribution, ModelSampleBoundary()))
+                    self._emit(index, render_interaction_items(contribution))
+                calls = tuple(i for i in exc.completed_items if isinstance(i, ToolCall))
+                if calls:
+                    results = tuple(ToolResult(c.call_id, "Not executed: the model response did not complete.", success=False) for c in calls)
+                    self._checkpoint(index, context, results)
+                    self._emit(index, render_interaction_items(results, source_calls=calls))
+                raise
+            if not isinstance(sample, ModelSample):
+                raise TypeError("Expected ModelSample.")
+            self._checkpoint(index, context, sample.context_items())
+            self._emit(index, sample.display_items())
+            if sample.stop_reason == "compaction":
+                continue
+            if not sample.tool_calls:
+                text = sample.last_assistant_text
+                if not text or not text.strip():
+                    raise RuntimeError("Model returned no final assistant text.")
+                summary = summarize_turn_usage(context.items, elapsed_seconds=time.perf_counter() - started)
+                self._checkpoint(index, context, (summary,))
+                self._emit(index, render_interaction_items((summary,)))
+                return text
+            self._check_running()
+            self._phase(index, "executing tools")
+            outcome = environment.execute_tool_calls(sample.tool_calls)
+            self._checkpoint(index, context, outcome.context_items())
+            self._emit(index, outcome.display_items(source_calls=sample.tool_calls))
+        raise RuntimeError("Model exceeded the per-turn sample limit.")
+
+    def _check_running(self):
+        if self.service.board.failed:
+            raise BoardError("Board persistence failed; no further effects may start.", 503)
+        if self._stop.is_set():
+            raise _Stopping()
+
+    def submit(self, text, *, request_id=None):
+        if self._stop.is_set() or self.service is None:
+            raise BoardError("Auto is not accepting new work.", 503)
+        return self.service.client("user").create_thread(text, request_id=request_id)
+
+    def thread_result(self, thread_id):
+        """None while pending; bool once all jobs and applicable watches settle."""
+        # Snapshot done BEFORE records: once main is done its board answer is
+        # committed and no further plans may be added. The later board snapshot
+        # therefore cannot miss a plan just published by a finishing main.
+        with self._changed:
+            done = dict(self._done)
+            expected, watched = set(self._expected_watches), set(self._watched)
+            fatal = self._fatal
+        if fatal or self.service.board.failed:
+            return False
+        sources = [r.record_id for r in self.service.board.records(thread_id) if r.kind in {"user", "plan"}]
+        if not sources:
+            raise BoardError("Unknown task thread.", 404)
+        if not all(key in done for key in sources) or (expected.intersection(sources) - watched):
+            return None
+        return all(done[key] for key in sources)
+
+    def request_stop(self):
+        self._stop.set()
+        if self.service is not None:
+            with self.service.board.changed:
+                self.service.board.accepting = False
+                self.service.board.changed.notify_all()
+
+    def close(self):
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.request_stop()
+            # Producers finish before the watcher sentinel and HTTP shutdown.
+            for index in (1, 2):
+                thread = self._threads.get(index)
+                if thread is not None and thread.ident is not None:
+                    thread.join()
+            self._watch_queue.put(None)
+            watcher = self._threads.get(-1)
+            if watcher is not None and watcher.ident is not None:
+                watcher.join()
+            if self.service is not None:
+                pending = sum(r.kind in {"user", "plan"} and r.record_id not in self._done
+                              for r in self.service.board.records())
+                if pending:
+                    self._emit(None, (DisplayItem(
+                        f"Stopped with {pending} queued/unresolved tasks in the saved board; they were not executed or replayed."),))
+                self.service.close()
+
+
+def _display_events(session, events):
+    items = []
+    for event in events:
+        if event.index is not None:
+            items.append(DisplayItem(f"[#{event.index} ({session.names[event.index]})]"))
+        items.extend(event.items)
+    return items
+
+
+def _print_events(session):
+    for item in _display_events(session, session.drain_events()):
+        print(DisplayItem(safe_text(item.text), is_diff=item.is_diff), flush=True)
+
+
+def _one_prompt(session, prompt):
+    _print_events(session)
+    submitted = session.submit(prompt)
+    while True:
+        _print_events(session)
+        result = session.thread_result(submitted["thread_id"])
+        if result is not None:
+            _print_events(session)
+            return 0 if result else 1
+        time.sleep(0.01)
+
+
+def _local_command(text, selected, session):
+    """Pure navigation/exit dispatch; never submit local slash commands."""
+    if "\n" in text or "\r" in text:
+        raise ValueError("Local commands must be a single line.")
+    words = text.split()
+    if words in (["/quit"], ["/exit"]):
+        return selected, (), True
+    if words == ["/contexts"]:
+        return selected, tuple(DisplayItem(("* " if i == selected else "  ") + session.status(i)) for i in NAMES), False
+    if words and words[0] == "/context" and len(words) in {1, 2}:
+        target = selected
+        if len(words) == 2:
+            value = words[1].removeprefix("#")
+            if value not in {"1", "2", "-1"}:
+                raise ValueError("Use /context 1, /context 2, or /context -1.")
+            target = int(value)
+        return target, (DisplayItem(f"Selected #{target} ({session.names[target]})."),), False
+    raise ValueError("Use /contexts, /context N, /quit, or /exit.")
+
+
+async def _interactive(session, terminal):
+    editor, selected = Editor(), 1
+    pending = None
+    submitted_text = None
+    retry = None
+    closing = None
+    notices = []
+    board_failure_shown = False
+    try:
+        with terminal:
+            while True:
+                for key in terminal.read_keys():
+                    if key.key in {"c-c", "c-d"}:
+                        if closing is None:
+                            session.request_stop()
+                            closing = asyncio.create_task(asyncio.to_thread(session.close))
+                    elif closing is None:
+                        if key.key != "c-m":
+                            editor = editor.edit(key.key, key.data or "")
+                        elif editor.text.strip():
+                            if editor.text.lstrip().startswith("/"):
+                                try:
+                                    selected, result, quit_ = _local_command(editor.text, selected, session)
+                                    notices.extend(result)
+                                    editor = Editor()
+                                    if quit_:
+                                        session.request_stop()
+                                        closing = asyncio.create_task(asyncio.to_thread(session.close))
+                                except ValueError as exc:
+                                    notices.append(DisplayItem(str(exc)))
+                            elif selected != 1:
+                                notices.append(DisplayItem("Switch to /context 1 to submit a new user board thread. Draft preserved."))
+                            elif pending is not None:
+                                notices.append(DisplayItem("A board submission is still pending. Draft preserved."))
+                            else:
+                                submitted_text = editor.text
+                                request_id = retry[1] if retry and retry[0] == submitted_text else uuid.uuid4().hex
+                                retry = (submitted_text, request_id)
+                                pending = asyncio.create_task(asyncio.to_thread(session.submit, submitted_text, request_id=request_id))
+                if terminal.closed and closing is None:
+                    session.request_stop()
+                    closing = asyncio.create_task(asyncio.to_thread(session.close))
+                if pending is not None and pending.done():
+                    try:
+                        posted = pending.result()
+                        notices.append(DisplayItem(f"Posted user thread {posted['thread_id']}."))
+                        retry = None
+                        if editor.text == submitted_text:
+                            editor = Editor()
+                    except Exception:
+                        notices.append(DisplayItem("Board submission failed or is uncertain. Retry the unchanged draft to reuse its request ID."))
+                    pending = None
+                notices.extend(_display_events(session, session.drain_events()))
+                if session.service.board.failed and not board_failure_shown:
+                    session.request_stop()
+                    notices.append(DisplayItem("Use /quit to close the failed session."))
+                    board_failure_shown = True
+                status = "closing - waiting for current work..." if closing else session.status(selected)
+                terminal.render(editor, status, tuple(notices))
+                notices.clear()
+                if closing is not None and closing.done():
+                    closing.result()
+                    break
+                await asyncio.sleep(1 / 128)
+    finally:
+        session.request_stop()
+        try:
+            if pending is not None:
+                try:
+                    await asyncio.shield(pending)
+                except Exception:
+                    pass
+        finally:
+            await asyncio.shield(asyncio.to_thread(session.close))
+    return 1 if session.has_errors else 0
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    session = None
+    exit_code = 1
+    try:
+        if not 0 <= args.board_port <= 65535:
+            raise ValueError("board-port must be between 0 and 65535.")
+        if args.prompt is not None and not args.prompt.strip():
+            raise ValueError("prompt must not be empty.")
+        if args.prompt is None and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty()):
+            raise ValueError("Interactive auto requires a POSIX terminal; use --prompt for one-shot mode.")
+        overrides = {k: v for k, v in vars(args).items() if k in DEFAULTS}
+        settings = resolve_config(args.context_config, overrides)
+        session = _Session(args.save, settings, board_port=args.board_port)
+        session.start()
+        if args.prompt is not None:
+            exit_code = _one_prompt(session, args.prompt)
+        else:
+            exit_code = asyncio.run(_interactive(session, PosixTerminal(sys.stdin, sys.stdout)))
+    except KeyboardInterrupt:
+        exit_code = 130
+    except Exception as exc:
+        # Config errors contain no credential values; unexpected provider/runtime
+        # exceptions are deliberately not stringified here.
+        detail = str(exc) if isinstance(exc, (ValueError, BoardError, FileExistsError)) else type(exc).__name__
+        print(f"auto failed: {detail}", file=sys.stderr)
+    finally:
+        if session is not None:
+            session.close()
+            try:
+                _print_events(session)
+            except (OSError, ValueError):
+                exit_code = 1 if exit_code == 0 else exit_code
+    return 1 if exit_code == 0 and session.has_errors else exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
