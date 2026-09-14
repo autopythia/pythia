@@ -367,10 +367,13 @@ def _default_credential_source(
 
 def _encode_context_items(
     items: Sequence[InteractionItem],
+    *,
+    system_role: str = "system",
 ) -> List[Dict[str, Any]]:
     encoded: List[Dict[str, Any]] = []
-    # Last-wins Instructions -> leading system message (parity with
-    # Chat Completions system). Empty preserved; absence means none.
+    # Last-wins Instructions -> leading caller instruction message. Codex
+    # rejects system input messages, so that route uses developer instead.
+    # Empty preserved; absence means none. Never mutate the interaction log.
     effective: Optional[Instructions] = None
     for item in items:
         if isinstance(item, Instructions):
@@ -379,7 +382,7 @@ def _encode_context_items(
         encoded.append(
             {
                 "type": "message",
-                "role": "system",
+                "role": system_role,
                 "content": [
                     {
                         "type": "input_text",
@@ -417,7 +420,7 @@ def _encode_context_items(
             encoded.append(
                 {
                     "type": "message",
-                    "role": item.role,
+                    "role": system_role if item.role == "system" else item.role,
                     "content": [
                         {
                             "type": content_type,
@@ -1015,6 +1018,28 @@ def _http_body_error_code(
         return None
 
 
+def _http_validation_reason(
+    detail: str,
+    forbidden_values: Tuple[str, ...],
+) -> Optional[str]:
+    """Recognize safe, fixed validation errors without exposing provider bodies."""
+    try:
+        value = json.loads(detail)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(value, Mapping):
+        return None
+    candidates = [value.get("detail"), value.get("message")]
+    error = value.get("error")
+    if isinstance(error, Mapping):
+        candidates.append(error.get("message"))
+    for candidate in candidates:
+        message = _safe_diagnostic_value(candidate, forbidden_values)
+        if message is not None and message.lower() == "system messages are not allowed":
+            return "system input messages are not allowed; use developer messages"
+    return None
+
+
 def _diagnostic_request_id(
     headers: Any,
     forbidden_values: Tuple[str, ...] = (),
@@ -1545,6 +1570,10 @@ def _http_failure(
     auth_error_code = _http_auth_error_code(headers, forbidden_values)
     error_code = _http_body_error_code(detail, forbidden_values)
     message = f"{label} HTTP {status}: request failed"
+    if status == 400:
+        reason = _http_validation_reason(detail, forbidden_values)
+        if reason is not None:
+            message = f"{label} HTTP {status}: {reason}"
     category = "http_error"
     error_type = ModelTransportError
     if _is_context_window_error(detail):
@@ -1825,7 +1854,10 @@ class CodexResponsesModel:
         spec = _resolve_model_spec(self.endpoint)
         payload: Dict[str, Any] = {
             "model": self.endpoint.model if spec is None else spec.api_model,
-            "input": _encode_context_items(context.model_items()),
+            "input": _encode_context_items(
+                context.model_items(),
+                system_role="developer" if self.endpoint.api_provider == "codex" else "system",
+            ),
             "tools": _encode_tools(tools),
             "tool_choice": "auto",
             "parallel_tool_calls": False,

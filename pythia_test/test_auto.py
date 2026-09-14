@@ -534,6 +534,85 @@ class RuntimeTests(unittest.TestCase):
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_codex_auto_flow_rejects_system_wire_messages_like_the_real_endpoint(self):
+        # The original auto fixtures covered Chat Completions/Messages, but did
+        # not enforce Codex's role restriction on generated default instructions.
+        seen = []
+
+        class CodexGateway(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                seen.append(request)
+                if any(item.get("role") == "system" for item in request["input"]):
+                    data = b'{"detail":"System messages are not allowed"}'
+                    status, content_type = 400, "application/json"
+                else:
+                    main = request["model"] == "gpt-6-astra"
+                    main_calls = sum(r["model"] == "gpt-6-astra" for r in seen)
+                    if main and main_calls == 1:
+                        item = {"type": "function_call", "name": "board_post_plan",
+                                "call_id": "delegate", "arguments": '{"content":"Review the worker task"}'}
+                    else:
+                        item = {"type": "message", "role": "assistant", "content": [{
+                            "type": "output_text", "text": "codex main done" if main else "codex worker done"}]}
+                    events = (
+                        {"type": "response.output_item.done", "output_index": 0, "item": item},
+                        {"type": "response.completed", "response": {
+                            "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}}},
+                    )
+                    data = b"".join(("data: " + json.dumps(event) + "\n\n").encode() for event in events)
+                    status, content_type = 200, "text/event-stream"
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        gateway = ThreadingHTTPServer(("127.0.0.1", 0), CodexGateway)
+        server_thread = threading.Thread(target=gateway.serve_forever, kwargs={"poll_interval": .01})
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                auth = root / "auth.json"
+                auth.write_text(json.dumps({"tokens": {
+                    "access_token": "FAKE_CODEX_SECRET", "account_id": "test-account"}}))
+                settings = root / "auto.json"
+                settings.write_text(json.dumps({
+                    "version": 1,
+                    "defaults": {"model_api": "codex", "model": "gpt-6-astra-max",
+                                 "api_url": f"http://127.0.0.1:{gateway.server_port}",
+                                 "codex_auth_file": str(auth), "request_timeout_seconds": 3,
+                                 "cwd": tmp},
+                    "contexts": {"2": {"model": "gpt-5.6-sol-max"}},
+                }))
+                result = subprocess.run([
+                    sys.executable, "-m", "pythia.interaction.auto", "--context-config", str(settings),
+                    "--save", str(root / "run"), "--prompt", "Review auto startup.",
+                ], capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("codex main done", result.stdout)
+                self.assertIn("codex worker done", result.stdout)
+                self.assertIn("condition fired", result.stdout)
+                self.assertEqual(len(seen), 3)
+                self.assertEqual({r["model"] for r in seen}, {"gpt-6-astra", "gpt-5.6-sol"})
+                for request in seen:
+                    self.assertEqual(request["input"][0]["role"], "developer")
+                    self.assertIn("/README.md", request["input"][0]["content"][0]["text"])
+                    self.assertEqual(request["reasoning"]["effort"], "max")
+                    self.assertFalse(any(item.get("role") == "system" for item in request["input"]))
+                for path in (root / "run").rglob("*"):
+                    if path.is_file():
+                        self.assertNotIn("FAKE_CODEX_SECRET", path.read_text())
+                self.assertNotIn("FAKE_CODEX_SECRET", result.stdout + result.stderr)
+        finally:
+            gateway.shutdown()
+            server_thread.join()
+            gateway.server_close()
+
     @unittest.skipUnless(os.name == "posix", "requires a POSIX pseudo-terminal")
     def test_pty_quiescence_navigation_and_exit_without_model_work(self):
         import fcntl

@@ -490,6 +490,49 @@ class CodexResponsesConstructionTests(unittest.TestCase):
 
 
 class CodexResponsesModelTests(unittest.TestCase):
+    def test_codex_maps_instructions_and_legacy_system_messages_to_developer(self):
+        for provider, role in (("codex", "developer"), ("api", "system")):
+            with self.subTest(provider=provider):
+                context = InteractionContext((
+                    Init("session-test"),
+                    Instructions("old instructions"),
+                    Message("user", "first request"),
+                    Instructions("effective instructions"),
+                    Message("system", "legacy system message"),
+                    Message("developer", "explicit developer message"),
+                    Message("user", "follow-up"),
+                ))
+                before = context.items
+                opener = _ScriptedOpener(_FakeSSEResponse(_message_event(0, "OK"), _completed_event()))
+                model = CodexResponsesModel(StreamingResponsesEndpoint(
+                    api_url=CODEX_RESPONSES_API_URL,
+                    model="gpt-6-astra-max", bearer_token="test-token", api_provider=provider,
+                ), opener=opener)
+                self.assertEqual(model.sample(context).last_assistant_text, "OK")
+                encoded = _request_payload(opener)["input"]
+                self.assertEqual([i["role"] for i in encoded], [role, "user", role, "developer", "user"])
+                self.assertEqual(encoded[0]["content"], [{"type": "input_text", "text": "effective instructions"}])
+                self.assertEqual(encoded[2]["content"], [{"type": "input_text", "text": "legacy system message"}])
+                self.assertEqual(context.items, before)
+
+    def test_codex_instruction_absence_and_empty_text_remain_distinct(self):
+        model = CodexResponsesModel(StreamingResponsesEndpoint(
+            api_url=CODEX_RESPONSES_API_URL, model="gpt-6-astra-max",
+            bearer_token="test-token", api_provider="codex",
+        ))
+        for text in (None, "", " \t "):
+            with self.subTest(text=text):
+                items = (() if text is None else (Instructions(text),))
+                context = InteractionContext((*items, Message("user", "hello")))
+                before = context.items
+                payload, _ = model._build_request_payload(context, (), None)
+                encoded = payload["input"]
+                self.assertEqual([i["role"] for i in encoded],
+                                 ["user"] if text is None else ["developer", "user"])
+                if text is not None:
+                    self.assertEqual(encoded[0]["content"][0]["text"], text)
+                self.assertEqual(context.items, before)
+
     def test_responses_opaque_compaction_subtype_is_enforced(self):
         response = _FakeSSEResponse(
             {
@@ -629,6 +672,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             OpaqueCompaction.from_responses("new-encrypted-checkpoint"),
         ))
         payload = _request_payload(opener)
+        self.assertEqual(payload["input"][0]["role"], "developer")
+        self.assertEqual(payload["input"][0]["content"][0]["text"], "Keep these instructions.")
         self.assertEqual(payload["input"][-1], {"type": "compaction_trigger"})
         self.assertEqual(
             sum(item.get("type") == "compaction_trigger" for item in payload["input"]),
@@ -2162,6 +2207,44 @@ class CodexResponsesModelTests(unittest.TestCase):
         self.assertEqual(raised.exception.failure.error_code, "invalid_request")
         self.assertIsNone(raised.exception.failure.authorization_error)
         self.assertNotIn("FAKE_SECRET", str(raised.exception))
+
+    def test_system_role_rejection_has_safe_actionable_diagnostics(self):
+        for body in (
+            {"detail": "System messages are not allowed", "debug": "FAKE_SECRET"},
+            {"error": {"message": "System messages are not allowed", "debug": "FAKE_SECRET"}},
+        ):
+            with self.subTest(body=body):
+                opener = _ScriptedOpener(_http_error(400, body=json.dumps(body).encode()))
+                model = CodexResponsesModel(StreamingResponsesEndpoint(
+                    api_url=CODEX_RESPONSES_API_URL, model="gpt-6-astra-max",
+                    bearer_token="test-token", api_provider="codex",
+                ), opener=opener)
+                with self.assertRaises(ModelTransportError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)))
+                failure = raised.exception.failure
+                self.assertIn("system input messages are not allowed; use developer messages", failure.message)
+                self.assertEqual(failure.http_status, 400)
+                self.assertEqual(failure.attempt_count, 1)
+                self.assertEqual(len(opener.calls), 1)
+                self.assertNotIn("FAKE_SECRET", repr(failure) + str(raised.exception))
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "failure.jsonl"
+                    save_interaction_save(path, InteractionContext((failure,)))
+                    self.assertEqual(load_interaction_save(path).items, (failure,))
+                    self.assertNotIn("FAKE_SECRET", path.read_text())
+
+    def test_arbitrary_http_error_detail_is_still_withheld(self):
+        for detail in ("FAKE_SECRET", "System messages are not allowed: FAKE_SECRET"):
+            with self.subTest(detail=detail):
+                opener = _ScriptedOpener(_http_error(400, body=json.dumps({"detail": detail}).encode()))
+                model = CodexResponsesModel(StreamingResponsesEndpoint(
+                    api_url=CODEX_RESPONSES_API_URL, model="gpt-6-astra-max",
+                    bearer_token="test-token", api_provider="codex",
+                ), opener=opener)
+                with self.assertRaises(ModelTransportError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)))
+                self.assertEqual(raised.exception.failure.message, "Codex Responses HTTP 400: request failed")
+                self.assertNotIn("FAKE_SECRET", repr(raised.exception.failure) + str(raised.exception))
 
     def test_http_and_midstream_failures_share_two_retry_budget(self):
         partial = _FailingSSEResponse(
