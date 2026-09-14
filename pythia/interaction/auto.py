@@ -234,7 +234,6 @@ class _Session:
             with self.service.board.changed:
                 self.service.board.accepting = True
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
-                              DisplayItem(f"Board: {self.service.base_url}/README.md"),
                               DisplayItem("Warning: local tools are unsandboxed; use a trusted model and workspace.")))
             summaries = "\n".join(
                 f"#{i} ({s['name']}): {s['model_api']} / {s['model'] or '(server default)'}"
@@ -543,16 +542,28 @@ def _print_events(session):
         print(DisplayItem(safe_text(item.text), is_diff=item.is_diff), flush=True)
 
 
-def _one_prompt(session, prompt):
-    _print_events(session)
+def _one_prompt(session, prompt, *, display=True):
+    output = _print_events if display else lambda value: value.drain_events()
+    output(session)
     submitted = session.submit(prompt)
     while True:
-        _print_events(session)
+        output(session)
         result = session.thread_result(submitted["thread_id"])
         if result is not None:
-            _print_events(session)
+            output(session)
             return 0 if result else 1
         time.sleep(0.01)
+
+
+def _headless(session):
+    board = session.service.board
+    while not session._stop.is_set() and not board.failed:
+        session.drain_events()
+        with board.changed:
+            if not session._stop.is_set() and not board.failed:
+                board.changed.wait()
+    session.drain_events()
+    return 1 if session.has_errors else 0
 
 
 def _local_command(text, selected, session):
@@ -669,14 +680,21 @@ def main(argv=None):
             raise ValueError("board-port must be between 0 and 65535.")
         if args.prompt is not None and not args.prompt.strip():
             raise ValueError("prompt must not be empty.")
-        if args.prompt is None and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty()):
-            raise ValueError("Interactive auto requires a POSIX terminal; use --prompt for one-shot mode.")
+        if (not args.headless and args.prompt is None
+                and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty())):
+            raise ValueError(
+                "Interactive auto requires a POSIX terminal; use --prompt for one-shot mode "
+                "or --headless to run without a TTY."
+            )
         overrides = {k: v for k, v in vars(args).items() if k in DEFAULTS}
         settings = resolve_config(args.context_config, overrides)
         session = _Session(args.save, settings, board_port=args.board_port)
         session.start()
+        print(f"Board: {session.service.base_url}/README.md", flush=True)
         if args.prompt is not None:
-            exit_code = _one_prompt(session, args.prompt)
+            exit_code = _one_prompt(session, args.prompt, display=not args.headless)
+        elif args.headless:
+            exit_code = _headless(session)
         else:
             exit_code = asyncio.run(_interactive(session, PosixTerminal(sys.stdin, sys.stdout)))
     except KeyboardInterrupt:
@@ -689,10 +707,11 @@ def main(argv=None):
     finally:
         if session is not None:
             session.close()
-            try:
-                _print_events(session)
-            except (OSError, ValueError):
-                exit_code = 1 if exit_code == 0 else exit_code
+            if not args.headless:
+                try:
+                    _print_events(session)
+                except (OSError, ValueError):
+                    exit_code = 1 if exit_code == 0 else exit_code
     return 1 if exit_code == 0 and session.has_errors else exit_code
 
 

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from ._auto_board import parse_json
 from .model import SamplingOptions
+from .model_config import _boolean_argument
 from .runtime_config import InteractionConfig
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
@@ -158,6 +159,12 @@ def build_parser():
     parser.add_argument("--save", type=Path, default=Path("interaction-auto"),
                         help="New save directory; existing paths are never overwritten (default: interaction-auto).")
     parser.add_argument("--prompt", help="Post one user task as a fresh board thread; run without a TTY.")
+    parser.add_argument(
+        "--headless", nargs="?", const=True, default=False,
+        type=_boolean_argument, metavar="{False,True}",
+        help=("run without the TUI or context display; a bare flag means True "
+              "and no TTY is required (default: %(default)s)"),
+    )
     parser.add_argument("--board-port", type=int, default=0, help="Loopback port (0 chooses an available port).")
     parser.add_argument("--model-api", choices=sorted(_APIS), default=argparse.SUPPRESS)
     for key in ("model", "api_url", "api_key_env", "codex_home", "codex_auth_file", "cwd", "instructions"):

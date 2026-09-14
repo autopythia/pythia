@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +16,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from urllib.request import urlopen
 
 from pythia.interaction import DisplayItem, Environment, Message, ModelSample, Tool, ToolCall
 from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary
@@ -149,6 +152,25 @@ class DisplayTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_headless_boolean_argument_is_frontend_only(self):
+        parser = build_parser()
+        for argv, expected in (((), False), (("--headless",), True),
+                               (("--headless", "True"), True),
+                               (("--headless", "tRuE"), True),
+                               (("--headless", "False"), False),
+                               (("--headless", "fAlSe"), False)):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertIs(args.headless, expected)
+                settings = resolve_config(overrides={
+                    key: value for key, value in vars(args).items() if key in auto.DEFAULTS
+                })
+                self.assertTrue(all("headless" not in value for value in settings.values()))
+        for value in ("yes", "1", "", "none"):
+            with self.subTest(value=value), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["--headless", value])
+
     def test_default_limits_are_unset(self):
         args = build_parser().parse_args([])
         self.assertFalse(hasattr(args, "max_samples"))
@@ -382,7 +404,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(all(event.index is None for event in events))
         self.assertEqual([item.text for item in events[0].items], [
             f"Save directory: {self.path}",
-            f"Board: {session.service.base_url}/README.md",
             "Warning: local tools are unsandboxed; use a trusted model and workspace.",
         ])
         self.assertEqual(len(events[1].items), 1)
@@ -406,6 +427,60 @@ class RuntimeTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 session._phase(2, phase)
                 self.assertFalse(session._is_busy(2))
+
+    def test_headless_wait_keeps_idle_board_reachable_and_processes_work(self):
+        session = self.session({1: [answer("headless answer")]})
+        runner = threading.Thread(target=auto._headless, args=(session,))
+        runner.start()
+        try:
+            with urlopen(session.service.base_url + "/README.md", timeout=2) as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn(b"Auto message board", response.read())
+            self.assertTrue(runner.is_alive())
+            self.assertEqual(self.calls, {1: [], 2: []})
+            submitted = session.submit("headless task", request_id="headless-test")
+            self.assertTrue(self.finished(session, submitted["thread_id"]))
+            self.assertEqual([record.kind for record in
+                              session.service.board.records(submitted["thread_id"])],
+                             ["user", "answer"])
+            self.assertTrue(runner.is_alive())
+        finally:
+            session.request_stop()
+            runner.join(3)
+            session.close()
+        self.assertFalse(runner.is_alive())
+        self.assertFalse(any(thread.is_alive() for thread in session._threads.values()))
+
+    def test_quiet_one_prompt_success_has_no_context_display(self):
+        session = self.session({1: [answer("quiet answer")]})
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(auto._one_prompt(session, "quiet task", display=False), 0)
+        self.assertEqual(output.getvalue(), "")
+        records = session.service.board.records()
+        self.assertEqual([record.kind for record in records], ["user", "answer"])
+        saved = load_interaction_save(self.path / "contexts" / "1.jsonl")
+        self.assertTrue(any(isinstance(item, Message) and item.content == "quiet answer"
+                            for item in saved))
+
+    def test_quiet_one_prompt_failure_has_no_context_display(self):
+        failure = ModelTransportError("SECRET", failure=ModelFailure("transport", "safe"))
+        session = self.session({1: [failure]})
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(auto._one_prompt(session, "failing task", display=False), 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual([record.kind for record in session.service.board.records()],
+                         ["user", "answer"])
+        self.assertFalse(session.service.board.records()[-1].success)
+
+    def test_headless_wait_stops_on_board_persistence_failure(self):
+        session = self.session({})
+        with session.service.board.changed:
+            session.service.board.failed = True
+            session.service.board.changed.notify_all()
+        self.assertEqual(auto._headless(session), 1)
+        self.assertEqual(session.drain_events(), [])
 
     def test_main_and_worker_can_run_past_eight_samples_by_default(self):
         tool = Tool(ToolSpec("noop", "continue the test", {}),
@@ -941,6 +1016,123 @@ class RuntimeTests(unittest.TestCase):
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_headless_main_prints_flushed_board_and_bypasses_tui(self):
+        class Output(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flushes = 0
+
+            def flush(self):
+                self.flushes += 1
+                super().flush()
+
+        class Session:
+            has_errors = False
+            service = SimpleNamespace(base_url="http://127.0.0.1:43210")
+
+            def __init__(self, *args, **kwargs):
+                self.closed = False
+
+            def start(self):
+                return self
+
+            def close(self):
+                self.closed = True
+
+            def drain_events(self):
+                return ()
+
+        for prompt in (None, "task"):
+            with self.subTest(prompt=prompt):
+                output = Output()
+                runner = "_headless" if prompt is None else "_one_prompt"
+                argv = ["--headless", "--save", "unused"]
+                if prompt is not None:
+                    argv += ["--prompt", prompt]
+                def run_after_board(*args, **kwargs):
+                    self.assertEqual(output.getvalue(),
+                                     "Board: http://127.0.0.1:43210/README.md\n")
+                    self.assertGreaterEqual(output.flushes, 1)
+                    return 0
+                with (mock.patch.object(auto, "_Session", Session),
+                      mock.patch.object(auto, runner, side_effect=run_after_board) as run,
+                      mock.patch.object(auto, "_interactive",
+                                        side_effect=AssertionError("TUI entered")),
+                      mock.patch.object(auto, "PosixTerminal",
+                                        side_effect=AssertionError("terminal constructed")),
+                      mock.patch.object(sys.stdin, "isatty", return_value=False),
+                      mock.patch.object(sys.stdout, "isatty", return_value=False),
+                      redirect_stdout(output)):
+                    self.assertEqual(auto.main(argv), 0)
+                self.assertEqual(output.getvalue(),
+                                 "Board: http://127.0.0.1:43210/README.md\n")
+                self.assertGreaterEqual(output.flushes, 1)
+                if prompt is None:
+                    run.assert_called_once()
+                else:
+                    self.assertFalse(run.call_args.kwargs["display"])
+
+        output = Output()
+        with (mock.patch.object(auto, "_Session", Session),
+              mock.patch.object(auto, "_one_prompt", return_value=0) as run,
+              redirect_stdout(output)):
+            self.assertEqual(auto.main([
+                "--headless", "False", "--save", "unused", "--prompt", "task"
+            ]), 0)
+        self.assertTrue(run.call_args.kwargs["display"])
+        self.assertEqual(output.getvalue().count("Board: "), 1)
+
+    def test_headless_false_keeps_non_tty_validation(self):
+        for argv in ([], ["--headless", "False"]):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with (mock.patch.object(sys.stdin, "isatty", return_value=False),
+                      mock.patch.object(sys.stdout, "isatty", return_value=False),
+                      mock.patch.object(auto, "_Session") as session,
+                      redirect_stderr(stderr)):
+                    self.assertEqual(auto.main(argv), 1)
+                session.assert_not_called()
+                self.assertIn("--headless", stderr.getvalue())
+
+    def test_headless_main_suppresses_events_on_startup_runtime_and_interrupt(self):
+        class Session:
+            has_errors = False
+            service = SimpleNamespace(base_url="http://127.0.0.1:43210")
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                return self
+
+            def close(self):
+                pass
+
+        for failure, expected, board in ((RuntimeError("runtime"), 1, True),
+                                         (KeyboardInterrupt(), 130, True)):
+            with self.subTest(failure=type(failure).__name__):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (mock.patch.object(auto, "_Session", Session),
+                      mock.patch.object(auto, "_headless", side_effect=failure),
+                      mock.patch.object(auto, "_print_events",
+                                        side_effect=AssertionError("display leaked")),
+                      redirect_stdout(stdout), redirect_stderr(stderr)):
+                    self.assertEqual(auto.main(["--headless", "--save", "unused"]), expected)
+                self.assertEqual(stdout.getvalue().count("Board: "), int(board))
+                self.assertNotIn("Save directory", stdout.getvalue())
+
+        class StartupFailure(Session):
+            def start(self):
+                raise RuntimeError("startup")
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (mock.patch.object(auto, "_Session", StartupFailure),
+              mock.patch.object(auto, "_print_events",
+                                side_effect=AssertionError("display leaked")),
+              redirect_stdout(stdout), redirect_stderr(stderr)):
+            self.assertEqual(auto.main(["--headless", "--save", "unused"]), 1)
+        self.assertEqual(stdout.getvalue(), "")
+
     def test_codex_auto_flow_rejects_system_wire_messages_like_the_real_endpoint(self):
         # The original auto fixtures covered Chat Completions/Messages, but did
         # not enforce Codex's role restriction on generated default instructions.
@@ -1004,6 +1196,8 @@ class EntryPointTests(unittest.TestCase):
                 self.assertIn("codex main done", result.stdout)
                 self.assertIn("codex worker done", result.stdout)
                 self.assertIn("condition fired", result.stdout)
+                self.assertEqual(result.stdout.count("Board: "), 1)
+                self.assertIn("/README.md", result.stdout)
                 self.assertEqual(len(seen), 3)
                 self.assertEqual({r["model"] for r in seen}, {"gpt-6-astra", "gpt-5.6-sol"})
                 for request in seen:
@@ -1050,6 +1244,7 @@ class EntryPointTests(unittest.TestCase):
                         except OSError:
                             self.fail(f"PTY closed early: {bytes(output)!r}")
             try:
+                expect(b"Board: http://127.0.0.1:")
                 expect(b"#1 (main) - quiescent")
                 start = len(output)
                 os.write(master, b"/context -1\r")
