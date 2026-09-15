@@ -20,8 +20,8 @@ import time
 from typing import Optional
 import uuid
 
-from ._auto_board import BoardError, BoardService, atomic_text
-from ._auto_config import DEFAULTS, NAMES, build_parser, namespace, resolve_config
+from ._auto_board import Board, BoardError, BoardService, atomic_text
+from ._auto_config import DEFAULTS, NAMES, build_parser, load_saved_config, namespace, resolve_config
 from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
 from .compaction import CompactionResult, create_default_compactor, should_auto_compact
@@ -30,11 +30,12 @@ from .default_environment import DefaultEnvironment
 from .display import DisplayItem, render_interaction_items
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
 from .items import Init, Instructions, Message, ModelSampleBoundary, ToolCall, ToolResult
+from .items import UserToolResult
 from .items import summarize_turn_usage
 from .model import ModelError, ModelSample
 from .model_config import build_model
 from .runtime_config import InteractionConfig
-from .save import SaveError, save_interaction_save
+from .save import SaveError, load_interaction_save, save_interaction_save
 from .user import UserInteraction
 
 
@@ -184,14 +185,20 @@ def _environment_factory(index, args, tools):
 
 
 class _Session:
-    """Private fixed-role runtime; no dynamic manager/template API or resume."""
+    """Private fixed-role runtime; no dynamic manager/template API."""
     def __init__(self, path, settings, *, board_port=0,
-                 model_factory=_model_factory, environment_factory=_environment_factory):
+                 model_factory=_model_factory, environment_factory=_environment_factory,
+                 resume=False):
         self.path = Path(path).expanduser().absolute()
         self.settings = {i: dict(s) for i, s in settings.items()}
         self.names = {i: self.settings[i]["name"] for i in NAMES}
         self._model_factory, self._environment_factory = model_factory, environment_factory
         self._port = board_port
+        self._resume = resume
+        self._resumed = False
+        self._baseline = 0
+        self._contexts = {}
+        self._lock_file = None
         self._stop = threading.Event()
         self._changed = threading.Condition()
         self._states = {i: ("starting", time.monotonic()) for i in NAMES}
@@ -211,17 +218,70 @@ class _Session:
         self._closed = False
         self.service = None
 
+    def _lock(self):
+        lock_path = self.path / ".lock"
+        file = lock_path.open("a+")
+        try:
+            os.chmod(lock_path, 0o600)
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                import msvcrt
+                if file.tell() == 0:
+                    file.write("\0")
+                    file.flush()
+                file.seek(0)
+                msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+        except (OSError, ImportError):
+            file.close()
+            raise BoardError("Auto save directory is already in use.", 409) from None
+        self._lock_file = file
+
+    def _unlock(self):
+        if self._lock_file is not None:
+            file, self._lock_file = self._lock_file, None
+            try:
+                if os.name == "posix":
+                    import fcntl
+                    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+                else:
+                    import msvcrt
+                    file.seek(0)
+                    msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                file.close()
+
     def start(self):
         if self.service is not None or self._closed:
             raise RuntimeError("Auto session cannot be started twice.")
-        # mkdir is the fresh-run claim: never overwrite or join an existing save.
-        self.path.mkdir(mode=0o700)
+        exists = self.path.exists()
+        if exists and not self._resume:
+            raise FileExistsError(self.path)
+        if not exists:
+            self.path.mkdir(mode=0o700)
         try:
-            (self.path / "contexts").mkdir(mode=0o700)
+            self._lock()
+            self._resumed = exists
+            restored = None
+            if self._resumed:
+                contexts_path = self.path / "contexts"
+                for index in NAMES:
+                    context = load_interaction_save(contexts_path / f"{index}.jsonl")
+                    if not len(context) or not isinstance(context[0], Init):
+                        raise ValueError("Auto context history must begin with initialization metadata.")
+                    self._contexts[index] = context
+                restored = Board.restore(self.path)
+                self._baseline = len(restored)
+                for record, _size in restored:
+                    if record.kind in {"answer", "result"}:
+                        self._done[record.reply_to] = record.success
+            else:
+                (self.path / "contexts").mkdir(mode=0o700)
             atomic_text(self.path / "config.json", json.dumps({
                 "version": 1, "contexts": {str(i): s for i, s in self.settings.items()}
             }, indent=2, ensure_ascii=False) + "\n")
-            self.service = BoardService(self.path, port=self._port)
+            self.service = BoardService(self.path, port=self._port, restored=restored)
             for index in NAMES:
                 thread = threading.Thread(target=self._owner, args=(index,),
                                           name=f"auto-context-{index}")
@@ -235,6 +295,10 @@ class _Session:
                 self.service.board.accepting = True
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
                               DisplayItem("Warning: local tools are unsandboxed; use a trusted model and workspace.")))
+            if self._resumed:
+                self._emit(None, (DisplayItem(
+                    "Resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
+                ),))
             summaries = "\n".join(
                 f"#{i} ({s['name']}): {s['model_api']} / {s['model'] or '(server default)'}"
                 for i, s in self.settings.items()
@@ -324,15 +388,38 @@ class _Session:
             model = None if index == -1 else self._model_factory(index, args)
             if index != -1 and not callable(getattr(model, "sample", None)):
                 raise TypeError("Model factory must return a model with sample().")
-            context = InteractionContext((Init(model=args.model),
-                                          _instructions(index, self.settings[index], self.service.base_url)))
-            self._checkpoint(index, context)
+            if self._resumed:
+                context = self._contexts[index]
+                recovered = []
+                for call in context.pending_tool_calls():
+                    recovered.append(ToolResult(
+                        call.call_id,
+                        "Result unavailable after restart. This call was not rerun and may already have produced side effects.",
+                        success=False,
+                    ))
+                for call in context.pending_user_tool_calls():
+                    recovered.append(UserToolResult(ToolResult(
+                        call.call.call_id,
+                        "User-tool outcome unavailable after restart. The command was not rerun and may already have produced side effects.",
+                        success=False,
+                    )))
+                current = _instructions(index, self.settings[index], self.service.base_url)
+                current = Instructions(
+                    current.text + "\n\nRestart notice: saved history was resumed without "
+                    "restoring old command-session IDs or runtime state."
+                )
+                context.extend((*recovered, current))
+                self._checkpoint(index, context)
+            else:
+                context = InteractionContext((Init(model=args.model),
+                                              _instructions(index, self.settings[index], self.service.base_url)))
+                self._checkpoint(index, context)
             self._phase(index, "quiescent")
             self._ready[index].set()
             if index == -1:
                 self._watch()
                 return
-            cursor = 0
+            cursor = self._baseline
             while not self._stop.is_set():
                 source = self.service.board.wait_input("user" if index == 1 else "plan", cursor, self._stop)
                 if source is None or self._stop.is_set():
@@ -515,6 +602,7 @@ class _Session:
                     self._emit(None, (DisplayItem(
                         f"Stopped with {pending} queued/unresolved tasks in the saved board; they were not executed or replayed."),))
                 self.service.close()
+            self._unlock()
 
 
 def _display_events(session, events):
@@ -687,8 +775,13 @@ def main(argv=None):
                 "or --headless to run without a TTY."
             )
         overrides = {k: v for k, v in vars(args).items() if k in DEFAULTS}
-        settings = resolve_config(args.context_config, overrides)
-        session = _Session(args.save, settings, board_port=args.board_port)
+        save_path = Path(args.save).expanduser().absolute()
+        saved = None
+        if args.resume and save_path.exists():
+            saved = load_saved_config(save_path / "config.json")
+        settings = resolve_config(args.context_config, overrides, saved=saved)
+        session = _Session(save_path, settings, board_port=args.board_port,
+                           resume=args.resume)
         session.start()
         print(f"Board: {session.service.base_url}/README.md", flush=True)
         if args.prompt is not None:

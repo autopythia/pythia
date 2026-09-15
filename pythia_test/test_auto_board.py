@@ -9,7 +9,7 @@ import threading
 import unittest
 from unittest import mock
 
-from pythia.interaction._auto_board import BoardError, BoardService, MAX_CONTENT
+from pythia.interaction._auto_board import Board, BoardError, BoardService, MAX_CONTENT
 
 
 class BoardTests(unittest.TestCase):
@@ -61,6 +61,109 @@ class BoardTests(unittest.TestCase):
         with self.assertRaises(BoardError) as raised:
             self.user.create_thread("different", request_id="same")
         self.assertEqual(raised.exception.status, 409)
+
+    def test_restore_preserves_ids_idempotency_and_resets_pending_quota(self):
+        originals = [self.user.create_thread(f"historical pending {index}", request_id=f"old-{index}")
+                     for index in range(16)]
+        original = originals[0]
+        self.service.close()
+        restored = BoardService(self.path, restored=Board.restore(self.path))
+        self.service = restored
+        self.addCleanup(restored.close)
+        restored.board.accepting = True
+        user = restored.client("user")
+        self.assertEqual(user.create_thread("historical pending 0", request_id="old-0"), original)
+        with self.assertRaises(BoardError) as raised:
+            user.create_thread("conflict", request_id="old-0")
+        self.assertEqual(raised.exception.status, 409)
+        new = user.create_thread("new work", request_id="new")
+        self.assertEqual(new["record_id"], "17")
+        self.assertEqual(len(restored.board.records()), 17)
+        self.assertEqual(restored.board.records()[-1].content, "new work")
+
+    def test_restore_rejects_torn_or_malformed_history_without_repair(self):
+        self.user.create_thread("valid", request_id="valid")
+        self.service.close()
+        journal = self.path / "index.jsonl"
+        for suffix in ('{"sequence":2}', '{"sequence":2}\n'):
+            with self.subTest(suffix=suffix):
+                original = journal.read_bytes()
+                journal.write_text(original.decode() + suffix)
+                broken = journal.read_bytes()
+                with self.assertRaises(ValueError):
+                    Board.restore(self.path)
+                self.assertEqual(journal.read_bytes(), broken)
+                journal.write_bytes(original)
+
+    def test_restore_round_trips_unicode_and_escaped_newlines_without_rewrite(self):
+        contents = ("valid Unicode: a\u2028b\u0085c\u2029d", "ordinary\nescaped newline")
+        for index, content in enumerate(contents):
+            self.user.create_thread(content, request_id=f"unicode-{index}")
+        self.service.close()
+        journal = self.path / "index.jsonl"
+        original = journal.read_bytes()
+        restored = Board.restore(self.path)
+        self.assertEqual([record.content for record, _size in restored], list(contents))
+        self.assertEqual(journal.read_bytes(), original)
+        self.assertEqual(sum(size for _record, size in restored), len(original))
+
+    def test_restore_reads_only_through_configured_byte_limit(self):
+        self.user.create_thread("larger than tiny limit", request_id="limited")
+        self.service.close()
+        journal = self.path / "index.jsonl"
+        original = journal.read_bytes()
+
+        class BoundedReader:
+            def __init__(self, file):
+                self.file = file
+
+            def __enter__(self):
+                self.file.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.file.__exit__(*args)
+
+            def read(self, size=-1):
+                self.assert_size = size
+                return self.file.read(size)
+
+        opened = []
+        real_open = Path.open
+        def open_path(path, *args, **kwargs):
+            reader = BoundedReader(real_open(path, *args, **kwargs))
+            opened.append(reader)
+            return reader
+        with mock.patch.object(Path, "open", open_path), self.assertRaises(ValueError):
+            Board.restore(self.path, max_bytes=16)
+        self.assertEqual(opened[0].assert_size, 17)
+        self.assertEqual(journal.read_bytes(), original)
+
+    def test_restore_rejects_terminal_reply_and_route_suffix_thread_id(self):
+        source = self.user.create_thread("task", request_id="source")
+        self.main.post(source["thread_id"], "answer", "done", source["record_id"],
+                       success=True, request_id="answer")
+        self.service.close()
+        journal = self.path / "index.jsonl"
+        original = journal.read_bytes()
+        plan = {
+            "sequence": 3, "record_id": "3", "thread_id": source["thread_id"],
+            "author": "1", "kind": "plan", "content": "too late",
+            "request_id": "late", "reply_to": source["record_id"], "success": None,
+        }
+        journal.write_bytes(original + (json.dumps(plan) + "\n").encode())
+        with self.assertRaises(ValueError):
+            Board.restore(self.path)
+        invalid_graph = journal.read_bytes()
+        self.assertEqual(journal.read_bytes(), invalid_graph)
+
+        first = json.loads(original.split(b"\n", 1)[0])
+        first["thread_id"] += "/messages"
+        journal.write_text(json.dumps(first) + "\n")
+        invalid_id = journal.read_bytes()
+        with self.assertRaises(ValueError):
+            Board.restore(self.path)
+        self.assertEqual(journal.read_bytes(), invalid_id)
 
     def test_plan_lifecycle_correlations_pagination_and_permissions(self):
         root = self.user.create_thread("task")

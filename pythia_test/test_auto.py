@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 from urllib.request import urlopen
 
-from pythia.interaction import DisplayItem, Environment, Message, ModelSample, Tool, ToolCall
+from pythia.interaction import DisplayItem, Environment, Message, ModelSample, ModelSampleBoundary, Tool, ToolCall
 from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary
 from pythia.interaction import ModelFailure, ModelTransportError, Reasoning, OpaqueCompaction
 from pythia.interaction import load_interaction_save
@@ -152,6 +152,66 @@ class DisplayTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_saved_config_statically_validates_and_normalizes_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory in ("relative-cwd", "relative-home", "auth-parent"):
+                (root / directory).mkdir()
+            snapshot = resolve_config(overrides={"cwd": tmp})
+            snapshot[1].update({
+                "model_api": "codex", "model": "saved-codex",
+                "cwd": "relative-cwd", "codex_home": "relative-home",
+            })
+            snapshot[2].update({
+                "model_api": "codex", "model": "saved-codex-worker",
+                "cwd": "relative-cwd", "codex_auth_file": "auth-parent/auth.json",
+            })
+            path = root / "config.json"
+
+            def write():
+                path.write_text(json.dumps({
+                    "version": 1,
+                    "contexts": {str(index): value for index, value in snapshot.items()},
+                }))
+
+            write()
+            saved = auto.load_saved_config(path)
+            self.assertEqual(saved[1]["cwd"], str((root / "relative-cwd").absolute()))
+            self.assertEqual(saved[1]["codex_home"], str((root / "relative-home").absolute()))
+            self.assertEqual(saved[2]["codex_auth_file"],
+                             str((root / "auth-parent/auth.json").absolute()))
+            merged = resolve_config(saved=saved)
+            self.assertEqual(merged[1]["codex_home"], saved[1]["codex_home"])
+
+            for key in ("cwd", "codex_home", "codex_auth_file"):
+                original = snapshot[1][key]
+                for invalid in (123, "", "bad\x00path"):
+                    with self.subTest(key=key, invalid=invalid):
+                        snapshot[1][key] = invalid
+                        write()
+                        with self.assertRaises(ValueError):
+                            auto.load_saved_config(path)
+                snapshot[1][key] = original
+
+    def test_saved_settings_are_base_for_explicit_resume_overrides(self):
+        saved = resolve_config(overrides={"model": "saved-model", "cwd": str(Path.cwd())})
+        saved[2]["name"] = "saved worker"
+        saved[2]["instructions"] = "saved custom worker instructions"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "override.json"
+            path.write_text(json.dumps({
+                "version": 1,
+                "defaults": {"max_samples": 7},
+                "contexts": {"2": {"model": "role-model", "name": "new worker"}},
+            }))
+            settings = resolve_config(path, {"model": "launch-model"}, saved=saved)
+        self.assertEqual(settings[1]["model"], "launch-model")
+        self.assertEqual(settings[2]["model"], "role-model")
+        self.assertEqual(settings[-1]["model"], "launch-model")
+        self.assertTrue(all(value["max_samples"] == 7 for value in settings.values()))
+        self.assertEqual(settings[2]["name"], "new worker")
+        self.assertEqual(settings[2]["instructions"], "saved custom worker instructions")
+
     def test_headless_boolean_argument_is_frontend_only(self):
         parser = build_parser()
         for argv, expected in (((), False), (("--headless",), True),
@@ -379,7 +439,11 @@ class RuntimeTests(unittest.TestCase):
                 test.threads[self.index].append(threading.get_ident())
                 test.closed.append(self.index)
 
-        settings = resolve_config(overrides={"cwd": self.temp.name, **(settings_overrides or {})})
+        saved = (auto.load_saved_config(self.path / "config.json")
+                 if kwargs.get("resume") and self.path.exists() else None)
+        settings = resolve_config(
+            overrides={"cwd": self.temp.name, **(settings_overrides or {})}, saved=saved
+        )
         for index, updates in (settings_updates or {}).items():
             settings[index].update(updates)
         session = auto._Session(self.path, settings,
@@ -1014,6 +1078,168 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(list(self.path.iterdir()), [marker])
         self.assertEqual(marker.read_text(), "untouched")
 
+    def test_resume_restores_history_without_replay_then_runs_one_new_task(self):
+        session = self.session({
+            1: [ModelSample((ToolCall("board_post_plan", "delegate", '{"content":"old plan"}'),)),
+                answer("old main")],
+            2: [answer("old worker")],
+        }, settings_updates={2: {"instructions": "saved custom worker instructions"}})
+        old = session.submit("old task", request_id="old-request")
+        self.assertTrue(self.finished(session, old["thread_id"]))
+        old_records = session.service.board.records()
+        old_contexts = {index: load_interaction_save(
+            self.path / "contexts" / f"{index}.jsonl").items for index in (1, 2, -1)}
+        old_calls = {index: len(calls) for index, calls in self.calls.items()}
+        old_url = session.service.base_url
+        session.close()
+
+        resumed = self.session({1: [answer("new main")]}, resume=True)
+        self.assertEqual({index: len(calls) for index, calls in self.calls.items()}, old_calls)
+        self.assertEqual(resumed.service.board.records(), old_records)
+        for index in (1, 2, -1):
+            restored = load_interaction_save(self.path / "contexts" / f"{index}.jsonl")
+            self.assertEqual(restored.items[:len(old_contexts[index])], old_contexts[index])
+            self.assertIsInstance(restored[-1], auto.Instructions)
+            self.assertIn(resumed.service.base_url, restored[-1].text)
+            self.assertIn("without restoring old command-session IDs or runtime state",
+                          restored[-1].text)
+        self.assertIn("saved custom worker instructions",
+                      load_interaction_save(self.path / "contexts" / "2.jsonl")[-1].text)
+        new = resumed.submit("new task", request_id="new-request")
+        self.assertTrue(self.finished(resumed, new["thread_id"]))
+        records = resumed.service.board.records()
+        self.assertEqual(records[:len(old_records)], old_records)
+        self.assertEqual([record.kind for record in records[len(old_records):]], ["user", "answer"])
+        self.assertNotEqual(old_url, "")
+        self.assertEqual(len(self.calls[1]), old_calls[1] + 1)
+        self.assertTrue(any("old main" in item.content for item in self.calls[1][-1]
+                            if isinstance(item, Message)))
+
+    def test_resume_lock_and_corrupt_context_fail_without_replacing_data(self):
+        session = self.session({})
+        config = (self.path / "config.json").read_bytes()
+        settings = resolve_config(self.path / "config.json")
+        with self.assertRaisesRegex(RuntimeError, "already in use"):
+            auto._Session(self.path, settings, resume=True,
+                          model_factory=lambda *_: self.fail("model initialized"),
+                          environment_factory=lambda *_: self.fail("environment initialized")).start()
+        self.assertEqual((self.path / "config.json").read_bytes(), config)
+        session.close()
+        context_path = self.path / "contexts" / "2.jsonl"
+        context_path.write_text("broken\n")
+        broken = context_path.read_bytes()
+        with self.assertRaises(Exception):
+            auto._Session(self.path, settings, resume=True).start()
+        self.assertEqual(context_path.read_bytes(), broken)
+
+    def test_resume_lock_cannot_be_bypassed_by_directory_symlink(self):
+        session = self.session({})
+        alias = self.path.parent / "alias"
+        alias.symlink_to(self.path, target_is_directory=True)
+        settings = resolve_config(self.path / "config.json")
+        before = {path.relative_to(self.path): path.read_bytes()
+                  for path in self.path.rglob("*") if path.is_file()}
+        with self.assertRaisesRegex(RuntimeError, "already in use"):
+            auto._Session(alias, settings, resume=True,
+                          model_factory=lambda *_: self.fail("model initialized"),
+                          environment_factory=lambda *_: self.fail("environment initialized")).start()
+        self.assertEqual({path.relative_to(self.path): path.read_bytes()
+                          for path in self.path.rglob("*") if path.is_file()}, before)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(auto.main([
+                "--resume", "--headless", "--save", str(alias)
+            ]), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("auto failed: Auto save directory is already in use.",
+                      stderr.getvalue())
+        session.close()
+        resumed = auto._Session(alias, settings, resume=True).start()
+        try:
+            self.assertTrue(resumed._resumed)
+            self.assertEqual(resumed.service.board.records(), ())
+        finally:
+            resumed.close()
+
+    def test_resume_rejects_nonempty_context_without_initial_metadata(self):
+        session = self.session({})
+        session.close()
+        context_path = self.path / "contexts" / "2.jsonl"
+        auto.save_interaction_save(
+            context_path, auto.InteractionContext((Message("user", "not auto metadata"),))
+        )
+        before = {path.relative_to(self.path): path.read_bytes()
+                  for path in self.path.rglob("*") if path.is_file()}
+        settings = resolve_config(self.path / "config.json")
+        with self.assertRaisesRegex(ValueError, "initialization metadata"):
+            auto._Session(self.path, settings, resume=True,
+                          model_factory=lambda *_: self.fail("model initialized"),
+                          environment_factory=lambda *_: self.fail("environment initialized")).start()
+        self.assertEqual({path.relative_to(self.path): path.read_bytes()
+                          for path in self.path.rglob("*") if path.is_file()}, before)
+
+    def test_resume_explicit_cwd_repairs_moved_saved_workspace(self):
+        old = Path(self.temp.name) / "old-workspace"
+        new = Path(self.temp.name) / "new-workspace"
+        old.mkdir()
+        session = self.session({}, settings_overrides={"cwd": str(old)})
+        session.close()
+        prefixes = {index: load_interaction_save(
+            self.path / "contexts" / f"{index}.jsonl").items for index in (1, 2, -1)}
+        before = {path.relative_to(self.path): path.read_bytes()
+                  for path in self.path.rglob("*") if path.is_file()}
+        old.rename(new)
+        saved = auto.load_saved_config(self.path / "config.json")
+        with self.assertRaisesRegex(ValueError, "cwd must be an existing"):
+            resolve_config(saved=saved)
+        self.assertEqual({path.relative_to(self.path): path.read_bytes()
+                          for path in self.path.rglob("*") if path.is_file()}, before)
+
+        settings = resolve_config(overrides={"cwd": str(new)}, saved=saved)
+        self.assertTrue(all(value["cwd"] == str(new.absolute()) for value in settings.values()))
+        resumed = auto._Session(self.path, settings, resume=True).start()
+        try:
+            for index in (1, 2, -1):
+                context = load_interaction_save(self.path / "contexts" / f"{index}.jsonl")
+                self.assertEqual(context.items[:len(prefixes[index])], prefixes[index])
+        finally:
+            resumed.close()
+        updated = auto.load_saved_config(self.path / "config.json")
+        again = resolve_config(saved=updated)
+        self.assertTrue(all(value["cwd"] == str(new.absolute()) for value in again.values()))
+        repeated = auto._Session(self.path, again, resume=True).start()
+        repeated.close()
+
+    def test_resume_missing_directory_is_fresh_and_pending_call_is_not_rerun(self):
+        session = self.session({}, resume=True)
+        self.assertFalse(session._resumed)
+        session.close()
+        context_path = self.path / "contexts" / "1.jsonl"
+        context = load_interaction_save(context_path)
+        call = ToolCall("exec_command", "old command", '{"cmd":"must-not-run"}')
+        context.extend((call, ModelSampleBoundary()))
+        auto.save_interaction_save(context_path, context)
+        prefix = context.items
+        calls = dict((index, len(values)) for index, values in self.calls.items())
+
+        resumed = self.session({}, resume=True)
+        restored = load_interaction_save(context_path)
+        self.assertEqual(restored.items[:len(prefix)], prefix)
+        result = restored[len(prefix)]
+        self.assertIsInstance(result, ToolResult)
+        self.assertEqual(result.call_id, call.call_id)
+        self.assertFalse(result.success)
+        self.assertIn("not rerun", result.output)
+        self.assertFalse(restored.pending_tool_calls())
+        self.assertEqual(dict((index, len(values)) for index, values in self.calls.items()), calls)
+        resumed.close()
+        repeated = self.session({}, resume=True)
+        again = load_interaction_save(context_path)
+        self.assertEqual(again.items[:len(restored)], restored.items)
+        self.assertEqual(sum(isinstance(item, ToolResult) and item.call_id == call.call_id
+                             for item in again), 1)
+        repeated.close()
+
 
 class EntryPointTests(unittest.TestCase):
     def test_headless_main_prints_flushed_board_and_bypasses_tui(self):
@@ -1344,13 +1570,12 @@ class EntryPointTests(unittest.TestCase):
             server_thread.join()
             gateway.server_close()
 
-    def test_help_and_no_ignored_resume(self):
+    def test_help_documents_resume_without_replay(self):
         result = subprocess.run([sys.executable, "-m", "pythia.interaction.auto", "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
         self.assertIn("--context-config", result.stdout)
-        self.assertNotIn("--resume", result.stdout)
-        result = subprocess.run([sys.executable, "-m", "pythia.interaction.auto", "--resume"], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
+        self.assertIn("--resume", result.stdout)
+        self.assertIn("historical work is not\n                        replayed", result.stdout)
 
 
 if __name__ == "__main__":

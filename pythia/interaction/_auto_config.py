@@ -58,7 +58,7 @@ def _merge(current, value):
     return current
 
 
-def resolve_config(path=None, overrides=None):
+def resolve_config(path=None, overrides=None, saved=None):
     document = {}
     base = Path.cwd()
     if path is not None:
@@ -79,13 +79,13 @@ def resolve_config(path=None, overrides=None):
         raise ValueError("Names must be configured per context.")
     main_instructions = launch.pop("instructions", None)
     main_instruction_override = overrides is not None and "instructions" in overrides
-    common = _merge(DEFAULTS, _layer(document.get("defaults", {}), base))
-    if "name" in common:
+    defaults = _layer(document.get("defaults", {}), base)
+    if "name" in defaults:
         raise ValueError("Names must be configured per context.")
-    common = _merge(common, launch)
     resolved = {}
     for index, name in NAMES.items():
-        settings = _merge({**common, "name": name},
+        initial = {**DEFAULTS, "name": name} if saved is None else dict(saved[index])
+        settings = _merge(_merge(_merge(initial, defaults), launch),
                           _layer(contexts.get(str(index), {}), base))
         if index == 1 and main_instruction_override and "instructions" not in contexts.get("1", {}):
             settings["instructions"] = main_instructions
@@ -93,6 +93,24 @@ def resolve_config(path=None, overrides=None):
         _validate(settings)
         resolved[index] = settings
     return resolved
+
+
+def load_saved_config(path):
+    path = Path(path).expanduser().absolute()
+    try:
+        document = parse_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        raise ValueError("Could not load saved auto configuration.") from None
+    expected = set(DEFAULTS) | {"name"}
+    contexts = document.get("contexts") if isinstance(document, dict) else None
+    if (not isinstance(document, dict)
+            or set(document) != {"version", "contexts"}
+            or type(document.get("version")) is not int or document["version"] != 1
+            or not isinstance(contexts, dict) or set(contexts) != {"1", "2", "-1"}
+            or any(not isinstance(value, dict) or set(value) != expected
+                   for value in contexts.values())):
+        raise ValueError("Invalid saved auto configuration.")
+    return {index: _layer(contexts[str(index)], path.parent) for index in NAMES}
 
 
 def _validate(settings):
@@ -157,8 +175,14 @@ def build_parser():
     )
     parser.add_argument("--context-config", type=Path, help="Version-1 JSON configuration for contexts 1, 2, -1.")
     parser.add_argument("--save", type=Path, default=Path("interaction-auto"),
-                        help="New save directory; existing paths are never overwritten (default: interaction-auto).")
+                        help=("New or resumed save directory; existing paths require --resume "
+                              "(default: interaction-auto)."))
     parser.add_argument("--prompt", help="Post one user task as a fresh board thread; run without a TTY.")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help=("resume the auto save selected by --save; a missing directory starts fresh, "
+              "and historical work is not replayed (default: %(default)s)"),
+    )
     parser.add_argument(
         "--headless", nargs="?", const=True, default=False,
         type=_boolean_argument, metavar="{False,True}",

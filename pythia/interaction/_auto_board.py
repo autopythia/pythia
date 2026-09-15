@@ -1,4 +1,4 @@
-"""Private, stdlib-only board for the fixed auto app (no session replay)."""
+"""Private, stdlib-only board for the fixed auto app."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ MAX_BODY = 1_048_576
 MAX_CONTENT = 262_144
 MAX_BATCH = 100
 _THREAD_PATH = re.compile(r"^/threads/(thread_[0-9a-f]{32})(/messages)?$")
+_THREAD_ID = re.compile(r"^thread_[0-9a-f]{32}$")
 
 
 class BoardError(RuntimeError):
@@ -81,7 +82,7 @@ class Record:
 
 class Board:
     def __init__(self, directory: Path, *, max_records=4096,
-                 max_bytes=16_777_216, max_pending=16):
+                 max_bytes=16_777_216, max_pending=16, restored=None):
         self.directory = directory
         self.changed = threading.Condition()
         self._records = []
@@ -98,7 +99,12 @@ class Board:
         self.failed = False
         self.view_stale = False
         self._closed = False
-        self._journal = (directory / "index.jsonl").open("x", encoding="utf-8")
+        self._baseline = len(restored or ())
+        for record, size in restored or ():
+            self._install(record, size)
+        self._journal = (directory / "index.jsonl").open(
+            "a" if restored is not None else "x", encoding="utf-8"
+        )
         try:
             os.chmod(directory / "index.jsonl", 0o600)
             self._journal.flush()
@@ -107,6 +113,92 @@ class Board:
         except BaseException:
             self._journal.close()
             raise
+
+    def _install(self, record, size):
+        fingerprint = ((None if record.kind == "user" else record.thread_id),
+                       record.kind, record.content, record.reply_to, record.success)
+        self._bytes += size
+        self._records.append(record)
+        self._by_id[record.record_id] = record
+        self._requests[(record.author, record.request_id)] = (fingerprint, record)
+        if record.kind == "user":
+            self._threads[record.thread_id] = record.record_id
+        if record.kind == "started":
+            self._started.add(record.reply_to)
+        if record.kind in {"answer", "result"}:
+            self._terminal.add(record.reply_to)
+
+    @classmethod
+    def restore(cls, directory, *, max_records=4096, max_bytes=16_777_216):
+        path = Path(directory) / "index.jsonl"
+        try:
+            with path.open("rb") as file:
+                data = file.read(max_bytes + 1)
+            if len(data) > max_bytes or (data and not data.endswith(b"\n")):
+                raise ValueError()
+            lines = data.split(b"\n")[:-1]
+        except (OSError, ValueError):
+            raise ValueError("Could not load auto board history.") from None
+        records, by_id, threads, requests, terminal, started = [], {}, {}, {}, set(), set()
+        total = 0
+        fields = set(Record.__dataclass_fields__)
+        allowed = {"user": {"user"}, "1": {"plan", "answer"},
+                   "2": {"started", "result"}, "-1": set()}
+        try:
+            for sequence, encoded in enumerate(lines, 1):
+                line = encoded.decode("utf-8")
+                value = parse_json(line)
+                if not isinstance(value, dict) or set(value) != fields:
+                    raise ValueError()
+                record = Record(**value)
+                if (type(record.sequence) is not int or record.sequence != sequence
+                        or record.record_id != str(sequence)
+                        or not isinstance(record.thread_id, str)
+                        or _THREAD_ID.fullmatch(record.thread_id) is None
+                        or record.author not in allowed or record.kind not in allowed[record.author]
+                        or not isinstance(record.content, str) or not record.content.strip()
+                        or len(record.content.encode("utf-8")) > MAX_CONTENT
+                        or not isinstance(record.request_id, str)
+                        or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", record.request_id) is None):
+                    raise ValueError()
+                if record.kind == "user":
+                    if (record.reply_to is not None or record.success is not None
+                            or record.thread_id in threads):
+                        raise ValueError()
+                    threads[record.thread_id] = record.record_id
+                else:
+                    if record.thread_id not in threads or not isinstance(record.reply_to, str):
+                        raise ValueError()
+                    parent = by_id.get(record.reply_to)
+                    expected = "plan" if record.kind in {"started", "result"} else "user"
+                    if (parent is None or parent.thread_id != record.thread_id
+                            or parent.kind != expected or record.reply_to in terminal):
+                        raise ValueError()
+                    if record.kind in {"answer", "result"}:
+                        if type(record.success) is not bool or record.reply_to in terminal:
+                            raise ValueError()
+                        if record.kind == "result" and record.reply_to not in started:
+                            raise ValueError()
+                        terminal.add(record.reply_to)
+                    elif record.success is not None:
+                        raise ValueError()
+                    if record.kind == "started":
+                        if record.reply_to in started:
+                            raise ValueError()
+                        started.add(record.reply_to)
+                key = (record.author, record.request_id)
+                if key in requests:
+                    raise ValueError()
+                requests[key] = True
+                by_id[record.record_id] = record
+                size = len(encoded) + 1
+                total += size
+                records.append((record, size))
+            if len(records) > max_records or total > max_bytes:
+                raise ValueError()
+        except (TypeError, ValueError, UnicodeError):
+            raise ValueError("Invalid auto board history.") from None
+        return tuple(records)
 
     def records(self, thread_id=None):
         with self.changed:
@@ -187,7 +279,7 @@ class Board:
                     raise BoardError("A plan must be started before its result.", 409)
             if kind in {"user", "plan"}:
                 pending = sum(r.kind == kind and r.record_id not in self._terminal
-                              for r in self._records)
+                              for r in self._records[self._baseline:])
                 if pending >= self._max_pending:
                     raise BoardError("Pending work limit reached; request was not accepted.", 429)
             sequence = len(self._records) + 1
@@ -206,16 +298,7 @@ class Board:
                 self.failed = True
                 self.changed.notify_all()
                 raise BoardPersistenceError() from None
-            self._bytes += encoded_size
-            self._records.append(record)
-            self._by_id[record.record_id] = record
-            self._requests[key] = (fingerprint, record)
-            if kind == "user":
-                self._threads[record.thread_id] = record.record_id
-            if kind == "started":
-                self._started.add(reply_to)
-            if kind in {"answer", "result"}:
-                self._terminal.add(reply_to)
+            self._install(record, encoded_size)
             # This small MVP serializes projection writes too. A stale view is
             # never grounds to undo a committed post or retry it with a new ID.
             try:
@@ -421,8 +504,8 @@ Host-side example: curl -H 'Content-Type: application/json' \\
 
 Reuse a request_id with the same body after an uncertain HTTP outcome; conflicting
 reuse returns 409. A new ID is new work. Records commit to index.jsonl before
-acknowledgement; index.md is a generated view, not editable state. This MVP only
-creates fresh saves and does not automatically resume interrupted work.
+acknowledgement; index.md is a generated view, not editable state. Resumed sessions
+preserve history but do not automatically replay interrupted work.
 
 Limits: {MAX_CONTENT} UTF-8 content bytes, {MAX_BODY} request bytes, {MAX_BATCH}
 records per read, 16 pending user tasks/plans each, 4096 records/16 MiB per board,
@@ -434,8 +517,8 @@ streaming waits, arbitrary file routes, or automatic task replay is provided.
 
 
 class BoardService:
-    def __init__(self, directory: Path, *, port=0):
-        self.board = Board(directory)
+    def __init__(self, directory: Path, *, port=0, restored=None):
+        self.board = Board(directory, restored=restored)
         try:
             self.server = _Server(self.board, port)
         except BaseException:
