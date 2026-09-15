@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import html
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -109,7 +110,7 @@ class Board:
             os.chmod(directory / "index.jsonl", 0o600)
             self._journal.flush()
             os.fsync(self._journal.fileno())
-            atomic_text(directory / "index.md", self._markdown())
+            self._write_views(strict=True)
         except BaseException:
             self._journal.close()
             raise
@@ -239,6 +240,8 @@ class Board:
         if size > MAX_CONTENT:
             raise BoardError("Board content is too large.", 413)
         kind = "user" if thread_id is None else body.get("kind")
+        if thread_id is not None and kind == "user":
+            raise BoardError("User records must create a new thread.", 403)
         allowed = {"user": ("user",), "1": ("plan", "answer"),
                    "2": ("started", "result"), "-1": ()}
         if kind not in allowed.get(author, ()):
@@ -301,11 +304,7 @@ class Board:
             self._install(record, encoded_size)
             # This small MVP serializes projection writes too. A stale view is
             # never grounds to undo a committed post or retry it with a new ID.
-            try:
-                atomic_text(self.directory / "index.md", self._markdown())
-                self.view_stale = False
-            except OSError:
-                self.view_stale = True
+            self._write_views()
             self.changed.notify_all()
             return record
 
@@ -344,6 +343,52 @@ class Board:
                 lines.extend((fence + "json", value, fence, ""))
         return "\n".join(lines)
 
+    def _html(self):
+        escape = html.escape
+        lines = [
+            "<!doctype html>",
+            '<html lang="en"><head><meta charset="utf-8">',
+            "<title>Shared message board</title>",
+            "<style>body{margin:2rem auto;max-width:72rem;padding:0 1rem;overflow-wrap:anywhere}"
+            "pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>",
+            "</head><body><h1>Shared message board</h1>",
+            f"<p>Rendered through sequence: {len(self._records)}</p>",
+        ]
+        threads = {}
+        for record in self._records:
+            threads.setdefault(record.thread_id, []).append(record)
+        for thread_id, records in threads.items():
+            lines.append(f"<section><h2>Thread {escape(thread_id)}</h2>")
+            for record in records:
+                reply = "none" if record.reply_to is None else record.reply_to
+                outcome = "none" if record.success is None else str(record.success).lower()
+                lines.extend((
+                    f'<article id="record-{record.sequence}">',
+                    f"<h3>Record {escape(record.record_id)}: {escape(record.author)} / {escape(record.kind)}</h3>",
+                    f"<p>Sequence: {record.sequence} · Request ID: {escape(record.request_id)} · "
+                    f"Reply to: {escape(reply)} · Success: {outcome}</p>",
+                    f"<pre>\n{escape(record.content)}</pre>",
+                    "</article>",
+                ))
+            lines.append("</section>")
+        lines.append("</body></html>\n")
+        return "\n".join(lines)
+
+    def _html_snapshot(self):
+        with self.changed:
+            return self._html()
+
+    def _write_views(self, *, strict=False):
+        failure = None
+        for name, text in (("index.md", self._markdown()), ("index.html", self._html())):
+            try:
+                atomic_text(self.directory / name, text)
+            except OSError as exc:
+                failure = failure or exc
+        self.view_stale = failure is not None
+        if strict and failure is not None:
+            raise failure
+
     def close(self):
         with self.changed:
             if not self._closed:
@@ -355,8 +400,11 @@ class Board:
 
 class _Server(ThreadingHTTPServer):
     # Bounded, non-daemon request threads drain before the journal is closed.
-    def __init__(self, board, port):
+    def __init__(self, board, port, enable_board_auth=True):
+        if type(enable_board_auth) is not bool:
+            raise TypeError("enable_board_auth must be a bool.")
         self.board = board
+        self.enable_board_auth = enable_board_auth
         self.tokens = {secrets.token_urlsafe(32): actor for actor in ("user", "1", "2", "-1")}
         self.slots = threading.BoundedSemaphore(8)
         super().__init__(("127.0.0.1", port), _Handler)
@@ -402,6 +450,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if content_type == "text/html":
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+                "form-action 'none'; frame-ancestors 'none'",
+            )
         self.end_headers()
         self.wfile.write(body)
 
@@ -418,12 +472,22 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.scheme or parsed.netloc or parsed.fragment:
                 raise BoardError("Invalid request path.")
             if not post and parsed.path == "/README.md" and not parsed.query:
-                self._reply(200, _readme(base), "text/markdown")
+                self._reply(200, _readme(base, self.server.enable_board_auth), "text/markdown")
                 return
             auth = self.headers.get_all("Authorization") or []
-            actor = self.server.tokens.get(auth[0][7:]) if len(auth) == 1 and auth[0].startswith("Bearer ") else None
+            if not auth and not self.server.enable_board_auth:
+                actor = "user"
+            else:
+                actor = (self.server.tokens.get(auth[0][7:])
+                         if len(auth) == 1 and auth[0].startswith("Bearer ") else None)
             if actor is None:
                 raise BoardError("Board authorization required.", 401)
+            if not post and parsed.path in {"/", "/index.html"}:
+                if parsed.query:
+                    raise BoardError("Unexpected HTML query parameters.")
+                snapshot = self.server.board._html_snapshot()
+                self._reply(200, snapshot, "text/html")
+                return
             match = _THREAD_PATH.fullmatch(parsed.path)
             if post:
                 if parsed.query or self.headers.get("Transfer-Encoding") is not None:
@@ -476,7 +540,22 @@ class _Handler(BaseHTTPRequestHandler):
         self._dispatch(True)
 
 
-def _readme(base):
+def _readme(base, enable_board_auth=True):
+    if type(enable_board_auth) is not bool:
+        raise TypeError("enable_board_auth must be a bool.")
+    if enable_board_auth:
+        policy = """Board data and HTML routes require Authorization: Bearer <private capability>.
+Capabilities are host-provided, never provider API keys, URLs, or model arguments.
+Authorized HTML example: curl -H "Authorization: Bearer $BOARD_CAPABILITY" \\
+  {base}/index.html"""
+    else:
+        policy = """DEBUG AUTH MODE: requests without Authorization act as the user actor and may
+read board data or submit tasks that run unsandboxed tools. Valid bearer capabilities
+still select their assigned roles and are required for privileged main/worker posts.
+Invalid, malformed, or duplicate Authorization headers are still rejected; omit the
+header to use anonymous user access.
+Unauthenticated HTML example: curl {base}/index.html"""
+    policy = policy.format(base=base)
     return f"""# Auto message board (version 1)
 
 Address: {base}
@@ -486,6 +565,8 @@ worker #2, watcher #-1. Prefer the bound board_read_thread/board_post_plan tools
 they supply the current thread, author, credentials, and request IDs privately.
 
 * GET /README.md: this public discovery document.
+* GET / or GET /index.html: authorized live static HTML rendering of the full
+  committed board. Fragments such as #record-1 select a record.
 * POST /threads: user only; JSON request_id and content. Creates the thread and
   initial user record atomically and returns its thread_id/record_id.
 * GET /threads/<id>?after=0&limit=100: authorized, non-destructive read. Returns
@@ -495,17 +576,18 @@ they supply the current thread, author, credentials, and request IDs privately.
   record. Worker posts started/result replying to a plan in the same thread.
   success describes runtime completion, not independent verification of the work.
 
-Data routes require Authorization: Bearer <private capability>. Capabilities
-are host-provided, never provider API keys, URLs, or model arguments. Example
-discovery: curl {base}/README.md
+{policy}
+Public discovery: curl {base}/README.md
 Host-side example: curl -H 'Content-Type: application/json' \\
   -H \"Authorization: Bearer $BOARD_CAPABILITY\" \\
   -d '{{"request_id":"example-1","content":"Inspect the repository"}}' {base}/threads
 
 Reuse a request_id with the same body after an uncertain HTTP outcome; conflicting
 reuse returns 409. A new ID is new work. Records commit to index.jsonl before
-acknowledgement; index.md is a generated view, not editable state. Resumed sessions
-preserve history but do not automatically replay interrupted work.
+acknowledgement; index.md and index.html are generated local sidecar views and
+are not editable state. The authorized live HTML routes render the in-memory
+board rather than serving those files. Resumed sessions preserve history but do
+not automatically replay interrupted work.
 
 Limits: {MAX_CONTENT} UTF-8 content bytes, {MAX_BODY} request bytes, {MAX_BATCH}
 records per read, 16 pending user tasks/plans each, 4096 records/16 MiB per board,
@@ -517,10 +599,13 @@ streaming waits, arbitrary file routes, or automatic task replay is provided.
 
 
 class BoardService:
-    def __init__(self, directory: Path, *, port=0, restored=None):
+    def __init__(self, directory: Path, *, port=0, restored=None,
+                 enable_board_auth=True):
+        if type(enable_board_auth) is not bool:
+            raise TypeError("enable_board_auth must be a bool.")
         self.board = Board(directory, restored=restored)
         try:
-            self.server = _Server(self.board, port)
+            self.server = _Server(self.board, port, enable_board_auth)
         except BaseException:
             self.board.close()
             raise

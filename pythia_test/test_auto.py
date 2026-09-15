@@ -152,6 +152,26 @@ class DisplayTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_board_auth_boolean_argument_is_frontend_only(self):
+        parser = build_parser()
+        cases = (((), True), (("--enable-board-auth",), True),
+                 (("--enable-board-auth", "TRUE"), True),
+                 (("--enable-board-auth", "false"), False),
+                 (("--enable-board-auth", "FaLsE"), False))
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertIs(args.enable_board_auth, expected)
+                settings = resolve_config(overrides={
+                    key: value for key, value in vars(args).items() if key in auto.DEFAULTS
+                })
+                self.assertTrue(all("enable_board_auth" not in value
+                                    for value in settings.values()))
+        for invalid in ("yes", "0", "enabled"):
+            with self.subTest(invalid=invalid), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["--enable-board-auth", invalid])
+
     def test_saved_config_statically_validates_and_normalizes_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1078,6 +1098,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(list(self.path.iterdir()), [marker])
         self.assertEqual(marker.read_text(), "untouched")
 
+    def test_invalid_session_board_auth_policy_creates_no_save(self):
+        settings = resolve_config(overrides={"cwd": self.temp.name})
+        for invalid in (None, 0, 1, "False"):
+            with self.subTest(invalid=invalid), self.assertRaises(TypeError):
+                auto._Session(self.path, settings, enable_board_auth=invalid)
+            self.assertFalse(self.path.exists())
+
     def test_resume_restores_history_without_replay_then_runs_one_new_task(self):
         session = self.session({
             1: [ModelSample((ToolCall("board_post_plan", "delegate", '{"content":"old plan"}'),)),
@@ -1242,6 +1269,36 @@ class RuntimeTests(unittest.TestCase):
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_board_auth_cli_propagation_warning_and_resume_secure_default(self):
+        created = []
+        class Session:
+            has_errors = False
+            service = SimpleNamespace(base_url="http://127.0.0.1:43210")
+            def __init__(self, *args, **kwargs):
+                created.append(kwargs)
+            def start(self):
+                return self
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "guaranteed-missing-save"
+            for argv, expected, warned in ((["--headless", "--enable-board-auth", "False"], False, True),
+                                           (["--headless"], True, False),
+                                           (["--headless", "--enable-board-auth"], True, False),
+                                           (["--headless", "--resume"], True, False)):
+                with self.subTest(argv=argv):
+                    self.assertFalse(missing.exists())
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (mock.patch.object(auto, "_Session", Session),
+                          mock.patch.object(auto, "_headless", return_value=0),
+                          redirect_stdout(stdout), redirect_stderr(stderr)):
+                        self.assertEqual(auto.main([*argv, "--save", str(missing)]), 0)
+                    self.assertIs(created[-1]["enable_board_auth"], expected)
+                    self.assertEqual(stdout.getvalue(),
+                                     "Board: http://127.0.0.1:43210/README.md\n")
+                    self.assertEqual("authentication is disabled" in stderr.getvalue(), warned)
+
     def test_headless_main_prints_flushed_board_and_bypasses_tui(self):
         class Output(io.StringIO):
             def __init__(self):

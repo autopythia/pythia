@@ -189,6 +189,12 @@ def build_parser():
         help=("run without the TUI or context display; a bare flag means True "
               "and no TTY is required (default: %(default)s)"),
     )
+    parser.add_argument(
+        "--enable-board-auth", nargs="?", const=True, default=True,
+        type=_boolean_argument, metavar="{False,True}",
+        help=("require bearer authentication for board data and HTML routes; "
+              "False enables unsafe local debugging (default: %(default)s)"),
+    )
     parser.add_argument("--board-port", type=int, default=0, help="Loopback port (0 chooses an available port).")
     parser.add_argument("--model-api", choices=sorted(_APIS), default=argparse.SUPPRESS)
     for key in ("model", "api_url", "api_key_env", "codex_home", "codex_auth_file", "cwd", "instructions"):

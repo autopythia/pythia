@@ -188,13 +188,16 @@ class _Session:
     """Private fixed-role runtime; no dynamic manager/template API."""
     def __init__(self, path, settings, *, board_port=0,
                  model_factory=_model_factory, environment_factory=_environment_factory,
-                 resume=False):
+                 resume=False, enable_board_auth=True):
+        if type(enable_board_auth) is not bool:
+            raise TypeError("enable_board_auth must be a bool.")
         self.path = Path(path).expanduser().absolute()
         self.settings = {i: dict(s) for i, s in settings.items()}
         self.names = {i: self.settings[i]["name"] for i in NAMES}
         self._model_factory, self._environment_factory = model_factory, environment_factory
         self._port = board_port
         self._resume = resume
+        self._enable_board_auth = enable_board_auth
         self._resumed = False
         self._baseline = 0
         self._contexts = {}
@@ -281,7 +284,10 @@ class _Session:
             atomic_text(self.path / "config.json", json.dumps({
                 "version": 1, "contexts": {str(i): s for i, s in self.settings.items()}
             }, indent=2, ensure_ascii=False) + "\n")
-            self.service = BoardService(self.path, port=self._port, restored=restored)
+            self.service = BoardService(
+                self.path, port=self._port, restored=restored,
+                enable_board_auth=self._enable_board_auth,
+            )
             for index in NAMES:
                 thread = threading.Thread(target=self._owner, args=(index,),
                                           name=f"auto-context-{index}")
@@ -330,7 +336,9 @@ class _Session:
                     self._board_failure_shown = True
                 stale = self.service.board.view_stale
                 if stale and not self._view_stale_shown:
-                    events.append(_Event(None, (DisplayItem("Board Markdown view is stale; index.jsonl remains authoritative."),)))
+                    events.append(_Event(None, (DisplayItem(
+                        "Board derived views are stale; index.jsonl remains authoritative."
+                    ),)))
                 self._view_stale_shown = stale
             return events
 
@@ -781,8 +789,11 @@ def main(argv=None):
             saved = load_saved_config(save_path / "config.json")
         settings = resolve_config(args.context_config, overrides, saved=saved)
         session = _Session(save_path, settings, board_port=args.board_port,
-                           resume=args.resume)
+                           resume=args.resume, enable_board_auth=args.enable_board_auth)
         session.start()
+        if not args.enable_board_auth:
+            print("Warning: board authentication is disabled; local clients can read board data "
+                  "and submit tasks that may run unsandboxed tools.", file=sys.stderr, flush=True)
         print(f"Board: {session.service.base_url}/README.md", flush=True)
         if args.prompt is not None:
             exit_code = _one_prompt(session, args.prompt, display=not args.headless)
