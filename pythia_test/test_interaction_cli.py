@@ -40,6 +40,7 @@ from pythia.interaction import TokenUsage
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import UserToolCall
+from pythia.interaction import UserToolResult
 from pythia.interaction import cli
 from pythia.interaction import demo
 from pythia.interaction import load_interaction_save
@@ -195,7 +196,9 @@ for module in (cli, demo):
         ):
             demo_args = vars(demo._build_parser().parse_args(argv))
             self.assertFalse(demo_args.pop("experimental_user_message_injection"))
-            self.assertEqual(vars(cli._build_parser().parse_args(argv)), demo_args)
+            cli_args = vars(cli._build_parser().parse_args(argv))
+            self.assertTrue(cli_args.pop("enable_default_tools"))
+            self.assertEqual(cli_args, demo_args)
 
     def test_enable_arguments_accept_bare_and_explicit_booleans(self):
         cases = (
@@ -204,9 +207,14 @@ for module in (cli, demo):
             (("--enable-workspace=True",), True),
             (("--enable-workspace=False",), False),
             (("--enable-workspace", "false"), False),
+            (("--enable-workspace=tRuE",), True),
+            (("--enable-workspace=FaLsE",), False),
         )
         for frontend in (cli, demo):
-            for option in ("enable-auto-compaction", "enable-workspace"):
+            options = ("enable-auto-compaction", "enable-workspace")
+            if frontend is cli:
+                options += ("enable-default-tools",)
+            for option in options:
                 attribute = option.replace("-", "_")
                 for suffix, expected in cases:
                     argv = tuple(
@@ -223,7 +231,10 @@ for module in (cli, demo):
 
     def test_enable_arguments_reject_other_boolean_spellings(self):
         for frontend in (cli, demo):
-            for option in ("enable-auto-compaction", "enable-workspace"):
+            options = ("enable-auto-compaction", "enable-workspace")
+            if frontend is cli:
+                options += ("enable-default-tools",)
+            for option in options:
                 for value in ("", "0", "1", "yes", "no", "enabled"):
                     with self.subTest(
                         frontend=frontend.__name__,
@@ -242,6 +253,17 @@ for module in (cli, demo):
             with self.assertRaises(SystemExit) as raised:
                 cli._build_parser().parse_args(["--experimental-user-message-injection"])
         self.assertEqual(raised.exception.code, 2)
+
+    def test_default_tools_flag_is_cli_only(self):
+        from pythia.interaction._auto_config import build_parser as auto_parser
+        for factory in (demo._build_parser, auto_parser):
+            with self.subTest(factory=factory.__module__):
+                parser = factory()
+                self.assertFalse(hasattr(parser.parse_args([]), "enable_default_tools"))
+                with mock.patch("sys.stderr", new=io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        parser.parse_args(["--enable-default-tools=False"])
+                self.assertEqual(raised.exception.code, 2)
 
     def test_non_tty_fails_before_model_environment_or_session_effects(self):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):
@@ -292,6 +314,26 @@ for module in (cli, demo):
             enable_workspace=False,
         )
 
+    def test_main_without_default_tools_does_not_construct_the_runtime(self):
+        terminal_stream = SimpleNamespace(isatty=lambda: True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(cli.sys, "stdin", terminal_stream), \
+                    mock.patch.object(cli.sys, "stdout", terminal_stream), \
+                    mock.patch.object(cli, "build_model", return_value=object()), \
+                    mock.patch.object(cli, "DefaultEnvironment") as default, \
+                    mock.patch.object(cli, "PosixTerminal"), \
+                    mock.patch.object(cli, "_run", new_callable=mock.AsyncMock, return_value=0) as run:
+                self.assertEqual(cli.main([
+                    "--save", str(Path(tmpdir) / "session.jsonl"),
+                    "--enable-default-tools=False",
+                ]), 0)
+        default.assert_not_called()
+        run.assert_awaited_once()
+        environment = run.call_args.args[1]
+        self.assertIs(type(environment), Environment)
+        self.assertEqual(environment.tool_specs, ())
+        self.assertFalse(run.call_args.args[3].enable_default_tools)
+
     def test_module_help_works_without_a_tty(self):
         result = subprocess.run(
             [sys.executable, "-m", "pythia.interaction.cli", "--help"],
@@ -301,6 +343,7 @@ for module in (cli, demo):
         self.assertIn("--resume", result.stdout)
         self.assertIn("--prompt", result.stdout)
         self.assertIn("--save PATH", result.stdout)
+        self.assertIn("--enable-default-tools", result.stdout)
 
     def test_invalid_initial_options_fail_before_effects_even_with_a_tty(self):
         for argv in (
@@ -378,6 +421,92 @@ class _ControllerTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(t != threading.get_ident() for t in model.threads))
         return result
+
+
+class CLIDisabledToolsTests(_ControllerTestCase):
+    async def test_unexpected_default_calls_fail_without_effects_or_tool_warnings(self):
+        marker = self.path.parent / "must-not-exist"
+        arguments = (
+            ("exec_command", {"cmd": f"touch {marker}"}),
+            ("write_stdin", {"session_id": 1, "chars": "input"}),
+            ("apply_patch", {"patch": f"*** Begin Patch\n*** Add File: {marker}\n+bad\n*** End Patch"}),
+            ("update_plan", {"plan": [{"step": "bad", "status": "completed"}]}),
+        )
+        calls = tuple(ToolCall(name, name, json.dumps(args)) for name, args in arguments)
+        model = _Model(self.path, ModelSample(calls), _answer())
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        self.assertEqual(await self._run(model, terminal, [
+            "--enable-default-tools=False", "--enable-workspace=False", "--prompt", "hello",
+        ]), 0)
+        self.assertTrue(all(tools == () for _, tools, _ in model.calls))
+        saved = load_interaction_save(self.path)
+        results = [item for item in saved if isinstance(item, ToolResult)]
+        self.assertEqual([r.call_id for r in results], [c.call_id for c in calls])
+        self.assertTrue(all(not r.success and r.output.startswith("Unknown tool:") for r in results))
+        self.assertFalse(saved.pending_tool_calls())
+        self.assertFalse(marker.exists())
+        notices = "\n".join(item.text for item in terminal.items)
+        self.assertIn("Default model tools disabled; user commands remain available.", notices)
+        self.assertNotIn("runs without a sandbox", notices)
+        self.assertNotIn("workspace path restrictions are disabled", notices)
+
+    async def test_resume_keeps_tool_history_and_does_not_replay_pending_calls(self):
+        original = (
+            Init("old"), ToolCall("update_plan", "old-plan", "{}"),
+            ToolResult("old-plan", "historical result"), Message("assistant", "old answer"),
+            TurnSummary(sample_count=1),
+            ToolCall("exec_command", "pending", '{"cmd":"touch must-not-run"}'),
+        )
+        save_interaction_save(self.path, InteractionContext(original))
+        model = _Model(self.path, _answer("continued"))
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        environment = Environment()
+        with mock.patch.object(environment, "execute_tool_calls") as execute:
+            self.assertEqual(await self._run(model, terminal, [
+                "--enable-default-tools=False", "--resume", "--prompt", "continue",
+            ], environment), 0)
+        execute.assert_not_called()
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.items[:len(original)], original)
+        recovered = saved[len(original)]
+        self.assertIsInstance(recovered, ToolResult)
+        self.assertEqual(recovered.call_id, "pending")
+        self.assertFalse(recovered.success)
+        self.assertIn("was not rerun", recovered.output)
+        self.assertEqual(model.calls[0][1], ())
+        self.assertFalse(saved.pending_tool_calls())
+
+    async def test_config_and_both_compaction_paths_keep_empty_model_tools(self):
+        save_interaction_save(self.path, InteractionContext((
+            Init("old"), Message("assistant", "old answer"),
+            SampleMetadata(TokenUsage(total_tokens=100)),
+            ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100),
+        )))
+        model = _Model(self.path, _answer("continued"))
+        model.auto_compact_context_tokens = 100
+        commands = deque(("/config max_output_tokens 17", "/config.json", "/compact", "/quit"))
+        terminal = _Terminal(lambda t, e, s: t.submit(commands.popleft())
+                             if s == "idle" and commands else None)
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult((
+            ContextPrefix((Message("assistant", "summary"),)),
+        ))
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+            self.assertEqual(await self._run(model, terminal, [
+                "--enable-default-tools=False", "--resume", "--prompt", "continue",
+            ]), 0)
+        self.assertEqual(compactor.compact.call_count, 2)  # automatic, then /compact
+        for call in compactor.compact.call_args_list:
+            self.assertEqual(call.kwargs["tools"], ())
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(model.calls[0][1], ())
+        saved = load_interaction_save(self.path)
+        results = [item.result for item in saved if isinstance(item, UserToolResult)]
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result.success for result in results))
+        config = json.loads(results[1].output)
+        self.assertEqual(config["max_output_tokens"], 17)
+        self.assertNotIn("enable_default_tools", config)
 
 
 class CLIControllerTests(_ControllerTestCase):

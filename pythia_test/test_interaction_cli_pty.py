@@ -76,12 +76,17 @@ elif failure == "attach":
     term_input.create_input = fail_create
 
 class Model:
-    def __init__(self, save_path):
+    def __init__(self, save_path, enable_default_tools):
         self.tool_done = False
         self.save_path = Path(save_path).expanduser().absolute()
+        self.enable_default_tools = enable_default_tools
 
     def sample(self, context, *, tools=(), options=None):
         assert load_interaction_save(self.save_path).items == context.items
+        assert {tool.name for tool in tools} == (
+            {"exec_command", "write_stdin", "apply_patch", "update_plan"}
+            if self.enable_default_tools else set()
+        )
         if "PYTHIA_TEST_RELEASE_FD" in os.environ:
             os.read(int(os.environ["PYTHIA_TEST_RELEASE_FD"]), 1)
             return ModelSample(items=(ToolCall(
@@ -109,7 +114,7 @@ if failure in {"auth", "auth-cancel"}:
     build = cli.build_model
     def build_when_authenticated(args):
         build(args)  # Real routing/validation/loading, but no provider sampling.
-        return Model(args.save_path)
+        return Model(args.save_path, args.enable_default_tools)
     cli.build_model = build_when_authenticated
     if failure == "auth":
         def fake_login(path, **kwargs):
@@ -119,7 +124,7 @@ if failure in {"auth", "auth-cancel"}:
     else:
         user_tools.login = partial(login, callback_port=0)
 else:
-    cli.build_model = lambda args: Model(args.save_path)
+    cli.build_model = lambda args: Model(args.save_path, args.enable_default_tools)
 raise SystemExit(cli.main())
 '''
 
@@ -184,7 +189,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         except asyncio.TimeoutError:
             self.fail(f"did not see {text!r}; terminal tail: {bytes(self.output[-2000:])!r}")
 
-    async def wait_exit(self, expected=0, paste_enabled=True):
+    async def wait_exit(self, expected=0, paste_enabled=True, default_tools=True):
         status = await asyncio.to_thread(self.process.wait, timeout=4)
         stderr = self.process.stderr.read().decode()
         self.assertEqual(status, expected, stderr)
@@ -194,6 +199,9 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         if paste_enabled:
             self.assertIn(b"\x1b[?2004h", self.output)
         self.assertIn(b"\x1b[?2004l", self.output)
+        if not default_tools:
+            self.assertFalse((self.root / "cleanup.json").exists())
+            return
         cleanup = json.loads((self.root / "cleanup.json").read_text())
         self.assertEqual(cleanup["active_after"], 0)
         self.assertTrue(cleanup["terminated"])
@@ -424,6 +432,33 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"[assistant] answer-1")
         os.write(self.master, b"/quit\r")
         await self.wait_exit()
+        self.assertNotIn(b"FAKE_PTY_SECRET", self.output)
+        self.assertNotIn("FAKE_PTY_SECRET", (self.root / "interaction.jsonl").read_text())
+
+    async def test_disabled_default_tools_preserve_config_login_quota_and_chat(self):
+        self.start("--enable-default-tools=False", "--enable-workspace=False",
+                   "--model-api", "codex", "--model", "test", "--codex-auth-file",
+                   str(self.root / "auth.json"), failure="auth")
+        await self.wait_output(b"Default model tools disabled")
+        await self.wait_output(b"auth needed")
+        os.write(self.master, b"/config enable_default_tools True\r")
+        await self.wait_output(b"Unknown config key")
+        os.write(self.master, b"/config.json\r")
+        await self.wait_output(b'"enable_workspace": false')
+        os.write(self.master, b"/login\r")
+        await self.wait_output(b"Model ready")
+        os.write(self.master, b"/quota\r")
+        await self.wait_output(b"offline quota snapshot")
+        os.write(self.master, b"hello\r")
+        await self.wait_output(b"Unknown tool: update_plan")
+        await self.wait_output(b"[assistant] answer-1")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit(default_tools=False)
+        saved = load_interaction_save(self.root / "interaction.jsonl")
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)],
+                         ["config", "login", "quota"])
+        self.assertTrue(all(i.result.success for i in saved if isinstance(i, UserToolResult)))
+        self.assertFalse(next(i for i in saved if isinstance(i, ToolResult)).success)
         self.assertNotIn(b"FAKE_PTY_SECRET", self.output)
         self.assertNotIn("FAKE_PTY_SECRET", (self.root / "interaction.jsonl").read_text())
 

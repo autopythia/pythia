@@ -10,6 +10,7 @@ import argparse
 import asyncio
 from collections import deque
 from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import field
 import os
@@ -58,6 +59,7 @@ from .model import ModelAuthenticationError
 from .model import ModelError
 from .model import SamplingOptions
 from .model_config import DEFAULT_SAVE_PATH
+from .model_config import _boolean_argument
 from .model_config import build_model
 from .model_config import build_parser
 from .model_config import initial_model_name
@@ -817,14 +819,19 @@ async def _run(
         "/quit or /exit; Ctrl-C/Ctrl-D exit."
     )
     state.notice(f"Save log: {path}")
-    state.notice(
-        "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
-    )
-    if not args.enable_workspace:
+    if args.enable_default_tools:
         state.notice(
-            "Warning: workspace path restrictions are disabled; "
-            "exec_command workdir and apply_patch paths may resolve "
-            "outside --cwd."
+            "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
+        )
+        if not args.enable_workspace:
+            state.notice(
+                "Warning: workspace path restrictions are disabled; "
+                "exec_command workdir and apply_patch paths may resolve "
+                "outside --cwd."
+            )
+    else:
+        state.notice(
+            "Default model tools disabled; user commands remain available."
         )
     worker = None
     frame = 0
@@ -877,9 +884,24 @@ async def _run(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    return build_parser(
+    parser = build_parser(
         "Interactive POSIX shell using Pythia's caller-owned interaction API."
     )
+    parser.add_argument(
+        "--enable-default-tools",
+        nargs="?",
+        const=True,
+        default=True,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "enable default model tools (exec_command, write_stdin, apply_patch, "
+            "update_plan); user commands remain available when False. "
+            "Launch-only: repeat on --resume. A bare flag means True "
+            "(default: %(default)s)"
+        ),
+    )
+    return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -904,10 +926,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise
             model = None
         cwd = Path(args.cwd).expanduser().resolve()
-        with DefaultEnvironment(
-            cwd=cwd,
-            enable_workspace=args.enable_workspace,
-        ) as environment:
+        environment_manager = (
+            DefaultEnvironment(cwd=cwd, enable_workspace=args.enable_workspace)
+            if args.enable_default_tools else nullcontext(Environment())
+        )
+        with environment_manager as environment:
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(model, environment, terminal, args, path=save_path))
     except Exception as exc:
