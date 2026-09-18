@@ -79,10 +79,16 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _MAX_PENDING_QUERIES = 8
 
 
+@dataclass(frozen=True, eq=False)
+class _RetryIntent:
+    """Identity ticket for one live sampling failure, never model input."""
+
+
 @dataclass
 class _UIState:
     editor: Editor = field(default_factory=Editor)
-    pending: deque[Union[str, UserToolIntent]] = field(default_factory=deque)
+    pending: deque[Union[str, UserToolIntent, _RetryIntent]] = field(default_factory=deque)
+    retry: Optional[_RetryIntent] = None
     displays: deque[DisplayItem] = field(default_factory=deque)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     closing: bool = False
@@ -107,6 +113,7 @@ class _UIState:
 
     def request_exit(self) -> None:
         self.closing = True
+        self.retry = None
         self.pending.clear()
         self.login_cancel.set()
         self.changed.set()
@@ -130,7 +137,22 @@ class _UIState:
                 self.notice("Checkpoint failed; no further work will run. Use /quit.")
                 return
             intent = text
-            if head.startswith("/"):
+            if head == "/retry":
+                error = None
+                if text.strip() != "/retry" or "\n" in text or "\r" in text:
+                    error = "Usage: /retry (no arguments; single line)."
+                elif self.phase not in {"idle", "failed", "auth needed"}:
+                    error = "Cannot retry while work is in progress."
+                elif self.retry is None:
+                    error = "No retryable sampling failure in this session."
+                elif any(isinstance(item, _RetryIntent) for item in self.pending):
+                    error = "A retry is already queued."
+                if error is not None:
+                    self.notice(error)
+                    self.editor = Editor()
+                    return
+                intent = self.retry
+            elif head.startswith("/"):
                 try:
                     intent = parse_user_tool(text)
                 except ValueError as exc:
@@ -470,6 +492,9 @@ async def _turn(
     path: Path,
     config: InteractionConfig,
 ) -> None:
+    # Each explicit attempt consumes the preceding failure's ticket. Only a
+    # sampling failure below can arm a new one, not a tool/compaction/save error.
+    state.retry = None
     turn_config = config.snapshot()
     options = turn_config.sampling_options()
     turn_started = time.perf_counter()
@@ -552,6 +577,12 @@ async def _turn(
                             source_calls=recovered_calls,
                         )
                     )
+            state.retry = _RetryIntent()
+            raise
+        except Exception:
+            # Adapters normally raise ModelError, but an exception at this
+            # sampling boundary is still distinct from a failed local effect.
+            state.retry = _RetryIntent()
             raise
         samples += 1
         model_account_id = getattr(
@@ -568,6 +599,7 @@ async def _turn(
         if not sample.tool_calls:
             final_text = sample.last_assistant_text
             if not final_text or not final_text.strip():
+                state.retry = _RetryIntent()
                 raise RuntimeError("model returned no final assistant text")
             summary = summarize_turn_usage(
                 context.items,
@@ -577,6 +609,42 @@ async def _turn(
             state.displays.extend(render_interaction_items((summary,)))
             return
         await _sweep_tools(context, environment, state, path)
+
+
+async def _reload_retry_model(
+    context: InteractionContext, state: _UIState, args: argparse.Namespace,
+) -> Optional[Model]:
+    """Reload credentials without initiating login or switching accounts."""
+    state.set_phase("loading model")
+    state.auth_required = True
+    expected_account = state.bound_account_id
+    if (
+        expected_account is None
+        and supports_account_services(args)
+        and _has_provider_history(context)
+    ):
+        state.notice(
+            "Cannot verify the account for saved provider state; start a fresh session."
+        )
+        return None
+    try:
+        model = await asyncio.to_thread(build_model, args)
+        account = getattr(getattr(model, "endpoint", None), "account_id", None)
+        if expected_account is not None and account != expected_account:
+            state.notice(
+                "Credential account changed; no model request was started. "
+                "Restore the original account or start a fresh session."
+            )
+            return None
+    except Exception:
+        # As with /login activation, do not reflect credential/provider details.
+        state.notice("Model reload failed; no model request was started. Details withheld.")
+        state.notice(state.auth_notice)
+        return None
+    state.bound_account_id = account
+    state.auth_required = False
+    state.auth_notice = "Model authentication needed; use /login."
+    return model
 
 
 def _ends_with_completed_manual_compaction(context: InteractionContext) -> bool:
@@ -680,6 +748,7 @@ async def _drive_interaction(
     initial_query = args.prompt
     startup = True
     while not state.closing:
+        sampling_attempt = False
         try:
             if startup:
                 if existing:
@@ -721,34 +790,52 @@ async def _drive_interaction(
                 if not state.pending:
                     continue
                 query = state.pending.popleft()
-                await _fail_pending_user_tools(context, state, path)
                 if state.pending:
                     state.changed.set()
-                # An explicit new query after a failed effect is not permission
-                # to retry old calls whose side effects may already have happened.
-                await _fail_pending_tools(
-                    context, state, path, reason="an interrupted operation"
-                )
-                if state.closing:
-                    return
-                if isinstance(query, UserToolIntent):
-                    model = await _user_tool(
-                        query,
-                        model,
-                        context,
-                        state,
-                        path,
-                        args,
-                        environment,
-                        config,
+                if isinstance(query, _RetryIntent):
+                    # Recheck on the owner: an earlier queued query may have
+                    # superseded the failure since Enter accepted this ticket.
+                    if query is not state.retry:
+                        state.notice("Retry no longer applies to the current task.")
+                        continue
+                    if context.pending_tool_calls() or context.pending_user_tool_calls():
+                        state.retry = None
+                        state.notice("Cannot retry with unresolved tool outcomes.")
+                        continue
+                    if model is None:
+                        model = await _reload_retry_model(context, state, args)
+                        if model is None:
+                            state.set_phase("auth needed")
+                            continue
+                    query = None  # Continue context; do not append a user turn.
+                else:
+                    await _fail_pending_user_tools(context, state, path)
+                    # A new query is not permission to retry old calls whose
+                    # side effects may already have happened.
+                    await _fail_pending_tools(
+                        context, state, path, reason="an interrupted operation"
                     )
-                    state.set_phase("auth needed" if state.auth_required else "idle")
-                    continue
-                if model is None:
-                    state.editor = Editor(query, len(query))
-                    state.notice(f"{state.auth_notice} Draft was not submitted.")
-                    state.set_phase("auth needed")
-                    continue
+                    if state.closing:
+                        return
+                    if isinstance(query, UserToolIntent):
+                        model = await _user_tool(
+                            query,
+                            model,
+                            context,
+                            state,
+                            path,
+                            args,
+                            environment,
+                            config,
+                        )
+                        state.set_phase("auth needed" if state.auth_required else "idle")
+                        continue
+                    if model is None:
+                        state.editor = Editor(query, len(query))
+                        state.notice(f"{state.auth_notice} Draft was not submitted.")
+                        state.set_phase("auth needed")
+                        continue
+                    state.retry = None
                 should_sample = True
             if state.closing:
                 return
@@ -757,6 +844,7 @@ async def _drive_interaction(
                 await _append(context, user.context_items(), state, path)
                 state.displays.extend(user.display_items())
             if should_sample:
+                sampling_attempt = True
                 await _turn(
                     context,
                     model,
@@ -772,6 +860,10 @@ async def _drive_interaction(
             startup = False
             state.set_phase("failed")
             if isinstance(exc, ModelAuthenticationError):
+                if state.bound_account_id is None:
+                    state.bound_account_id = getattr(
+                        getattr(model, "endpoint", None), "account_id", None
+                    )
                 model = None
                 _mark_auth_required(state, exc)
             state.notice(f"{type(exc).__name__}: {exc}")
@@ -782,6 +874,7 @@ async def _drive_interaction(
             state.pending.clear()
             state.changed.clear()
             if state.persistence_failed:
+                state.retry = None
                 # Retain the unsaved context here until exit; never replay the effect.
                 state.notice(
                     "Checkpoint failed; unsaved state remains in memory. Use /quit."
@@ -790,6 +883,14 @@ async def _drive_interaction(
                     await state.changed.wait()
                     state.changed.clear()
                 return
+            if sampling_attempt and state.retry is not None and not state.closing:
+                # Keep all existing diagnostics above, then append guidance.
+                # Authentication guidance suggests /login; it is not a gate
+                # on /retry, which can reload externally refreshed credentials.
+                state.notice(
+                    state.auth_notice if isinstance(exc, ModelAuthenticationError)
+                    else "Sampling failed. Use /retry to try again."
+                )
 
 
 async def _run(
@@ -815,7 +916,7 @@ async def _run(
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
     )
     state.notice(
-        "pythia.interaction — /compact, /config, /config.json, /login, /quota; "
+        "pythia.interaction — /retry, /compact, /config, /config.json, /login, /quota; "
         "/quit or /exit; Ctrl-C/Ctrl-D exit."
     )
     state.notice(f"Save log: {path}")

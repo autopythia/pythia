@@ -33,7 +33,7 @@ _SCRIPT = '''
 import json
 import os
 from pathlib import Path
-from pythia.interaction import cli, Message, ModelSample, ToolCall, ToolResult, load_interaction_save
+from pythia.interaction import cli, Message, ModelSample, ModelTimeoutError, ToolCall, ToolResult, load_interaction_save
 
 failure = os.environ.get("PYTHIA_TEST_FAILURE")
 
@@ -94,6 +94,8 @@ class Model:
             ),))
         if not self.tool_done:
             self.tool_done = True
+            if failure == "retry":
+                raise ModelTimeoutError("injected sample timeout")
             if failure in {"model", "save", "render"}:
                 return ModelSample(items=(ToolCall(
                     "exec_command", "command-1", '{"cmd":"read line","yield_time_ms":0}'
@@ -461,6 +463,24 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(next(i for i in saved if isinstance(i, ToolResult)).success)
         self.assertNotIn(b"FAKE_PTY_SECRET", self.output)
         self.assertNotIn("FAKE_PTY_SECRET", (self.root / "interaction.jsonl").read_text())
+
+    async def test_retry_after_sample_failure_preserves_diagnostics_and_one_user_turn(self):
+        self.start("--prompt", "original", "--enable-default-tools=False", failure="retry")
+        await self.wait_output(b"ModelTimeoutError: injected sample timeout")
+        await self.wait_output(b"Sampling failed. Use /retry to try again.")
+        self.assertLess(self.output.index(b"ModelTimeoutError: injected sample timeout"),
+                        self.output.index(b"Sampling failed. Use /retry to try again."))
+        os.write(self.master, b"/retry\r")
+        await self.wait_output(b"[assistant] answer-1")
+        os.write(self.master, b"/retry\r")
+        await self.wait_output(b"No retryable sampling failure")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit(expected=1, default_tools=False)
+        saved = load_interaction_save(self.root / "interaction.jsonl")
+        self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
+                         [Message("user", "original")])
+        self.assertFalse(any(isinstance(i, (UserToolCall, ToolCall)) for i in saved))
+        self.assertIsInstance(saved[-1], TurnSummary)
 
     async def test_exit_during_real_login_callback_wait_restores_terminal(self):
         self.start("--model-api", "codex", "--model", "test", "--codex-auth-file",
