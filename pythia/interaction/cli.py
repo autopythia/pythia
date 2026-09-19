@@ -518,7 +518,9 @@ async def _turn(
                 "model did not produce a final answer within "
                 f"{turn_config.max_samples} samples"
             )
-        threshold = getattr(model, "auto_compact_context_tokens", None)
+        threshold = turn_config.auto_compact_tokens
+        if threshold is None:
+            threshold = getattr(model, "auto_compact_context_tokens", None)
         if (
             turn_config.enable_auto_compaction
             and isinstance(threshold, int)

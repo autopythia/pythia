@@ -58,6 +58,8 @@ from .usage import TokenUsage
 
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
+# Anthropic requires a context-management edit trigger at or above this floor.
+MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS = 50_000
 _RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 409, 425, 429, 500, 502, 503, 504, 529}
 )
@@ -914,11 +916,27 @@ class MessagesModel:
             compaction = MessagesServerCompaction()
         enable_auto_compaction = auto_compaction_override is not False
         if compaction is not None and enable_auto_compaction:
-            auto_compact_context = (
-                None
-                if spec is None
-                else spec.limits.auto_compact_context_tokens
+            threshold_override = (
+                None if options is None else options.auto_compact_tokens
             )
+            auto_compact_context = (
+                threshold_override
+                if threshold_override is not None
+                else (
+                    None
+                    if spec is None
+                    else spec.limits.auto_compact_context_tokens
+                )
+            )
+            if (
+                auto_compact_context is not None
+                and auto_compact_context
+                < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
+            ):
+                raise ModelConfigurationError(
+                    "auto-compaction trigger must be at least "
+                    f"{MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS} tokens"
+                )
             if (
                 compaction.trigger_input_tokens is None
                 and auto_compact_context is not None

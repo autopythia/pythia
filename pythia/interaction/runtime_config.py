@@ -24,11 +24,15 @@ CONFIG_KEYS = (
     "max_samples",
     "max_output_tokens",
     "enable_auto_compaction",
+    "auto_compact_tokens",
+    "max_context_tokens",
 )
 _BOOLEAN_KEYS = frozenset(("enable_workspace", "enable_auto_compaction"))
 _OPTIONAL_POSITIVE_INTEGER_KEYS = frozenset((
     "max_samples",
     "max_output_tokens",
+    "auto_compact_tokens",
+    "max_context_tokens",
 ))
 _INTEGER_LITERAL_RE = re.compile(r"^[+-]?[0-9]+$")
 
@@ -91,6 +95,8 @@ class InteractionConfigSnapshot:
     max_samples: Optional[int] = None
     max_output_tokens: Optional[int] = None
     enable_auto_compaction: bool = True
+    auto_compact_tokens: Optional[int] = None
+    max_context_tokens: Optional[int] = None
     _auto_compaction_override: Optional[bool] = field(
         default=None,
         repr=False,
@@ -119,11 +125,13 @@ class InteractionConfigSnapshot:
         if (
             self.max_output_tokens is None
             and self._auto_compaction_override is None
+            and self.auto_compact_tokens is None
         ):
             return None
         return SamplingOptions(
             max_output_tokens=self.max_output_tokens,
             enable_auto_compaction=self._auto_compaction_override,
+            auto_compact_tokens=self.auto_compact_tokens,
         )
 
 
@@ -134,12 +142,17 @@ class InteractionConfig:
         self,
         snapshot: InteractionConfigSnapshot = InteractionConfigSnapshot(),
         *,
+        initial: Optional[InteractionConfigSnapshot] = None,
         on_enable_workspace: Optional[Callable[[bool], None]] = None,
         require_max_output_tokens: bool = False,
         max_output_tokens_fallback: Optional[int] = None,
     ) -> None:
         if not isinstance(snapshot, InteractionConfigSnapshot):
             raise TypeError("snapshot must be InteractionConfigSnapshot")
+        if initial is not None and not isinstance(
+            initial, InteractionConfigSnapshot
+        ):
+            raise TypeError("initial must be InteractionConfigSnapshot or None")
         if on_enable_workspace is not None and not callable(
             on_enable_workspace
         ):
@@ -157,6 +170,9 @@ class InteractionConfig:
             )
         self._lock = RLock()
         self._snapshot = snapshot
+        # The launch-seeded values; `/config` can show (and later reset to)
+        # these even after the live snapshot changes.
+        self._initial = snapshot if initial is None else initial
         self._on_enable_workspace = on_enable_workspace
         self._require_max_output_tokens = require_max_output_tokens
         self._max_output_tokens_fallback = max_output_tokens_fallback
@@ -187,6 +203,8 @@ class InteractionConfig:
                 max_samples=args.max_samples,
                 max_output_tokens=max_output_tokens,
                 enable_auto_compaction=args.enable_auto_compaction,
+                auto_compact_tokens=getattr(args, "auto_compact_tokens", None),
+                max_context_tokens=getattr(args, "max_context_tokens", None),
                 _auto_compaction_override=(
                     None if args.enable_auto_compaction else False
                 ),
@@ -199,6 +217,10 @@ class InteractionConfig:
     def snapshot(self) -> InteractionConfigSnapshot:
         with self._lock:
             return self._snapshot
+
+    def initial_snapshot(self) -> InteractionConfigSnapshot:
+        with self._lock:
+            return self._initial
 
     def get(self, key: str) -> ConfigValue:
         key = _require_key(key)
@@ -237,14 +259,31 @@ class InteractionConfig:
             return {key: getattr(snapshot, key)}
         return snapshot.as_dict()
 
+    def initial_values(self, key: Optional[str] = None) -> Dict[str, ConfigValue]:
+        initial = self.initial_snapshot()
+        if key is not None:
+            key = _require_key(key)
+            return {key: getattr(initial, key)}
+        return initial.as_dict()
+
     def render(self, key: Optional[str] = None, *, json_output: bool) -> str:
         values = self.values(key)
+        initial = self.initial_values(key)
         if json_output:
-            return json.dumps(values, ensure_ascii=False, indent=2)
-        return "\n".join(
-            f"{name} = {value!r}"
-            for name, value in values.items()
-        )
+            # ``__init__`` carries the launch-seeded defaults (a dict) alongside
+            # the current values; `/config-reset` (TODO) will restore them.
+            return json.dumps(
+                {**values, "__init__": initial},
+                ensure_ascii=False,
+                indent=2,
+            )
+        lines = []
+        for name, value in values.items():
+            seeded = initial[name]
+            if seeded is not None and seeded != value:
+                lines.append(f"# init: {name} = {seeded!r}")
+            lines.append(f"{name} = {value!r}")
+        return "\n".join(lines)
 
 
 __all__ = [

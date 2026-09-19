@@ -100,6 +100,8 @@ class SamplingOptions:
     seed: Optional[int] = None
     # Host/provider context-management control, never a sampling wire field.
     enable_auto_compaction: Optional[bool] = None
+    # Host context-management threshold override, never a sampling wire field.
+    auto_compact_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.max_output_tokens is not None:
@@ -141,6 +143,14 @@ class SamplingOptions:
         ):
             raise TypeError(
                 "enable_auto_compaction must be a bool or None"
+            )
+        if self.auto_compact_tokens is not None and (
+            isinstance(self.auto_compact_tokens, bool)
+            or not isinstance(self.auto_compact_tokens, int)
+            or self.auto_compact_tokens <= 0
+        ):
+            raise ValueError(
+                "auto_compact_tokens must be a positive integer or None"
             )
 
 

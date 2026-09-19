@@ -77,6 +77,8 @@ def run(
     enable_media: bool = False,
     enable_workspace: bool = True,
     cwd: Path = Path("."),
+    auto_compact_tokens: Optional[int] = None,
+    max_context_tokens: Optional[int] = None,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
@@ -90,6 +92,14 @@ def run(
         raise TypeError("enable_media must be a bool")
     if not isinstance(enable_workspace, bool):
         raise TypeError("enable_workspace must be a bool")
+    for field_name, value in (
+        ("auto_compact_tokens", auto_compact_tokens),
+        ("max_context_tokens", max_context_tokens),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(f"{field_name} must be a positive integer or None")
     if prompt is not None and (
         not isinstance(prompt, str) or not prompt.strip()
     ):
@@ -203,7 +213,9 @@ def run(
     turn_started = perf_counter()
     sample_count = 0
     while max_samples is None or sample_count < max_samples:
-        threshold = getattr(model, "auto_compact_context_tokens", None)
+        threshold = auto_compact_tokens
+        if threshold is None:
+            threshold = getattr(model, "auto_compact_context_tokens", None)
         if (
             enable_auto_compaction
             and isinstance(threshold, int)
@@ -359,8 +371,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             enable_auto_compaction=(
                 False if not args.enable_auto_compaction else None
             ),
+            auto_compact_tokens=args.auto_compact_tokens,
         )
-        if args.max_output_tokens is not None or not args.enable_auto_compaction
+        if (
+            args.max_output_tokens is not None
+            or not args.enable_auto_compaction
+            or args.auto_compact_tokens is not None
+        )
         else None
     )
 
@@ -410,6 +427,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 enable_media=args.enable_experimental_media,
                 enable_workspace=args.enable_workspace,
                 cwd=cwd,
+                auto_compact_tokens=args.auto_compact_tokens,
+                max_context_tokens=args.max_context_tokens,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

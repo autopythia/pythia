@@ -35,6 +35,8 @@ class InteractionConfigTests(unittest.TestCase):
                 "max_samples = None",
                 "max_output_tokens = None",
                 "enable_auto_compaction = True",
+                "auto_compact_tokens = None",
+                "max_context_tokens = None",
             )),
         )
         rendered_json = config.render(json_output=True)
@@ -43,6 +45,16 @@ class InteractionConfigTests(unittest.TestCase):
             "max_samples": None,
             "max_output_tokens": None,
             "enable_auto_compaction": True,
+            "auto_compact_tokens": None,
+            "max_context_tokens": None,
+            "__init__": {
+                "enable_workspace": True,
+                "max_samples": None,
+                "max_output_tokens": None,
+                "enable_auto_compaction": True,
+                "auto_compact_tokens": None,
+                "max_context_tokens": None,
+            },
         })
         self.assertLess(
             rendered_json.index('"enable_workspace"'),
@@ -54,8 +66,35 @@ class InteractionConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             config.render("max_output_tokens", json_output=True),
-            '{\n  "max_output_tokens": null\n}',
+            '{\n  "max_output_tokens": null,\n  "__init__": {\n'
+            '    "max_output_tokens": null\n  }\n}',
         )
+
+    def test_initial_values_render_as_comments_and_json_defaults(self):
+        config = InteractionConfig(
+            InteractionConfigSnapshot(auto_compact_tokens=100),
+            initial=InteractionConfigSnapshot(
+                auto_compact_tokens=500_000,
+            ),
+        )
+        self.assertEqual(
+            config.render(json_output=False),
+            "\n".join((
+                "enable_workspace = True",
+                "max_samples = None",
+                "max_output_tokens = None",
+                "enable_auto_compaction = True",
+                "# init: auto_compact_tokens = 500000",
+                "auto_compact_tokens = 100",
+                "max_context_tokens = None",
+            )),
+        )
+        payload = json.loads(config.render(json_output=True))
+        self.assertEqual(payload["auto_compact_tokens"], 100)
+        self.assertEqual(payload["__init__"]["auto_compact_tokens"], 500_000)
+
+        config.set("auto_compact_tokens", 500_000)
+        self.assertNotIn("# init:", config.render(json_output=False))
 
     def test_namespace_values_seed_process_state(self):
         args = cli._build_parser().parse_args([
@@ -63,6 +102,8 @@ class InteractionConfigTests(unittest.TestCase):
             "--enable-auto-compaction=False",
             "--max-samples", "3",
             "--max-output-tokens", "2048",
+            "--auto-compact-tokens", "500000",
+            "--max-context-tokens", "1000000",
         ])
 
         config = InteractionConfig.from_namespace(args)
@@ -72,14 +113,40 @@ class InteractionConfigTests(unittest.TestCase):
             "max_samples": 3,
             "max_output_tokens": 2048,
             "enable_auto_compaction": False,
+            "auto_compact_tokens": 500000,
+            "max_context_tokens": 1000000,
         })
         self.assertEqual(
             config.snapshot().sampling_options(),
             SamplingOptions(
                 max_output_tokens=2048,
                 enable_auto_compaction=False,
+                auto_compact_tokens=500000,
             ),
         )
+
+    def test_context_limit_keys_validate_and_stay_independent(self):
+        for key in ("auto_compact_tokens", "max_context_tokens"):
+            self.assertIsNone(parse_config_literal(key, "null"))
+            self.assertEqual(parse_config_literal(key, "123"), 123)
+            for bad in ("0", "-1", "1.5", "True", "x"):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ConfigError):
+                        parse_config_literal(key, bad)
+
+        config = InteractionConfig()
+        self.assertIsNone(config.snapshot().sampling_options())
+        config.set("auto_compact_tokens", 500000)
+        self.assertEqual(
+            config.snapshot().sampling_options(),
+            SamplingOptions(auto_compact_tokens=500000),
+        )
+        # max_context_tokens is informational: no auto<=max gate.
+        config.set("max_context_tokens", 1000)
+        self.assertEqual(config.get("auto_compact_tokens"), 500000)
+        self.assertEqual(config.get("max_context_tokens"), 1000)
+        config.set("auto_compact_tokens", None)
+        self.assertIsNone(config.snapshot().sampling_options())
 
     def test_messages_uses_catalog_fallback_and_explicit_precedence(self):
         catalogued = cli._build_parser().parse_args([

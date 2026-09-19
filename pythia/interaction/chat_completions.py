@@ -367,6 +367,11 @@ def _apply_sampling_options(
         payload["stop"] = list(options.stop)
     if options.seed is not None:
         payload["seed"] = options.seed
+    # TODO: hack for non-standard API.
+    payload["thinking"] = {
+        "type": "enabled",
+    }
+    payload["reasoning_effort"] = "max"
 
 
 def _coerce_content_text(value: Any, field_name: str) -> str:

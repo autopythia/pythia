@@ -202,6 +202,20 @@ for module in (cli, demo):
             self.assertIsNone(cli_args.pop("prompt_file"))
             self.assertEqual(cli_args, demo_args)
 
+    def test_context_limit_arguments_validate(self):
+        # Context-limit args are positive ints (or unset) and chat-completions
+        # accepts them; Messages enforces its compaction minimum.
+        for option in ("--auto-compact-tokens", "--max-context-tokens"):
+            args = cli._build_parser().parse_args(["--model", "m", option, "0"])
+            with self.assertRaisesRegex(ValueError, option.lstrip("-")):
+                cli.build_model(args)
+        messages = cli._build_parser().parse_args([
+            "--model-api", "messages", "--model", "claude-fable-5-1",
+            "--auto-compact-tokens", "100",
+        ])
+        with self.assertRaisesRegex(ValueError, "at least 50000"):
+            cli.build_model(messages)
+
     def test_enable_arguments_accept_bare_and_explicit_booleans(self):
         cases = (
             ((), True),
@@ -514,6 +528,32 @@ class CLIDisabledToolsTests(_ControllerTestCase):
 
 
 class CLIControllerTests(_ControllerTestCase):
+    async def test_auto_compact_tokens_config_drives_compaction(self):
+        save_interaction_save(self.path, InteractionContext((
+            Init("old"), Message("assistant", "old answer"),
+            SampleMetadata(TokenUsage(total_tokens=100)),
+            ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100),
+        )))
+        model = _Model(self.path, _answer("continued"))
+        # The config value drives compaction even though the model exposes no
+        # auto-compaction attribute of its own.
+        self.assertFalse(hasattr(model, "auto_compact_context_tokens"))
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult((
+            ContextPrefix((Message("assistant", "summary"),)),
+        ))
+        commands = deque(("/quit",))
+        terminal = _Terminal(
+            lambda t, e, s: t.submit(commands.popleft())
+            if s == "idle" and commands else None
+        )
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+            self.assertEqual(await self._run(model, terminal, [
+                "--enable-default-tools=False", "--resume",
+                "--auto-compact-tokens", "100", "--prompt", "continue",
+            ]), 0)
+        self.assertEqual(compactor.compact.call_count, 1)
+        self.assertEqual(len(model.calls), 1)
     async def test_sampling_spinner_changes_and_returns_to_idle_prompt(self):
         release = threading.Event()
         sampling_prompts = []

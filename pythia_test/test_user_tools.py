@@ -101,10 +101,15 @@ class UserToolValueTests(unittest.TestCase):
             "max_samples = None",
             "max_output_tokens = None",
             "enable_auto_compaction = True",
+            "auto_compact_tokens = None",
+            "max_context_tokens = None",
         )))
         json_dump = execute("/config.json")
         self.assertTrue(json_dump.success)
-        self.assertEqual(json.loads(json_dump.output), config.values())
+        self.assertEqual(
+            json.loads(json_dump.output),
+            {**config.values(), "__init__": config.initial_values()},
+        )
 
         updated = execute("/config max_output_tokens 2048")
         self.assertTrue(updated.success)
@@ -112,7 +117,10 @@ class UserToolValueTests(unittest.TestCase):
         self.assertEqual(config.get("max_output_tokens"), 2048)
         cleared = execute("/config.json max_output_tokens None")
         self.assertTrue(cleared.success)
-        self.assertEqual(json.loads(cleared.output), {"max_output_tokens": None})
+        self.assertEqual(
+            json.loads(cleared.output),
+            {"max_output_tokens": None, "__init__": {"max_output_tokens": None}},
+        )
         self.assertIsNone(config.get("max_output_tokens"))
         workspace = execute("/config enable_workspace False")
         self.assertTrue(workspace.success)
@@ -423,6 +431,16 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 "max_samples": None,
                 "max_output_tokens": None,
                 "enable_auto_compaction": True,
+                "auto_compact_tokens": None,
+                "max_context_tokens": None,
+                "__init__": {
+                    "enable_workspace": True,
+                    "max_samples": None,
+                    "max_output_tokens": None,
+                    "enable_auto_compaction": True,
+                    "auto_compact_tokens": None,
+                    "max_context_tokens": None,
+                },
             },
         )
         self.assertEqual(config_results[1].result.output, "max_output_tokens = 17")
