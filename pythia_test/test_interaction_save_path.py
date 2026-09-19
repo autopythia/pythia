@@ -68,6 +68,8 @@ class SaveArgumentTests(_SavePathTestCase):
         self.assertFalse(demo_args.pop("experimental_user_message_injection"))
         cli_args = vars(cli._build_parser().parse_args(argv))
         self.assertTrue(cli_args.pop("enable_default_tools"))
+        self.assertFalse(cli_args.pop("headless"))
+        self.assertIsNone(cli_args.pop("prompt_file"))
         self.assertEqual(cli_args, demo_args)
 
     def test_raw_validation_rejects_empty_nul_stream_and_old_flag(self):

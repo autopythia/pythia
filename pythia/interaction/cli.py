@@ -1,7 +1,8 @@
 """Caller-owned interaction loop with a scrollback POSIX terminal shell.
 
-Run with ``python3 -m pythia.interaction.cli``. Line-shell compatibility and
-active-effect interruption are deliberately deferred.
+Run with ``python3 -m pythia.interaction.cli``. ``--headless`` runs one explicit
+task without a terminal. Line-shell input and active-effect interruption are
+deliberately deferred.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from dataclasses import field
 import os
 from pathlib import Path
 import queue
+import signal
 import sys
 import threading
 import time
@@ -25,7 +27,9 @@ from typing import Sequence
 from typing import Union
 
 from ._cli_editor import Editor
+from ._cli_editor import safe_text
 from ._cli_terminal import PosixTerminal
+from ._prompt import load_prompt
 from .codex_auth import CodexAuthUnavailable
 from .compaction import CompactionError
 from .compaction import CompactionResult
@@ -89,6 +93,7 @@ class _UIState:
     editor: Editor = field(default_factory=Editor)
     pending: deque[Union[str, UserToolIntent, _RetryIntent]] = field(default_factory=deque)
     retry: Optional[_RetryIntent] = None
+    headless: bool = False
     displays: deque[DisplayItem] = field(default_factory=deque)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     closing: bool = False
@@ -109,7 +114,10 @@ class _UIState:
 
     def notice(self, text: str) -> None:
         text = text.rstrip("\r\n")
-        self.displays.append(DisplayItem(f"[cli] {text}"))
+        if self.headless:
+            print(safe_text(f"[cli] {text}"), file=sys.stderr, flush=True)
+        else:
+            self.displays.append(DisplayItem(f"[cli] {text}"))
 
     def request_exit(self) -> None:
         self.closing = True
@@ -854,6 +862,8 @@ async def _drive_interaction(
                     config,
                 )
             state.set_phase("auth needed" if state.auth_required else "idle")
+            if state.headless:
+                return
         except Exception as exc:
             state.exit_code = 1
             state.ready = True
@@ -877,11 +887,16 @@ async def _drive_interaction(
                 state.retry = None
                 # Retain the unsaved context here until exit; never replay the effect.
                 state.notice(
-                    "Checkpoint failed; unsaved state remains in memory. Use /quit."
+                    "Checkpoint failed; unsaved state remains in memory. "
+                    + ("No further work will run." if state.headless else "Use /quit.")
                 )
+                if state.headless:
+                    return
                 while not state.closing:
                     await state.changed.wait()
                     state.changed.clear()
+                return
+            if state.headless:
                 return
             if sampling_attempt and state.retry is not None and not state.closing:
                 # Keep all existing diagnostics above, then append guidance.
@@ -893,14 +908,7 @@ async def _drive_interaction(
                 )
 
 
-async def _run(
-    model: Optional[Model],
-    environment: Environment,
-    terminal: PosixTerminal,
-    args: argparse.Namespace,
-    path: Path = DEFAULT_SAVE_PATH,
-) -> int:
-    path = Path(path).absolute()
+def _runtime_config(environment, args):
     workspace_update = getattr(environment, "set_enable_workspace", None)
     config = InteractionConfig.from_namespace(
         args,
@@ -910,15 +918,10 @@ async def _run(
     )
     if callable(workspace_update):
         workspace_update(config.get("enable_workspace"))
-    prompt = args.prompt or ""
-    state = _UIState(
-        editor=Editor(prompt, len(prompt)), auth_required=model is None,
-        bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
-    )
-    state.notice(
-        "pythia.interaction — /retry, /compact, /config, /config.json, /login, /quota; "
-        "/quit or /exit; Ctrl-C/Ctrl-D exit."
-    )
+    return config
+
+
+def _startup_notices(state, args, path):
     state.notice(f"Save log: {path}")
     if args.enable_default_tools:
         state.notice(
@@ -931,9 +934,73 @@ async def _run(
                 "outside --cwd."
             )
     else:
-        state.notice(
-            "Default model tools disabled; user commands remain available."
-        )
+        state.notice("Default model tools disabled; user commands remain available."
+                     if not state.headless else "Default model tools disabled.")
+
+
+async def _run_headless(model, environment, args, path):
+    """One explicit task, quiet context display, and orderly effect draining."""
+    if model is None:
+        raise ValueError("Headless execution requires an available model.")
+    path = Path(path).absolute()
+    config = _runtime_config(environment, args)
+    state = _UIState(
+        headless=True,
+        bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
+    )
+    _startup_notices(state, args, path)
+    loop = asyncio.get_running_loop()
+    interrupted = False
+    previous_sigint = None
+
+    def interrupt(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+        loop.call_soon_threadsafe(state.request_exit)
+
+    if threading.current_thread() is threading.main_thread():
+        # asyncio.run on older Python versions cancels *all* tasks on SIGINT.
+        # Request a cooperative stop instead, so the effect owner can save.
+        previous_sigint = signal.signal(signal.SIGINT, interrupt)
+    worker = asyncio.create_task(_drive_interaction(model, environment, state, args, path, config))
+    try:
+        while not worker.done():
+            # The controller's display queue is transient, not a second log.
+            state.displays.clear()
+            await asyncio.wait((worker,), timeout=0.05)
+        worker.result()
+    finally:
+        try:
+            state.request_exit()
+            # Cancellation/SIGINT must not close command resources before an
+            # in-flight request/tool has finished and checkpointed its outcome.
+            await asyncio.shield(worker)
+            state.displays.clear()
+        finally:
+            if previous_sigint is not None:
+                signal.signal(signal.SIGINT, previous_sigint)
+    return 130 if interrupted else state.exit_code
+
+
+async def _run(
+    model: Optional[Model],
+    environment: Environment,
+    terminal: PosixTerminal,
+    args: argparse.Namespace,
+    path: Path = DEFAULT_SAVE_PATH,
+) -> int:
+    path = Path(path).absolute()
+    config = _runtime_config(environment, args)
+    prompt = args.prompt or ""
+    state = _UIState(
+        editor=Editor(prompt, len(prompt)), auth_required=model is None,
+        bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
+    )
+    state.notice(
+        "pythia.interaction — /retry, /compact, /config, /config.json, /login, /quota; "
+        "/quit or /exit; Ctrl-C/Ctrl-D exit."
+    )
+    _startup_notices(state, args, path)
     worker = None
     frame = 0
     with terminal:
@@ -986,7 +1053,16 @@ async def _run(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = build_parser(
-        "Interactive POSIX shell using Pythia's caller-owned interaction API."
+        "Interactive POSIX shell or headless task using Pythia's caller-owned interaction API.",
+        allow_prompt_file=True,
+    )
+    parser.add_argument(
+        "--headless", nargs="?", const=True, default=False,
+        type=_boolean_argument, metavar="{False,True}",
+        help=("run one explicit prompt without a TUI, stdin reads, or context display; "
+              "save the interaction and exit. Requires --prompt/--prompt-file or "
+              "--resume with --instructions and an existing save. A bare flag "
+              "means True (default: %(default)s)"),
     )
     parser.add_argument(
         "--enable-default-tools",
@@ -1008,10 +1084,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        if os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty():
+        args.prompt = load_prompt(args)
+        if not args.headless and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty()):
             raise ValueError(
                 "interaction CLI requires POSIX terminal stdin/stdout; "
-                "line-shell mode is deferred"
+                "use --headless with --prompt or --prompt-file for one task"
             )
         if args.prompt is not None and not args.prompt.strip():
             raise ValueError("prompt must be a non-empty string or None")
@@ -1020,10 +1097,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.max_output_tokens is not None:
             SamplingOptions(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
+        if (args.headless and args.prompt is None
+                and not (args.resume and args.instructions is not None and save_path.is_file())):
+            raise ValueError(
+                "--headless requires --prompt or --prompt-file, or "
+                "--resume with --instructions and an existing save."
+            )
         try:
             model = build_model(args)
         except CodexAuthUnavailable:
-            if not supports_account_services(args):
+            if args.headless or not supports_account_services(args):
                 raise
             model = None
         cwd = Path(args.cwd).expanduser().resolve()
@@ -1032,8 +1115,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.enable_default_tools else nullcontext(Environment())
         )
         with environment_manager as environment:
+            if args.headless:
+                return asyncio.run(_run_headless(model, environment, args, path=save_path))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(model, environment, terminal, args, path=save_path))
+    except KeyboardInterrupt:
+        return 130
     except Exception as exc:
         print(f"interaction CLI failed: {exc}", file=sys.stderr)
         return 1

@@ -24,6 +24,7 @@ from ._auto_board import Board, BoardError, BoardService, atomic_text
 from ._auto_config import DEFAULTS, NAMES, build_parser, load_saved_config, namespace, resolve_config
 from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
+from ._prompt import load_prompt
 from .compaction import CompactionResult, create_default_compactor, should_auto_compact
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
@@ -772,6 +773,7 @@ def main(argv=None):
     session = None
     exit_code = 1
     try:
+        args.prompt = load_prompt(args)
         if not 0 <= args.board_port <= 65535:
             raise ValueError("board-port must be between 0 and 65535.")
         if args.prompt is not None and not args.prompt.strip():

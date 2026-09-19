@@ -9,6 +9,7 @@ import re
 from urllib.parse import urlsplit
 
 from ._auto_board import parse_json
+from ._prompt import add_prompt_arguments
 from .model import SamplingOptions
 from .model_config import _boolean_argument
 from .runtime_config import InteractionConfig
@@ -177,7 +178,10 @@ def build_parser():
     parser.add_argument("--save", type=Path, default=Path("interaction-auto"),
                         help=("New or resumed save directory; existing paths require --resume "
                               "(default: interaction-auto)."))
-    parser.add_argument("--prompt", help="Post one user task as a fresh board thread; run without a TTY.")
+    add_prompt_arguments(
+        parser, allow_file=True,
+        prompt_help="Post one user task as a fresh board thread; run without a TTY.",
+    )
     parser.add_argument(
         "--resume", action="store_true",
         help=("resume the auto save selected by --save; a missing directory starts fresh, "

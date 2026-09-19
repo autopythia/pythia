@@ -6,6 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
+from ._prompt import add_prompt_arguments
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
 from .messages import MessagesEndpoint
@@ -161,7 +162,7 @@ def _model_argument_help() -> str:
     return "model name; uncatalogued names pass through. Catalog presets: " + "; ".join(entries)
 
 
-def build_parser(description: str) -> argparse.ArgumentParser:
+def build_parser(description: str, *, allow_prompt_file: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--model-api",
@@ -226,7 +227,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
             "(default: %(default)s seconds; not an overall deadline)"
         ),
     )
-    parser.add_argument("--prompt")
+    add_prompt_arguments(parser, allow_file=allow_prompt_file)
     parser.add_argument(
         "--instructions",
         default=None,
