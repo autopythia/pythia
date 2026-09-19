@@ -59,6 +59,7 @@ from .items import ToolResult
 from .items import SampleMetadata
 from .items import TurnSummary
 from .items import UserInteractionBoundary
+from .media import content_item_to_responses
 from .model import ModelConfigurationError
 from .model import ModelAuthenticationError
 from .model import ModelContextWindowError
@@ -414,18 +415,13 @@ def _encode_context_items(
                 raise ModelConfigurationError(
                     f"unsupported message role at item {index}: {item.role!r}"
                 )
-            content_type = (
-                "output_text" if item.role == "assistant" else "input_text"
-            )
             encoded.append(
                 {
                     "type": "message",
                     "role": system_role if item.role == "system" else item.role,
                     "content": [
-                        {
-                            "type": content_type,
-                            "text": item.content,
-                        }
+                        content_item_to_responses(part, item.role)
+                        for part in item.parts
                     ],
                 }
             )
@@ -2367,7 +2363,7 @@ class ResponsesOpaqueCompactor:
     def _is_retained_user_message(self, message: Message) -> bool:
         if message.role != "user":
             return False
-        if message.content.startswith(f"{DEFAULT_SUMMARY_PREFIX}\n"):
+        if message.content_text.startswith(f"{DEFAULT_SUMMARY_PREFIX}\n"):
             return False
         if self._retain_user_message is not None:
             return bool(self._retain_user_message(message))

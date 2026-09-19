@@ -30,10 +30,12 @@ from .environment import ToolHandler
 from .environment import ToolOutcome
 from .environment import ToolSpec
 from .items import CompactionMetadata
+from .items import ContentPart
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
+from .items import MediaPart
 from .items import Message
 from .items import ModelFailure
 from .items import ModelSampleBoundary
@@ -42,6 +44,7 @@ from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
 from .items import SampleMetadata
+from .items import TextPart
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
@@ -119,6 +122,7 @@ __all__ = [
     "Compactor",
     "CONFIG_KEYS",
     "ConfigError",
+    "ContentPart",
     "ContextPrefix",
     "ContextValidationError",
     "DefaultEnvironment",
@@ -138,6 +142,7 @@ __all__ = [
     "InteractionConfigSnapshot",
     "InteractionContext",
     "Instructions",
+    "MediaPart",
     "Message",
     "MESSAGES_COMPACTION_BETA",
     "META_RESPONSES_API_URL",
@@ -174,6 +179,7 @@ __all__ = [
     "SamplingOptions",
     "Init",
     "SaveError",
+    "TextPart",
     "TokenUsage",
     "Tool",
     "ToolCall",

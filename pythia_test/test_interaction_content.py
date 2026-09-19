@@ -82,7 +82,7 @@ class InteractionContentTests(unittest.TestCase):
 
     def test_codec_rejects_missing_or_invalid_content_without_fallback(self):
         fields_to_reject = [{}]
-        for value in (None, True, 123, [], {}, [{"type": "text", "text": "hi"}]):
+        for value in (None, True, 123, {}):
             fields_to_reject.extend((
                 {"content": value},
                 {"text": value},
@@ -94,6 +94,22 @@ class InteractionContentTests(unittest.TestCase):
                 with self.subTest(item_type=base["type"], fields=fields):
                     with self.assertRaisesRegex(SaveError, "(content|text) must be a string"):
                         interaction_item_from_dict({**base, **fields})
+        # A list is only meaningful for a `message` record as a content-part
+        # array; malformed arrays are still rejected, and Reasoning never
+        # accepts a list.
+        for fields in (
+            {"content": []},
+            {"content": [{"type": "text"}]},
+            {"content": [{"type": "media"}]},
+            {"content": [{"type": "input_text", "text": "hi"}]},
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaises(SaveError):
+                    interaction_item_from_dict(
+                        {"type": "message", "role": "user", **fields}
+                    )
+        with self.assertRaises(SaveError):
+            interaction_item_from_dict({"type": "reasoning", "content": []})
 
     def test_jsonl_loads_legacy_new_and_mixed_logs_and_normalizes_on_save(self):
         expected = InteractionContext((

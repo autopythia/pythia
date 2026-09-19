@@ -399,6 +399,11 @@ def _encode_context(
             continue
 
         if isinstance(item, Message):
+            if not isinstance(item.content, str):
+                raise ModelConfigurationError(
+                    "media message content is not supported with the "
+                    "Messages API yet"
+                )
             if item.role in {"system", "developer"}:
                 if conversation_started:
                     raise ModelConfigurationError(

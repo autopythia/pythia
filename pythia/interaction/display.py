@@ -27,6 +27,7 @@ from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
 from .items import SampleMetadata
+from .items import TextPart
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
@@ -372,11 +373,40 @@ def render_interaction_items(
     )
 
 
+def _format_byte_count(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MiB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size} B"
+
+
+def _describe_non_text_source(source_uri: str) -> str:
+    """A compact, payload-free label for a ``MediaPart`` source URI."""
+    if not source_uri.startswith("data:"):
+        return source_uri
+    header, _, encoded = source_uri.partition(",")
+    media_type = header[len("data:"):].split(";", 1)[0]
+    if not media_type:
+        media_type = "application/octet-stream"
+    padding = encoded[-2:].count("=")
+    size = max(0, len(encoded) * 3 // 4 - padding)
+    return f"{media_type} {_format_byte_count(size)}"
+
+
 def _render_message(item: Message) -> Tuple[str, ...]:
-    if not item.content.strip():
-        return ()
     role = item.role.strip() or "message"
-    return (f"[{role}] {item.content}",)
+    blocks = []
+    text = item.content_text
+    if text.strip():
+        blocks.append(f"[{role}] {text}")
+    for part in item.parts:
+        if isinstance(part, TextPart):
+            continue
+        blocks.append(
+            f"[{role}] [image] {_describe_non_text_source(part.source_uri)}"
+        )
+    return tuple(blocks)
 
 
 def _render_instructions(item: Instructions) -> Tuple[str, ...]:

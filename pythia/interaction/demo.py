@@ -29,6 +29,7 @@ from .items import ToolResult
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import summarize_turn_usage
+from .media import parse_user_prompt
 from .model import Model
 from .model import ModelError
 from .model import SamplingOptions
@@ -73,6 +74,9 @@ def run(
     save_path: Optional[Union[str, Path]] = None,
     resume: bool = False,
     enable_auto_compaction: bool = True,
+    enable_media: bool = False,
+    enable_workspace: bool = True,
+    cwd: Path = Path("."),
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
@@ -82,6 +86,10 @@ def run(
         raise TypeError("resume must be a bool")
     if not isinstance(enable_auto_compaction, bool):
         raise TypeError("enable_auto_compaction must be a bool")
+    if not isinstance(enable_media, bool):
+        raise TypeError("enable_media must be a bool")
+    if not isinstance(enable_workspace, bool):
+        raise TypeError("enable_workspace must be a bool")
     if prompt is not None and (
         not isinstance(prompt, str) or not prompt.strip()
     ):
@@ -178,8 +186,14 @@ def run(
     if prompt is not None:
         # For a resumed save, add the follow-up only after any pending
         # tool batch has been made valid again.
+        message = parse_user_prompt(
+            prompt,
+            cwd=Path(cwd).expanduser().resolve(),
+            enabled=enable_media,
+            enable_workspace=enable_workspace,
+        )
         user_interaction = UserInteraction(
-            items=(Message(role="user", content=prompt),),
+            items=(message,),
         )
         context.extend(user_interaction.context_items())
         _persist()
@@ -310,7 +324,7 @@ def _final_assistant_text(context: InteractionContext) -> Optional[str]:
         if isinstance(item, ModelFailure):
             return None
         if isinstance(item, Message) and item.role == "assistant":
-            return item.content
+            return item.content_text
         return None
     return None
 
@@ -393,6 +407,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 save_path=save_path,
                 resume=args.resume,
                 enable_auto_compaction=args.enable_auto_compaction,
+                enable_media=args.enable_experimental_media,
+                enable_workspace=args.enable_workspace,
+                cwd=cwd,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

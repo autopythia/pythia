@@ -58,13 +58,111 @@ class Init:
 
 
 @dataclass(frozen=True)
+class TextPart:
+    """A plain-text content item inside a media ``Message``.
+
+    Mirrors the Responses ``input_text``/``output_text`` content item. A
+    text-only message is stored as a plain ``str`` and never carries this type,
+    so it is normally only observed alongside a non-text part.
+    """
+
+    text: str
+
+    def __post_init__(self) -> None:
+        _require_string(self.text, "TextPart.text")
+
+
+@dataclass(frozen=True)
+class MediaPart:
+    """A non-text media content item.
+
+    ``source_uri`` is an ``http(s)`` URL or a ``data:`` URL. This slice only
+    produces images, and every media part is serialized as the Responses
+    ``input_image`` content item and the Chat Completions ``image_url`` part.
+
+    TODO: always emitted as ``input_image`` for now. Add Responses
+    ``input_file``, filename, and ``detail`` handling once file/document
+    support is designed.
+    """
+
+    source_uri: str
+
+    def __post_init__(self) -> None:
+        _require_string(self.source_uri, "MediaPart.source_uri", allow_empty=False)
+        if "\r" in self.source_uri or "\n" in self.source_uri:
+            raise ValueError("MediaPart.source_uri must not contain newlines")
+
+
+ContentPart = Union[TextPart, MediaPart]
+
+
+@dataclass(frozen=True)
 class Message:
+    """An input or output message (there is no separate output message type).
+
+    ``content`` is either plain text (a ``str``) or an ordered tuple of content
+    parts mirroring a Responses ``content`` array. A tuple containing only
+    ``TextPart`` items is canonicalized back to a ``str`` in ``__post_init__``,
+    so ``content`` is a string exactly when the message is text-only. Non-text
+    parts are only permitted for ``role == "user"``.
+    """
+
     role: str
-    content: str
+    content: Union[str, Tuple[ContentPart, ...]]
 
     def __post_init__(self) -> None:
         _require_string(self.role, "role", allow_empty=False)
-        _require_string(self.content, "content")
+        content = self.content
+        if isinstance(content, str):
+            return
+        if isinstance(content, (list, tuple)):
+            parts = tuple(content)
+            if not parts:
+                raise TypeError(
+                    "content must be a string or a non-empty sequence of "
+                    "content parts"
+                )
+            for index, part in enumerate(parts):
+                if not isinstance(part, (TextPart, MediaPart)):
+                    raise TypeError(
+                        "content must be a string or a tuple of typed content "
+                        f"parts; content[{index}] is {type(part).__name__}"
+                    )
+            object.__setattr__(self, "content", parts)
+            if all(isinstance(part, TextPart) for part in parts):
+                object.__setattr__(
+                    self, "content", "\n".join(part.text for part in parts)
+                )
+                return
+            if self.role != "user":
+                raise ValueError(
+                    "non-text content parts require role 'user'; "
+                    f"got {self.role!r}"
+                )
+            return
+        raise TypeError("content must be a string or a tuple of content parts")
+
+    @property
+    def has_media(self) -> bool:
+        return not isinstance(self.content, str)
+
+    @property
+    def content_text(self) -> str:
+        """The concatenated text projection, for every role."""
+        content = self.content
+        if isinstance(content, str):
+            return content
+        return "\n".join(
+            part.text for part in content if isinstance(part, TextPart)
+        )
+
+    @property
+    def parts(self) -> Tuple[ContentPart, ...]:
+        """The ordered content view; a string becomes a single text part."""
+        content = self.content
+        if isinstance(content, str):
+            return (TextPart(content),)
+        return content
 
 
 @dataclass(frozen=True)
@@ -610,6 +708,8 @@ def is_interaction_item(value: object) -> bool:
 
 __all__ = [
     "ContextPrefix",
+    "ContentPart",
+    "MediaPart",
     "Instructions",
     "InteractionItem",
     "Message",
@@ -618,6 +718,7 @@ __all__ = [
     "OpaqueCompaction",
     "Reasoning",
     "Init",
+    "TextPart",
     "ToolCall",
     "ToolResult",
     "UserToolCall",

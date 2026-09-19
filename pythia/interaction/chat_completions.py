@@ -39,6 +39,7 @@ from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
 from .items import SampleMetadata
+from .items import TextPart
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
@@ -224,7 +225,35 @@ def _encode_context_messages(
                     f"unsupported message role at item {index}: {item.role!r}"
                 )
             flush_assistant()
-            messages.append({"role": item.role, "content": item.content})
+            if isinstance(item.content, str):
+                messages.append({"role": item.role, "content": item.content})
+            else:
+                # Non-text content is user-only (constructor-enforced); the
+                # OpenAI chat format uses text/image_url parts here.
+                if item.role != "user":
+                    raise ModelConfigurationError(
+                        "media content requires the user role at item "
+                        f"{index}: {item.role!r}"
+                    )
+                # TODO: an attachment-only message emits an image_url-only
+                # array. If a provider rejects that, add a leading empty
+                # {"type": "text", "text": ""} part (waiting on a real error).
+                messages.append(
+                    {
+                        "role": item.role,
+                        "content": [
+                            (
+                                {"type": "text", "text": part.text}
+                                if isinstance(part, TextPart)
+                                else {
+                                    "type": "image_url",
+                                    "image_url": {"url": part.source_uri},
+                                }
+                            )
+                            for part in item.content
+                        ],
+                    }
+                )
             continue
 
         if isinstance(item, Reasoning):

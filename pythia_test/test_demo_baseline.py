@@ -43,6 +43,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "cwd": ".",
     "enable_auto_compaction": True,
     "enable_workspace": True,
+    "enable_experimental_media": False,
     "max_samples": None,
     "max_output_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,

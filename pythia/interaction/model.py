@@ -248,8 +248,8 @@ class ModelSample:
     @property
     def last_assistant_text(self) -> Optional[str]:
         for item in reversed(self.items):
-            if isinstance(item, Message) and item.content:
-                return item.content
+            if isinstance(item, Message) and item.content_text:
+                return item.content_text
         return None
 
 

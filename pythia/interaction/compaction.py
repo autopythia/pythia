@@ -242,15 +242,17 @@ def _select_retained_user_messages(
     for message in reversed(messages):
         if remaining == 0:
             break
-        tokens = _approx_token_count(message.content)
+        tokens = _approx_token_count(message.content_text)
         if tokens <= remaining:
             selected_reversed.append(message)
             remaining -= tokens
             continue
+        # Truncation drops any non-text parts: a partial image/file is not
+        # meaningful and would still consume provider budget.
         selected_reversed.append(
             Message(
                 role="user",
-                content=_truncate_text_to_tokens(message.content, remaining),
+                content=_truncate_text_to_tokens(message.content_text, remaining),
             )
         )
         break
@@ -328,7 +330,7 @@ class PromptSummarizingCompactor:
     def _is_retained_user_message(self, message: Message) -> bool:
         if message.role != "user":
             return False
-        if message.content.startswith(f"{self._summary_prefix}\n"):
+        if message.content_text.startswith(f"{self._summary_prefix}\n"):
             return False
         if self._retain_user_message is not None:
             return bool(self._retain_user_message(message))

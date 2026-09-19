@@ -212,6 +212,19 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
         ),
     )
     parser.add_argument(
+        "--enable-experimental-media",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "experimental: convert leading @path-or-uri tokens in user "
+            "prompts into media message content; launch-only "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--max-samples",
         type=int,
         default=None,

@@ -10,14 +10,17 @@ from typing import Iterable
 from typing import Iterator
 from typing import Mapping
 from typing import Optional
+from typing import Tuple
 from typing import Union
 
 from .context import InteractionContext
 from .items import CompactionMetadata
+from .items import ContentPart
 from .items import ContextPrefix
 from .items import Init
 from .items import Instructions
 from .items import InteractionItem
+from .items import MediaPart
 from .items import Message
 from .items import ModelFailure
 from .items import ModelSampleBoundary
@@ -26,6 +29,7 @@ from .items import Reasoning
 from .items import ToolCall
 from .items import ToolResult
 from .items import SampleMetadata
+from .items import TextPart
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
@@ -76,6 +80,20 @@ def _item_type_name(item: InteractionItem) -> str:
     return _ITEM_TYPES[item_type]
 
 
+def _content_part_to_dict(part: ContentPart) -> Dict[str, Any]:
+    """Encode one in-memory content part using its own (non-wire) shape.
+
+    The durable record mirrors the in-memory ``TextPart``/``MediaPart`` types;
+    the Responses ``input_text``/``input_image`` mapping happens only when a
+    request is assembled (see ``responses._encode_context_items``).
+    """
+    if isinstance(part, TextPart):
+        return {"type": "text", "text": part.text}
+    if isinstance(part, MediaPart):
+        return {"type": "media", "source_uri": part.source_uri}
+    raise SaveError(f"cannot encode content part type {type(part).__name__}")
+
+
 def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     """Encode an interaction item as a JSON-compatible dictionary."""
     encoded: Dict[str, Any] = {"type": _item_type_name(item)}
@@ -87,7 +105,13 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
     elif isinstance(item, Instructions):
         encoded.update(text=item.text)
     elif isinstance(item, Message):
-        encoded.update(role=item.role, content=item.content)
+        if isinstance(item.content, str):
+            encoded.update(role=item.role, content=item.content)
+        else:
+            encoded.update(
+                role=item.role,
+                content=[_content_part_to_dict(part) for part in item.content],
+            )
     elif isinstance(item, Init):
         encoded["prefix_id"] = item.prefix_id
         if item.model is not None:
@@ -238,6 +262,39 @@ def _require_init_prefix_id(mapping: Mapping[str, Any]) -> str:
     return prefix_id
 
 
+def _message_content_parts(value: Any) -> Tuple[ContentPart, ...]:
+    """Decode a durable content array into in-memory content parts."""
+    parts = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise SaveError(f"message.content[{index}] must be an object")
+        part_type = entry.get("type")
+        if part_type == "text":
+            parts.append(
+                TextPart(
+                    text=_require_string(
+                        entry.get("text"),
+                        f"message.content[{index}].text",
+                    )
+                )
+            )
+        elif part_type == "media":
+            source_uri = entry.get("source_uri")
+            if not isinstance(source_uri, str) or not source_uri:
+                raise SaveError(
+                    f"message.content[{index}].source_uri must be a "
+                    "non-empty string"
+                )
+            parts.append(MediaPart(source_uri=source_uri))
+        else:
+            raise SaveError(
+                f"unsupported message.content[{index}] type: {part_type!r}"
+            )
+    if not parts:
+        raise SaveError("message.content list must not be empty")
+    return tuple(parts)
+
+
 def _optional_string(
     mapping: Mapping[str, Any],
     key: str,
@@ -291,8 +348,15 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
             text=_require_string(mapping.get("text"), "instructions.text"),
         )
     if item_type == "message":
+        role = _require_string(mapping.get("role"), "message.role")
+        raw_content = mapping.get("content")
+        if isinstance(raw_content, list):
+            return Message(
+                role=role,
+                content=_message_content_parts(raw_content),
+            )
         return Message(
-            role=_require_string(mapping.get("role"), "message.role"),
+            role=role,
             content=_require_content(mapping, "message"),
         )
     if item_type in {"init", "session_init"}:

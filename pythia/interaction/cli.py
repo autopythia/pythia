@@ -58,6 +58,8 @@ from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
 from .items import summarize_turn_usage
+from .media import AttachmentError
+from .media import parse_user_prompt
 from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
@@ -725,6 +727,7 @@ async def _drive_interaction(
     path: Path,
     config: InteractionConfig,
 ) -> None:
+    attachment_cwd = Path(args.cwd).expanduser().resolve()
     existing = args.resume and await asyncio.to_thread(path.exists)
     if existing:
         context = await asyncio.to_thread(load_interaction_save, path)
@@ -848,7 +851,33 @@ async def _drive_interaction(
             if state.closing:
                 return
             if query is not None:
-                user = UserInteraction((Message(role="user", content=query),))
+                try:
+                    message = parse_user_prompt(
+                        query,
+                        cwd=attachment_cwd,
+                        enabled=args.enable_experimental_media,
+                        enable_workspace=args.enable_workspace,
+                    )
+                    if message.has_media and args.model_api not in {
+                        "codex",
+                        "codex-responses",
+                        "chat-completions",
+                    }:
+                        raise AttachmentError(
+                            f"--model-api {args.model_api} does not support "
+                            "media prompts; use codex-responses or "
+                            "chat-completions"
+                        )
+                except AttachmentError as exc:
+                    state.notice(str(exc))
+                    if state.headless:
+                        state.exit_code = 1
+                        state.set_phase("failed")
+                        return
+                    state.editor = Editor(query, len(query))
+                    state.set_phase("idle")
+                    continue
+                user = UserInteraction((message,))
                 await _append(context, user.context_items(), state, path)
                 state.displays.extend(user.display_items())
             if should_sample:
