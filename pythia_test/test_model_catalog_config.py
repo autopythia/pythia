@@ -1,3 +1,7 @@
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import responses_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import FrozenInstanceError, replace
 import io
@@ -12,9 +16,8 @@ from unittest import mock
 from pythia.interaction import (
     BUILTIN_MODEL_CATALOG, ConfigError, Environment, InteractionConfig,
     InteractionContext, Message, ModelCatalog, ModelSample, ResolvedSamplingParams,
-    ResolvedSamplingOptions, SamplingParams, SamplingOptions,
+    SamplingParams,
     load_model_catalog, parse_model_catalog,
-    sample_model,
 )
 from pythia.interaction import auto, cli, demo, model_catalog, responses
 from pythia.interaction._auto_config import build_parser, load_saved_config, namespace, resolve_config
@@ -28,15 +31,14 @@ from pythia.interaction.save import SaveError
 from pythia.interaction.model_catalog_config import MAX_CATALOG_BYTES
 
 
-HEADER = "[catalog]\nversion = 1\n"
+HEADER = "[catalog]\nversion = 2\n"
 LOCAL = """
 [model.local-max]
-route.api = chat-completions
-route.api_model = served-local
+endpoint.api = chat-completions
+endpoint.model = served-local
+endpoint.url = http://127.0.0.1:8000/v1/chat/completions
+endpoint.auth = none
 aliases = ["local-alias"]
-route.provider = local
-route.api_url = http://127.0.0.1:8000
-route.auth_source = explicit
 limits.auto_compact_context_tokens = 100000
 limits.max_context_tokens = 150000
 limits.max_output_tokens = 32000
@@ -45,11 +47,10 @@ request_params.reasoning_effort = "max"
 """
 MESSAGE = """
 [model.worker]
-api = messages
-api_model = served-messages
-route.provider = remote
-route.api_url = https://messages.example.test
-route.auth_source = explicit
+endpoint.api = messages
+endpoint.model = served-messages
+endpoint.url = https://messages.example.test/v1/messages
+endpoint.auth = none
 limits.auto_compact_context_tokens = 60000
 limits.max_context_tokens = 80000
 limits.max_output_tokens = 8000
@@ -57,12 +58,10 @@ messages.output_effort = high
 """
 CODEX = """
 [model.code-env]
-route.api = codex
-route.api_model = served-code
-route.provider = custom
-route.api_url = https://responses.example.test/v1
-route.auth_source = environment
-route.api_key_environment_variable = CATALOG_TEST_TOKEN
+endpoint.api = codex
+endpoint.model = served-code
+endpoint.url = https://responses.example.test/v1/responses
+endpoint.auth = env:CATALOG_TEST_TOKEN
 responses.reasoning_effort = high
 """
 
@@ -93,12 +92,11 @@ class CatalogParserTests(unittest.TestCase):
         registry = catalog(LOCAL + MESSAGE)
         spec = registry.get_model_spec("chat-completions", "local-alias")
         self.assertEqual(spec.name, "local-max")
-        self.assertEqual(spec.api_model, "served-local")
+        self.assertEqual(spec.endpoint.model, "served-local")
         self.assertEqual(spec.request_params["thinking"]["budget_tokens"], 1000)
         self.assertEqual(spec.limits.max_context_tokens, 150000)
         self.assertEqual(registry.bind(name="worker").api, "messages")
         self.assertIsNone(model_catalog.get_model_spec("chat-completions", "local-max"))
-        self.assertIs(registry.get_model_route("chat-completions", "local-alias"), spec.route)
         self.assertIn(spec, registry.list_model_specs("chat-completions"))
 
     def test_parser_preserves_case_percent_comments_and_multiline_json(self):
@@ -125,8 +123,8 @@ responses.text_verbosity = medium
         changed = registry.get_model_spec("codex", original.name)
         self.assertEqual(changed.limits.auto_compact_context_tokens, 700000)
         self.assertEqual(changed.responses.text_verbosity, "medium")
-        self.assertEqual(changed.route, original.route)
-        self.assertEqual(changed.api_model, original.api_model)
+        self.assertEqual(changed.endpoint, original.endpoint)
+        self.assertEqual(changed.endpoint.model, original.endpoint.model)
         self.assertEqual(changed.responses.reasoning_summary, original.responses.reasoning_summary)
         self.assertEqual(changed.limits.max_context_tokens, original.limits.max_context_tokens)
         self.assertEqual(original.limits.auto_compact_context_tokens, 872000)
@@ -156,7 +154,7 @@ request_params = {}
     def test_alias_replacement_and_nullable_field_clear(self):
         registry = catalog('''[model.claude-fable-5-1]
 override = true
-route.api = messages
+endpoint.api = messages
 aliases = ["my-fable"]
 limits.auto_compact_context_tokens = null
 ''')
@@ -165,12 +163,12 @@ limits.auto_compact_context_tokens = null
         self.assertIsNone(registry.bind("messages", "my-fable").limits.auto_compact_context_tokens)
         self.assertIsNotNone(model_catalog.get_model_spec("messages", "claude-fable-5.1"))
 
-    def test_shorthands_duplicate_spellings_and_invalid_schema(self):
-        valid = LOCAL.replace("route.api =", "api =").replace("route.api_model =", "api_model =")
-        self.assertEqual(catalog(valid).bind(name="local-max").api_model, "served-local")
+    def test_old_spellings_and_invalid_schema_are_rejected(self):
         bad = (
             LOCAL + "api = chat-completions\n",
             LOCAL + "api_model = other\n",
+            LOCAL.replace("endpoint.api =", "route.api ="),
+            LOCAL.replace("endpoint.model =", "route.api_model ="),
             LOCAL + "unknown = value\n",
             LOCAL.replace("limits.max_context_tokens = 150000", "limits.max_context_tokens = true"),
             LOCAL.replace('aliases = ["local-alias"]', 'aliases = "alias"'),
@@ -179,12 +177,12 @@ limits.auto_compact_context_tokens = null
             LOCAL + "request_params.duplicate = {\"x\":1,\"x\":2}\n",
             LOCAL + "request_params.nonfinite = NaN\n",
             LOCAL + "request_params.nonfinite = 1e999\n",
-            LOCAL.replace("route.auth_source = explicit", "route.auth_source = codex-login"),
-            LOCAL.replace("route.api_url = http://127.0.0.1:8000", "route.api_url = https://user:secret@example.test"),
-            LOCAL.replace("route.auth_source = explicit", "route.auth_source = environment\nroute.api_key_environment_variable = BAD-NAME"),
+            LOCAL.replace("endpoint.auth = none", "endpoint.auth = codex-login"),
+            LOCAL.replace("http://127.0.0.1:8000", "https://user:secret@example.test"),
+            LOCAL.replace("endpoint.auth = none", "endpoint.auth = env:BAD-NAME"),
             MESSAGE.replace("60000", "49999"),
             MESSAGE + 'request_params.thinking = {"type":"enabled"}\n',
-            '[model.gpt-6-astra]\noverride = true\nroute.api = null\n',
+            '[model.gpt-6-astra]\noverride = true\nendpoint.api = null\n',
             '[model.missing]\noverride = true\n',
             '[model.claude-fable-5.1]\noverride = true\n',
             LOCAL.replace("local-max", "gpt-6-astra").replace("chat-completions", "codex"),
@@ -198,7 +196,8 @@ limits.auto_compact_context_tokens = null
             HEADER + LOCAL + LOCAL,
             HEADER + LOCAL + 'request_params.reasoning_effort = "low"\n',
             HEADER + "[DEFAULT]\noverride = true\n" + LOCAL,
-            HEADER.replace("1", "2") + LOCAL,
+            HEADER.replace("version = 2", "version = 1") + LOCAL,
+            HEADER.replace("version = 2", "version = 3") + LOCAL,
             LOCAL, HEADER + "[other]\nx = 1\n", HEADER + "unknown = 1\n",
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
@@ -234,14 +233,14 @@ limits.auto_compact_context_tokens = null
         registry = catalog(LOCAL.replace("local-max", "gpt-6-astra"))
         with self.assertRaisesRegex(ValueError, "Ambiguous"):
             registry.bind(name="gpt-6-astra")
-        self.assertEqual(registry.bind("codex", "gpt-6-astra").api_model, "gpt-6-astra")
-        self.assertEqual(registry.bind("chat-completions", "gpt-6-astra").api_model, "served-local")
+        self.assertEqual(registry.bind("codex", "gpt-6-astra").endpoint.model, "gpt-6-astra")
+        self.assertEqual(registry.bind("chat-completions", "gpt-6-astra").endpoint.model, "served-local")
         isolated = registry.bind("messages", "gpt-6-astra")
         self.assertIsNone(isolated.spec)
         self.assertFalse(isolated.request_params)
         with self.assertRaises(ValueError):
             catalog('[model.gpt-6-astra]\noverride = true\nsource = patch\n', base=registry)
-        patched = catalog('[model.gpt-6-astra]\noverride = true\napi = codex-responses\nsource = patch\n', base=registry)
+        patched = catalog('[model.gpt-6-astra]\noverride = true\nendpoint.api = codex\nsource = patch\n', base=registry)
         self.assertEqual(patched.get_model_spec("codex", "gpt-6-astra").source, "patch")
 
     def test_discovery_is_explicit_bounded_and_missing_default_is_optional(self):
@@ -320,8 +319,9 @@ class BoundRequestTests(unittest.TestCase):
         self.assertIsInstance(model, MessagesModel)
         self.assertEqual(model.endpoint.max_output_tokens, 8000)
         self.assertEqual(model.max_context_tokens, 80000)
-        with mock.patch("pythia.interaction.messages.get_model_spec", side_effect=AssertionError("late lookup")):
-            payload = model._build_request_payload(context(), (), cfg.snapshot().sampling_params())
+        payload = model._build_request_payload(
+            context(), (), cfg.snapshot().sampling_params(),
+        )
         self.assertEqual(payload["model"], "served-messages")
         self.assertEqual(payload["output_config"], {"effort": "high"})
         self.assertEqual(payload["context_management"]["edits"][0]["trigger"]["value"], 60000)
@@ -333,9 +333,11 @@ class BoundRequestTests(unittest.TestCase):
                 mock.patch.object(responses, "load_codex_auth", side_effect=AssertionError("ambient credentials")):
             model = build_model(args)
         self.assertEqual(model.endpoint.bearer_token, "fake-token")
-        self.assertEqual(model.endpoint.api_url, "https://responses.example.test/v1")
-        with mock.patch.object(responses, "get_model_spec", side_effect=AssertionError("late lookup")):
-            payload, _ = model._build_request_payload(context(), (), None)
+        self.assertEqual(
+            model.endpoint.url,
+            "https://responses.example.test/v1/responses",
+        )
+        payload, _ = model._build_request_payload(context(), (), None)
         self.assertEqual(payload["model"], "served-code")
         self.assertEqual(payload["reasoning"]["effort"], "high")
         self.assertFalse(model.supports_remote_compaction)
@@ -345,9 +347,11 @@ class BoundRequestTests(unittest.TestCase):
                 mock.patch.object(responses, "load_codex_auth", side_effect=AssertionError("stale raw path")):
             self.assertEqual(build_model(args).endpoint.bearer_token, "fake-token")
 
-    def test_forged_provider_label_cannot_grant_account_or_compaction_services(self):
-        text = CODEX.replace("route.provider = custom", "route.provider = chatgpt").replace(
-            "https://responses.example.test/v1", model_catalog.CODEX_RESPONSES_API_URL)
+    def test_endpoint_location_alone_cannot_grant_account_or_compaction_services(self):
+        text = CODEX.replace(
+            "https://responses.example.test/v1",
+            model_catalog.CODEX_RESPONSES_API_URL,
+        )
         args = args_for(catalog(text), "--model", "code-env")
         with mock.patch.dict("os.environ", {"CATALOG_TEST_TOKEN": "fake-token"}):
             model = build_model(args)
@@ -355,7 +359,7 @@ class BoundRequestTests(unittest.TestCase):
         self.assertFalse(model.supports_remote_compaction)
 
     def test_chat_environment_reference_resolved_only_for_selected_model(self):
-        text = LOCAL.replace("route.auth_source = explicit", "route.auth_source = environment\nroute.api_key_environment_variable = CATALOG_TEST_TOKEN")
+        text = LOCAL.replace("endpoint.auth = none", "endpoint.auth = env:CATALOG_TEST_TOKEN")
         with mock.patch("os.environ.get", side_effect=no_credentials):
             registry = catalog(text)
             args = args_for(registry, "--model", "local-max")
@@ -370,14 +374,14 @@ class BoundRequestTests(unittest.TestCase):
         args = args_for(first, "--model", "local-max")
         cfg, model = InteractionConfig.from_namespace(args), build_model(args)
         second = catalog(LOCAL.replace("served-local", "other-wire").replace("100000", "110000"))
-        self.assertEqual(second.bind(name="local-max").api_model, "other-wire")
+        self.assertEqual(second.bind(name="local-max").endpoint.model, "other-wire")
         self.assertEqual(cfg.set("auto_compact_tokens", None), 100000)
         self.assertEqual(model._build_request_payload(context(), (), None)["model"], "served-local")
         self.assertIsNone(model_catalog.get_model_spec("chat-completions", "local-max"))
 
     def test_direct_library_endpoints_do_not_load_a_home_catalog(self):
         with mock.patch("os.open", side_effect=AssertionError("implicit catalog read")):
-            endpoint = ChatCompletionsEndpoint("http://localhost:8000", "local-max",
+            endpoint = chat_endpoint("http://localhost:8000", "local-max",
                                                request_params={"reasoning_effort": "high"})
             payload = ChatCompletionsModel(endpoint)._build_request_payload(context(), (), None)
         self.assertEqual(payload["model"], "local-max")
@@ -388,63 +392,26 @@ class BoundRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Load and bind"):
             build_model(args)
         registry = catalog()
-        self.assertEqual(build_model(args, catalog=registry).binding.api_model, "served-local")
+        self.assertEqual(build_model(args, catalog=registry).binding.endpoint.model, "served-local")
         self.assertEqual(InteractionConfig.from_namespace(args, catalog=registry).get("auto_compact_tokens"), 100000)
 
     def test_unconfigured_chat_sampling_does_not_enable_reasoning(self):
-        model = ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost:8000", "literal"))
+        model = ChatCompletionsModel(chat_endpoint("http://localhost:8000", "literal"))
         for params in (None, SamplingParams(max_output_tokens=77), ResolvedSamplingParams(max_output_tokens=77)):
             payload = model._build_request_payload(context(), (), params)
             self.assertNotIn("thinking", payload)
             self.assertNotIn("reasoning_effort", payload)
 
     def test_api_inference_does_not_send_ambient_codex_login_to_a_proxy(self):
-        args = cli._build_parser().parse_args(["--model", "gpt-6-astra", "--api-url", "http://localhost:8000"])
+        args = cli._build_parser().parse_args([
+            "--model", "gpt-6-astra",
+            "--endpoint-url", "http://localhost:8000/v1/chat/completions",
+        ])
         with mock.patch.object(responses, "load_codex_auth", side_effect=AssertionError("credential read")):
-            with self.assertRaisesRegex(ValueError, "explicit --api"):
+            with self.assertRaisesRegex(ValueError, "explicit --endpoint-auth"):
                 build_model(args)
         args.model_api = "chat-completions"
         self.assertIsInstance(build_model(args), ChatCompletionsModel)
-
-    def test_params_aliases_and_keyword_conflicts(self):
-        self.assertIs(SamplingParams, SamplingOptions)
-        self.assertIs(ResolvedSamplingParams, ResolvedSamplingOptions)
-        cfg = InteractionConfig()
-        self.assertEqual(cfg.snapshot().sampling_params(), cfg.snapshot().sampling_options())
-        models = [build_model(args_for(catalog(LOCAL + MESSAGE), "--model", name)) for name in ("local-max", "worker")]
-        models.append(responses.CodexResponsesModel(
-            responses.StreamingResponsesEndpoint("https://responses.example.test/v1", "wire", "fake")))
-        for model in models:
-            with self.subTest(model=type(model)), mock.patch.object(model, "_opener", side_effect=AssertionError("network")):
-                with self.assertRaisesRegex(TypeError, "not both"):
-                    model.sample(context(), options=None, sampling_params=None)
-        with self.assertRaisesRegex(TypeError, "not both"):
-            demo.run(models[0], Environment(), options=None, sampling_params=None)
-
-    def test_custom_modern_and_legacy_models_work_without_retrying_typeerrors(self):
-        calls = []
-        class Modern:
-            def sample(self, ctx, *, tools=(), sampling_params=None):
-                calls.append(("modern", sampling_params))
-                return ModelSample((Message("assistant", "done"),))
-        class Legacy:
-            def sample(self, ctx, *, tools=(), options=None):
-                calls.append(("legacy", options))
-                return ModelSample((Message("assistant", "done"),))
-        params = SamplingParams(max_output_tokens=17)
-        for model in (Modern(), Legacy()):
-            with redirect_stdout(io.StringIO()):
-                self.assertEqual(demo.run(model, Environment(), sampling_params=params), "done")
-        self.assertEqual([kind for kind, _ in calls], ["modern", "legacy"])
-        self.assertTrue(all(value.max_output_tokens == 17 for _, value in calls))
-        class Failing:
-            def sample(self, ctx, *, tools=(), sampling_params=None):
-                calls.append(("failed", sampling_params))
-                raise TypeError("error inside sample")
-        with self.assertRaisesRegex(TypeError, "inside sample"):
-            sample_model(Failing(), context(), sampling_params=params)
-        self.assertEqual([kind for kind, _ in calls].count("failed"), 1)
-
 
 class AutoCatalogTests(unittest.TestCase):
     def test_context_api_can_disambiguate_a_common_model_without_repeating_it(self):
@@ -459,8 +426,8 @@ class AutoCatalogTests(unittest.TestCase):
             }))
             settings = resolve_config(path, catalog=registry)
             self.assertEqual(settings[1]["model"], "gpt-6-astra")
-            self.assertEqual(namespace(settings[1], registry).model_binding.api_model, "gpt-6-astra")
-            self.assertEqual(namespace(settings[2], registry).model_binding.api_model, "served-local")
+            self.assertEqual(namespace(settings[1], registry).model_binding.endpoint.model, "gpt-6-astra")
+            self.assertEqual(namespace(settings[2], registry).model_binding.endpoint.model, "served-local")
 
     def test_context_api_inference_clearing_and_params_do_not_leak(self):
         registry = catalog(LOCAL + MESSAGE)
@@ -516,7 +483,7 @@ class AutoCatalogTests(unittest.TestCase):
             self.assertIsNone(settings[2]["codex_home"])
             self.assertEqual(settings[1]["codex_home"], directory)
 
-    def test_save_roundtrip_keeps_raw_nulls_and_legacy_schema_upgrades(self):
+    def test_saved_config_requires_the_current_complete_schema(self):
         registry = catalog()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -525,18 +492,26 @@ class AutoCatalogTests(unittest.TestCase):
             for row in document["contexts"].values():
                 row.pop("request_params")
             path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "Invalid saved"):
+                load_saved_config(path)
+            path.write_text(json.dumps({
+                "version": 1,
+                "contexts": {str(i): dict(s) for i, s in settings.items()},
+            }))
             saved = load_saved_config(path)
             current = resolve_config(saved=saved, catalog=registry)
             self.assertIsNone(current[1]["request_params"])
             self.assertIsNone(current[1]["model_api"])
-            self.assertEqual(namespace(current[1], registry).model_binding.api_model, "served-local")
+            self.assertEqual(namespace(current[1], registry).model_binding.endpoint.model, "served-local")
 
 
 class CatalogEntrypointTests(unittest.TestCase):
-    def test_api_flag_alias_and_help_are_independent_of_home_catalog(self):
+    def test_endpoint_api_flag_and_help_are_independent_of_home_catalog(self):
         for parser in (cli._build_parser(), demo._build_parser(), build_parser()):
-            self.assertEqual(parser.parse_args(["--api", "messages"]).model_api,
-                             parser.parse_args(["--model-api", "messages"]).model_api)
+            self.assertEqual(
+                parser.parse_args(["--endpoint-api", "messages"]).model_api,
+                "messages",
+            )
         for frontend in (cli, demo, auto):
             with mock.patch("os.open", side_effect=AssertionError("help must not read catalog")), \
                     redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as result:

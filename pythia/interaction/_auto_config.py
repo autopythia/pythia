@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-import re
 from urllib.parse import urlsplit
 
 from ._auto_board import parse_json
 from ._prompt import add_prompt_arguments
-from .model import SamplingOptions
+from .model import SamplingParams
 from .model_config import _boolean_argument
 from .model_config import add_catalog_arguments, add_endpoint_arguments, prepare_namespace
 from .model_catalog import BUILTIN_MODEL_CATALOG, freeze_request_params, thaw_json
@@ -20,9 +19,9 @@ from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 NAMES = {1: "main", 2: "worker", -1: "watcher"}
 DEFAULTS = {
-    "model_api": None, "model": None, "api_url": None,
+    "model_api": None, "model": None,
     "endpoint_url": None, "endpoint_model": None, "endpoint_auth": None,
-    "api_key_env": None, "codex_home": None, "codex_auth_file": None,
+    "codex_home": None, "codex_auth_file": None,
     "cwd": ".", "max_samples": None, "max_output_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
     "enable_workspace": True, "enable_auto_compaction": True,
@@ -30,13 +29,10 @@ DEFAULTS = {
     "request_params": None,
     "instructions": None,
 }
-_APIS = {"chat-completions", "messages", "codex", "codex-responses"}
-_PROVIDER_FIELDS = ("model", "api_url", "endpoint_url", "endpoint_model", "endpoint_auth",
-                    "api_key_env", "codex_home", "codex_auth_file")
+_APIS = {"chat-completions", "messages", "codex"}
+_PROVIDER_FIELDS = ("model", "endpoint_url", "endpoint_model", "endpoint_auth",
+                    "codex_home", "codex_auth_file")
 _PATHS = ("cwd", "codex_home", "codex_auth_file")
-# Added after the original v1 saved schema; other fields remain required.
-_V1_OPTIONAL_FIELDS = frozenset(("auto_compact_tokens", "max_context_tokens", "request_params",
-                                  "endpoint_url", "endpoint_model", "endpoint_auth"))
 
 
 class AutoSettings(dict):
@@ -51,10 +47,6 @@ def _layer(value, base):
     if not isinstance(value, dict) or set(value) - (set(DEFAULTS) | {"name"}):
         raise ValueError("Invalid auto configuration fields (use credential references, not API keys).")
     value = dict(value)
-    if value.get("api_url") is not None and value.get("endpoint_url") is not None:
-        raise ValueError("Use endpoint_url or legacy api_url, not both.")
-    if value.get("endpoint_auth") is not None and value.get("api_key_env") is not None:
-        raise ValueError("Use endpoint_auth or api_key_env, not both.")
     api = value.get("model_api")
     if api is not None and (not isinstance(api, str) or api not in _APIS):
         raise ValueError("Unsupported auto model API.")
@@ -74,11 +66,10 @@ def _layer(value, base):
 
 def _identity(settings, catalog):
     api, name = settings["model_api"], settings["model"]
-    if api == "codex-responses":
-        api = "codex"
     if api is None:
         matches = catalog.matches(name) if isinstance(name, str) else ()
-        api = matches[0].profile if len(matches) == 1 else (None if matches else "chat-completions")
+        api = (matches[0].endpoint.api if len(matches) == 1
+               else (None if matches else "chat-completions"))
     if api in _APIS and isinstance(name, str):
         spec = catalog.get_model_spec(api, name)
         name = spec.name if spec is not None else name.strip()
@@ -108,17 +99,9 @@ def _merge(current, value, catalog):
             current[key] = None
     if before != after:
         current["request_params"] = None
-    if value.get("endpoint_url") is not None:
-        current["api_url"] = None
-    if value.get("api_url") is not None:
-        current["endpoint_url"] = None
     if value.get("endpoint_auth") is not None:
-        current["api_key_env"] = None
         if value["endpoint_auth"] != "codex-login":
             current["codex_home"] = current["codex_auth_file"] = None
-    if value.get("api_key_env") is not None:
-        current["endpoint_auth"] = None
-        current["codex_home"] = current["codex_auth_file"] = None
     previous_params = current.get("request_params") or {}
     current.update(value)
     if isinstance(value.get("request_params"), dict):
@@ -175,18 +158,16 @@ def load_saved_config(path):
     except (OSError, ValueError, RecursionError):
         raise ValueError("Could not load saved auto configuration.") from None
     expected = set(DEFAULTS) | {"name"}
-    required = expected - _V1_OPTIONAL_FIELDS
     contexts = document.get("contexts") if isinstance(document, dict) else None
     if (not isinstance(document, dict)
             or set(document) != {"version", "contexts"}
             or type(document.get("version")) is not int or document["version"] != 1
             or not isinstance(contexts, dict) or set(contexts) != {"1", "2", "-1"}
-            or any(not isinstance(value, dict) or not required <= set(value) <= expected
+            or any(not isinstance(value, dict) or set(value) != expected
                    for value in contexts.values())):
         raise ValueError("Invalid saved auto configuration.")
     return {
-        index: _layer({**{key: None for key in _V1_OPTIONAL_FIELDS},
-                       **contexts[str(index)]}, path.parent)
+        index: _layer(contexts[str(index)], path.parent)
         for index in NAMES
     }
 
@@ -209,9 +190,6 @@ def _validate(settings, catalog):
     instructions = settings["instructions"]
     if instructions is not None and not isinstance(instructions, str):
         raise ValueError("instructions must be text or null.")
-    env = settings["api_key_env"]
-    if env is not None and (not isinstance(env, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env) is None):
-        raise ValueError("api_key_env must name an environment variable.")
     timeout = settings["request_timeout_seconds"]
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
             not math.isfinite(timeout) or timeout <= 0):
@@ -219,7 +197,7 @@ def _validate(settings, catalog):
     samples = settings["max_samples"]
     if samples is not None and (type(samples) is not int or samples <= 0):
         raise ValueError("max_samples must be a positive integer or null.")
-    url = settings["api_url"]
+    url = settings["endpoint_url"]
     if url is not None:
         try:
             if not isinstance(url, str):
@@ -231,10 +209,10 @@ def _validate(settings, catalog):
                 raise ValueError()
             parsed.port  # Validate the numeric/range syntax without connecting.
         except (TypeError, ValueError):
-            raise ValueError("api_url must be an HTTP(S) URL without credentials/query/fragment.") from None
+            raise ValueError("endpoint_url must be an HTTP(S) URL without credentials/query/fragment.") from None
     if not Path(settings["cwd"]).is_dir():
         raise ValueError("Context cwd must be an existing directory.")
-    SamplingOptions(max_output_tokens=settings["max_output_tokens"])
+    SamplingParams(max_output_tokens=settings["max_output_tokens"])
     # Reuse provider-aware max-output-token and runtime setting validation.
     InteractionConfig.from_namespace(args)
 

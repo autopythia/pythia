@@ -7,7 +7,6 @@ import re
 import socket
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -49,10 +48,9 @@ from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
-from .model import SamplingOptions
-from .model import ResolvedSamplingOptions
-from .model import UNSET_SAMPLING_PARAMS, select_sampling_params
-from .model_catalog import ModelBinding, bind_endpoint, bound_transport_inputs, thaw_json
+from .model import SamplingParams
+from .model import ResolvedSamplingParams
+from .model_catalog import ModelBinding, thaw_json
 from .model import TokenUsage
 from .model import _timed_sample
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -64,74 +62,17 @@ _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 @dataclass(frozen=True)
 class ChatCompletionsEndpoint:
-    api_url: Optional[str] = None
-    model: Optional[str] = None
+    binding: ModelBinding = field(repr=False)
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     api_key: Optional[str] = field(default=None, repr=False)
-    binding: Optional[ModelBinding] = field(default=None, repr=False)
-    request_params: Optional[Mapping] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        bound = self.binding is not None
-        model, prefix = bound_transport_inputs("chat-completions", self.model, self.api_url, self.binding)
-        object.__setattr__(self, "model", model)
-        object.__setattr__(self, "api_url", prefix)
-        if not bound:
-            if not isinstance(self.api_url, str):
-                raise TypeError("api_url must be a string")
-            api_url = self.api_url.strip()
-            if not api_url:
-                raise ModelConfigurationError("api_url must not be empty")
-            if any(character.isspace() for character in api_url):
-                raise ModelConfigurationError(
-                    "api_url must not contain whitespace"
-                )
-
-            try:
-                parsed = urllib.parse.urlsplit(api_url)
-                hostname = parsed.hostname
-                port = parsed.port
-            except ValueError as exc:
-                raise ModelConfigurationError("api_url is invalid") from exc
-            scheme = parsed.scheme.lower()
-            if scheme not in {"http", "https"}:
-                raise ModelConfigurationError(
-                    "api_url scheme must be 'http' or 'https'"
-                )
-            if not parsed.netloc or hostname is None:
-                raise ModelConfigurationError(
-                    "api_url must be an absolute URL with a host"
-                )
-            if port == 0:
-                raise ModelConfigurationError(
-                    "api_url port must be from 1 through 65535"
-                )
-            if parsed.username is not None or parsed.password is not None:
-                raise ModelConfigurationError(
-                    "api_url must not contain user information"
-                )
-            if parsed.query:
-                raise ModelConfigurationError("api_url must not contain a query")
-            if parsed.fragment:
-                raise ModelConfigurationError(
-                    "api_url must not contain a fragment"
-                )
-            path_prefix = parsed.path.rstrip("/")
-            if path_prefix.endswith("/v1/chat/completions"):
-                raise ModelConfigurationError(
-                    "api_url must not include the fixed "
-                    "/v1/chat/completions path"
-                )
-            api_url = urllib.parse.urlunsplit(
-                (scheme, parsed.netloc, path_prefix, "", "")
+        if not isinstance(self.binding, ModelBinding):
+            raise TypeError("binding must be ModelBinding")
+        if self.binding.api != "chat-completions":
+            raise ModelConfigurationError(
+                "Chat Completions endpoint requires a chat-completions binding"
             )
-            object.__setattr__(self, "api_url", api_url)
-
-        if self.model is not None:
-            if not isinstance(self.model, str):
-                raise TypeError("model must be a string or None")
-            model = self.model.strip() or None
-            object.__setattr__(self, "model", model)
 
         if self.api_key is not None:
             if not isinstance(self.api_key, str):
@@ -156,13 +97,12 @@ class ChatCompletionsEndpoint:
                 "request_timeout_seconds must be positive and finite"
             )
         object.__setattr__(self, "request_timeout_seconds", float(timeout))
-        binding = bind_endpoint("chat-completions", self.model, self.api_url,
-                                self.binding, self.request_params,
-                                auth="supplied" if self.api_key is not None else "none")
-        if bound and ((binding.endpoint.auth == "none") != (self.api_key is None)):
+        if ((self.binding.endpoint.auth == "none") != (self.api_key is None)):
             raise ModelConfigurationError("Credentials do not match the resolved endpoint auth policy")
-        object.__setattr__(self, "binding", binding)
-        object.__setattr__(self, "request_params", binding.request_params)
+
+    @property
+    def model(self) -> Optional[str]:
+        return self.binding.endpoint.model
 
     @property
     def url(self) -> str:
@@ -370,24 +310,20 @@ def _encode_tools(tools: Sequence[Any]) -> List[Dict[str, Any]]:
 
 def _apply_sampling_params(
     payload: Dict[str, Any],
-    options: Optional[SamplingOptions],
+    sampling_params: Optional[SamplingParams],
 ) -> None:
-    if options is None:
+    if sampling_params is None:
         return
-    if options.max_output_tokens is not None:
-        payload["max_tokens"] = options.max_output_tokens
-    if options.temperature is not None:
-        payload["temperature"] = options.temperature
-    if options.top_p is not None:
-        payload["top_p"] = options.top_p
-    if options.stop:
-        payload["stop"] = list(options.stop)
-    if options.seed is not None:
-        payload["seed"] = options.seed
-
-
-# Compatibility spelling for callers of the former encoder helper.
-_apply_sampling_options = _apply_sampling_params
+    if sampling_params.max_output_tokens is not None:
+        payload["max_tokens"] = sampling_params.max_output_tokens
+    if sampling_params.temperature is not None:
+        payload["temperature"] = sampling_params.temperature
+    if sampling_params.top_p is not None:
+        payload["top_p"] = sampling_params.top_p
+    if sampling_params.stop:
+        payload["stop"] = list(sampling_params.stop)
+    if sampling_params.seed is not None:
+        payload["seed"] = sampling_params.seed
 
 
 def _coerce_content_text(value: Any, field_name: str) -> str:
@@ -679,7 +615,7 @@ class ChatCompletionsModel:
         self,
         context: InteractionContext,
         tools: Sequence[Any],
-        options: Optional[SamplingOptions],
+        sampling_params: Optional[SamplingParams],
     ) -> Dict[str, Any]:
         if not isinstance(context, InteractionContext):
             raise TypeError("context must be InteractionContext")
@@ -688,14 +624,15 @@ class ChatCompletionsModel:
             "messages": _encode_context_messages(context.model_items()),
             "stream": False,
         }
-        if self.binding.api_model is not None:
-            payload["model"] = self.binding.api_model
+        if self.binding.endpoint.model is not None:
+            payload["model"] = self.binding.endpoint.model
         encoded_tools = _encode_tools(tools)
         if encoded_tools:
             payload["tools"] = encoded_tools
             payload["parallel_tool_calls"] = False
-        _apply_sampling_params(payload, options)
-        params = (options.request_params if isinstance(options, ResolvedSamplingOptions)
+        _apply_sampling_params(payload, sampling_params)
+        params = (sampling_params.request_params
+                  if isinstance(sampling_params, ResolvedSamplingParams)
                   else self.binding.request_params)
         payload.update(thaw_json(params))
         return payload
@@ -706,11 +643,11 @@ class ChatCompletionsModel:
         context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
-        options=UNSET_SAMPLING_PARAMS,
-        sampling_params=UNSET_SAMPLING_PARAMS,
+        sampling_params: Optional[SamplingParams] = None,
     ) -> ModelSample:
-        options = select_sampling_params(sampling_params, options)
-        payload = self._build_request_payload(context, tools, options)
+        if sampling_params is not None and not isinstance(sampling_params, SamplingParams):
+            raise TypeError("sampling_params must be SamplingParams or None")
+        payload = self._build_request_payload(context, tools, sampling_params)
         try:
             request_data = json.dumps(
                 payload,

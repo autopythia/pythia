@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import chat_endpoint
+
 import json
 import unittest
 from typing import Any
@@ -46,7 +48,7 @@ def _sample_message(message: dict[str, Any]):
             ]
         }
     )
-    endpoint = ChatCompletionsEndpoint(api_url="http://127.0.0.1:1")
+    endpoint = chat_endpoint(api_url="http://127.0.0.1:1")
     model = ChatCompletionsModel(endpoint, opener=opener)
     context = InteractionContext((Message(role="user", content="hello"),))
     return model.sample(context)
@@ -112,7 +114,7 @@ class ReasoningFieldTests(unittest.TestCase):
             }
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://127.0.0.1:1"),
+            chat_endpoint(api_url="http://127.0.0.1:1"),
             opener=opener,
         )
         context = InteractionContext(

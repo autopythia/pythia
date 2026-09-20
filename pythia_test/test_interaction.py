@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import chat_endpoint
+
 import io
 import json
 import socket
@@ -33,7 +35,7 @@ from pythia.interaction import ModelTimeoutError
 from pythia.interaction import ModelTransportError
 from pythia.interaction import PromptSummarizingCompactor
 from pythia.interaction import Reasoning
-from pythia.interaction import SamplingOptions
+from pythia.interaction import SamplingParams
 from pythia.interaction import TokenUsage
 from pythia.interaction import Tool
 from pythia.interaction import ToolCall
@@ -400,37 +402,32 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(USER_AGENT, urllib_headers["User-agent"])
 
     def test_endpoint_builds_url_after_path_prefix(self):
-        endpoint = ChatCompletionsEndpoint(
+        endpoint = chat_endpoint(
             api_url=" HTTPS://api.example.test:8443/proxy/root/ ",
             model=" example-model ",
         )
 
         self.assertEqual(
-            endpoint.api_url,
-            "https://api.example.test:8443/proxy/root",
-        )
-        self.assertEqual(
             endpoint.url,
-            "https://api.example.test:8443/proxy/root/v1/chat/completions",
+            "HTTPS://api.example.test:8443/proxy/root/v1/chat/completions",
         )
         self.assertEqual(endpoint.model, "example-model")
 
     def test_endpoint_normalizes_absent_model(self):
-        endpoint = ChatCompletionsEndpoint(
+        endpoint = chat_endpoint(
             api_url="http://localhost:9000/",
             model=" ",
         )
 
         self.assertIsNone(endpoint.model)
-        self.assertEqual(endpoint.api_url, "http://localhost:9000")
         self.assertEqual(
             endpoint.url,
             "http://localhost:9000/v1/chat/completions",
         )
 
     def test_endpoint_rejects_invalid_configuration(self):
-        with self.assertRaisesRegex(TypeError, "api_url"):
-            ChatCompletionsEndpoint(api_url=object())
+        with self.assertRaises((TypeError, AttributeError)):
+            chat_endpoint(api_url=object())
 
         cases = [
             {"api_url": ""},
@@ -442,7 +439,6 @@ class EndpointTests(unittest.TestCase):
             {"api_url": "http://localhost/prefix#fragment"},
             {"api_url": "http://localhost:not-a-port"},
             {"api_url": "http://localhost:0"},
-            {"api_url": "http://localhost/v1/chat/completions"},
             {
                 "api_url": "http://localhost",
                 "request_timeout_seconds": 0,
@@ -450,16 +446,16 @@ class EndpointTests(unittest.TestCase):
         ]
         for kwargs in cases:
             with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ModelConfigurationError):
-                    ChatCompletionsEndpoint(**kwargs)
+                with self.assertRaises((ModelConfigurationError, ValueError)):
+                    chat_endpoint(**kwargs)
         with self.assertRaisesRegex(TypeError, "retry_sleep"):
             ChatCompletionsModel(
-                ChatCompletionsEndpoint(api_url="http://localhost"),
+                chat_endpoint(api_url="http://localhost"),
                 retry_sleep=object(),
             )
 
     def test_endpoint_validates_and_redacts_api_key(self):
-        endpoint = ChatCompletionsEndpoint(
+        endpoint = chat_endpoint(
             api_url="http://localhost:8000",
             api_key=" example-secret ",
         )
@@ -468,7 +464,7 @@ class EndpointTests(unittest.TestCase):
         self.assertNotIn("example-secret", repr(endpoint))
 
         with self.assertRaisesRegex(TypeError, "api_key"):
-            ChatCompletionsEndpoint(
+            chat_endpoint(
                 api_url="http://localhost:8000",
                 api_key=object(),
             )
@@ -478,7 +474,7 @@ class EndpointTests(unittest.TestCase):
                     ModelConfigurationError,
                     "api_key",
                 ):
-                    ChatCompletionsEndpoint(
+                    chat_endpoint(
                         api_url="http://localhost:8000",
                         api_key=api_key,
                     )
@@ -554,7 +550,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(response)
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(
+            chat_endpoint(
                 api_url="http://localhost:8000",
                 model="demo",
             ),
@@ -579,7 +575,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         sample = model.sample(
             context,
             tools=(spec,),
-            options=SamplingOptions(
+            sampling_params=SamplingParams(
                 max_output_tokens=100,
                 temperature=0.25,
                 stop=("END",),
@@ -650,7 +646,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             }
         )
         opener = _ScriptedOpener(response)
-        endpoint = ChatCompletionsEndpoint(
+        endpoint = chat_endpoint(
             api_url="https://api.example.test/proxy",
             api_key=" example-secret ",
         )
@@ -713,7 +709,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(first_response, final_response)
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            chat_endpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
 
@@ -801,7 +797,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             }],
         }))
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"), opener=opener,
+            chat_endpoint(api_url="http://localhost:8000"), opener=opener,
         )
         model.sample(context, tools=environment.tool_specs)
         self.assertEqual(_request_payload(opener)["messages"][-2:], [
@@ -826,7 +822,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            chat_endpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
         context = InteractionContext(
@@ -880,7 +876,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            chat_endpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
         context = InteractionContext(
@@ -929,7 +925,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            chat_endpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
         context = InteractionContext(
@@ -969,7 +965,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             )
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            chat_endpoint(api_url="http://localhost:8000"),
             opener=opener,
         )
 
@@ -988,7 +984,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
             ),
         )
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost:8000"),
+            chat_endpoint(api_url="http://localhost:8000"),
             opener=_ScriptedOpener(error),
         )
 
@@ -1014,7 +1010,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         sleeps = []
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="https://api.example.test"),
+            chat_endpoint(api_url="https://api.example.test"),
             opener=opener,
             retry_sleep=sleeps.append,
         )
@@ -1048,7 +1044,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         )
         sleeps = []
         sample = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="https://api.example.test"),
+            chat_endpoint(api_url="https://api.example.test"),
             opener=opener,
             retry_sleep=sleeps.append,
         ).sample(InteractionContext((Message("user", "hello"),)))
@@ -1067,7 +1063,7 @@ class ChatCompletionsModelTests(unittest.TestCase):
         ))
         sleeps = []
         model = ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="https://api.example.test"),
+            chat_endpoint(api_url="https://api.example.test"),
             opener=opener,
             retry_sleep=sleeps.append,
         )
@@ -1335,8 +1331,8 @@ class _ScriptedModel:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def sample(self, context, *, tools=(), options=None):
-        self.calls.append((context.copy(), tuple(tools), options))
+    def sample(self, context, *, tools=(), sampling_params=None):
+        self.calls.append((context.copy(), tuple(tools), sampling_params))
         if not self.outcomes:
             raise AssertionError("unexpected model sample")
         outcome = self.outcomes.pop(0)
@@ -1348,11 +1344,13 @@ class _ScriptedModel:
 class CompactionTests(unittest.TestCase):
     def test_prompt_compaction_output_limit_can_be_overridden(self):
         model = mock.Mock()
-        options = SamplingOptions(max_output_tokens=321)
+        options = SamplingParams(max_output_tokens=321)
 
-        compactor = PromptSummarizingCompactor(model, options=options)
+        compactor = PromptSummarizingCompactor(
+            model, sampling_params=options,
+        )
 
-        self.assertIs(compactor._options, options)
+        self.assertIs(compactor._sampling_params, options)
 
     def test_prompt_compactor_returns_append_only_checkpoint(self):
         usage = TokenUsage(input_tokens=80, output_tokens=20, total_tokens=100)
@@ -1416,7 +1414,7 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(tools, ())
         self.assertEqual(
             options,
-            SamplingOptions(
+            SamplingParams(
                 temperature=0.0,
                 max_output_tokens=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
             ),

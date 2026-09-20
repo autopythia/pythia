@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import responses_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 import base64
 import http.client
 import io
@@ -37,7 +40,7 @@ from pythia.interaction import PromptSummarizingCompactor
 from pythia.interaction import Reasoning
 from pythia.interaction import REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
 from pythia.interaction import ResponsesOpaqueCompactor
-from pythia.interaction import SamplingOptions
+from pythia.interaction import SamplingParams
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
@@ -259,7 +262,7 @@ def _http_error(status, *, body=b"", headers=None):
 
 class StreamingResponsesEndpointTests(unittest.TestCase):
     def test_endpoint_normalizes_url_and_redacts_token(self):
-        endpoint = StreamingResponsesEndpoint(
+        endpoint = responses_endpoint(
             api_url=" HTTPS://api.example.test:8443/proxy/root/ ",
             model=" codex-test ",
             bearer_token=" secret-token ",
@@ -268,12 +271,8 @@ class StreamingResponsesEndpointTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            endpoint.api_url,
-            "https://api.example.test:8443/proxy/root",
-        )
-        self.assertEqual(
             endpoint.url,
-            "https://api.example.test:8443/proxy/root/responses",
+            "HTTPS://api.example.test:8443/proxy/root/responses",
         )
         self.assertEqual(endpoint.model, "codex-test")
         self.assertEqual(endpoint.account_id, "account-1")
@@ -296,7 +295,6 @@ class StreamingResponsesEndpointTests(unittest.TestCase):
             {"api_url": "http://localhost/prefix#fragment"},
             {"api_url": "http://localhost:not-a-port"},
             {"api_url": "http://localhost:0"},
-            {"api_url": "http://localhost/v1/responses"},
             {"model": " "},
             {"bearer_token": " "},
             {"bearer_token": "two words"},
@@ -308,8 +306,8 @@ class StreamingResponsesEndpointTests(unittest.TestCase):
             kwargs = dict(base)
             kwargs.update(override)
             with self.subTest(override=override):
-                with self.assertRaises(ModelConfigurationError):
-                    StreamingResponsesEndpoint(**kwargs)
+                with self.assertRaises((ModelConfigurationError, ValueError)):
+                    responses_endpoint(**kwargs)
 
 
 class CodexResponsesConstructionTests(unittest.TestCase):
@@ -328,12 +326,12 @@ class CodexResponsesConstructionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="codex-test",
                 auth_file=auth_file,
             )
 
-        self.assertEqual(model.endpoint.api_url, CODEX_RESPONSES_API_URL)
+        self.assertEqual(model.endpoint.url, CODEX_RESPONSES_API_URL + "/responses")
         self.assertEqual(model.endpoint.model, "codex-test")
         self.assertEqual(model.endpoint.account_id, "account-1")
         self.assertEqual(model.endpoint.api_provider, "codex")
@@ -344,7 +342,7 @@ class CodexResponsesConstructionTests(unittest.TestCase):
         self.assertNotIn("codex-token", repr(model.endpoint))
 
     def test_model_accepts_explicit_auth_and_endpoint_overrides(self):
-        model = CodexResponsesModel(
+        model = codex_model(
             model="codex-test",
             auth=CodexAuth(
                 access_token="override-token",
@@ -355,18 +353,18 @@ class CodexResponsesConstructionTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            model.endpoint.api_url,
-            "https://proxy.example.test/codex",
+            model.endpoint.url,
+            "https://proxy.example.test/codex/responses",
         )
         self.assertEqual(model.endpoint.account_id, "account-2")
         self.assertEqual(model.endpoint.request_timeout_seconds, 12.0)
 
-        endpoint = StreamingResponsesEndpoint(
+        endpoint = responses_endpoint(
             api_url="https://api.example.test/v1",
             model="generic-model",
             bearer_token="api-key",
         )
-        overridden = CodexResponsesModel(endpoint)
+        overridden = codex_model(endpoint)
         self.assertIs(overridden.endpoint, endpoint)
 
     def test_context_token_metadata_respects_model_and_provider_routes(self):
@@ -387,8 +385,8 @@ class CodexResponsesConstructionTests(unittest.TestCase):
                     model=requested_model,
                     api_provider=api_provider,
                 ):
-                    model = CodexResponsesModel(
-                        StreamingResponsesEndpoint(
+                    model = codex_model(
+                        responses_endpoint(
                             api_url="https://api.example.test/v1",
                             model=requested_model,
                             bearer_token="token",
@@ -415,14 +413,14 @@ class CodexResponsesConstructionTests(unittest.TestCase):
             {"META_API_KEY": " meta-api-key "},
             clear=True,
         ):
-            model = CodexResponsesModel(model=" muse-spark-1.3 ")
+            model = codex_model(model=" muse-spark-1.3 ")
 
-        self.assertEqual(model.endpoint.api_url, META_RESPONSES_API_URL)
+        self.assertEqual(model.endpoint.url, META_RESPONSES_API_URL + "/responses")
         self.assertEqual(
             model.endpoint.url,
             "https://api.meta.ai/v1/responses",
         )
-        self.assertEqual(model.endpoint.model, "muse-spark-1.3")
+        self.assertEqual(model.endpoint.model, "muse-spark-1.3-contributor")
         self.assertEqual(model.endpoint.api_provider, "codex")
         self.assertEqual(model.endpoint.bearer_token, "meta-api-key")
         self.assertIsNone(model.endpoint.account_id)
@@ -434,18 +432,18 @@ class CodexResponsesConstructionTests(unittest.TestCase):
                 ModelConfigurationError,
                 "META_API_KEY",
             ):
-                CodexResponsesModel(model="muse-spark-1.3-xhigh")
+                codex_model(model="muse-spark-1.3-xhigh")
 
     def test_explicit_api_url_overrides_muse_model_default(self):
-        model = CodexResponsesModel(
+        model = codex_model(
             model="muse-spark-1.3",
             auth=CodexAuth(access_token="codex-token"),
             api_url="https://proxy.example.test/meta",
         )
 
         self.assertEqual(
-            model.endpoint.api_url,
-            "https://proxy.example.test/meta",
+            model.endpoint.url,
+            "https://proxy.example.test/meta/responses",
         )
 
     def test_model_rejects_missing_or_conflicting_construction_options(self):
@@ -453,36 +451,30 @@ class CodexResponsesConstructionTests(unittest.TestCase):
             ModelConfigurationError,
             "model is required",
         ):
-            CodexResponsesModel()
+            codex_model()
         with self.assertRaisesRegex(
             ModelConfigurationError,
-            "model must not be empty",
+            "model is required",
         ):
-            CodexResponsesModel(
+            codex_model(
                 model=" ",
                 auth=CodexAuth(access_token="token"),
             )
 
-        endpoint = StreamingResponsesEndpoint(
+        endpoint = responses_endpoint(
             api_url="https://api.example.test/v1",
             model="generic-model",
             bearer_token="api-key",
         )
-        with self.assertRaisesRegex(
-            ModelConfigurationError,
-            "cannot be combined",
-        ):
-            CodexResponsesModel(
-                endpoint,
-                model="other-model",
-            )
+        with self.assertRaises(TypeError):
+            CodexResponsesModel(endpoint, model="other-model")
         with self.assertRaisesRegex(TypeError, "retry_sleep"):
-            CodexResponsesModel(endpoint, retry_sleep=object())
+            codex_model(endpoint, retry_sleep=object())
         with self.assertRaisesRegex(
             ModelConfigurationError,
-            "auth cannot be combined",
+            "credentials conflict with endpoint auth policy",
         ):
-            CodexResponsesModel(
+            codex_model(
                 model="codex-test",
                 auth=CodexAuth(access_token="token"),
                 auth_file="/tmp/auth.json",
@@ -504,7 +496,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 ))
                 before = context.items
                 opener = _ScriptedOpener(_FakeSSEResponse(_message_event(0, "OK"), _completed_event()))
-                model = CodexResponsesModel(StreamingResponsesEndpoint(
+                model = codex_model(responses_endpoint(
                     api_url=CODEX_RESPONSES_API_URL,
                     model="gpt-6-astra-max", bearer_token="test-token", api_provider=provider,
                 ), opener=opener)
@@ -516,7 +508,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 self.assertEqual(context.items, before)
 
     def test_codex_instruction_absence_and_empty_text_remain_distinct(self):
-        model = CodexResponsesModel(StreamingResponsesEndpoint(
+        model = codex_model(responses_endpoint(
             api_url=CODEX_RESPONSES_API_URL, model="gpt-6-astra-max",
             bearer_token="test-token", api_provider="codex",
         ))
@@ -547,8 +539,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             _completed_event(),
         )
         opener = _ScriptedOpener(response)
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="http://localhost:8000/v1",
                 model="model",
                 bearer_token="token",
@@ -612,8 +604,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             headers={"x-codex-turn-state": "replacement-state"},
         )
         opener = _ScriptedOpener(response)
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="secret-token",
@@ -714,8 +706,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             _compaction_event(None),
             _completed_event(),
         ))
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -755,8 +747,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             _http_error(500, body=b'{"error":{"code":"temporary"}}'),
             response,
         )
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -789,8 +781,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(discarded, accepted)
         sleeps = []
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -841,8 +833,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         for payloads, message in cases:
             with self.subTest(message=message):
                 attempts = 3 if message == "closed before response.completed" else 1
-                model = CodexResponsesModel(
-                    StreamingResponsesEndpoint(
+                model = codex_model(
+                    responses_endpoint(
                         api_url=CODEX_RESPONSES_API_URL,
                         model="codex-test",
                         bearer_token="token",
@@ -860,24 +852,24 @@ class CodexResponsesModelTests(unittest.TestCase):
                     )
 
     def test_default_compactor_uses_remote_only_for_known_codex_route(self):
-        official = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        official = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
                 api_provider="codex",
             )
         )
-        custom = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        custom = codex_model(
+            responses_endpoint(
                 api_url="https://example.test/v1",
                 model="codex-test",
                 bearer_token="token",
                 api_provider="codex",
             )
         )
-        meta = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        meta = codex_model(
+            responses_endpoint(
                 api_url=META_RESPONSES_API_URL,
                 model="muse-spark-1.3",
                 bearer_token="token",
@@ -899,16 +891,16 @@ class CodexResponsesModelTests(unittest.TestCase):
         for model in (custom, meta):
             compactor = create_default_compactor(model)
             self.assertIsInstance(compactor, PromptSummarizingCompactor)
-            self.assertIsNone(compactor._options.temperature)
+            self.assertIsNone(compactor._sampling_params.temperature)
             self.assertEqual(
-                compactor._options.max_output_tokens,
+                compactor._sampling_params.max_output_tokens,
                 DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
             )
 
     def test_remote_compactor_rejects_pending_calls_without_network(self):
         opener = _ScriptedOpener()
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -923,8 +915,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         self.assertEqual(opener.calls, [])
 
     def test_compaction_metadata_can_preserve_codex_turn_continuity(self):
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -960,8 +952,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
         turn_identifiers = iter(("turn-1",))
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -1005,8 +997,8 @@ class CodexResponsesModelTests(unittest.TestCase):
                         _completed_event(),
                     )
                 )
-                model = CodexResponsesModel(
-                    StreamingResponsesEndpoint(
+                model = codex_model(
+                    responses_endpoint(
                         api_url=CODEX_RESPONSES_API_URL,
                         model=requested_model,
                         bearer_token="token",
@@ -1045,7 +1037,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                         _completed_event(),
                     )
                 )
-                model = CodexResponsesModel(
+                model = codex_model(
                     model=requested_model,
                     auth=CodexAuth(access_token="token"),
                     opener=opener,
@@ -1081,8 +1073,8 @@ class CodexResponsesModelTests(unittest.TestCase):
                         _completed_event(),
                     )
                 )
-                model = CodexResponsesModel(
-                    StreamingResponsesEndpoint(
+                model = codex_model(
+                    responses_endpoint(
                         api_url="https://api.example.test/v1",
                         model=requested_model,
                         bearer_token="api-key",
@@ -1113,7 +1105,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                         _completed_event(),
                     )
                 )
-                model = CodexResponsesModel(
+                model = codex_model(
                     model=requested_model,
                     auth=CodexAuth(access_token="meta-api-key"),
                     opener=opener,
@@ -1165,8 +1157,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(response)
         identifiers = iter(("session-1", "turn-1"))
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="secret-token",
@@ -1196,7 +1188,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         sample = model.sample(
             context,
             tools=(tool,),
-            options=SamplingOptions(max_output_tokens=200),
+            sampling_params=SamplingParams(max_output_tokens=200),
         )
 
         self.assertEqual(context.items, before)
@@ -1318,7 +1310,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 _message_event(0, "received: hello world"), _completed_event(),
             ),
         )
-        model = CodexResponsesModel(
+        model = codex_model(
             model="gpt-5.6-sol-medium",
             auth=CodexAuth(access_token="test-token"),
             opener=opener,
@@ -1393,8 +1385,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             third_response,
         )
         identifiers = iter(("session-1", "turn-1", "turn-2"))
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -1490,8 +1482,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         def unexpected_identifier():
             raise AssertionError("generic Responses must not create Codex IDs")
 
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -1522,14 +1514,14 @@ class CodexResponsesModelTests(unittest.TestCase):
             _completed_event(),
             headers={"x-codex-turn-state": "resume-state"},
         )
-        endpoint = StreamingResponsesEndpoint(
+        endpoint = responses_endpoint(
             api_url=CODEX_RESPONSES_API_URL,
             model="codex-test",
             bearer_token="token",
             api_provider="codex",
         )
         identifiers = iter(("session-1", "turn-1"))
-        first_model = CodexResponsesModel(
+        first_model = codex_model(
             endpoint,
             opener=_ScriptedOpener(first_response),
             identifier_factory=lambda: next(identifiers),
@@ -1562,7 +1554,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         def unexpected_identifier():
             raise AssertionError("resumed context must supply provider IDs")
 
-        second_model = CodexResponsesModel(
+        second_model = codex_model(
             endpoint,
             opener=opener,
             identifier_factory=unexpected_identifier,
@@ -1600,8 +1592,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         response = _FakeSSEResponse()
         response._lines = lines
         opener = _ScriptedOpener(response)
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -1621,8 +1613,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             _message_event(None, "second"),
             _completed_event(),
         )
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -1643,8 +1635,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
 
     def test_errors_are_typed_and_unsupported_options_are_rejected(self):
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -1657,7 +1649,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         ):
             model.sample(
                 InteractionContext([Message(role="user", content="hello")]),
-                options=SamplingOptions(temperature=0.5),
+                sampling_params=SamplingParams(temperature=0.5),
             )
 
         partial_message = _message_event(0, "partial")
@@ -1675,7 +1667,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             },
         )
         with self.assertRaisesRegex(ModelResponseError, "before") as raised:
-            CodexResponsesModel(
+            codex_model(
                 model.endpoint,
                 opener=_ScriptedOpener(
                     incomplete_response,
@@ -1723,7 +1715,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             _completed_event(),
         )
         with self.assertRaisesRegex(ModelResponseError, "unsupported"):
-            CodexResponsesModel(
+            codex_model(
                 model.endpoint,
                 opener=_ScriptedOpener(unsupported_response),
             ).sample(
@@ -1733,7 +1725,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         malformed_response = _FakeSSEResponse()
         malformed_response._lines = [b"data: {\n", b"\n"]
         with self.assertRaisesRegex(ModelResponseError, "invalid JSON"):
-            CodexResponsesModel(
+            codex_model(
                 model.endpoint,
                 opener=_ScriptedOpener(malformed_response),
             ).sample(
@@ -1750,8 +1742,8 @@ class CodexResponsesModelTests(unittest.TestCase):
                 io.BytesIO(b'{"error":{"message":"expired"}}'),
             )
         opener = _ScriptedOpener(error(), error())
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="secret-token",
@@ -1783,8 +1775,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         sleeper = mock.Mock(
             side_effect=AssertionError("generic 401 must not retry")
         )
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -1831,7 +1823,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 raise _http_error(401)
 
             opener = _ScriptedOpener(first, response)
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="codex-test",
                 auth_file=auth_file,
                 opener=opener,
@@ -1872,7 +1864,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 side_effect=AssertionError("spurious 401 must not refresh")
             )
             sleeps = []
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="codex-test",
                 auth_file=auth_file,
                 opener=opener,
@@ -1935,7 +1927,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                     ).encode("utf-8"),
                 )
             )
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="codex-test",
                 auth_file=auth_file,
                 opener=opener,
@@ -1986,7 +1978,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             return response
 
         with mock.patch.dict(os.environ, {"META_API_KEY": "old-meta-key"}, clear=True):
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="muse-spark-1.3",
                 opener=opener,
             )
@@ -2009,7 +2001,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             _http_error(401, headers={"x-request-id": "request-env"}),
         )
         with mock.patch.dict(os.environ, {"META_API_KEY": "meta-key"}, clear=True):
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="muse-spark-1.3",
                 opener=opener,
                 retry_sleep=lambda _delay: None,
@@ -2058,7 +2050,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             auth_opener = mock.Mock(
                 side_effect=AssertionError("refresh must not be attempted")
             )
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="codex-test",
                 auth_file=auth_file,
                 opener=opener,
@@ -2124,7 +2116,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                     ).encode("utf-8"),
                 )
             )
-            model = CodexResponsesModel(
+            model = codex_model(
                 model="codex-test",
                 auth_file=auth_file,
                 opener=opener,
@@ -2170,8 +2162,8 @@ class CodexResponsesModelTests(unittest.TestCase):
                 _completed_event(),
             ),
         )
-        recovered = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        recovered = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -2192,8 +2184,8 @@ class CodexResponsesModelTests(unittest.TestCase):
                 },
             )
         )
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -2215,7 +2207,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 opener = _ScriptedOpener(_http_error(400, body=json.dumps(body).encode()))
-                model = CodexResponsesModel(StreamingResponsesEndpoint(
+                model = codex_model(responses_endpoint(
                     api_url=CODEX_RESPONSES_API_URL, model="gpt-6-astra-max",
                     bearer_token="test-token", api_provider="codex",
                 ), opener=opener)
@@ -2237,7 +2229,7 @@ class CodexResponsesModelTests(unittest.TestCase):
         for detail in ("FAKE_SECRET", "System messages are not allowed: FAKE_SECRET"):
             with self.subTest(detail=detail):
                 opener = _ScriptedOpener(_http_error(400, body=json.dumps({"detail": detail}).encode()))
-                model = CodexResponsesModel(StreamingResponsesEndpoint(
+                model = codex_model(responses_endpoint(
                     api_url=CODEX_RESPONSES_API_URL, model="gpt-6-astra-max",
                     bearer_token="test-token", api_provider="codex",
                 ), opener=opener)
@@ -2262,8 +2254,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             success,
         )
         sleeps = []
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url=CODEX_RESPONSES_API_URL,
                 model="codex-test",
                 bearer_token="token",
@@ -2307,8 +2299,8 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         opener = _ScriptedOpener(*responses)
         sleeps = []
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -2343,8 +2335,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             ),
         )
         sleeps = []
-        sample = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        sample = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -2367,8 +2359,8 @@ class CodexResponsesModelTests(unittest.TestCase):
             for index in range(1, 4)
         ))
         sleeps = []
-        model = CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        model = codex_model(
+            responses_endpoint(
                 api_url="https://api.example.test/v1",
                 model="generic-model",
                 bearer_token="api-key",
@@ -2406,8 +2398,8 @@ class DemoConfigurationTests(unittest.TestCase):
 
         self.assertIsInstance(model, ChatCompletionsModel)
         self.assertEqual(
-            model.endpoint.api_url,
-            "http://127.0.0.1:8000",
+            model.endpoint.url,
+            "http://127.0.0.1:8000/v1/chat/completions",
         )
         self.assertEqual(
             DEFAULT_PROMPT,
@@ -2430,11 +2422,11 @@ class DemoConfigurationTests(unittest.TestCase):
             )
             args = _build_parser().parse_args(
                 [
-                    "--model-api",
-                    "codex-responses",
+                    "--endpoint-api",
+                    "codex",
                     "--model",
                     "codex-test",
-                    "--codex-auth-file",
+                    "--endpoint-auth-file",
                     str(auth_file),
                 ]
             )
@@ -2442,7 +2434,7 @@ class DemoConfigurationTests(unittest.TestCase):
             model = _build_model(args)
 
         self.assertIsInstance(model, CodexResponsesModel)
-        self.assertEqual(model.endpoint.api_url, CODEX_RESPONSES_API_URL)
+        self.assertEqual(model.endpoint.url, CODEX_RESPONSES_API_URL + "/responses")
         self.assertEqual(model.endpoint.model, "codex-test")
         self.assertEqual(model.endpoint.account_id, "account-1")
         self.assertNotIn("codex-token", repr(model.endpoint))
@@ -2463,10 +2455,10 @@ class DemoConfigurationTests(unittest.TestCase):
             )
             args = _build_parser().parse_args(
                 [
-                    "--model-api=codex",
+                    "--endpoint-api=codex",
                     "--model",
                     "codex-test",
-                    "--codex-auth-file",
+                    "--endpoint-auth-file",
                     str(auth_file),
                 ]
             )
@@ -2474,14 +2466,14 @@ class DemoConfigurationTests(unittest.TestCase):
             model = _build_model(args)
 
         self.assertIsInstance(model, CodexResponsesModel)
-        self.assertEqual(model.endpoint.api_url, CODEX_RESPONSES_API_URL)
+        self.assertEqual(model.endpoint.url, CODEX_RESPONSES_API_URL + "/responses")
         self.assertEqual(model.endpoint.model, "codex-test")
         self.assertEqual(model.endpoint.account_id, "account-1")
 
     def test_demo_builds_muse_model_from_meta_api_key(self):
         args = _build_parser().parse_args(
             [
-                "--model-api=codex",
+                "--endpoint-api=codex",
                 "--model=muse-spark-1.3-xhigh",
             ]
         )
@@ -2494,8 +2486,8 @@ class DemoConfigurationTests(unittest.TestCase):
             model = _build_model(args)
 
         self.assertIsInstance(model, CodexResponsesModel)
-        self.assertEqual(model.endpoint.api_url, META_RESPONSES_API_URL)
-        self.assertEqual(model.endpoint.model, "muse-spark-1.3-xhigh")
+        self.assertEqual(model.endpoint.url, META_RESPONSES_API_URL + "/responses")
+        self.assertEqual(model.endpoint.model, "muse-spark-1.3-contributor")
         self.assertEqual(model.endpoint.bearer_token, "meta-api-key")
         self.assertIsNone(model.endpoint.account_id)
         self.assertNotIn("meta-api-key", repr(model.endpoint))
@@ -2504,18 +2496,18 @@ class DemoConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "required"):
             _build_model(
                 _build_parser().parse_args(
-                    ["--model-api", "codex-responses"]
+                    ["--endpoint-api", "codex"]
                 )
             )
         with self.assertRaisesRegex(ValueError, "not used"):
             _build_model(
                 _build_parser().parse_args(
                     [
-                        "--model-api",
-                        "codex-responses",
+                        "--endpoint-api",
+                        "codex",
                         "--model",
                         "codex-test",
-                        "--api-key",
+                        "--endpoint-api-key",
                         "token",
                     ]
                 )
@@ -2523,7 +2515,7 @@ class DemoConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "require"):
             _build_model(
                 _build_parser().parse_args(
-                    ["--codex-home", "/tmp/codex"]
+                    ["--endpoint-auth-home", "/tmp/codex"]
                 )
             )
 

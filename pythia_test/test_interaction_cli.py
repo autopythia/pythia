@@ -28,7 +28,7 @@ from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
-from pythia.interaction import ResolvedSamplingOptions
+from pythia.interaction import ResolvedSamplingParams
 from pythia.interaction import SampleMetadata
 from pythia.interaction import SaveError
 from pythia.interaction import Tool
@@ -99,8 +99,8 @@ class _Model:
         self.checkpoints = []
         self.threads = []
 
-    def sample(self, context, *, tools=(), options=None):
-        self.calls.append((context.copy(), tuple(tools), options))
+    def sample(self, context, *, tools=(), sampling_params=None):
+        self.calls.append((context.copy(), tuple(tools), sampling_params))
         self.checkpoints.append(load_interaction_save(self.path).items)
         self.threads.append(threading.get_ident())
         if not self.outcomes:
@@ -188,7 +188,7 @@ for module in (cli, demo):
     def test_parser_matches_shared_demo_defaults_and_overrides(self):
         for argv in (
             [],
-            ["--model-api", "codex", "--model", "gpt-6-astra", "--resume",
+            ["--endpoint-api", "codex", "--model", "gpt-6-astra", "--resume",
              "--prompt", "/quit\nA literal query", "--instructions", "",
              "--max-samples", "3", "--max-output-tokens", "77", "--cwd", "work",
              "--save", "chosen.jsonl", "--enable-auto-compaction=False",
@@ -210,7 +210,7 @@ for module in (cli, demo):
             with self.assertRaisesRegex(ValueError, option.lstrip("-")):
                 cli.build_model(args)
         messages = cli._build_parser().parse_args([
-            "--model-api", "messages", "--model", "claude-fable-5-1",
+            "--endpoint-api", "messages", "--model", "claude-fable-5-1",
             "--auto-compact-tokens", "100",
         ])
         with self.assertRaisesRegex(ValueError, "at least 50000"):
@@ -649,7 +649,7 @@ class CLIControllerTests(_ControllerTestCase):
         )
         self.assertEqual(
             [call[2] for call in model.calls],
-            [ResolvedSamplingOptions(max_output_tokens=77)] * 2,
+            [ResolvedSamplingParams(max_output_tokens=77)] * 2,
         )
         texts = [item.text for item in terminal.items]
         self.assertEqual(texts.count("[assistant] first"), 1)
@@ -958,7 +958,7 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(
             model.calls[0][2],
-            ResolvedSamplingOptions(enable_auto_compaction=False, auto_compact_tokens=100),
+            ResolvedSamplingParams(enable_auto_compaction=False, auto_compact_tokens=100),
         )
         self.assertIn(
             Message("assistant", "uncompacted answer"),

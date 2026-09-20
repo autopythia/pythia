@@ -23,31 +23,30 @@ def check_catalog_manifest(path, bindings, *, reselected=()):
     try:
         data = read_config_bytes(path, MAX_MANIFEST_BYTES)
     except FileNotFoundError:
-        return ()  # Legacy saves have no provenance.
+        # Interaction logs written before catalog provenance remain resumable.
+        return ()
     except (OSError, ValueError):
         raise SaveError("Could not read model-catalog provenance.") from None
     try:
         document = parse_json_value(data.decode("utf-8"))
         if (not isinstance(document, dict) or set(document) != {"version", "bindings"}
-                or type(document["version"]) is not int or document["version"] not in {1, 2}
+                or type(document["version"]) is not int or document["version"] != 2
                 or not isinstance(document["bindings"], dict)
                 or set(document["bindings"]) != set(bindings)):
             raise ValueError()
         for item in document["bindings"].values():
             expected = {
-                "api", "selector", "api_model", "canonical", "source", "fingerprint",
+                "api", "selector", "model", "canonical", "source",
+                "fingerprint", "endpoint",
             }
-            if document["version"] == 2:
-                expected.add("endpoint")
             if (not isinstance(item, dict) or set(item) != expected
                     or any(not isinstance(item[key], str) for key in ("api", "source", "fingerprint"))
                     or any(item[key] is not None and not isinstance(item[key], str)
-                           for key in ("selector", "api_model", "canonical"))):
+                           for key in ("selector", "model", "canonical"))):
                 raise ValueError()
-            if document["version"] == 2:
-                endpoint = EndpointSpec(**item["endpoint"])
-                if endpoint.api != item["api"] or endpoint.model != item["api_model"]:
-                    raise ValueError()
+            endpoint = EndpointSpec(**item["endpoint"])
+            if endpoint.api != item["api"] or endpoint.model != item["model"]:
+                raise ValueError()
             if (item["api"] not in {"codex", "responses", "messages", "chat-completions"}
                     or re.fullmatch(r"[0-9a-f]{64}", item["fingerprint"]) is None):
                 raise ValueError()
@@ -65,13 +64,12 @@ def check_catalog_manifest(path, bindings, *, reselected=()):
                     "Saved model preset is unavailable or has changed identity; "
                     "explicitly select a different model/API to resume."
                 )
-        if document["version"] == 2:
-            changes = {field for field in new["endpoint"]
-                       if old["endpoint"].get(field) != new["endpoint"][field]}
-            if changes - binding.endpoint_overrides and not (key in reselected and changed_selection):
-                raise SaveError(
-                    "Saved endpoint changed; explicitly select endpoint URL/model/auth or a new model/API to resume."
-                )
+        changes = {field for field in new["endpoint"]
+                   if old["endpoint"].get(field) != new["endpoint"][field]}
+        if changes - binding.endpoint_overrides and not (key in reselected and changed_selection):
+            raise SaveError(
+                "Saved endpoint changed; explicitly select endpoint URL/model/auth or a new model/API to resume."
+            )
         if old["fingerprint"] != new["fingerprint"]:
             notices.append(f"Model binding changed for {key}; using current catalog/launch settings.")
     return tuple(notices)

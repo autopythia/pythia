@@ -1,5 +1,10 @@
 """Offline regression tests for config as the effective frontend policy."""
 
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import messages_endpoint
+from pythia_test.interaction_helpers import responses_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 from contextlib import redirect_stdout
 import io
 import json
@@ -13,10 +18,10 @@ from pythia.interaction import (
     CompactionResult, ConfigError, ContextPrefix, Environment, Init,
     InteractionConfig, InteractionConfigSnapshot, InteractionContext, Message,
     ModelConfigurationError, ModelSample, ModelSampleBoundary,
-    ResolvedSamplingOptions, SampleMetadata, SamplingOptions, TokenUsage,
+    ResolvedSamplingParams, SampleMetadata, SamplingParams, TokenUsage,
     TurnSummary,
 )
-from pythia.interaction import auto, cli, demo, runtime_config
+from pythia.interaction import auto, cli, demo
 from pythia.interaction._auto_config import (
     DEFAULTS, build_parser, load_saved_config, namespace, resolve_config,
 )
@@ -44,7 +49,7 @@ def previous_context(tokens=900_000):
 
 class CaptureMessages(MessagesModel):
     def __init__(self, trigger=None):
-        super().__init__(MessagesEndpoint(
+        super().__init__(messages_endpoint(
             api_url="https://api.anthropic.com", model="claude-fable-5.1",
             max_output_tokens=321,
             server_compaction=MessagesServerCompaction(trigger_input_tokens=trigger),
@@ -55,8 +60,8 @@ class CaptureMessages(MessagesModel):
     def auto_compact_context_tokens(self):
         raise AssertionError("frontend must not look up a model threshold")
 
-    def sample(self, context, *, tools=(), options=None):
-        self.payloads.append(self._build_request_payload(context, tools, options))
+    def sample(self, context, *, tools=(), sampling_params=None):
+        self.payloads.append(self._build_request_payload(context, tools, sampling_params))
         return ModelSample((Message("assistant", "done"),))
 
 
@@ -64,14 +69,14 @@ class CaptureHost:
     auto_compaction_owner = "host"
 
     def __init__(self):
-        self.options = []
+        self.sampling_params = []
 
     @property
     def auto_compact_context_tokens(self):
         raise AssertionError("frontend must not look up a model threshold")
 
-    def sample(self, context, *, tools=(), options=None):
-        self.options.append(options)
+    def sample(self, context, *, tools=(), sampling_params=None):
+        self.sampling_params.append(sampling_params)
         return ModelSample((Message("assistant", "done"),))
 
 
@@ -79,7 +84,6 @@ class ConfigSeedingTests(unittest.TestCase):
     def test_catalog_seeds_current_and_initial_without_constructing_a_model(self):
         for api, model, budget in (
             ("codex", "gpt-6-astra", None),
-            ("codex-responses", "gpt-5.6-sol-max", None),
             ("messages", "claude-fable-5.1", 128_000),
             ("messages", "claude-fable-5-1-max", 128_000),
         ):
@@ -91,7 +95,7 @@ class ConfigSeedingTests(unittest.TestCase):
                 self.assertEqual(config.get("auto_compact_tokens"), 872_000)
                 self.assertEqual(config.get("max_context_tokens"), 1_000_000)
                 self.assertEqual(config.get("max_output_tokens"), budget)
-                self.assertEqual(config.snapshot().sampling_options(), ResolvedSamplingOptions(
+                self.assertEqual(config.snapshot().sampling_params(), ResolvedSamplingParams(
                     auto_compact_tokens=872_000, max_output_tokens=budget,
                 ))
 
@@ -107,7 +111,7 @@ class ConfigSeedingTests(unittest.TestCase):
                 self.assertIsNone(config.get("max_output_tokens"))
 
     def test_python_generic_responses_binding_does_not_inherit_codex_limits(self):
-        model = CodexResponsesModel(StreamingResponsesEndpoint(
+        model = codex_model(responses_endpoint(
             api_url="https://api.openai.com/v1", model="gpt-6-astra", bearer_token="FAKE",
         ))
         config = InteractionConfig.from_model(model)
@@ -120,7 +124,7 @@ class ConfigSeedingTests(unittest.TestCase):
         self.assertEqual(config.initial_values()["max_output_tokens"], 321)
         config.set("auto_compact_tokens", None)
         config.set("max_output_tokens", 77)
-        payload = model._build_request_payload(previous_context(), (), config.snapshot().sampling_options())
+        payload = model._build_request_payload(previous_context(), (), config.snapshot().sampling_params())
         self.assertEqual(payload["max_tokens"], 77)
         self.assertEqual(payload["context_management"]["edits"][0]["trigger"]["value"], 872_000)
 
@@ -131,19 +135,18 @@ class ConfigSeedingTests(unittest.TestCase):
         initial = config.initial_snapshot()
         config.set("auto_compact_tokens", 100_000)
         config.set("max_context_tokens", 1_000)  # Informational, not a constraint.
-        with mock.patch.object(runtime_config, "get_model_spec", side_effect=AssertionError("late lookup")):
-            self.assertEqual(config.set("auto_compact_tokens", None), 872_000)
-            self.assertEqual(config.set("max_context_tokens", None), 1_000_000)
-            self.assertEqual(config.get("auto_compact_tokens"), 872_000)
-            self.assertIn("auto_compact_tokens = 872000", config.render(json_output=False))
-            payload = json.loads(config.render(json_output=True))
-            self.assertEqual(payload["auto_compact_tokens"], 872_000)
-            self.assertEqual(payload["__init__"]["auto_compact_tokens"], 500_000)
-            self.assertEqual(config.snapshot().sampling_options().auto_compact_tokens, 872_000)
-            config.reset("auto_compact_tokens")
-            self.assertEqual(config.get("auto_compact_tokens"), 500_000)
-            self.assertEqual(config.get("max_context_tokens"), 1_000_000)
-            self.assertEqual(config.reset(), initial)
+        self.assertEqual(config.set("auto_compact_tokens", None), 872_000)
+        self.assertEqual(config.set("max_context_tokens", None), 1_000_000)
+        self.assertEqual(config.get("auto_compact_tokens"), 872_000)
+        self.assertIn("auto_compact_tokens = 872000", config.render(json_output=False))
+        payload = json.loads(config.render(json_output=True))
+        self.assertEqual(payload["auto_compact_tokens"], 872_000)
+        self.assertEqual(payload["__init__"]["auto_compact_tokens"], 500_000)
+        self.assertEqual(config.snapshot().sampling_params().auto_compact_tokens, 872_000)
+        config.reset("auto_compact_tokens")
+        self.assertEqual(config.get("auto_compact_tokens"), 500_000)
+        self.assertEqual(config.get("max_context_tokens"), 1_000_000)
+        self.assertEqual(config.reset(), initial)
         self.assertIs(config.initial_snapshot(), initial)
 
     def test_messages_validation_is_atomic_even_while_disabled(self):
@@ -175,26 +178,26 @@ class ConfigSeedingTests(unittest.TestCase):
 
     def test_equal_visible_policy_has_equal_behavior_regardless_of_history(self):
         config = InteractionConfig()
-        initial = config.snapshot().sampling_options()
+        initial = config.snapshot().sampling_params()
         config.set("enable_auto_compaction", False)
         config.set("enable_auto_compaction", True)
-        self.assertEqual(config.snapshot().sampling_options(), initial)
+        self.assertEqual(config.snapshot().sampling_params(), initial)
         self.assertEqual(config.values(), config.initial_values())
         config.set("auto_compact_tokens", 100)
         self.assertIn("# init: auto_compact_tokens = None", config.render(json_output=False))
         self.assertIsNone(config.set("auto_compact_tokens", None))
-        self.assertIsNone(config.snapshot().sampling_options().auto_compact_tokens)
+        self.assertIsNone(config.snapshot().sampling_params().auto_compact_tokens)
 
     def test_projection_preserves_sampling_fields_but_not_old_policy(self):
-        base = SamplingOptions(max_output_tokens=7, auto_compact_tokens=8,
+        base = SamplingParams(max_output_tokens=7, auto_compact_tokens=8,
                                enable_auto_compaction=False, temperature=0.5,
                                top_p=0.8, stop=("stop",), seed=4)
-        options = InteractionConfigSnapshot(max_output_tokens=10).sampling_options(base)
-        self.assertEqual(options, ResolvedSamplingOptions(
+        options = InteractionConfigSnapshot(max_output_tokens=10).sampling_params(base)
+        self.assertEqual(options, ResolvedSamplingParams(
             max_output_tokens=10, temperature=0.5, top_p=0.8, stop=("stop",), seed=4,
         ))
         with self.assertRaises(TypeError):
-            ResolvedSamplingOptions(enable_auto_compaction=None)
+            ResolvedSamplingParams(enable_auto_compaction=None)
 
 
 class ResolvedRequestTests(unittest.TestCase):
@@ -202,7 +205,7 @@ class ResolvedRequestTests(unittest.TestCase):
         model = CaptureMessages(trigger=150_000)
         for threshold in (100_000, None):
             with self.subTest(threshold=threshold):
-                payload = model._build_request_payload(previous_context(), (), ResolvedSamplingOptions(
+                payload = model._build_request_payload(previous_context(), (), ResolvedSamplingParams(
                     max_output_tokens=77, auto_compact_tokens=threshold,
                 ))
                 self.assertEqual(payload["max_tokens"], 77)
@@ -211,7 +214,7 @@ class ResolvedRequestTests(unittest.TestCase):
                     self.assertNotIn("trigger", edit)
                 else:
                     self.assertEqual(edit["trigger"]["value"], threshold)
-        payload = model._build_request_payload(previous_context(), (), ResolvedSamplingOptions(
+        payload = model._build_request_payload(previous_context(), (), ResolvedSamplingParams(
             max_output_tokens=77, enable_auto_compaction=False,
         ))
         self.assertNotIn("context_management", payload)
@@ -219,34 +222,34 @@ class ResolvedRequestTests(unittest.TestCase):
 
     def test_messages_resolved_missing_budget_never_inherits_endpoint_budget(self):
         with self.assertRaisesRegex(ModelConfigurationError, "max_output_tokens"):
-            CaptureMessages()._build_request_payload(previous_context(), (), ResolvedSamplingOptions())
+            CaptureMessages()._build_request_payload(previous_context(), (), ResolvedSamplingParams())
 
     def test_direct_messages_calls_retain_endpoint_precedence(self):
         payload = CaptureMessages(trigger=150_000)._build_request_payload(
-            previous_context(), (), SamplingOptions(auto_compact_tokens=49_999),
+            previous_context(), (), SamplingParams(auto_compact_tokens=49_999),
         )
         self.assertEqual(payload["context_management"]["edits"][0]["trigger"]["value"], 150_000)
         self.assertEqual(payload["max_tokens"], 321)
 
     def test_resolved_true_enables_messages_without_endpoint_compaction(self):
-        model = MessagesModel(MessagesEndpoint(
+        model = MessagesModel(messages_endpoint(
             api_url="https://api.anthropic.com", model="claude-fable-5.1",
         ))
-        payload = model._build_request_payload(previous_context(), (), ResolvedSamplingOptions(
+        payload = model._build_request_payload(previous_context(), (), ResolvedSamplingParams(
             max_output_tokens=77,
         ))
         self.assertEqual(payload["context_management"]["edits"], [{"type": "compact_20260112"}])
 
     def test_default_responses_does_not_turn_output_ceiling_into_budget(self):
-        model = CodexResponsesModel(model="gpt-6-astra", auth=CodexAuth("FAKE"))
+        model = codex_model(model="gpt-6-astra", auth=CodexAuth("FAKE"))
         config = InteractionConfig.from_namespace(arguments())
-        payload, _ = model._build_request_payload(previous_context(), (), config.snapshot().sampling_options())
+        payload, _ = model._build_request_payload(previous_context(), (), config.snapshot().sampling_params())
         for key in ("max_output_tokens", "auto_compact_tokens", "max_context_tokens", "enable_auto_compaction"):
             self.assertNotIn(key, payload)
 
     def test_host_only_options_do_not_change_chat_sampling_payload(self):
-        model = ChatCompletionsModel(ChatCompletionsEndpoint(api_url="http://localhost:8000"))
-        payload = model._build_request_payload(previous_context(), (), ResolvedSamplingOptions())
+        model = ChatCompletionsModel(chat_endpoint(api_url="http://localhost:8000"))
+        payload = model._build_request_payload(previous_context(), (), ResolvedSamplingParams())
         ordinary = model._build_request_payload(previous_context(), (), None)
         self.assertEqual(payload, ordinary)
 
@@ -281,7 +284,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                     await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
                                     Path(directory) / "log.jsonl", config)
                 self.assertEqual(compactor.compact.call_count, int(threshold is not None))
-                self.assertEqual(model.options, [config.snapshot().sampling_options()])
+                self.assertEqual(model.sampling_params, [config.snapshot().sampling_params()])
 
     def test_auto_turn_uses_context_policy_not_model_metadata(self):
         session = SimpleNamespace(
@@ -303,8 +306,8 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
     def test_demo_normalizes_keyword_and_options_before_sampling(self):
         for kwargs in (
             {"auto_compact_tokens": 100_000},
-            {"options": SamplingOptions(auto_compact_tokens=100_000)},
-            {"auto_compact_tokens": 100_000, "options": SamplingOptions(auto_compact_tokens=100_000)},
+            {"sampling_params": SamplingParams(auto_compact_tokens=100_000)},
+            {"auto_compact_tokens": 100_000, "sampling_params": SamplingParams(auto_compact_tokens=100_000)},
         ):
             with self.subTest(kwargs=kwargs):
                 model = CaptureMessages()
@@ -316,12 +319,12 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(model.payloads[0]["max_tokens"], 321)
         with self.assertRaisesRegex(ValueError, "Conflicting"):
             demo.run(CaptureMessages(), Environment(), auto_compact_tokens=100_000,
-                     options=SamplingOptions(auto_compact_tokens=200_000))
+                     sampling_params=SamplingParams(auto_compact_tokens=200_000))
 
     def test_demo_honors_pre_resolved_none_without_inheriting(self):
         model = CaptureMessages(trigger=150_000)
         with redirect_stdout(io.StringIO()):
-            demo.run(model, Environment(), prompt="hello", options=ResolvedSamplingOptions(max_output_tokens=77))
+            demo.run(model, Environment(), prompt="hello", sampling_params=ResolvedSamplingParams(max_output_tokens=77))
         self.assertNotIn("trigger", model.payloads[0]["context_management"]["edits"][0])
 
     def test_demo_samples_after_custom_metadata_is_bound_once(self):
@@ -337,7 +340,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         with redirect_stdout(io.StringIO()):
             demo.run(model, Environment(), prompt="hello")
         self.assertEqual(model.reads, 1)
-        self.assertEqual(model.options[0].auto_compact_tokens, 100)
+        self.assertEqual(model.sampling_params[0].auto_compact_tokens, 100)
 
 
 class AutoSeedingTests(unittest.TestCase):
@@ -371,7 +374,7 @@ class AutoSeedingTests(unittest.TestCase):
             resumed = resolve_config(saved=load_saved_config(saved))
             self.assertEqual(resumed, raw)
 
-    def test_legacy_v1_saves_upgrade_only_the_new_optional_keys(self):
+    def test_saved_config_rejects_missing_current_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "saved.json"
             raw = resolve_config(overrides={"model_api": "codex", "model": "gpt-6-astra"})
@@ -379,21 +382,7 @@ class AutoSeedingTests(unittest.TestCase):
                 del settings["auto_compact_tokens"], settings["max_context_tokens"]
             document = {"version": 1, "contexts": {str(i): s for i, s in raw.items()}}
             path.write_text(json.dumps(document))
-            loaded = load_saved_config(path)
-            self.assertIsNone(loaded[1]["auto_compact_tokens"])
-            self.assertIsNone(loaded[1]["max_context_tokens"])
-            config = InteractionConfig.from_namespace(namespace(resolve_config(saved=loaded)[1]))
-            self.assertEqual(config.get("auto_compact_tokens"), 872_000)
-            changed = resolve_config(saved=loaded, overrides={"model": "muse-spark-1.3"})
-            self.assertIsNone(InteractionConfig.from_namespace(namespace(changed[1])).get("auto_compact_tokens"))
-            del document["contexts"]["1"]["cwd"]
-            path.write_text(json.dumps(document))
-            with self.assertRaises(ValueError):
-                load_saved_config(path)
-            document["contexts"]["1"]["cwd"] = str(Path.cwd())
-            document["contexts"]["1"]["api_key"] = "not-allowed"
-            path.write_text(json.dumps(document))
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Invalid saved"):
                 load_saved_config(path)
 
     def test_new_cli_defaults_are_suppressed_and_values_are_validated_per_context(self):

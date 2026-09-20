@@ -8,21 +8,19 @@ from pathlib import Path
 import re
 
 from ._config_file import read_config_bytes
-from .model_catalog import BUILTIN_MODEL_CATALOG, CODEX_RESPONSES_API_URL
-from .model_catalog import ModelCatalog, ModelLimits, ModelRoute, ModelSpec
+from .model_catalog import BUILTIN_MODEL_CATALOG
+from .model_catalog import ModelCatalog, ModelLimits, ModelSpec
 from .model_catalog import EndpointSpec
 from .model_catalog import MessagesDefaults, ResponsesDefaults
-from .model_catalog import _normalize_profile, parse_json_value, validate_route_url
+from .model_catalog import _normalize_profile, parse_json_value
 
 
 MAX_CATALOG_BYTES = 1_048_576
 MAX_CATALOG_MODELS = 1024
-_ROUTE_FIELDS = frozenset(("provider", "api_url", "auth_source", "api_key_environment_variable"))
 _LIMIT_FIELDS = frozenset(("auto_compact_context_tokens", "max_context_tokens", "max_output_tokens"))
 _RESPONSES_FIELDS = frozenset(("reasoning_effort", "reasoning_summary", "text_verbosity"))
 _MESSAGES_FIELDS = frozenset(("output_effort",))
 _INTEGER = re.compile(r"^[+-]?[0-9]+$")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def default_model_catalog_path():
@@ -39,46 +37,35 @@ def _text(value):
     return value
 
 
-def _entry(section, values, base, version):
+def _entry(section, values, base):
     name = section.removeprefix("model.")
     values = dict(values)
-    if version == 1:
-        for short, full in (("api", "route.api"), ("api_model", "route.api_model")):
-            if short in values:
-                if full in values:
-                    raise ValueError("Duplicate route field spelling.")
-                values[full] = values.pop(short)
-        if any(key.startswith("endpoint.") for key in values):
-            raise ValueError("endpoint.* requires catalog version 2.")
-    elif any(key.startswith("route.") or key in {"api", "api_model"} for key in values):
-        raise ValueError("Version 2 uses endpoint.*; do not mix legacy route fields.")
     override = values.pop("override", "false").lower()
     if override not in configparser.ConfigParser.BOOLEAN_STATES:
         raise ValueError("override must be a boolean.")
     override = configparser.ConfigParser.BOOLEAN_STATES[override]
-    api_key = "route.api" if version == 1 else "endpoint.api"
+    api_key = "endpoint.api"
     has_api = api_key in values
     api = _text(values.pop(api_key)) if has_api else None
     if has_api and api is None:
-        raise ValueError("route.api cannot be null.")
+        raise ValueError("endpoint.api cannot be null.")
     if api is not None:
         api = _normalize_profile(api)
     if override:
         candidates = tuple(spec for spec in base.matches(name, canonical_only=True)
-                           if api is None or spec.profile == api)
+                           if api is None or spec.endpoint.api == api)
         if len(candidates) != 1:
-            raise ValueError("Override requires one existing canonical model; specify route.api if ambiguous.")
+            raise ValueError("Override requires one existing canonical model; specify endpoint.api if ambiguous.")
         original = candidates[0]
-        api = original.profile
+        api = original.endpoint.api
     else:
         if api is None:
-            raise ValueError("New entries require route.api.")
+            raise ValueError("New entries require endpoint.api.")
         if base.get_model_spec(api, name) is not None:
             raise ValueError("Existing entries require override = true.")
         original = None
 
     fields = {}
-    route = {} if original is None or version == 2 else dict(vars(original.route))
     endpoint = {} if original is None else dict(vars(original.endpoint))
     if api is not None:
         endpoint["api"] = api
@@ -89,20 +76,16 @@ def _entry(section, values, base, version):
     if "request_params" in values and any(key.startswith("request_params.") for key in values):
         raise ValueError("Cannot combine whole-map and per-key request params.")
     for key, value in values.items():
-        if version == 2 and key in {"endpoint.model", "endpoint.url", "endpoint.auth"}:
+        if key in {"endpoint.model", "endpoint.url", "endpoint.auth"}:
             endpoint[key[9:]] = _text(value)
             if key == "endpoint.auth":
                 endpoint["auth_file"] = None
-        elif key == "route.api_model":
-            fields["api_model"] = _text(value)
         elif key == "aliases":
             fields[key] = parse_json_value(value)
             if not isinstance(fields[key], list):
                 raise ValueError("aliases must be a JSON array.")
         elif key == "source":
             fields[key] = _text(value)
-        elif key.startswith("route.") and key[6:] in _ROUTE_FIELDS:
-            route[key[6:]] = _text(value)
         elif key.startswith("limits.") and key[7:] in _LIMIT_FIELDS:
             if value != "null" and _INTEGER.fullmatch(value) is None:
                 raise ValueError("Limits require integers or null.")
@@ -118,24 +101,15 @@ def _entry(section, values, base, version):
         else:
             raise ValueError("Unknown model field.")
 
-    if version == 1:
-        route["api_url"] = validate_route_url(route.get("api_url"))
-        variable = route.get("api_key_environment_variable")
-        if variable is not None and (not isinstance(variable, str) or _ENV_NAME.fullmatch(variable) is None):
-            raise ValueError("Invalid environment variable reference.")
-        parsed_route = ModelRoute(**route)
-        endpoint = EndpointSpec.from_route(api, fields.pop("api_model", None if original is None else original.api_model), parsed_route)
-        fields["provider_label"] = parsed_route.provider
-    else:
-        if original is None and not {"api", "url", "model", "auth"} <= endpoint.keys():
-            raise ValueError("New entries require endpoint.api, url, model, and auth.")
-        if (original is not None and "endpoint.url" in values
-                and endpoint["url"] != original.endpoint.url and original.endpoint.auth != "none"
-                and "endpoint.auth" not in values):
-            raise ValueError("Changing a credentialed endpoint URL requires endpoint.auth.")
-        endpoint = EndpointSpec(**endpoint)
+    if original is None and not {"api", "url", "model", "auth"} <= endpoint.keys():
+        raise ValueError("New entries require endpoint.api, url, model, and auth.")
+    if (original is not None and "endpoint.url" in values
+            and endpoint["url"] != original.endpoint.url and original.endpoint.auth != "none"
+            and "endpoint.auth" not in values):
+        raise ValueError("Changing a credentialed endpoint URL requires endpoint.auth.")
+    endpoint = EndpointSpec(**endpoint)
     if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
-        raise ValueError("Catalog Codex login requires the official Codex route.")
+        raise ValueError("Catalog Codex login requires the official Codex endpoint.")
     fields.update(endpoint=endpoint, limits=ModelLimits(**limits), request_params=params)
     if responses:
         fields["responses"] = ResponsesDefaults(**responses)
@@ -164,20 +138,20 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
         if parser.defaults() or not parser.has_section("catalog"):
             raise ValueError()
         version = parser.getint("catalog", "version")
-        if set(parser["catalog"]) != {"version"} or version not in {1, 2}:
+        if set(parser["catalog"]) != {"version"} or version != 2:
             raise ValueError()
         sections = [section for section in parser.sections() if section != "catalog"]
         if len(sections) > MAX_CATALOG_MODELS or any(not section.startswith("model.") for section in sections):
             raise ValueError()
     except (configparser.Error, ValueError):
         raise ValueError(f"Invalid model catalog header/INI syntax: {source}") from None
-    specs = {(spec.profile, spec.name): spec for spec in base.specs}
+    specs = {(spec.endpoint.api, spec.name): spec for spec in base.specs}
     origins = dict(base.origins)
     seen = set()
     for section in sections:
         try:
-            spec = _entry(section, parser[section], base, version)
-            identity = (spec.profile, spec.name)
+            spec = _entry(section, parser[section], base)
+            identity = (spec.endpoint.api, spec.name)
             if identity in seen:
                 raise ValueError("Duplicate normalized model identity.")
             seen.add(identity)

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import messages_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 import asyncio
 import io
 import json
@@ -15,7 +19,7 @@ from pythia.interaction import (
     CodexResponsesModel, CompactionError, CompactionMetadata, CompactionResult, ContextPrefix,
     ContextValidationError, DefaultEnvironment, Environment,
     Instructions, InteractionConfig, Message, MessagesEndpoint, MessagesModel, InteractionContext, ModelSample,
-    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, ResolvedSamplingOptions, Init,
+    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, ResolvedSamplingParams, Init,
     TokenUsage, ToolCall, ToolResult, SampleMetadata, TurnSummary, UserInteraction,
     UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_save,
     render_interaction_items, save_interaction_save,
@@ -223,14 +227,14 @@ class UserToolValueTests(unittest.TestCase):
             self.assertEqual(load_interaction_save(path).items, context.items)
         self.assertEqual(context.model_items(), InteractionContext(base).model_items())
         models = (
-            ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost:8000")),
-            MessagesModel(MessagesEndpoint(
+            ChatCompletionsModel(chat_endpoint("http://localhost:8000")),
+            MessagesModel(messages_endpoint(
                 api_url="https://api.anthropic.com",
                 model="test",
                 max_output_tokens=100,
                 api_key="fake",
             )),
-            CodexResponsesModel(model="test", auth=CodexAuth("fake")),
+            codex_model(model="test", auth=CodexAuth("fake")),
         )
         for model in models:
             with self.subTest(model=type(model).__name__):
@@ -313,8 +317,8 @@ class UserToolValueTests(unittest.TestCase):
 class AuthConfigurationTests(unittest.TestCase):
     def test_main_opens_only_missing_auth_case_and_rejects_other_config_errors(self):
         with tempfile.TemporaryDirectory() as directory:
-            base = ["--model-api", "codex", "--model", "test", "--codex-home", directory]
-            for extra, code, opens in (([], 0, True), (["--api-url", "bad-url"], 1, False),
+            base = ["--endpoint-api", "codex", "--model", "test", "--endpoint-auth-home", directory]
+            for extra, code, opens in (([], 0, True), (["--endpoint-url", "bad-url"], 1, False),
                                        (["--request-timeout-seconds", "0"], 1, False)):
                 with self.subTest(extra=extra):
                     stream = SimpleNamespace(isatty=lambda: True)
@@ -333,11 +337,11 @@ class AuthConfigurationTests(unittest.TestCase):
 
     def test_non_auth_validation_precedes_missing_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
-            argv = ["--model-api", "codex", "--model", "test", "--codex-home", directory]
+            argv = ["--endpoint-api", "codex", "--model", "test", "--endpoint-auth-home", directory]
             with self.assertRaises(CodexAuthUnavailable):
                 build_model(cli._build_parser().parse_args(argv))
-            for extra in (["--api-url", "not-a-url"], ["--request-timeout-seconds", "nan"],
-                          ["--api-key", "secret"], ["--codex-home", ""]):
+            for extra in (["--endpoint-url", "not-a-url"], ["--request-timeout-seconds", "nan"],
+                          ["--endpoint-api-key", "secret"], ["--endpoint-auth-home", ""]):
                 with self.subTest(extra=extra):
                     with self.assertRaises(ValueError) as error:
                         build_model(cli._build_parser().parse_args([*argv, *extra]))
@@ -345,17 +349,19 @@ class AuthConfigurationTests(unittest.TestCase):
 
     def test_capabilities_do_not_follow_wire_api_name_and_demo_stays_fail_fast(self):
         for argv, supported in (
-            (["--model-api", "codex", "--model", "test"], True),
-            (["--model-api", "codex", "--model", "muse-spark-1.3"], False),
-            (["--model-api", "codex", "--model", "test", "--api-url", "https://example.org"], False),
-            ([], False), (["--model-api", "messages", "--model", "test"], False),
+            (["--endpoint-api", "codex", "--model", "test"], True),
+            (["--endpoint-api", "codex", "--model", "muse-spark-1.3"], False),
+            (["--endpoint-api", "codex", "--model", "test",
+              "--endpoint-url", "https://example.org/responses",
+              "--endpoint-auth", "none"], False),
+            ([], False), (["--endpoint-api", "messages", "--model", "test"], False),
         ):
             self.assertEqual(supports_account_services(cli._build_parser().parse_args(argv)), supported)
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(demo, "DefaultEnvironment") as environment:
                 with mock.patch("sys.stderr", io.StringIO()):
-                    self.assertEqual(demo.main(["--model-api", "codex", "--model", "test",
-                                                "--codex-home", directory]), 1)
+                    self.assertEqual(demo.main(["--endpoint-api", "codex", "--model", "test",
+                                                "--endpoint-auth-home", directory]), 1)
                 environment.assert_not_called()
 
 
@@ -367,7 +373,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.path = self.root / "interaction.jsonl"
         self.auth_path = self.root / "auth.json"
         self.args = cli._build_parser().parse_args([
-            "--model-api", "codex", "--model", "test", "--codex-auth-file", str(self.auth_path),
+            "--endpoint-api", "codex", "--model", "test", "--endpoint-auth-file", str(self.auth_path),
         ])
 
     async def run_cli(self, model, terminal):
@@ -409,7 +415,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.run_cli(model, terminal), 0)
 
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(model.calls[0][2], ResolvedSamplingOptions(max_output_tokens=17))
+        self.assertEqual(model.calls[0][2], ResolvedSamplingParams(max_output_tokens=17))
         self.assertFalse(any(
             isinstance(item, (UserToolCall, UserToolResult))
             for item in model.calls[0][0].model_items()
@@ -534,7 +540,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         terminal = _Terminal(second_frame)
         self.assertEqual(await self.run_cli(model, terminal), 0)
 
-        self.assertEqual(model.calls[0][2], ResolvedSamplingOptions())
+        self.assertEqual(model.calls[0][2], ResolvedSamplingParams())
         self.assertTrue(any(
             "saved config commands were not replayed" in item.text
             for item in terminal.items
@@ -579,7 +585,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         create.assert_not_called()
         self.assertEqual(
             model.calls[0][2],
-            ResolvedSamplingOptions(enable_auto_compaction=False, auto_compact_tokens=100),
+            ResolvedSamplingParams(enable_auto_compaction=False, auto_compact_tokens=100),
         )
 
     async def test_config_max_samples_applies_to_the_next_turn(self):
@@ -1184,7 +1190,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             observed.append((saved.items, payload, dict(request.header_items()), timeout))
             return response
 
-        model = CodexResponsesModel(
+        model = codex_model(
             model="test",
             auth=CodexAuth("token", "account"),
             opener=open_request,

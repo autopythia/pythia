@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import messages_endpoint
+
 import http.client
 import io
 import json
@@ -26,7 +28,7 @@ from pythia.interaction import ModelTimeoutError
 from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
-from pythia.interaction import SamplingOptions
+from pythia.interaction import SamplingParams
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
@@ -103,16 +105,16 @@ def _payload(opener: _Opener) -> dict[str, Any]:
 
 def _endpoint(*args, **kwargs) -> MessagesEndpoint:
     kwargs.setdefault("max_output_tokens", 100)
-    return MessagesEndpoint(*args, **kwargs)
+    return messages_endpoint(*args, **kwargs)
 
 
 class MessagesEndpointTests(unittest.TestCase):
     def test_output_limit_prefers_explicit_then_catalog_and_requires_a_source(self):
-        catalogued = MessagesEndpoint(
+        catalogued = messages_endpoint(
             api_url="http://localhost",
             model="claude-fable-5-1",
         )
-        explicit = MessagesEndpoint(
+        explicit = messages_endpoint(
             api_url="http://localhost",
             model="claude-fable-5-1",
             max_output_tokens=100,
@@ -124,7 +126,7 @@ class MessagesEndpointTests(unittest.TestCase):
             ModelConfigurationError,
             "model catalog.*--max-output-tokens",
         ):
-            MessagesEndpoint(api_url="http://localhost", model="model")
+            messages_endpoint(api_url="http://localhost", model="model")
 
     def test_normalizes_url_and_redacts_key(self):
         endpoint = _endpoint(
@@ -133,10 +135,9 @@ class MessagesEndpointTests(unittest.TestCase):
             api_key=" secret-key ",
         )
 
-        self.assertEqual(endpoint.api_url, "https://api.example.test:8443/proxy")
         self.assertEqual(
             endpoint.url,
-            "https://api.example.test:8443/proxy/v1/messages",
+            "HTTPS://api.example.test:8443/proxy/v1/messages",
         )
         self.assertEqual(endpoint.model, "model-name")
         self.assertEqual(endpoint.api_key, "secret-key")
@@ -152,7 +153,6 @@ class MessagesEndpointTests(unittest.TestCase):
             {"api_url": "localhost", "model": "model"},
             {"api_url": "ftp://localhost", "model": "model"},
             {"api_url": "http://user:pass@localhost", "model": "model"},
-            {"api_url": "http://localhost/v1/messages", "model": "model"},
             {"api_url": "http://localhost", "model": ""},
             {"api_url": "http://localhost", "model": "model", "api_key": ""},
             {
@@ -173,7 +173,7 @@ class MessagesEndpointTests(unittest.TestCase):
         ]
         for kwargs in cases:
             with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ModelConfigurationError):
+                with self.assertRaises((ModelConfigurationError, ValueError)):
                     _endpoint(**kwargs)
         with self.assertRaisesRegex(TypeError, "retry_sleep"):
             MessagesModel(
@@ -224,7 +224,7 @@ class MessagesEndpointTests(unittest.TestCase):
         payload = model._build_request_payload(
             InteractionContext((Message("user", "Hello."),)),
             (),
-            SamplingOptions(auto_compact_tokens=123_456),
+            SamplingParams(auto_compact_tokens=123_456),
         )
 
         self.assertEqual(
@@ -235,7 +235,7 @@ class MessagesEndpointTests(unittest.TestCase):
             model._build_request_payload(
                 InteractionContext((Message("user", "Hello."),)),
                 (),
-                SamplingOptions(auto_compact_tokens=49_999),
+                SamplingParams(auto_compact_tokens=49_999),
             )
 
         explicit = MessagesModel(_endpoint(
@@ -249,7 +249,7 @@ class MessagesEndpointTests(unittest.TestCase):
         explicit_payload = explicit._build_request_payload(
             InteractionContext((Message("user", "Hello."),)),
             (),
-            SamplingOptions(auto_compact_tokens=200_000),
+            SamplingParams(auto_compact_tokens=200_000),
         )
         self.assertEqual(
             explicit_payload["context_management"]["edits"][0]["trigger"]["value"],
@@ -286,7 +286,7 @@ class MessagesEndpointTests(unittest.TestCase):
         disabled = model._build_request_payload(
             InteractionContext((Message("user", "Hello."),)),
             (),
-            SamplingOptions(enable_auto_compaction=False),
+            SamplingParams(enable_auto_compaction=False),
         )
         self.assertNotIn("context_management", disabled)
 
@@ -298,7 +298,7 @@ class MessagesEndpointTests(unittest.TestCase):
         enabled_after_startup = runtime_enabled._build_request_payload(
             InteractionContext((Message("user", "Hello."),)),
             (),
-            SamplingOptions(enable_auto_compaction=True),
+            SamplingParams(enable_auto_compaction=True),
         )
         self.assertEqual(
             enabled_after_startup["context_management"],
@@ -316,7 +316,7 @@ class MessagesEndpointTests(unittest.TestCase):
         opener = _Opener(response)
         MessagesModel(model.endpoint, opener=opener).sample(
             InteractionContext((Message("user", "Hello."),)),
-            options=SamplingOptions(enable_auto_compaction=False),
+            sampling_params=SamplingParams(enable_auto_compaction=False),
         )
         request, _ = opener.calls[0]
         self.assertIsNone(request.get_header("Anthropic-beta"))
@@ -391,7 +391,7 @@ class MessagesModelTests(unittest.TestCase):
         sample = model.sample(
             context,
             tools=(tool,),
-            options=SamplingOptions(
+            sampling_params=SamplingParams(
                 max_output_tokens=100,
                 temperature=0.25,
                 top_p=0.9,
@@ -587,14 +587,14 @@ class MessagesModelTests(unittest.TestCase):
             ),
             (
                 InteractionContext((Message(role="user", content="hello"),)),
-                SamplingOptions(seed=1),
+                SamplingParams(seed=1),
                 "seed",
             ),
         ]
         for context, options, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ModelConfigurationError, message):
-                    model.sample(context, options=options)
+                    model.sample(context, sampling_params=options)
 
     def test_rejects_unknown_response_blocks(self):
         model = MessagesModel(
@@ -910,7 +910,7 @@ class ReasoningSignatureTests(unittest.TestCase):
 class MessagesDemoTests(unittest.TestCase):
     def test_uncatalogued_frontend_model_requires_an_explicit_output_limit(self):
         args = _build_parser().parse_args([
-            "--model-api",
+            "--endpoint-api",
             "messages",
             "--model",
             "claude-sonnet-5",
@@ -921,7 +921,7 @@ class MessagesDemoTests(unittest.TestCase):
 
     def test_frontend_uses_catalogued_output_limit_when_omitted(self):
         args = _build_parser().parse_args([
-            "--model-api",
+            "--endpoint-api",
             "messages",
             "--model",
             "claude-fable-5-1",
@@ -935,7 +935,7 @@ class MessagesDemoTests(unittest.TestCase):
     def test_builds_anthropic_messages_model(self):
         args = _build_parser().parse_args(
             [
-                "--model-api",
+                "--endpoint-api",
                 "messages",
                 "--model",
                 "claude-sonnet-5",
@@ -951,7 +951,10 @@ class MessagesDemoTests(unittest.TestCase):
             model = _build_model(args)
 
         self.assertIsInstance(model, MessagesModel)
-        self.assertEqual(model.endpoint.api_url, ANTHROPIC_MESSAGES_API_URL)
+        self.assertEqual(
+            model.endpoint.url,
+            ANTHROPIC_MESSAGES_API_URL + "/v1/messages",
+        )
         self.assertEqual(
             model.endpoint.model,
             "claude-sonnet-5",
@@ -960,7 +963,7 @@ class MessagesDemoTests(unittest.TestCase):
 
     def test_auto_compaction_flag_configures_messages_server_policy(self):
         base = [
-            "--model-api",
+            "--endpoint-api",
             "messages",
             "--model",
             "claude-sonnet-5",
@@ -997,8 +1000,8 @@ class MessagesDemoTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def sample(self, context, *, tools=(), options=None):
-                del tools, options
+            def sample(self, context, *, tools=(), sampling_params=None):
+                del tools, sampling_params
                 self.calls.append(context.copy())
                 if len(self.calls) == 1:
                     return ModelSample(

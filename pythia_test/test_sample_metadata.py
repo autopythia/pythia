@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import messages_endpoint
+from pythia_test.interaction_helpers import responses_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 from contextlib import ExitStack
 import json
 from pathlib import Path
@@ -23,8 +28,8 @@ from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import ModelTimeoutError
 from pythia.interaction import SampleMetadata
 from pythia.interaction import SaveError
-from pythia.interaction import SamplingOptions
-from pythia.interaction import ResolvedSamplingOptions
+from pythia.interaction import SamplingParams
+from pythia.interaction import ResolvedSamplingParams
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
 from pythia.interaction import TurnSummary
@@ -58,7 +63,7 @@ class SampleMetadataTests(unittest.TestCase):
     def test_sampling_auto_compaction_override_is_optional_boolean(self):
         for value in (None, False, True):
             self.assertIs(
-                SamplingOptions(enable_auto_compaction=value).enable_auto_compaction,
+                SamplingParams(enable_auto_compaction=value).enable_auto_compaction,
                 value,
             )
         for value in (0, 1, "false", [], {}):
@@ -66,7 +71,7 @@ class SampleMetadataTests(unittest.TestCase):
                 TypeError,
                 "enable_auto_compaction",
             ):
-                SamplingOptions(enable_auto_compaction=value)
+                SamplingParams(enable_auto_compaction=value)
 
     def test_elapsed_validation_and_unknown_default(self):
         for item_type, fields in (
@@ -366,12 +371,12 @@ class SampleMetadataTests(unittest.TestCase):
 
             def __init__(self):
                 self.contexts = []
-                self.options = []
+                self.sampling_params = []
 
-            def sample(self, context, *, tools=(), options=None):
+            def sample(self, context, *, tools=(), sampling_params=None):
                 del tools
                 self.contexts.append(context.copy())
-                self.options.append(options)
+                self.sampling_params.append(sampling_params)
                 return ModelSample((Message("assistant", "Done."),))
 
         model = Model()
@@ -411,8 +416,8 @@ class SampleMetadataTests(unittest.TestCase):
         compactor.compact.assert_called_once()
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
-            model.options,
-            [ResolvedSamplingOptions(auto_compact_tokens=100)],
+            model.sampling_params,
+            [ResolvedSamplingParams(auto_compact_tokens=100)],
         )
         self.assertEqual(model.contexts[0].model_items(), (
             Message("user", "follow up"),
@@ -428,12 +433,12 @@ class SampleMetadataTests(unittest.TestCase):
 
             def __init__(self):
                 self.contexts = []
-                self.options = []
+                self.sampling_params = []
 
-            def sample(self, context, *, tools=(), options=None):
+            def sample(self, context, *, tools=(), sampling_params=None):
                 del tools
                 self.contexts.append(context.copy())
-                self.options.append(options)
+                self.sampling_params.append(sampling_params)
                 return ModelSample((Message("assistant", "Done."),))
 
         model = Model()
@@ -461,8 +466,8 @@ class SampleMetadataTests(unittest.TestCase):
         create.assert_not_called()
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
-            model.options,
-            [ResolvedSamplingOptions(enable_auto_compaction=False, auto_compact_tokens=100)],
+            model.sampling_params,
+            [ResolvedSamplingParams(enable_auto_compaction=False, auto_compact_tokens=100)],
         )
         self.assertIn(
             Message("assistant", "uncompacted"),
@@ -540,11 +545,11 @@ def _timing_case(name, clock, *, fail=False):
         return response
 
     if name == "chat":
-        model = ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost"), opener=opener)
+        model = ChatCompletionsModel(chat_endpoint("http://localhost"), opener=opener)
         return model, response, chat_completions, "_decode_response"
     if name == "messages":
         model = MessagesModel(
-            MessagesEndpoint(
+            messages_endpoint(
                 "http://localhost",
                 "model",
                 max_output_tokens=100,
@@ -553,7 +558,7 @@ def _timing_case(name, clock, *, fail=False):
         )
         return model, response, messages, "_decode_response"
     identifiers = iter(("session-private", "turn-private"))
-    model = CodexResponsesModel(StreamingResponsesEndpoint(
+    model = codex_model(responses_endpoint(
         api_url="http://localhost", model="model", bearer_token="FAKE",
         api_provider="codex" if name == "codex" else "api",
     ), opener=opener, identifier_factory=lambda: next(identifiers))

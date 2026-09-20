@@ -23,7 +23,7 @@ from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary
 from pythia.interaction import ModelFailure, ModelTransportError, Reasoning, OpaqueCompaction
 from pythia.interaction import load_interaction_save
 from pythia.interaction import auto
-from pythia.interaction import ResolvedSamplingOptions
+from pythia.interaction import ResolvedSamplingParams
 from pythia.interaction._auto_board import BoardError
 from pythia.interaction._auto_config import build_parser, namespace, resolve_config
 from pythia.interaction.messages import resolve_messages_max_output_tokens
@@ -261,7 +261,7 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(settings["max_output_tokens"])
             snapshot = InteractionConfig.from_namespace(namespace(settings)).snapshot()
             self.assertIsNone(snapshot.max_samples)
-            self.assertEqual(snapshot.sampling_options(), ResolvedSamplingOptions())
+            self.assertEqual(snapshot.sampling_params(), ResolvedSamplingParams())
 
     def test_explicit_limits_and_per_context_null_overrides(self):
         args = build_parser().parse_args(["--max-samples", "3", "--max-output-tokens", "128"])
@@ -290,8 +290,12 @@ class ConfigTests(unittest.TestCase):
         model = "claude-fable-5-1"
         settings = resolve_config(overrides={"model_api": "messages", "model": model})[2]
         self.assertIsNone(settings["max_output_tokens"])
-        snapshot = InteractionConfig.from_namespace(namespace(settings)).snapshot()
-        self.assertEqual(snapshot.max_output_tokens, resolve_messages_max_output_tokens(model, None))
+        args = namespace(settings)
+        snapshot = InteractionConfig.from_namespace(args).snapshot()
+        self.assertEqual(
+            snapshot.max_output_tokens,
+            resolve_messages_max_output_tokens(args.model_binding, None),
+        )
         with self.assertRaisesRegex(ValueError, "provide it explicitly"):
             resolve_config(overrides={"model_api": "messages", "model": "uncatalogued-auto-test-model"})
 
@@ -301,7 +305,8 @@ class ConfigTests(unittest.TestCase):
             path.write_text(json.dumps({
                 "version": 1,
                 "defaults": {"model_api": "codex", "model": "file-main", "codex_auth_file": "auth.json"},
-                "contexts": {"2": {"model_api": "messages", "model": "worker", "api_key_env": "WORKER_KEY",
+                "contexts": {"2": {"model_api": "messages", "model": "worker",
+                                       "endpoint_auth": "env:WORKER_KEY",
                                        "max_output_tokens": 64}},
             }))
             parsed = build_parser().parse_args(["--context-config", str(path), "--prompt", "hi"])
@@ -313,7 +318,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings[2]["model_api"], "messages")
             self.assertEqual(settings[2]["model"], "worker")
             self.assertIsNone(settings[2]["codex_auth_file"])
-            self.assertEqual(settings[2]["api_key_env"], "WORKER_KEY")
+            self.assertEqual(settings[2]["endpoint_auth"], "env:WORKER_KEY")
             self.assertEqual([settings[i]["name"] for i in (1, 2, -1)], ["main", "worker", "watcher"])
 
     def test_config_validation_and_instruction_scope(self):
@@ -321,9 +326,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings[1]["instructions"], "")
         self.assertIsNone(settings[2]["instructions"])
         bad = ({"max_samples": 0}, {"request_timeout_seconds": float("nan")},
-               {"api_url": "http://user:secret@localhost"}, {"api_key": "SECRET"},
+               {"endpoint_url": "http://user:secret@localhost"}, {"api_key": "SECRET"},
                {"model_api": "other"}, {"max_output_tokens": True},
-               {"cwd": None}, {"api_url": True}, {"api_url": "http://localhost:bad"})
+               {"cwd": None}, {"endpoint_url": True},
+               {"endpoint_url": "http://localhost:bad"})
         for overrides in bad:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 resolve_config(overrides=overrides)
@@ -432,10 +438,10 @@ class RuntimeTests(unittest.TestCase):
                 self.outcomes = deque(scripts.get(index, ()))
                 test.threads[index].append(threading.get_ident())
 
-            def sample(self, context, **options):
+            def sample(self, context, **params):
                 test.threads[self.index].append(threading.get_ident())
                 test.calls[self.index].append(context.copy())
-                test.options[self.index].append(options.get("options"))
+                test.options[self.index].append(params.get("sampling_params"))
                 saved = load_interaction_save(test.path / "contexts" / f"{self.index}.jsonl")
                 test.assertEqual(saved.items, context.items)
                 test.assertFalse(context.pending_tool_calls())
@@ -581,7 +587,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(self.finished(session, source["thread_id"]))
         for index in (1, 2):
             self.assertEqual(len(self.calls[index]), 10)
-            self.assertTrue(all(options == ResolvedSamplingOptions() for options in self.options[index]))
+            self.assertTrue(all(options == ResolvedSamplingParams() for options in self.options[index]))
 
     def test_explicit_limits_still_apply(self):
         tool = Tool(ToolSpec("noop", "continue the test", {}),
@@ -1467,7 +1473,8 @@ class EntryPointTests(unittest.TestCase):
                 settings.write_text(json.dumps({
                     "version": 1,
                     "defaults": {"model_api": "codex", "model": "gpt-6-astra-max",
-                                 "api_url": f"http://127.0.0.1:{gateway.server_port}",
+                                 "endpoint_url": f"http://127.0.0.1:{gateway.server_port}/responses",
+                                 "endpoint_auth": "codex-login",
                                  "codex_auth_file": str(auth), "request_timeout_seconds": 3,
                                  "cwd": tmp},
                     "contexts": {"2": {"model": "gpt-5.6-sol-max"}},
@@ -1512,7 +1519,8 @@ class EntryPointTests(unittest.TestCase):
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
             process = subprocess.Popen([
                 sys.executable, "-m", "pythia.interaction.auto", "--save", str(path),
-                "--api-url", "http://127.0.0.1:1", "--request-timeout-seconds", "1",
+                "--endpoint-url", "http://127.0.0.1:1/v1/chat/completions",
+                "--request-timeout-seconds", "1",
             ], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                env={**os.environ, "TERM": "xterm-256color"})
             os.close(slave)
@@ -1589,10 +1597,13 @@ class EntryPointTests(unittest.TestCase):
                 settings = root / "contexts.json"
                 url = f"http://127.0.0.1:{gateway.server_port}"
                 settings.write_text(json.dumps({
-                    "version": 1, "defaults": {"model_api": "chat-completions", "api_url": url,
+                    "version": 1, "defaults": {"model_api": "chat-completions",
+                        "endpoint_url": url + "/v1/chat/completions",
                         "model": "main", "request_timeout_seconds": 3, "cwd": tmp},
-                    "contexts": {"2": {"model_api": "messages", "model": "worker", "api_url": url,
-                                           "api_key_env": "AUTO_TEST_KEY", "max_output_tokens": 128}},
+                    "contexts": {"2": {"model_api": "messages", "model": "worker",
+                                           "endpoint_url": url + "/v1/messages",
+                                           "endpoint_auth": "env:AUTO_TEST_KEY",
+                                           "max_output_tokens": 128}},
                 }))
                 result = subprocess.run([sys.executable, "-m", "pythia.interaction.auto",
                     "--context-config", str(settings), "--save", str(root / "run"), "--prompt", "Do the task"],

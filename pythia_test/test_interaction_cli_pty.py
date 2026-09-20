@@ -81,7 +81,7 @@ class Model:
         self.save_path = Path(save_path).expanduser().absolute()
         self.enable_default_tools = enable_default_tools
 
-    def sample(self, context, *, tools=(), options=None):
+    def sample(self, context, *, tools=(), sampling_params=None):
         assert load_interaction_save(self.save_path).items == context.items
         assert {tool.name for tool in tools} == (
             {"exec_command", "write_stdin", "apply_patch", "update_plan"}
@@ -310,7 +310,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         auth = self.root / "credentials.json"
         default = self.root / "interaction.jsonl"
         default.write_bytes(b"default sentinel\n")
-        self.start("--model-api", "codex", "--model", "test", "--codex-auth-file", str(auth),
+        self.start("--endpoint-api", "codex", "--model", "test", "--endpoint-auth-file", str(auth),
                    "--save", "auth session.jsonl", "--prompt", "blocked initial", failure="auth")
         await self.wait_output(b"auth needed")
         self.assertEqual(len(load_interaction_save(selected).items), 1)
@@ -418,7 +418,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.root / "interaction.jsonl").exists())
 
     async def test_missing_auth_shell_login_then_explicit_query(self):
-        self.start("--model-api", "codex", "--model", "test", "--codex-auth-file",
+        self.start("--endpoint-api", "codex", "--model", "test", "--endpoint-auth-file",
                    str(self.root / "auth.json"), "--prompt", "blocked initial", failure="auth")
         await self.wait_output(b"auth needed")
         os.write(self.master, b"\r")
@@ -439,7 +439,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_default_tools_preserve_config_login_quota_and_chat(self):
         self.start("--enable-default-tools=False", "--enable-workspace=False",
-                   "--model-api", "codex", "--model", "test", "--codex-auth-file",
+                   "--endpoint-api", "codex", "--model", "test", "--endpoint-auth-file",
                    str(self.root / "auth.json"), failure="auth")
         await self.wait_output(b"Default model tools disabled")
         await self.wait_output(b"auth needed")
@@ -483,7 +483,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(saved[-1], TurnSummary)
 
     async def test_exit_during_real_login_callback_wait_restores_terminal(self):
-        self.start("--model-api", "codex", "--model", "test", "--codex-auth-file",
+        self.start("--endpoint-api", "codex", "--model", "test", "--endpoint-auth-file",
                    str(self.root / "auth.json"), failure="auth-cancel")
         await self.wait_output(b"auth needed")
         os.write(self.master, b"/login\r")

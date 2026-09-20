@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import messages_endpoint
+from pythia_test.interaction_helpers import responses_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError
 from dataclasses import replace
@@ -21,13 +26,11 @@ from pythia.interaction import MessagesModel
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelLimits
-from pythia.interaction import ModelRoute
 from pythia.interaction import ModelSpec
 from pythia.interaction import ResponsesDefaults
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import cli
 from pythia.interaction import demo
-from pythia.interaction import get_model_route
 from pythia.interaction import get_model_spec
 from pythia.interaction import list_model_specs
 from pythia.interaction import messages
@@ -58,19 +61,18 @@ class ModelCatalogTests(unittest.TestCase):
             with self.subTest(name=name):
                 spec = get_model_spec("codex", name)
                 self.assertIsInstance(spec, ModelSpec)
-                self.assertEqual(spec.api_model, wire_model)
-                self.assertEqual(spec.route.provider, provider)
+                self.assertEqual(spec.endpoint.model, wire_model)
                 self.assertEqual(spec.responses, ResponsesDefaults(
                     reasoning_effort=reasoning.get("effort"),
                     reasoning_summary=reasoning.get("summary"), text_verbosity=verbosity,
                 ))
                 expected_url = (model_catalog.META_RESPONSES_API_URL if provider == "meta"
                                 else model_catalog.CODEX_RESPONSES_API_URL)
-                self.assertEqual(spec.route.api_url, expected_url)
-                self.assertEqual(spec.route.api_key_environment_variable,
-                                 "META_API_KEY" if provider == "meta" else None)
-                self.assertEqual(spec.route.auth_source,
-                                 "environment" if provider == "meta" else "codex-login")
+                self.assertEqual(spec.endpoint.url, expected_url + "/responses")
+                self.assertEqual(
+                    spec.endpoint.auth,
+                    "env:META_API_KEY" if provider == "meta" else "codex-login",
+                )
                 limits = (
                     ModelLimits()
                     if provider == "meta"
@@ -79,12 +81,12 @@ class ModelCatalogTests(unittest.TestCase):
                 self.assertEqual(spec.limits, limits)
                 self.assertTrue(spec.source)
 
-                model = CodexResponsesModel(model=name, auth=CodexAuth("FAKE"),
+                model = codex_model(model=name, auth=CodexAuth("FAKE"),
                                             identifier_factory=lambda: "fixed-turn")
                 context = InteractionContext((Init("session"), Message("user", "Hello.")))
                 payload, _ = model._build_request_payload(context, (), None)
-                self.assertEqual(model.endpoint.api_url, expected_url)
-                self.assertEqual(model.endpoint.model, name)
+                self.assertEqual(model.endpoint.url, expected_url + "/responses")
+                self.assertEqual(model.endpoint.model, wire_model)
                 self.assertEqual(payload["model"], wire_model)
                 self.assertEqual(payload.get("reasoning", {}), reasoning)
                 self.assertEqual(payload.get("text"), None if verbosity is None else {"verbosity": verbosity})
@@ -113,8 +115,7 @@ class ModelCatalogTests(unittest.TestCase):
                 max_output_tokens=128_000,
             ),
         )
-        self.assertEqual(fable.route.auth_source, "environment")
-        self.assertEqual(fable.route.api_key_environment_variable, "ANTHROPIC_API_KEY")
+        self.assertEqual(fable.endpoint.auth, "env:ANTHROPIC_API_KEY")
         self.assertIsNone(fable.responses)
         self.assertIsNone(fable.messages)
 
@@ -124,7 +125,7 @@ class ModelCatalogTests(unittest.TestCase):
             fable_max,
         )
         self.assertEqual(fable_max.aliases, ("claude-fable-5.1-max",))
-        self.assertEqual(fable_max.api_model, "claude-fable-5-1")
+        self.assertEqual(fable_max.endpoint.model, "claude-fable-5-1")
         self.assertIs(fable_max.limits, fable.limits)
         self.assertIs(fable_max.endpoint, fable.endpoint)
         self.assertEqual(
@@ -144,8 +145,8 @@ class ModelCatalogTests(unittest.TestCase):
             self.assertIs(base.limits, preset.limits)
             self.assertIs(base.endpoint, preset.endpoint)
             self.assertNotEqual(base.responses, preset.responses)
-        self.assertIs(get_model_spec("codex-responses", "gpt-6-astra"),
-                      get_model_spec("codex", "gpt-6-astra"))
+        with self.assertRaises(ValueError):
+            get_model_spec("codex-responses", "gpt-6-astra")
 
     def test_fable_max_uses_output_effort(self):
         context = InteractionContext((Message("user", "Hello."),))
@@ -157,7 +158,7 @@ class ModelCatalogTests(unittest.TestCase):
         )
         for name, effort in cases:
             with self.subTest(name=name):
-                model = MessagesModel(MessagesEndpoint(
+                model = MessagesModel(messages_endpoint(
                     api_url="https://api.anthropic.com",
                     model=name,
                     max_output_tokens=100,
@@ -187,7 +188,6 @@ class ModelCatalogTests(unittest.TestCase):
                      "gpt-5.6-sol-high", "muse-spark-1.3-max"):
             with self.subTest(name=name):
                 self.assertIsNone(get_model_spec("codex", name))
-                self.assertEqual(get_model_route("codex", name).api_url, model_catalog.CODEX_RESPONSES_API_URL)
         for name in ("claude-fable-5.2", "claude-fable-5-1-20260901",
                      "claude-fable-5-1-high", "gpt-6-astra"):
             self.assertIsNone(get_model_spec("messages", name))
@@ -198,7 +198,7 @@ class ModelCatalogTests(unittest.TestCase):
             for name in (spec.name, *spec.aliases):
                 with self.subTest(name=name):
                     context = InteractionContext((Message("user", "Hello."),))
-                    model = CodexResponsesModel(StreamingResponsesEndpoint(
+                    model = codex_model(responses_endpoint(
                         api_url="https://proxy.example.test/v1", model=name, bearer_token="FAKE",
                     ))
                     payload, state = model._build_request_payload(context, (), None)
@@ -209,13 +209,13 @@ class ModelCatalogTests(unittest.TestCase):
                     self.assertIsNone(model.max_context_tokens)
                     self.assertIsNone(model.max_output_tokens)
                     self.assertNotIn("session_id", model._build_headers(state))
-                    chat = ChatCompletionsModel(ChatCompletionsEndpoint("http://localhost", model=name))
+                    chat = ChatCompletionsModel(chat_endpoint("http://localhost", model=name))
                     self.assertEqual(chat._build_request_payload(context, (), None)["model"], name)
 
     def test_catalog_is_immutable_and_rejects_colliding_selectors(self):
         spec = get_model_spec("messages", "claude-fable-5-1")
         for obj, field, value in ((spec, "name", "other"), (spec.limits, "max_context_tokens", 1),
-                                  (spec.route, "api_url", "https://other.test")):
+                                  (spec.endpoint, "url", "https://other.test")):
             with self.assertRaises(FrozenInstanceError):
                 setattr(obj, field, value)
         with self.assertRaises(TypeError):
@@ -228,7 +228,11 @@ class ModelCatalogTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "duplicate model selector"):
                 model_catalog._build_index(specs)
-        self.assertEqual(len(model_catalog._build_index((spec, replace(spec, profile="responses")))), 4)
+        other_profile = replace(
+            spec,
+            endpoint=replace(spec.endpoint, api="responses"),
+        )
+        self.assertEqual(len(model_catalog._build_index((spec, other_profile))), 4)
 
     def test_catalog_validation(self):
         for field in (
@@ -242,7 +246,7 @@ class ModelCatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ModelLimits(auto_compact_context_tokens=200, max_context_tokens=100)
         spec = get_model_spec("messages", "claude-fable-5-1")
-        for fields in ({"name": ""}, {"api_model": "bad\nname"}, {"profile": "bad"},
+        for fields in ({"name": ""}, {"endpoint": "bad"},
                        {"aliases": "alias"}, {"aliases": [" "]},
                        {"responses": ResponsesDefaults(reasoning_effort="max")}):
             with self.assertRaises((TypeError, ValueError)):
@@ -261,10 +265,6 @@ class ModelCatalogTests(unittest.TestCase):
         ):
             with self.assertRaises((TypeError, ValueError)):
                 MessagesDefaults(**fields)
-        with self.assertRaises(TypeError):
-            ModelRoute("meta", "https://example.test", "environment")
-        with self.assertRaises(ValueError):
-            ModelRoute("meta", "https://example.test", "explicit", "META_API_KEY")
         with self.assertRaises(ValueError):
             get_model_spec("unknown-profile", "model")
 
@@ -279,18 +279,11 @@ class ModelCatalogTests(unittest.TestCase):
                 stack.enter_context(mock.patch(target, side_effect=AssertionError("unexpected effect")))
             module_spec.loader.exec_module(module)
             self.assertEqual(len(module.list_model_specs()), 10)
-            self.assertEqual(module.get_model_route("codex", "muse-spark-1.3").api_key_environment_variable,
-                             "META_API_KEY")
+            self.assertEqual(
+                module.get_model_spec("codex", "muse-spark-1.3").endpoint.auth,
+                "env:META_API_KEY",
+            )
             self.assertIsNone(module.get_model_spec("responses", "gpt-6-astra"))
-
-    def test_public_url_constants_keep_existing_import_paths(self):
-        for name in ("CODEX_RESPONSES_API_URL", "META_RESPONSES_API_URL", "OPENAI_RESPONSES_API_URL"):
-            self.assertEqual(getattr(interaction, name), getattr(model_catalog, name))
-            self.assertEqual(getattr(responses, name), getattr(model_catalog, name))
-        self.assertEqual(interaction.ANTHROPIC_MESSAGES_API_URL, model_catalog.ANTHROPIC_MESSAGES_API_URL)
-        self.assertEqual(messages.ANTHROPIC_MESSAGES_API_URL, model_catalog.ANTHROPIC_MESSAGES_API_URL)
-        self.assertEqual(model_config.ANTHROPIC_MESSAGES_API_URL, model_catalog.ANTHROPIC_MESSAGES_API_URL)
-        self.assertEqual(model_config.CODEX_RESPONSES_API_URL, model_catalog.CODEX_RESPONSES_API_URL)
 
     def test_cli_and_demo_help_list_catalog_presets_and_aliases(self):
         for frontend in (cli, demo):
@@ -308,57 +301,81 @@ class ModelCatalogTests(unittest.TestCase):
 class CatalogAuthParityTests(unittest.TestCase):
     def test_meta_environment_defaults_and_explicit_auth_url_and_file_precedence(self):
         with mock.patch.dict("os.environ", {"META_API_KEY": " env-token "}, clear=True):
-            model = CodexResponsesModel(model="muse-spark-1.3")
+            model = codex_model(model="muse-spark-1.3")
             self.assertEqual(model.endpoint.bearer_token, "env-token")
             with mock.patch.object(responses, "_load_default_model_auth",
                                    side_effect=AssertionError("must use explicit auth")):
-                model = CodexResponsesModel(
+                model = codex_model(
                     model="muse-spark-1.3", auth=CodexAuth("explicit-token"),
                     api_url="https://proxy.example.test", request_timeout_seconds=7,
                 )
             self.assertEqual(model.endpoint.bearer_token, "explicit-token")
-            self.assertEqual(model.endpoint.api_url, "https://proxy.example.test")
+            self.assertEqual(
+                model.endpoint.url,
+                "https://proxy.example.test/responses",
+            )
             self.assertEqual(model.endpoint.request_timeout_seconds, 7)
             for options in ({"codex_home": "/fake-home"}, {"auth_file": "/fake-auth.json"}):
                 with self.subTest(options=options):
                     with mock.patch.object(responses, "load_codex_auth", return_value=CodexAuth("file-token")) as load:
-                        model = CodexResponsesModel(model="muse-spark-1.3", **options)
-                    load.assert_called_once_with(codex_home=None,
-                                                 auth_file=model.binding.endpoint.auth_file)
+                        model = codex_model(model="muse-spark-1.3", **options)
+                    load.assert_called_once_with(
+                        auth_file=model.binding.endpoint.auth_file,
+                    )
                     self.assertEqual(model.endpoint.bearer_token, "file-token")
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(ModelConfigurationError, "META_API_KEY"):
-                CodexResponsesModel(model="muse-spark-1.3-xhigh")
+                codex_model(model="muse-spark-1.3-xhigh")
 
     def test_frontend_messages_auth_and_chat_defaults_do_not_cross_profiles(self):
         with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "anthropic-token",
                                             "META_API_KEY": "meta-token"}, clear=True):
-            for flags, expected in (([], "anthropic-token"), (["--api-key", "explicit"], "explicit")):
+            for flags, expected in (([], "anthropic-token"), ([
+                "--endpoint-auth", "supplied",
+                "--endpoint-api-key", "explicit",
+            ], "explicit")):
                 args = demo._build_parser().parse_args([
-                    "--model-api", "messages", "--model", "claude-fable-5.1",
+                    "--endpoint-api", "messages", "--model", "claude-fable-5.1",
                     "--max-output-tokens", "100", *flags,
                 ])
                 self.assertEqual(build_model(args).endpoint.api_key, expected)
-            args = demo._build_parser().parse_args(["--api", "chat-completions", "--model", "muse-spark-1.3"])
+            args = demo._build_parser().parse_args([
+                "--endpoint-api", "chat-completions",
+                "--model", "muse-spark-1.3",
+            ])
             model = build_model(args)
-            self.assertEqual(model.endpoint.api_url, "http://127.0.0.1:8000")
+            self.assertEqual(
+                model.endpoint.url,
+                "http://127.0.0.1:8000/v1/chat/completions",
+            )
             self.assertIsNone(model.endpoint.api_key)
             self.assertNotIn("anthropic-token", repr(list_model_specs()))
             self.assertNotIn("meta-token", repr(list_model_specs()))
 
     def test_account_services_require_actual_trusted_route_not_just_model_identity(self):
-        for api in ("codex", "codex-responses", "messages", "chat-completions"):
-            for name in ("gpt-6-astra", "unknown-model", "muse-spark-1.3", "muse-spark-1.3-xhigh"):
-                for url in (None, model_catalog.CODEX_RESPONSES_API_URL,
-                            model_catalog.CODEX_RESPONSES_API_URL + "/",
-                            "https://proxy.example.test", model_catalog.META_RESPONSES_API_URL):
-                    with self.subTest(api=api, name=name, url=url):
-                        args = cli._build_parser().parse_args(["--model-api", api, "--model", name])
-                        args.api_url = url
-                        expected = (api in {"codex", "codex-responses"}
-                                    and not name.startswith("muse-")
-                                    and (url is None or url.rstrip("/") == model_catalog.CODEX_RESPONSES_API_URL))
-                        self.assertEqual(supports_account_services(args), expected)
+        parser = cli._build_parser()
+        official = parser.parse_args([
+            "--endpoint-api", "codex", "--model", "gpt-6-astra",
+        ])
+        self.assertTrue(supports_account_services(official))
+
+        custom = parser.parse_args([
+            "--endpoint-api", "codex", "--model", "gpt-6-astra",
+            "--endpoint-url", "https://proxy.example.test/responses",
+            "--endpoint-auth", "none",
+        ])
+        self.assertFalse(supports_account_services(custom))
+
+        wrong_auth = parser.parse_args([
+            "--endpoint-api", "codex", "--model", "gpt-6-astra",
+            "--endpoint-auth", "env:OTHER_TOKEN",
+        ])
+        self.assertFalse(supports_account_services(wrong_auth))
+
+        messages_args = parser.parse_args([
+            "--endpoint-api", "messages", "--model", "gpt-6-astra",
+        ])
+        self.assertFalse(supports_account_services(messages_args))
 
 
 if __name__ == "__main__":

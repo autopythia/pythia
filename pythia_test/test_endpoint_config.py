@@ -1,4 +1,7 @@
-"""Endpoint authority, v1 migration, and v2/CLI request semantics (offline)."""
+"""Endpoint authority and catalog/CLI request semantics (offline)."""
+
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import codex_model
 
 from dataclasses import replace
 import io
@@ -56,35 +59,26 @@ class EndpointSpecTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(endpoint, **changes)
 
-    def test_model_definition_has_one_endpoint_and_legacy_views(self):
+    def test_model_definition_has_one_endpoint(self):
         original = BUILTIN_MODEL_CATALOG.get_model_spec("codex", "gpt-6-astra")
-        changed = replace(original, api_model="renamed")
+        changed = replace(
+            original,
+            endpoint=replace(original.endpoint, model="renamed"),
+        )
         self.assertEqual(changed.endpoint.model, "renamed")
-        self.assertEqual(changed.api_model, changed.endpoint.model)
-        self.assertNotIn("api_model", vars(changed))
-        self.assertNotIn("profile", vars(changed))
-        self.assertNotIn("route", vars(changed))
-        self.assertEqual(changed.profile, changed.endpoint.api)
-        self.assertEqual(changed.route.api_url, "https://chatgpt.com/backend-api/codex")
+        self.assertEqual(original.endpoint.model, "gpt-6-astra")
 
-    def test_v1_prefixes_convert_exactly_once(self):
-        for api, prefix, suffix, auth in (
-            ("chat-completions", "http://host.test/prefix/v1", "/v1/chat/completions", "explicit"),
-            ("messages", "https://host.test/prefix", "/v1/messages", "explicit"),
-            ("responses", "https://host.test/v1", "/responses", "explicit"),
-            ("codex", "https://chatgpt.com/backend-api/codex", "/responses", "codex-login"),
-        ):
-            with self.subTest(api=api):
-                registry = parse_model_catalog(f'''[catalog]
+    def test_old_route_catalog_is_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_model_catalog('''[catalog]
 version = 1
 [model.example]
-api = {api}
+api = chat-completions
 api_model = wire
 route.provider = label
-route.api_url = {prefix}
-route.auth_source = {auth}
+route.api_url = http://host.test
+route.auth_source = explicit
 ''')
-                self.assertEqual(registry.bind(name="example").endpoint.url, prefix + suffix)
 
     def test_v2_needs_no_provider_and_granular_patches_preserve_endpoint(self):
         registry = parse_model_catalog(V2)
@@ -108,7 +102,10 @@ request_params.thinking = {"type": "disabled"}
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_model_catalog(text)
         with self.assertRaises((ValueError, TypeError)):
-            replace(BUILTIN_MODEL_CATALOG.specs[0], api_model=None)
+            replace(
+                BUILTIN_MODEL_CATALOG.specs[0],
+                endpoint=replace(BUILTIN_MODEL_CATALOG.specs[0].endpoint, model=None),
+            )
         with self.assertRaises(ValueError):
             parse_model_catalog(V2.replace('request_params.thinking = {"type": "enabled"}\n', '')
                                 .replace('request_params.reasoning_effort = "max"', 'request_params = null'))
@@ -136,7 +133,6 @@ class EndpointRuntimeTests(unittest.TestCase):
         config = InteractionConfig.from_namespace(args)
         self.assertEqual(args.model_binding.selector, "local")
         self.assertEqual(model.endpoint.url, "http://127.0.0.1:8000/custom/invoke/")
-        self.assertIsNone(model.endpoint.api_url)  # Not representable as a legacy prefix.
         payload = model._build_request_payload(ctx(), (), config.snapshot().sampling_params())
         self.assertEqual(payload["model"], "wire-override")
         self.assertEqual(payload["reasoning_effort"], "max")
@@ -148,20 +144,23 @@ class EndpointRuntimeTests(unittest.TestCase):
         self.assertIsNone(args.model_binding.selector)
         self.assertEqual(build_model(args).endpoint.url, "http://localhost:8000/infer")
         self.assertIsNone(InteractionConfig.from_namespace(args).get("auto_compact_tokens"))
-        for spelling in ("--endpoint-api", "--api", "--model-api"):
-            self.assertEqual(cli._build_parser().parse_args([spelling, "messages"]).model_api, "messages")
+        self.assertEqual(
+            cli._build_parser().parse_args([
+                "--endpoint-api", "messages",
+            ]).model_api,
+            "messages",
+        )
 
-    def test_full_url_and_legacy_prefix_are_not_ambiguous_aliases(self):
+    def test_old_endpoint_flags_are_rejected(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
-            cli._build_parser().parse_args(["--endpoint-url", "http://host/infer", "--api-url", "http://host"])
-        legacy = prepared("--api-url", "http://localhost:8000/prefix", "--model", "unknown")
-        self.assertEqual(build_model(legacy).endpoint.url, "http://localhost:8000/prefix/v1/chat/completions")
+            cli._build_parser().parse_args(["--api-url", "http://host"])
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            cli._build_parser().parse_args(["--model-api", "messages"])
 
     def test_prepared_raw_mutations_cannot_override_actual_url_model_or_login_file(self):
         with tempfile.TemporaryDirectory() as directory:
             args = prepared("--model", "gpt-6-astra", "--endpoint-auth-home", directory)
             endpoint = args.model_binding.endpoint
-            args.api_url = "https://proxy.example.test"
             args.endpoint_url = "https://another.example.test/infer"
             args.endpoint_model = "other-wire"
             args.model = "other-selector"
@@ -169,17 +168,23 @@ class EndpointRuntimeTests(unittest.TestCase):
             with mock.patch.object(responses, "load_codex_auth", return_value=CodexAuth("FAKE")) as load:
                 model = build_model(args)
             self.assertEqual(model.endpoint.url, endpoint.url)
-            self.assertEqual(model.binding.api_model, endpoint.model)
+            self.assertEqual(model.binding.endpoint.model, endpoint.model)
             self.assertEqual(supports_account_services(args), model.binding.supports_account_services)
-            load.assert_called_once_with(codex_home=None, auth_file=endpoint.auth_file)
+            load.assert_called_once_with(auth_file=endpoint.auth_file)
 
     def test_bound_transport_constructors_reject_late_url_changes(self):
         binding = parse_model_catalog(V2).bind(name="local")
-        with self.assertRaisesRegex(ValueError, "conflicts"):
-            ChatCompletionsEndpoint("http://different.example.test", "local", binding=binding)
+        with self.assertRaises(TypeError):
+            ChatCompletionsEndpoint(
+                binding=binding,
+                api_url="http://different.example.test",
+            )
         binding = BUILTIN_MODEL_CATALOG.bind("codex", "gpt-6-astra")
-        with self.assertRaisesRegex(ValueError, "conflicts"):
-            responses.CodexResponsesModel(binding=binding, api_url="https://other.example.test")
+        with self.assertRaises(TypeError):
+            responses.CodexResponsesModel(
+                binding=binding,
+                api_url="https://other.example.test",
+            )
 
     def test_environment_requirement_does_not_depend_on_catalog_origin(self):
         changed = parse_model_catalog('''[catalog]
@@ -221,7 +226,7 @@ source = metadata only
     def test_anonymous_generic_responses_requires_no_dummy_bearer(self):
         spec = EndpointSpec("responses", "http://host.test/custom/respond", "wire", "none")
         registry = type(BUILTIN_MODEL_CATALOG)((ModelSpec(name="test", endpoint=spec),))
-        model = responses.CodexResponsesModel(binding=registry.bind(name="test"))
+        model = codex_model(binding=registry.bind(name="test"))
         self.assertIsNone(model.endpoint.bearer_token)
         self.assertNotIn("Authorization", model._build_headers(responses._ProviderState()))
         snapshot = model._checked_credential()
@@ -265,21 +270,7 @@ source = metadata only
                 self.assertIsNone(requests[0].get_header("Authorization"))
                 self.assertIsNone(requests[0].get_header("X-api-key"))
 
-    def test_provider_labels_do_not_affect_fingerprints_or_auto_inheritance(self):
-        base = BUILTIN_MODEL_CATALOG.get_model_spec("codex", "gpt-6-astra")
-        changed = replace(base, provider_label="display-only")
-        registry = type(BUILTIN_MODEL_CATALOG)((base, replace(changed, name="other")))
-        self.assertEqual(type(registry)((base,)).bind(name=base.name).manifest_entry()["fingerprint"],
-                         type(registry)((changed,)).bind(name=base.name).manifest_entry()["fingerprint"])
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "contexts.json"
-            path.write_text(json.dumps({"version": 1, "contexts": {"2": {"model": "other"}}}))
-            settings = resolve_config(path, {"model_api": "codex", "model": base.name,
-                                            "api_url": "https://proxy.example.test", "codex_home": directory}, catalog=registry)
-            self.assertEqual(settings[2]["api_url"], "https://proxy.example.test")
-            self.assertEqual(settings[2]["codex_home"], directory)
-
-    def test_auto_endpoint_fields_override_and_legacy_saves_still_load(self):
+    def test_auto_endpoint_fields_override_catalog_values(self):
         registry = parse_model_catalog(V2)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "contexts.json"
@@ -287,8 +278,14 @@ source = metadata only
                 "endpoint_url": "http://host.test/exact", "endpoint_model": "worker-wire",
                 "endpoint_auth": "none",
             }}}))
-            settings = resolve_config(path, {"model": "local", "api_url": "http://legacy.test"}, catalog=registry)
-            self.assertIsNone(settings[2]["api_url"])
+            settings = resolve_config(
+                path,
+                {
+                    "model": "local",
+                    "endpoint_url": "http://launch.test/exact",
+                },
+                catalog=registry,
+            )
             endpoint = namespace(settings[2], registry).model_binding.endpoint
             self.assertEqual(endpoint.url, "http://host.test/exact")
             self.assertEqual(endpoint.model, "worker-wire")
@@ -305,11 +302,12 @@ source = metadata only
                 check_catalog_manifest(path, {"main": other})
             other = replace(other, endpoint_overrides=frozenset(("url",)))
             self.assertTrue(check_catalog_manifest(path, {"main": other}))
-            legacy = json.loads(path.read_text())
-            legacy["version"] = 1
-            legacy["bindings"]["main"].pop("endpoint")
-            path.write_text(json.dumps(legacy))
-            self.assertTrue(check_catalog_manifest(path, {"main": other}))
+            outdated = json.loads(path.read_text())
+            outdated["version"] = 1
+            outdated["bindings"]["main"].pop("endpoint")
+            path.write_text(json.dumps(outdated))
+            with self.assertRaisesRegex(SaveError, "Invalid"):
+                check_catalog_manifest(path, {"main": other})
 
 
 if __name__ == "__main__":

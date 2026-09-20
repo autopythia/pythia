@@ -11,7 +11,7 @@ from pythia.interaction import (
     CompactionResult, ContextPrefix, Environment, Init, InteractionContext,
     Message, ModelAuthenticationError, ModelFailure, ModelResponseError,
     ModelSample, ModelSampleBoundary, ModelTimeoutError, OpaqueCompaction,
-    Reasoning, ResolvedSamplingOptions, SaveError, Tool, ToolCall, ToolOutcome,
+    Reasoning, ResolvedSamplingParams, SaveError, Tool, ToolCall, ToolOutcome,
     ToolResult, ToolSpec, TurnSummary, UserInteractionBoundary, UserToolCall,
     cli, load_interaction_save, save_interaction_save,
 )
@@ -171,13 +171,13 @@ class RetryControllerTests(_ControllerTestCase):
                 mock.patch.object(cli, "build_model", return_value=model) as build, \
                 mock.patch.object(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
-                "--prompt", "hello", "--model-api", "codex", "--model", "test",
-                "--codex-auth-file", str(auth), "--enable-default-tools=False",
+                "--prompt", "hello", "--endpoint-api", "codex", "--model", "test",
+                "--endpoint-auth-file", str(auth), "--enable-default-tools=False",
             ]), 1)
         login.assert_called_once()
         build.assert_called_once()  # /login activation only; retry reuses it.
         self.assertEqual(len(model.calls), 2)
-        self.assertEqual(model.calls[1][2], ResolvedSamplingOptions(max_output_tokens=17))
+        self.assertEqual(model.calls[1][2], ResolvedSamplingParams(max_output_tokens=17))
         self.assertEqual(model.calls[1][1], ())
         self.assertIn(Message("user", "summary"), model.calls[1][0].model_items())
         self.assertEqual([i.call.name for i in load_interaction_save(self.path) if isinstance(i, UserToolCall)],
@@ -368,8 +368,8 @@ class RetryAuthenticationTests(_ControllerTestCase):
         with mock.patch.object(user_tools, "login") as login, \
                 mock.patch.object(cli, "build_model", return_value=replacement) as build:
             self.assertEqual(await self._run(model, _Terminal(frame), [
-                "--prompt", "hello", "--model-api", "codex", "--model", "test",
-                "--codex-auth-file", str(self.path.parent / "auth.json"),
+                "--prompt", "hello", "--endpoint-api", "codex", "--model", "test",
+                "--endpoint-auth-file", str(self.path.parent / "auth.json"),
             ]), 1)
         login.assert_called_once()
         build.assert_called_once()  # Retry reuses the model activated by /login.
@@ -395,7 +395,7 @@ class RetryAuthenticationTests(_ControllerTestCase):
 
                 with mock.patch.object(cli, "build_model", return_value=replacement) as build:
                     self.assertEqual(await self._run(model, _Terminal(frame), [
-                        "--prompt", "hello", "--model-api", "codex", "--model", "test",
+                        "--prompt", "hello", "--endpoint-api", "codex", "--model", "test",
                     ]), 1)
                 self.assertEqual(build.call_count, int(account is not None))
                 self.assertEqual(replacement.calls, [])

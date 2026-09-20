@@ -490,7 +490,7 @@ class HeadlessMediaTests(unittest.TestCase):
         code, model, stderr = self.run_main(
             [
                 "--enable-experimental-media",
-                "--model-api",
+                "--endpoint-api",
                 "messages",
                 "--model",
                 "claude-test",
@@ -541,7 +541,7 @@ class DemoMediaTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def sample(self, context, *, tools=(), options=None):
+            def sample(self, context, *, tools=(), sampling_params=None):
                 self.calls.append(context.copy())
                 return _answer("ok")
 

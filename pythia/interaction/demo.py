@@ -35,10 +35,8 @@ from .messages import MessagesModel
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
 from .model import ModelError
-from .model import SamplingOptions
-from .model import ResolvedSamplingOptions
-from .model import UNSET_SAMPLING_PARAMS, select_sampling_params
-from .model import sample_model
+from .model import SamplingParams
+from .model import ResolvedSamplingParams
 from .model_config import DEFAULT_SAVE_PATH as DEFAULT_SAVE_PATH
 from .model_config import build_model
 from .model_config import build_parser
@@ -81,8 +79,7 @@ def run(
     prompt: Optional[str] = DEFAULT_PROMPT,
     instructions: Optional[Union[str, Instructions]] = None,
     max_samples: Optional[int] = None,
-    options=UNSET_SAMPLING_PARAMS,
-    sampling_params=UNSET_SAMPLING_PARAMS,
+    sampling_params: Optional[SamplingParams] = None,
     save_path: Optional[Union[str, Path]] = None,
     resume: bool = False,
     enable_auto_compaction: bool = True,
@@ -92,7 +89,6 @@ def run(
     auto_compact_tokens: Optional[int] = None,
     max_context_tokens: Optional[int] = None,
 ) -> str:
-    options = select_sampling_params(sampling_params, options)
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
     if not isinstance(environment, Environment):
@@ -136,31 +132,31 @@ def run(
         or max_samples <= 0
     ):
         raise ValueError("max_samples must be a positive integer or None")
-    if options is not None and not isinstance(options, SamplingOptions):
-        raise TypeError("options must be SamplingOptions or None")
-    base_options = options or SamplingOptions()
+    if sampling_params is not None and not isinstance(sampling_params, SamplingParams):
+        raise TypeError("sampling_params must be SamplingParams or None")
+    base_params = sampling_params or SamplingParams()
     if auto_compact_tokens is not None and (
-        base_options.auto_compact_tokens is not None
-        or isinstance(base_options, ResolvedSamplingOptions)
-    ) and auto_compact_tokens != base_options.auto_compact_tokens:
-        raise ValueError("Conflicting auto_compact_tokens keyword and sampling option")
+        base_params.auto_compact_tokens is not None
+        or isinstance(base_params, ResolvedSamplingParams)
+    ) and auto_compact_tokens != base_params.auto_compact_tokens:
+        raise ValueError("Conflicting auto_compact_tokens keyword and sampling param")
     inputs = InteractionConfigSnapshot(
         enable_workspace=enable_workspace,
         max_samples=max_samples,
-        max_output_tokens=base_options.max_output_tokens,
+        max_output_tokens=base_params.max_output_tokens,
         enable_auto_compaction=(
-            enable_auto_compaction and base_options.enable_auto_compaction is not False
+            enable_auto_compaction and base_params.enable_auto_compaction is not False
         ),
         auto_compact_tokens=(
             auto_compact_tokens if auto_compact_tokens is not None
-            else base_options.auto_compact_tokens
+            else base_params.auto_compact_tokens
         ),
         max_context_tokens=max_context_tokens,
-        request_params=(base_options.request_params
-                        if isinstance(base_options, ResolvedSamplingOptions) else {}),
+        request_params=(base_params.request_params
+                        if isinstance(base_params, ResolvedSamplingParams) else {}),
     )
-    # Resolved options must not be sent through model-default inheritance again.
-    if isinstance(base_options, ResolvedSamplingOptions):
+    # Resolved params must not be sent through model-default inheritance again.
+    if isinstance(base_params, ResolvedSamplingParams):
         messages = isinstance(model, MessagesModel)
         turn_config = InteractionConfig(
             inputs,
@@ -171,7 +167,7 @@ def run(
         ).snapshot()
     else:
         turn_config = InteractionConfig.from_model(model, inputs).snapshot()
-    options = turn_config.sampling_params(base_options)
+    sampling_params = turn_config.sampling_params(base_params)
     binding = getattr(model, "binding", None)
     if isinstance(binding, ModelBinding):
         binding = replace(binding, request_params=turn_config.request_params)
@@ -281,11 +277,10 @@ def run(
                 print(display_item)
         sample_count += 1
         try:
-            sample = sample_model(
-                model,
+            sample = model.sample(
                 context,
                 tools=environment.tool_specs,
-                sampling_params=options,
+                sampling_params=sampling_params,
             )
         except ModelError as exc:
             contribution = (

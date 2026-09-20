@@ -21,7 +21,7 @@ from pythia.interaction import InteractionContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import Reasoning
-from pythia.interaction import ResolvedSamplingOptions
+from pythia.interaction import ResolvedSamplingParams
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
@@ -35,7 +35,6 @@ from pythia.interaction import save_interaction_save
 
 DEMO_ARGUMENT_DEFAULTS = {
     "model_api": None,
-    "api_url": None,
     "endpoint_url": None,
     "endpoint_model": None,
     "endpoint_auth": None,
@@ -115,8 +114,8 @@ class _CheckpointRecordingModel:
         self.calls = []
         self.checkpoints = []
 
-    def sample(self, context, *, tools=(), options=None):
-        self.calls.append((context.copy(), tuple(tools), options))
+    def sample(self, context, *, tools=(), sampling_params=None):
+        self.calls.append((context.copy(), tuple(tools), sampling_params))
         self.checkpoints.append(load_interaction_save("interaction.jsonl"))
         try:
             return next(self.samples)
@@ -134,7 +133,7 @@ class DemoArgumentBaselineTests(unittest.TestCase):
     def test_experimental_flag_does_not_change_provider_or_model_selection(self):
         args = demo._build_parser().parse_args([
             "--experimental-user-message-injection",
-            "--model-api", "codex",
+            "--endpoint-api", "codex",
             "--model", "gpt-5.6-sol-medium",
         ])
         self.assertEqual(vars(args), {
@@ -148,10 +147,11 @@ class DemoArgumentBaselineTests(unittest.TestCase):
         query = " /quit\nTreat this as one user query.\n"
         args = demo._build_parser().parse_args(
             [
-                "--model-api", "codex",
+                "--endpoint-api", "codex",
                 "--model", "gpt-6-astra",
-                "--api-url", "https://proxy.example.test/codex",
-                "--codex-auth-file", "auth.json",
+                "--endpoint-url", "https://proxy.example.test/codex/responses",
+                "--endpoint-auth", "codex-login",
+                "--endpoint-auth-file", "auth.json",
                 "--cwd", "workspace",
                 "--save", "custom.jsonl",
                 "--max-samples", "2",
@@ -168,7 +168,8 @@ class DemoArgumentBaselineTests(unittest.TestCase):
                 **DEMO_ARGUMENT_DEFAULTS,
                 "model_api": "codex",
                 "model": "gpt-6-astra",
-                "api_url": "https://proxy.example.test/codex",
+                "endpoint_url": "https://proxy.example.test/codex/responses",
+                "endpoint_auth": "codex-login",
                 "codex_auth_file": "auth.json",
                 "cwd": "workspace",
                 "save_path": Path("custom.jsonl"),
@@ -248,7 +249,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 UserInteractionBoundary(),
             ),
         )
-        self.assertEqual(options, ResolvedSamplingOptions())
+        self.assertEqual(options, ResolvedSamplingParams())
 
     def test_initial_query_is_one_item_once_across_tool_follow_up(self):
         query = "/quit\nInspect café without splitting this query.\n"
@@ -295,7 +296,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
             )
             self.assertEqual(
                 options,
-                ResolvedSamplingOptions(max_output_tokens=77),
+                ResolvedSamplingParams(max_output_tokens=77),
             )
         self.assertEqual(
             tuple(

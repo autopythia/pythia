@@ -155,7 +155,7 @@ class HeadlessCLITests(unittest.TestCase):
     def test_missing_auth_is_fail_fast_without_creating_a_save_or_login_shell(self):
         with mock.patch.object(cli, "DefaultEnvironment") as environment:
             code, _, _, stderr = self.run_main(
-                ["--prompt", "hello", "--model-api", "codex", "--model", "test"],
+                ["--prompt", "hello", "--endpoint-api", "codex", "--model", "test"],
                 factory=mock.Mock(side_effect=CodexAuthUnavailable("missing credentials")),
             )
         self.assertEqual(code, 1)

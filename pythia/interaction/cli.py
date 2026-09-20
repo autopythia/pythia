@@ -64,8 +64,7 @@ from .media import parse_user_prompt
 from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
-from .model import SamplingOptions
-from .model import sample_model
+from .model import SamplingParams
 from .model_config import DEFAULT_SAVE_PATH
 from .model_config import _boolean_argument
 from .model_config import build_model
@@ -510,7 +509,7 @@ async def _turn(
     # sampling failure below can arm a new one, not a tool/compaction/save error.
     state.retry = None
     turn_config = config.snapshot()
-    options = turn_config.sampling_params()
+    sampling_params = turn_config.sampling_params()
     turn_started = time.perf_counter()
     samples = 0
     while not state.closing:
@@ -553,11 +552,10 @@ async def _turn(
         state.set_phase("sampling")
         try:
             sample = await asyncio.to_thread(
-                sample_model,
-                model,
+                model.sample,
                 context.copy(),
                 tools=environment.tool_specs,
-                sampling_params=options,
+                sampling_params=sampling_params,
             )
         except ModelError as exc:
             contribution = (
@@ -867,12 +865,11 @@ async def _drive_interaction(
                     )
                     if message.has_media and args.model_api not in {
                         "codex",
-                        "codex-responses",
                         "chat-completions",
                     }:
                         raise AttachmentError(
-                            f"--model-api {args.model_api} does not support "
-                            "media prompts; use codex-responses or "
+                            f"--endpoint-api {args.model_api} does not support "
+                            "media prompts; use codex or "
                             "chat-completions"
                         )
                 except AttachmentError as exc:
@@ -1141,7 +1138,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.max_samples is not None and args.max_samples <= 0:
             raise ValueError("max_samples must be a positive integer or None")
         if args.max_output_tokens is not None:
-            SamplingOptions(max_output_tokens=args.max_output_tokens)
+            SamplingParams(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
         if args.resume and save_path.is_file():
             args._catalog_notices = check_catalog_manifest(

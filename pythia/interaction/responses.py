@@ -8,7 +8,6 @@ import os
 import socket
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Mapping
@@ -30,7 +29,6 @@ from ._http import USER_AGENT
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .codex_auth import CodexAuth
-from .codex_auth import CodexAuthPath
 from .codex_auth import CodexCredentials
 from .codex_auth import _resolve_auth_file
 from .codex_auth import load_codex_auth
@@ -68,16 +66,11 @@ from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
-from .model import SamplingOptions
-from .model import ResolvedSamplingParams, UNSET_SAMPLING_PARAMS, select_sampling_params
+from .model import SamplingParams
+from .model import ResolvedSamplingParams
 from .model import _timed_sample
-from .model_catalog import CODEX_RESPONSES_API_URL
-from .model_catalog import META_RESPONSES_API_URL
-from .model_catalog import OPENAI_RESPONSES_API_URL
 from .model_catalog import ModelSpec
-from .model_catalog import get_model_route
-from .model_catalog import get_model_spec
-from .model_catalog import ModelBinding, BUILTIN_MODEL_CATALOG, bind_endpoint, bound_transport_inputs
+from .model_catalog import ModelBinding
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
@@ -90,109 +83,24 @@ _MAX_DIAGNOSTIC_VALUE_CHARS = 256
 _MAX_DIAGNOSTIC_EVENT_TYPES = 32
 
 
-def _normalize_configuration(
-    api_url: str, model: str, request_timeout_seconds: float,
-) -> Tuple[str, str, float]:
-    """Validate non-secret endpoint options before attempting credential loading."""
-    if not isinstance(api_url, str):
-        raise TypeError("api_url must be a string")
-    api_url = api_url.strip()
-    if not api_url:
-        raise ModelConfigurationError("api_url must not be empty")
-    if any(character.isspace() for character in api_url):
-        raise ModelConfigurationError(
-            "api_url must not contain whitespace"
-        )
-
-    try:
-        parsed = urllib.parse.urlsplit(api_url)
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError as exc:
-        raise ModelConfigurationError("api_url is invalid") from exc
-    scheme = parsed.scheme.lower()
-    if scheme not in {"http", "https"}:
-        raise ModelConfigurationError(
-            "api_url scheme must be 'http' or 'https'"
-        )
-    if not parsed.netloc or hostname is None:
-        raise ModelConfigurationError(
-            "api_url must be an absolute URL with a host"
-        )
-    if port == 0:
-        raise ModelConfigurationError(
-            "api_url port must be from 1 through 65535"
-        )
-    if parsed.username is not None or parsed.password is not None:
-        raise ModelConfigurationError(
-            "api_url must not contain user information"
-        )
-    if parsed.query:
-        raise ModelConfigurationError("api_url must not contain a query")
-    if parsed.fragment:
-        raise ModelConfigurationError(
-            "api_url must not contain a fragment"
-        )
-    path_prefix = parsed.path.rstrip("/")
-    if path_prefix.endswith("/responses"):
-        raise ModelConfigurationError(
-            "api_url must not include the fixed /responses path"
-        )
-    api_url = urllib.parse.urlunsplit(
-        (scheme, parsed.netloc, path_prefix, "", "")
-    )
-
-    if not isinstance(model, str):
-        raise TypeError("model must be a string")
-    model = model.strip()
-    if not model:
-        raise ModelConfigurationError("model must not be empty")
-
-    timeout = request_timeout_seconds
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or not math.isfinite(float(timeout))
-        or float(timeout) <= 0
-    ):
-        raise ModelConfigurationError(
-            "request_timeout_seconds must be positive and finite"
-        )
-    return api_url, model, float(timeout)
-
-
 @dataclass(frozen=True)
 class StreamingResponsesEndpoint:
-    api_url: Optional[str] = None
-    model: Optional[str] = None
+    binding: ModelBinding = field(repr=False)
     bearer_token: Optional[str] = field(default=None, repr=False)
     account_id: Optional[str] = None
-    api_provider: Optional[str] = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
-    binding: Optional[ModelBinding] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        bound = self.binding is not None
-        if self.api_provider is not None and not isinstance(self.api_provider, str):
-            raise TypeError("api_provider must be a string")
-        provider = None if self.api_provider is None else self.api_provider.strip().lower()
-        expected = "codex" if bound and self.binding.api == "codex" else "api"
-        if bound and provider is not None and provider != expected:
-            raise ModelConfigurationError("API dialect conflicts with resolved endpoint")
-        object.__setattr__(self, "api_provider", expected if provider is None else provider)
-        api = "codex" if self.api_provider == "codex" else "responses"
-        model, prefix = bound_transport_inputs(api, self.model, self.api_url, self.binding)
-        api_url, model, timeout = _normalize_configuration(
-            prefix or (self.binding.endpoint.url if bound else prefix),
-            model, self.request_timeout_seconds,
-        )
-        if bound:
-            api_url = prefix
-        object.__setattr__(self, "api_url", api_url)
-        object.__setattr__(self, "model", model)
-        object.__setattr__(self, "request_timeout_seconds", timeout)
+        if not isinstance(self.binding, ModelBinding):
+            raise TypeError("binding must be ModelBinding")
+        if self.binding.api not in {"codex", "responses"}:
+            raise ModelConfigurationError(
+                "Responses endpoint requires a codex or responses binding"
+            )
+        if self.binding.endpoint.model is None:
+            raise ModelConfigurationError("Responses endpoint model is required")
 
-        anonymous = bound and self.binding.endpoint.auth == "none"
+        anonymous = self.binding.endpoint.auth == "none"
         if anonymous:
             if self.bearer_token is not None or self.account_id is not None:
                 raise ModelConfigurationError("Anonymous endpoint cannot receive credentials")
@@ -208,18 +116,13 @@ class StreamingResponsesEndpoint:
                 )
             object.__setattr__(self, "bearer_token", bearer_token)
 
-        if not isinstance(self.api_provider, str):
-            raise TypeError("api_provider must be a string")
-        api_provider = self.api_provider.strip().lower()
-        if api_provider not in {"api", "codex"}:
+        timeout = self.request_timeout_seconds
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not math.isfinite(float(timeout)) or float(timeout) <= 0):
             raise ModelConfigurationError(
-                "api_provider must be 'api' or 'codex'"
+                "request_timeout_seconds must be positive and finite"
             )
-        object.__setattr__(self, "api_provider", api_provider)
-        object.__setattr__(self, "binding", bind_endpoint(
-            "codex" if api_provider == "codex" else "responses",
-            model, api_url, self.binding, auth="supplied",
-        ))
+        object.__setattr__(self, "request_timeout_seconds", float(timeout))
 
         if self.account_id is not None:
             if not isinstance(self.account_id, str):
@@ -231,11 +134,19 @@ class StreamingResponsesEndpoint:
                 raise ModelConfigurationError(
                     "account_id must not contain newlines"
                 )
-            if api_provider != "codex":
+            if self.binding.api != "codex":
                 raise ModelConfigurationError(
-                    "account_id requires api_provider='codex'"
+                    "account_id requires a Codex endpoint"
                 )
             object.__setattr__(self, "account_id", account_id)
+
+    @property
+    def model(self) -> str:
+        return self.binding.endpoint.model
+
+    @property
+    def api_provider(self) -> str:
+        return "codex" if self.binding.api == "codex" else "api"
 
     @property
     def url(self) -> str:
@@ -349,8 +260,7 @@ class _FileCredentialSource:
         return _CredentialSnapshot(refreshed.auth, refreshed)
 
 
-def _load_default_model_auth(model, *, codex_home=None, auth_file=None, endpoint=None):
-    endpoint = BUILTIN_MODEL_CATALOG.bind("codex", model).endpoint if endpoint is None else endpoint
+def _load_default_model_auth(endpoint):
     if endpoint.auth == "none":
         return None
     if endpoint.environment_variable is not None:
@@ -359,18 +269,19 @@ def _load_default_model_auth(model, *, codex_home=None, auth_file=None, endpoint
             raise ModelConfigurationError(f"{endpoint.environment_variable} is required for this model")
         return CodexAuth(access_token=token)
     if endpoint.auth == "codex-login":
-        return load_codex_auth(codex_home=None, auth_file=endpoint.auth_file)
+        return load_codex_auth(auth_file=endpoint.auth_file)
     raise ModelConfigurationError("This endpoint requires supplied credentials")
 
 
-def _default_credential_source(model, *, codex_home=None, auth_file=None, endpoint=None):
-    endpoint = BUILTIN_MODEL_CATALOG.bind("codex", model).endpoint if endpoint is None else endpoint
+def _default_credential_source(endpoint):
     if endpoint.auth == "none":
         return _StaticCredentialSource(None)
     if endpoint.environment_variable is not None:
         return _EnvironmentCredentialSource(endpoint.environment_variable)
     if endpoint.auth == "codex-login":
-        path = _resolve_auth_file(codex_home=None, auth_file=endpoint.auth_file).resolve()
+        path = _resolve_auth_file(
+            codex_home=None, auth_file=endpoint.auth_file,
+        ).resolve()
         return _FileCredentialSource(path)
     raise ModelConfigurationError("This endpoint requires supplied credentials")
 
@@ -543,32 +454,29 @@ def _encode_tools(tools: Sequence[Any]) -> List[Dict[str, Any]]:
 
 def _apply_sampling_params(
     payload: Dict[str, Any],
-    options: Optional[SamplingOptions],
+    sampling_params: Optional[SamplingParams],
 ) -> None:
-    if options is None:
+    if sampling_params is None:
         return
-    if isinstance(options, ResolvedSamplingParams) and options.request_params:
+    if (isinstance(sampling_params, ResolvedSamplingParams)
+            and sampling_params.request_params):
         raise ModelConfigurationError("request_params is unsupported for Responses")
     unsupported = []
-    if options.temperature is not None:
+    if sampling_params.temperature is not None:
         unsupported.append("temperature")
-    if options.top_p is not None:
+    if sampling_params.top_p is not None:
         unsupported.append("top_p")
-    if options.stop:
+    if sampling_params.stop:
         unsupported.append("stop")
-    if options.seed is not None:
+    if sampling_params.seed is not None:
         unsupported.append("seed")
     if unsupported:
         raise ModelConfigurationError(
             "Codex Responses does not support these sampling options yet: "
             + ", ".join(unsupported)
         )
-    if options.max_output_tokens is not None:
-        payload["max_output_tokens"] = options.max_output_tokens
-
-
-# Compatibility spelling for callers of the former encoder helper.
-_apply_sampling_options = _apply_sampling_params
+    if sampling_params.max_output_tokens is not None:
+        payload["max_output_tokens"] = sampling_params.max_output_tokens
 
 
 def _new_identifier(factory: Callable[[], Any], field_name: str) -> str:
@@ -1704,12 +1612,8 @@ class CodexResponsesModel:
         self,
         endpoint: Optional[StreamingResponsesEndpoint] = None,
         *,
-        model: Optional[str] = None,
         auth: Optional[CodexAuth] = None,
-        api_url: Optional[str] = None,
         request_timeout_seconds: Optional[float] = None,
-        codex_home: Optional[CodexAuthPath] = None,
-        auth_file: Optional[CodexAuthPath] = None,
         opener: Optional[Callable[..., Any]] = None,
         auth_opener: Optional[Callable[..., Any]] = None,
         identifier_factory: Optional[Callable[[], Any]] = None,
@@ -1721,22 +1625,11 @@ class CodexResponsesModel:
                 raise TypeError(
                     "endpoint must be StreamingResponsesEndpoint or None"
                 )
-            conflicting_options = [
-                name
-                for name, value in (
-                    ("model", model),
-                    ("auth", auth),
-                    ("api_url", api_url),
-                    (
-                        "request_timeout_seconds",
-                        request_timeout_seconds,
-                    ),
-                    ("codex_home", codex_home),
-                    ("auth_file", auth_file),
-                    ("binding", binding),
-                )
-                if value is not None
-            ]
+            conflicting_options = [name for name, value in (
+                ("auth", auth),
+                ("request_timeout_seconds", request_timeout_seconds),
+                ("binding", binding),
+            ) if value is not None]
             if conflicting_options:
                 raise ModelConfigurationError(
                     "endpoint cannot be combined with endpoint-construction "
@@ -1748,81 +1641,43 @@ class CodexResponsesModel:
                 None if endpoint.bearer_token is None else CodexAuth(endpoint.bearer_token, endpoint.account_id)
             )
         else:
-            bound_input = binding is not None
-            if binding is not None:
-                if not isinstance(binding, ModelBinding) or binding.api not in {"codex", "responses"}:
-                    raise ModelConfigurationError("Invalid Responses model binding")
-                if model is None:
-                    model = binding.selector if binding.selector is not None else binding.api_model
-            if model is None:
-                raise ModelConfigurationError(
-                    "model is required when endpoint is not supplied"
-                )
-            if not isinstance(model, str):
-                raise TypeError("model must be a string")
-            model = model.strip()
-            if not model:
-                raise ModelConfigurationError("model must not be empty")
-            if binding is None:
-                binding = BUILTIN_MODEL_CATALOG.bind("codex", model, api_url=api_url)
-            else:
-                binding = bind_endpoint(binding.api, model, api_url, binding)
-            if bound_input and (codex_home is not None or auth_file is not None):
-                raise ModelConfigurationError("Credential paths are already resolved by the endpoint binding")
-            if not bound_input and (codex_home is not None or auth_file is not None):
-                binding = replace(binding, endpoint=replace(
-                    binding.endpoint, auth="codex-login",
-                    auth_file=str(_resolve_auth_file(codex_home=codex_home, auth_file=auth_file).resolve()),
-                ))
+            if not isinstance(binding, ModelBinding):
+                raise TypeError("binding must be ModelBinding when endpoint is omitted")
+            if binding.api not in {"codex", "responses"}:
+                raise ModelConfigurationError("Invalid Responses model binding")
+            if binding.endpoint.model is None:
+                raise ModelConfigurationError("Responses endpoint model is required")
             if auth is None and binding.endpoint.auth == "codex-login" and binding.endpoint.auth_file is None:
                 binding = replace(binding, endpoint=replace(binding.endpoint,
-                    auth_file=str(_resolve_auth_file(codex_home=None, auth_file=None).resolve())))
-            try:
-                legacy_url = binding.endpoint.legacy_api_url
-            except ValueError:
-                legacy_url = None
-            resolved_url, model, resolved_timeout = _normalize_configuration(
-                legacy_url or binding.endpoint.url,
-                model,
-                (
-                    DEFAULT_REQUEST_TIMEOUT_SECONDS
-                    if request_timeout_seconds is None
-                    else request_timeout_seconds
-                ),
-            )
+                    auth_file=str(_resolve_auth_file(
+                        codex_home=None, auth_file=None,
+                    ).resolve())))
+            resolved_timeout = (DEFAULT_REQUEST_TIMEOUT_SECONDS
+                                if request_timeout_seconds is None
+                                else request_timeout_seconds)
+            if (isinstance(resolved_timeout, bool)
+                    or not isinstance(resolved_timeout, (int, float))
+                    or not math.isfinite(float(resolved_timeout))
+                    or float(resolved_timeout) <= 0):
+                raise ModelConfigurationError(
+                    "request_timeout_seconds must be positive and finite"
+                )
+            resolved_timeout = float(resolved_timeout)
             if auth is not None:
                 if not isinstance(auth, CodexAuth):
                     raise TypeError("auth must be CodexAuth or None")
-                if codex_home is not None or auth_file is not None:
-                    raise ModelConfigurationError(
-                        "auth cannot be combined with codex_home or auth_file"
-                    )
-                if bound_input and binding.endpoint.auth != "supplied":
+                if binding.endpoint.auth != "supplied":
                     raise ModelConfigurationError("Supplied credentials conflict with endpoint auth policy")
-                binding = replace(binding, endpoint=replace(binding.endpoint, auth="supplied", auth_file=None))
                 resolved_auth = auth
                 credential_source = _StaticCredentialSource(auth)
             else:
-                credential_source = _default_credential_source(
-                    model,
-                    codex_home=codex_home,
-                    auth_file=auth_file,
-                    endpoint=binding.endpoint,
-                )
-                resolved_auth = _load_default_model_auth(
-                    model,
-                    codex_home=codex_home,
-                    auth_file=auth_file,
-                    endpoint=binding.endpoint,
-                )
+                credential_source = _default_credential_source(binding.endpoint)
+                resolved_auth = _load_default_model_auth(binding.endpoint)
             resolved_endpoint = StreamingResponsesEndpoint(
-                api_url=None,
-                model=model,
+                binding=binding,
                 bearer_token=None if resolved_auth is None else resolved_auth.access_token,
                 account_id=None if resolved_auth is None else resolved_auth.account_id,
-                api_provider="codex" if binding.api == "codex" else "api",
                 request_timeout_seconds=resolved_timeout,
-                binding=binding,
             )
 
         if identifier_factory is not None and not callable(identifier_factory):
@@ -1879,7 +1734,7 @@ class CodexResponsesModel:
         self,
         context: InteractionContext,
         tools: Sequence[Any],
-        options: Optional[SamplingOptions],
+        sampling_params: Optional[SamplingParams],
     ) -> Tuple[Dict[str, Any], _ProviderState]:
         if not isinstance(context, InteractionContext):
             raise TypeError("context must be InteractionContext")
@@ -1895,7 +1750,7 @@ class CodexResponsesModel:
 
         spec = _resolve_model_spec(self.endpoint)
         payload: Dict[str, Any] = {
-            "model": self.binding.api_model,
+            "model": self.binding.endpoint.model,
             "input": _encode_context_items(
                 context.model_items(),
                 system_role="developer" if self.endpoint.api_provider == "codex" else "system",
@@ -1920,7 +1775,7 @@ class CodexResponsesModel:
             payload["text"] = {"verbosity": defaults.text_verbosity}
         if provider_state.session_id is not None:
             payload["prompt_cache_key"] = provider_state.session_id
-        _apply_sampling_params(payload, options)
+        _apply_sampling_params(payload, sampling_params)
         return payload, provider_state
 
     def _build_headers(
@@ -2042,22 +1897,22 @@ class CodexResponsesModel:
         context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
-        options=UNSET_SAMPLING_PARAMS,
-        sampling_params=UNSET_SAMPLING_PARAMS,
+        sampling_params: Optional[SamplingParams] = None,
     ) -> ModelSample:
-        options = select_sampling_params(sampling_params, options)
+        if sampling_params is not None and not isinstance(sampling_params, SamplingParams):
+            raise TypeError("sampling_params must be SamplingParams or None")
         with self._credential_lock:
-            return self._sample_locked(context, tools, options)
+            return self._sample_locked(context, tools, sampling_params)
 
     def _sample_locked(
         self,
         context: InteractionContext,
         tools: Sequence[Any],
-        options: Optional[SamplingOptions],
+        sampling_params: Optional[SamplingParams],
     ) -> ModelSample:
-        if options is not None and not isinstance(options, SamplingOptions):
-            raise TypeError("options must be SamplingOptions or None")
-        payload, provider_state = self._build_request_payload(context, tools, options)
+        payload, provider_state = self._build_request_payload(
+            context, tools, sampling_params,
+        )
         return self._execute_request_locked(
             payload,
             provider_state,
@@ -2464,10 +2319,7 @@ class ResponsesOpaqueCompactor:
 
 
 __all__ = [
-    "CODEX_RESPONSES_API_URL",
     "CodexResponsesModel",
-    "META_RESPONSES_API_URL",
-    "OPENAI_RESPONSES_API_URL",
     "REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS",
     "ResponsesOpaqueCompactor",
     "StreamingResponsesEndpoint",

@@ -37,7 +37,6 @@ from .items import Init, Instructions, Message, ModelSampleBoundary, ToolCall, T
 from .items import UserToolResult
 from .items import summarize_turn_usage
 from .model import ModelError, ModelSample
-from .model import sample_model
 from .model_config import build_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
@@ -513,7 +512,7 @@ class _Session:
 
     def _turn(self, index, model, environment, config, context):
         started = time.perf_counter()
-        options = config.sampling_params()
+        sampling_params = config.sampling_params()
         samples = 0
         while config.max_samples is None or samples < config.max_samples:
             self._check_running()
@@ -531,7 +530,10 @@ class _Session:
             self._phase(index, "sampling")
             samples += 1
             try:
-                sample = sample_model(model, context.copy(), tools=environment.tool_specs, sampling_params=options)
+                sample = model.sample(
+                    context.copy(), tools=environment.tool_specs,
+                    sampling_params=sampling_params,
+                )
             except ModelError as exc:
                 contribution = (*exc.completed_items, *((exc.failure,) if exc.failure is not None else ()))
                 if contribution:

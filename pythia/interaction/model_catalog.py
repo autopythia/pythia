@@ -3,9 +3,10 @@
 This module has no adapter, credential, environment, or network dependencies.
 Maximum/output limits are metadata rather than request budgets;
 ``auto_compact_context_tokens`` is caller policy consumed by interaction
-frontends and server-compaction configuration. Routes describe defaults, not
-resolved credentials or permission to use account services. Unknown names
-remain valid pass-through candidates for the owning adapter.
+frontends and server-compaction configuration. Endpoints contain non-secret
+delivery policy, not resolved credential values or permission to use account
+services. Unknown names remain valid pass-through candidates for the owning
+adapter.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ import re
 from types import MappingProxyType
 from collections.abc import Mapping as MappingABC
 from typing import Iterable
-from typing import Literal
 from typing import Mapping
 from typing import Optional
 from typing import Tuple
@@ -111,8 +111,8 @@ def freeze_request_params(value, profile=None):
     return frozen
 
 
-def validate_route_url(value):
-    """Validate external route data without constructing a credentialed adapter."""
+def validate_endpoint_url(value):
+    """Validate a complete external endpoint URL."""
     try:
         if not isinstance(value, str) or not value or any(char.isspace() or ord(char) < 32 for char in value):
             raise ValueError()
@@ -122,13 +122,12 @@ def validate_route_url(value):
                 or parsed.query or parsed.fragment or parsed.port == 0):
             raise ValueError()
     except (ValueError, TypeError):
-        raise ValueError("Route URL must be HTTP(S), without credentials, query, or fragment.") from None
-    return value.rstrip("/")
+        raise ValueError(
+            "Endpoint URL must be HTTP(S), without credentials, query, or fragment."
+        ) from None
 
 
 def _normalize_profile(profile: str) -> str:
-    if profile == "codex-responses":
-        return "codex"
     if not isinstance(profile, str) or profile not in _PROFILES:
         raise ValueError("unknown model catalog profile")
     return profile
@@ -139,17 +138,6 @@ def _require_identifier(value: object, field_name: str) -> None:
         raise TypeError(f"{field_name} must be a string")
     if not value or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError(f"{field_name} must be nonempty and contain no whitespace or controls")
-
-
-_LEGACY_SUFFIXES = {
-    "chat-completions": "/v1/chat/completions", "messages": "/v1/messages",
-    "responses": "/responses", "codex": "/responses",
-}
-
-
-def legacy_endpoint_url(api, prefix):
-    """Lossless v1 conversion; never guess whether a prefix already contains /v1."""
-    return validate_route_url(prefix) + _LEGACY_SUFFIXES[_normalize_profile(api)]
 
 
 @dataclass(frozen=True)
@@ -165,7 +153,7 @@ class EndpointSpec:
 
     def __post_init__(self):
         object.__setattr__(self, "api", _normalize_profile(self.api))
-        validate_route_url(self.url)
+        validate_endpoint_url(self.url)
         if self.model is not None:
             _require_identifier(self.model, "endpoint.model")
         if not isinstance(self.auth, str) or not (
@@ -191,30 +179,10 @@ class EndpointSpec:
     def is_official_codex(self):
         return self.api == "codex" and self.url.rstrip("/") == CODEX_RESPONSES_API_URL + "/responses"
 
-    @property
-    def legacy_api_url(self):
-        suffix = _LEGACY_SUFFIXES[self.api]
-        if not self.url.endswith(suffix):
-            raise ValueError("This exact endpoint URL has no legacy prefix; use EndpointSpec.url")
-        return self.url[:-len(suffix)]
-
     def as_dict(self):
         return {"api": self.api, "url": self.url, "model": self.model,
                 "auth": self.auth, "auth_file": self.auth_file}
 
-    @classmethod
-    def from_route(cls, api, model, route):
-        api = _normalize_profile(api)
-        auth = ("env:" + route.api_key_environment_variable if route.auth_source == "environment"
-                else "codex-login" if route.auth_source == "codex-login"
-                else "none" if api in {"chat-completions", "messages"} else "supplied")
-        return cls(api, legacy_endpoint_url(api, route.api_url), model, auth)
-
-    def legacy_route(self, provider="api"):
-        return ModelRoute(provider, self.legacy_api_url,
-                          "environment" if self.environment_variable else
-                          "codex-login" if self.auth == "codex-login" else "explicit",
-                          self.environment_variable)
 
 
 @dataclass(frozen=True)
@@ -247,26 +215,6 @@ class ModelLimits:
 
 
 @dataclass(frozen=True)
-class ModelRoute:
-    """Non-secret provider defaults; credential loading stays in the caller."""
-
-    provider: str
-    api_url: str
-    auth_source: Literal["codex-login", "environment", "explicit"]
-    api_key_environment_variable: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        _require_identifier(self.provider, "provider")
-        _require_identifier(self.api_url, "api_url")
-        if self.auth_source not in ("codex-login", "environment", "explicit"):
-            raise ValueError("unsupported catalog authentication source")
-        if self.auth_source == "environment":
-            _require_identifier(self.api_key_environment_variable, "api_key_environment_variable")
-        elif self.api_key_environment_variable is not None:
-            raise ValueError("an environment variable requires environment authentication")
-
-
-@dataclass(frozen=True)
 class ResponsesDefaults:
     """Pythia request preferences, not claims about a model's native defaults."""
 
@@ -292,12 +240,9 @@ class MessagesDefaults:
             _require_identifier(self.output_effort, "output_effort")
 
 
-_UNSET_SPEC_FIELD = object()
-
-
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class ModelSpec:
-    """A named policy and one endpoint. Legacy constructor fields are inputs only."""
+    """A named policy and its single authoritative endpoint."""
 
     name: str
     endpoint: EndpointSpec
@@ -307,77 +252,28 @@ class ModelSpec:
     source: Optional[str] = None
     messages: Optional[MessagesDefaults] = None
     request_params: Mapping = field(default_factory=dict)
-    provider_label: str = "api"
-    _legacy_route: Optional[ModelRoute] = field(default=None, init=False, repr=False, compare=False)
-
-    def __init__(self, profile=_UNSET_SPEC_FIELD, name=None, api_model=_UNSET_SPEC_FIELD,
-                 route=_UNSET_SPEC_FIELD, limits=_UNSET_SPEC_FIELD,
-                 responses=None, aliases=(), source=None, messages=None,
-                 request_params=_UNSET_SPEC_FIELD, *, endpoint=None, provider_label="api"):
-        if endpoint is None:
-            if not isinstance(route, ModelRoute):
-                raise TypeError("route must be ModelRoute when endpoint is omitted")
-            endpoint = EndpointSpec.from_route(profile, api_model, route)
-            provider_label = route.provider
-        else:
-            if not isinstance(endpoint, EndpointSpec):
-                raise TypeError("endpoint must be EndpointSpec")
-            # dataclasses.replace with a legacy keyword remains supported.
-            if profile is not _UNSET_SPEC_FIELD:
-                endpoint = replace(endpoint, api=_normalize_profile(profile))
-            if api_model is not _UNSET_SPEC_FIELD:
-                endpoint = replace(endpoint, model=api_model)
-            if route is not _UNSET_SPEC_FIELD:
-                if not isinstance(route, ModelRoute):
-                    raise TypeError("route must be ModelRoute")
-                endpoint = EndpointSpec.from_route(endpoint.api, endpoint.model, route)
-                provider_label = route.provider
-        for key, value in (("name", name), ("endpoint", endpoint),
-                           ("limits", ModelLimits() if limits is _UNSET_SPEC_FIELD else limits),
-                           ("responses", responses), ("aliases", aliases), ("source", source),
-                           ("messages", messages), ("request_params", {} if request_params is _UNSET_SPEC_FIELD else request_params),
-                           ("provider_label", provider_label)):
-            object.__setattr__(self, key, value)
-        try:
-            legacy = endpoint.legacy_route(provider_label)
-        except ValueError:
-            legacy = None
-        object.__setattr__(self, "_legacy_route", legacy)
-        self.__post_init__()
-
-    @property
-    def profile(self):
-        return self.endpoint.api
-
-    @property
-    def api_model(self):
-        return self.endpoint.model
-
-    @property
-    def route(self):
-        if self._legacy_route is None:
-            raise ValueError("Use spec.endpoint for an exact, non-legacy URL")
-        return self._legacy_route
 
     def __post_init__(self) -> None:
         _require_identifier(self.name, "name")
-        _require_identifier(self.api_model, "api_model")
+        if not isinstance(self.endpoint, EndpointSpec):
+            raise TypeError("endpoint must be EndpointSpec")
+        _require_identifier(self.endpoint.model, "endpoint.model")
         if not isinstance(self.limits, ModelLimits):
             raise TypeError("limits must be ModelLimits")
-        if (self.profile == "messages" and self.limits.auto_compact_context_tokens is not None
+        if (self.endpoint.api == "messages" and self.limits.auto_compact_context_tokens is not None
                 and self.limits.auto_compact_context_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS):
             raise ValueError("Messages compaction threshold must be at least 50000.")
         if self.responses is not None:
             if not isinstance(self.responses, ResponsesDefaults):
                 raise TypeError("responses must be ResponsesDefaults or None")
-            if self.profile not in {"codex", "responses"}:
-                raise ValueError("Responses defaults require a Responses routing profile")
+            if self.endpoint.api not in {"codex", "responses"}:
+                raise ValueError("Responses defaults require a Responses endpoint API")
         if self.messages is not None:
             if not isinstance(self.messages, MessagesDefaults):
                 raise TypeError("messages must be MessagesDefaults or None")
-            if self.profile != "messages":
+            if self.endpoint.api != "messages":
                 raise ValueError(
-                    "Messages defaults require a Messages routing profile"
+                    "Messages defaults require the Messages endpoint API"
                 )
         if isinstance(self.aliases, (str, bytes)):
             raise TypeError("aliases must be an iterable of strings")
@@ -387,19 +283,30 @@ class ModelSpec:
         object.__setattr__(self, "aliases", aliases)
         if self.source is not None and (not isinstance(self.source, str) or not self.source.strip()):
             raise ValueError("source must be a nonempty string or None")
-        object.__setattr__(self, "request_params", freeze_request_params(self.request_params, self.profile))
+        object.__setattr__(self, "request_params", freeze_request_params(
+            self.request_params, self.endpoint.api,
+        ))
 
 
-_CHATGPT = ModelRoute("chatgpt", CODEX_RESPONSES_API_URL, "codex-login")
-_META = ModelRoute("meta", META_RESPONSES_API_URL, "environment", "META_API_KEY")
-_ANTHROPIC = ModelRoute(
-    "anthropic", ANTHROPIC_MESSAGES_API_URL, "environment", "ANTHROPIC_API_KEY",
+_CHATGPT = EndpointSpec(
+    "codex", CODEX_RESPONSES_API_URL + "/responses", auth="codex-login",
 )
-_PROFILE_DEFAULT_ROUTES = MappingProxyType({
+_META = EndpointSpec(
+    "codex", META_RESPONSES_API_URL + "/responses", auth="env:META_API_KEY",
+)
+_ANTHROPIC = EndpointSpec(
+    "messages", ANTHROPIC_MESSAGES_API_URL + "/v1/messages",
+    auth="env:ANTHROPIC_API_KEY",
+)
+_PROFILE_DEFAULT_ENDPOINTS = MappingProxyType({
     "codex": _CHATGPT,
-    "responses": ModelRoute("api", OPENAI_RESPONSES_API_URL, "explicit"),
+    "responses": EndpointSpec(
+        "responses", OPENAI_RESPONSES_API_URL + "/responses", auth="supplied",
+    ),
     "messages": _ANTHROPIC,
-    "chat-completions": ModelRoute("api", "http://127.0.0.1:8000", "explicit"),
+    "chat-completions": EndpointSpec(
+        "chat-completions", "http://127.0.0.1:8000/v1/chat/completions",
+    ),
 })
 
 # Shared immutable facts, inherited by effort presets rather than copied.
@@ -409,7 +316,7 @@ _CODEX_LIMITS = ModelLimits(
     max_output_tokens=128_000,
 )
 _SOL = ModelSpec(
-    profile="codex", name="gpt-5.6-sol", api_model="gpt-5.6-sol", route=_CHATGPT,
+    name="gpt-5.6-sol", endpoint=replace(_CHATGPT, model="gpt-5.6-sol"),
     limits=_CODEX_LIMITS, responses=ResponsesDefaults(),
     source=(
         "codex-latest-20260904/codex-rs/models-manager/models.json; "
@@ -417,18 +324,20 @@ _SOL = ModelSpec(
     ),
 )
 _ASTRA = replace(
-    _SOL, name="gpt-6-astra", api_model="gpt-6-astra",
+    _SOL, name="gpt-6-astra",
+    endpoint=replace(_SOL.endpoint, model="gpt-6-astra"),
     # Pythia deliberately requests summaries; the bundled catalog default is none.
     responses=ResponsesDefaults(reasoning_summary="auto", text_verbosity="low"),
 )
 _SPARK = ModelSpec(
-    profile="codex", name="muse-spark-1.3", api_model="muse-spark-1.3-contributor",
-    route=_META, responses=ResponsesDefaults(),
+    name="muse-spark-1.3",
+    endpoint=replace(_META, model="muse-spark-1.3-contributor"),
+    responses=ResponsesDefaults(),
     source="Existing Pythia Meta Responses integration presets; token capacities unknown",
 )
 _FABLE = ModelSpec(
-    profile="messages", name="claude-fable-5-1", api_model="claude-fable-5-1",
-    route=_ANTHROPIC,
+    name="claude-fable-5-1",
+    endpoint=replace(_ANTHROPIC, model="claude-fable-5-1"),
     limits=ModelLimits(
         auto_compact_context_tokens=872_000,
         max_context_tokens=1_000_000,
@@ -491,9 +400,11 @@ def _build_index(specs: Iterable[ModelSpec]) -> Mapping[Tuple[str, str], ModelSp
         if not isinstance(spec, ModelSpec):
             raise TypeError("catalog entries must be ModelSpec")
         for name in (spec.name, *spec.aliases):
-            key = (spec.profile, name)
+            key = (spec.endpoint.api, name)
             if key in index:
-                raise ValueError(f"duplicate model selector in {spec.profile}: {name}")
+                raise ValueError(
+                    f"duplicate model selector in {spec.endpoint.api}: {name}"
+                )
             index[key] = spec
     return MappingProxyType(index)
 
@@ -523,7 +434,8 @@ class ModelBinding:
         if self.selector is not None and not isinstance(self.selector, str):
             raise TypeError("selector must be a string or None")
         if self.spec is not None:
-            if not isinstance(self.spec, ModelSpec) or self.spec.profile != self.api:
+            if (not isinstance(self.spec, ModelSpec)
+                    or self.spec.endpoint.api != self.api):
                 raise ValueError("binding spec must match the selected API")
             if self.selector not in (self.spec.name, *self.spec.aliases):
                 raise ValueError("binding selector does not select its spec")
@@ -533,15 +445,6 @@ class ModelBinding:
     @property
     def api(self):
         return self.endpoint.api
-
-    @property
-    def api_model(self):
-        return self.endpoint.model
-
-    @property
-    def route(self):
-        """Legacy read-only view; never used for dispatch or capability decisions."""
-        return self.endpoint.legacy_route("api" if self.spec is None else self.spec.provider_label)
 
     @property
     def limits(self):
@@ -573,7 +476,7 @@ class ModelBinding:
             "messages": None if spec is None or spec.messages is None else vars(spec.messages),
         }
         fingerprint = hashlib.sha256(json.dumps(facts, sort_keys=True, allow_nan=False).encode()).hexdigest()
-        return {"api": self.api, "selector": self.selector, "api_model": self.api_model,
+        return {"api": self.api, "selector": self.selector, "model": self.endpoint.model,
                 "canonical": None if spec is None else spec.name, "source": self.origin,
                 "fingerprint": fingerprint, "endpoint": self.endpoint.as_dict()}
 
@@ -596,7 +499,9 @@ class ModelCatalog:
         object.__setattr__(self, "specs", specs)
         object.__setattr__(self, "_index", index)
         object.__setattr__(self, "origins", MappingProxyType({
-            (spec.profile, spec.name): self.origins.get((spec.profile, spec.name), "python")
+            (spec.endpoint.api, spec.name): self.origins.get(
+                (spec.endpoint.api, spec.name), "python",
+            )
             for spec in specs
         }))
 
@@ -608,16 +513,11 @@ class ModelCatalog:
             raise TypeError("model name must be a string or None")
         return self._index.get((api, name.strip()))
 
-    def get_model_route(self, api, name=None):
-        api = _normalize_profile(api)
-        spec = self.get_model_spec(api, name)
-        return _PROFILE_DEFAULT_ROUTES[api] if spec is None else spec.route
-
     def list_model_specs(self, api=None):
         if api is None:
             return self.specs
         api = _normalize_profile(api)
-        return tuple(spec for spec in self.specs if spec.profile == api)
+        return tuple(spec for spec in self.specs if spec.endpoint.api == api)
 
     def matches(self, name, *, canonical_only=False):
         if name is None:
@@ -629,7 +529,7 @@ class ModelCatalog:
             not canonical_only and name in spec.aliases
         ))
 
-    def bind(self, api=None, name=None, *, api_url=None, request_params=None,
+    def bind(self, api=None, name=None, *, request_params=None,
              endpoint_url=None, endpoint_model=None, endpoint_auth=None):
         if name is not None:
             if not isinstance(name, str):
@@ -640,16 +540,14 @@ class ModelCatalog:
             matches = self.matches(name)
             if len(matches) > 1:
                 raise ValueError("Ambiguous catalog model; select its API with --endpoint-api.")
-            api = matches[0].profile if matches else "chat-completions"
+            api = matches[0].endpoint.api if matches else "chat-completions"
         api = _normalize_profile(api)
         spec = self.get_model_spec(api, name)
-        endpoint = (EndpointSpec.from_route(api, name, _PROFILE_DEFAULT_ROUTES[api])
-                    if spec is None else spec.endpoint)
-        if api_url is not None and endpoint_url is not None:
-            raise ValueError("Use --endpoint-url or legacy --api-url, not both.")
+        endpoint = (
+            replace(_PROFILE_DEFAULT_ENDPOINTS[api], model=name)
+            if spec is None else spec.endpoint
+        )
         changes = {}
-        if api_url is not None:
-            changes["url"] = legacy_endpoint_url(api, api_url)
         if endpoint_url is not None:
             if endpoint_url != endpoint.url and endpoint.auth != "none" and endpoint_auth is None:
                 raise ValueError("Changing a credentialed endpoint URL requires explicit --endpoint-auth.")
@@ -662,14 +560,15 @@ class ModelCatalog:
         binding = ModelBinding(
             name, endpoint, spec,
             {} if spec is None else spec.request_params,
-            "builtin" if spec is None else self.origins[(spec.profile, spec.name)],
+            "builtin" if spec is None else self.origins[(spec.endpoint.api, spec.name)],
             explicit, frozenset(changes),
         )
         return binding.with_request_params(request_params)
 
 
 BUILTIN_MODEL_CATALOG = ModelCatalog(
-    _MODEL_SPECS, {(spec.profile, spec.name): "builtin" for spec in _MODEL_SPECS},
+    _MODEL_SPECS,
+    {(spec.endpoint.api, spec.name): "builtin" for spec in _MODEL_SPECS},
 )
 
 
@@ -684,20 +583,14 @@ def binding_from_namespace(args, catalog=None):
         raise ValueError("Load and bind the explicit model catalog before resolving model configuration.")
     catalog = BUILTIN_MODEL_CATALOG if catalog is None else catalog
     auth = getattr(args, "endpoint_auth", None)
-    variable = getattr(args, "api_key_env", None)
     supplied = getattr(args, "api_key", None) is not None
-    inferred_supplied = supplied and auth is None and variable is None
-    if variable is not None:
-        if auth is not None:
-            raise ValueError("Use endpoint_auth or api_key_env, not both.")
-        auth = "env:" + variable
+    inferred_supplied = supplied and auth is None
     if supplied:
         if auth is not None and auth != "supplied":
             raise ValueError("A supplied API key requires endpoint-auth supplied.")
         auth = "supplied"
     binding = catalog.bind(
         getattr(args, "model_api", None), getattr(args, "model", None),
-        api_url=getattr(args, "api_url", None),
         endpoint_url=getattr(args, "endpoint_url", None),
         endpoint_model=getattr(args, "endpoint_model", None),
         endpoint_auth=auth,
@@ -706,49 +599,17 @@ def binding_from_namespace(args, catalog=None):
     if inferred_supplied and binding.api == "codex" and (
         binding.spec is None or binding.spec.endpoint.auth == "codex-login"
     ):
-        raise ValueError("--api-key is not used with Codex login; select --endpoint-auth supplied explicitly.")
+        raise ValueError(
+            "--endpoint-api-key is not used with Codex login; select "
+            "--endpoint-auth supplied explicitly."
+        )
     return binding
-
-
-def bind_endpoint(api, model, api_url, binding=None, request_params=None, *, auth=None):
-    """Compatibility boundary for legacy transport constructors.
-
-    With a binding, inputs are consistency assertions, never another override.
-    Without one, old prefixes are converted exactly once.
-    """
-    api = _normalize_profile(api)
-    if binding is None:
-        result = BUILTIN_MODEL_CATALOG.bind(api, model, api_url=api_url, request_params=request_params)
-        return result if auth is None else replace(result, endpoint=replace(result.endpoint, auth=auth, auth_file=None))
-    if (not isinstance(binding, ModelBinding) or binding.api != api
-            or model != (binding.selector if binding.selector is not None else binding.api_model)):
-        raise ValueError("Endpoint identity does not match its model binding.")
-    if api_url is not None and legacy_endpoint_url(api, api_url) != binding.endpoint.url:
-        raise ValueError("URL conflicts with resolved endpoint; construct a new binding explicitly.")
-    if request_params is not None and freeze_request_params(request_params, api) != binding.request_params:
-        raise ValueError("Request params conflict with resolved binding.")
-    return binding
-
-
-def bound_transport_inputs(api, model, api_url, binding):
-    """Project compatibility fields from an authoritative endpoint before validation."""
-    if binding is None:
-        return model, api_url
-    if model is None:
-        model = binding.selector if binding.selector is not None else binding.api_model
-    bind_endpoint(api, model, api_url, binding)
-    try:
-        prefix = binding.endpoint.legacy_api_url
-    except ValueError:
-        prefix = None  # An arbitrary exact URL cannot be represented as an old prefix.
-    return model, prefix
 
 
 def get_model_spec(profile: str, name: Optional[str]) -> Optional[ModelSpec]:
     """Look up an exact, case-sensitive selector; unknown models return None.
 
-    Outer whitespace is stripped just as endpoint constructors strip it.
-    ``codex-responses`` is a profile synonym for ``codex``. Generic Responses
+    Outer whitespace is stripped at the selector boundary. Generic Responses
     (``responses``) and Chat Completions do not inherit Codex presets.
     """
     profile = _normalize_profile(profile)
@@ -759,19 +620,12 @@ def get_model_spec(profile: str, name: Optional[str]) -> Optional[ModelSpec]:
     return _MODEL_INDEX.get((profile, name.strip()))
 
 
-def get_model_route(profile: str, name: Optional[str] = None) -> ModelRoute:
-    """Return known model defaults or the profile's pass-through defaults."""
-    profile = _normalize_profile(profile)
-    spec = get_model_spec(profile, name)
-    return spec.route if spec is not None else _PROFILE_DEFAULT_ROUTES[profile]
-
-
 def list_model_specs(profile: Optional[str] = None) -> Tuple[ModelSpec, ...]:
     """List canonical presets in declaration order; aliases do not duplicate entries."""
     if profile is None:
         return _MODEL_SPECS
     profile = _normalize_profile(profile)
-    return tuple(spec for spec in _MODEL_SPECS if spec.profile == profile)
+    return tuple(spec for spec in _MODEL_SPECS if spec.endpoint.api == profile)
 
 
 __all__ = [
@@ -784,11 +638,9 @@ __all__ = [
     "ModelBinding",
     "BUILTIN_MODEL_CATALOG",
     "EndpointSpec",
-    "ModelRoute",
     "ModelSpec",
     "MessagesDefaults",
     "ResponsesDefaults",
-    "get_model_route",
     "get_model_spec",
     "list_model_specs",
 ]

@@ -366,8 +366,10 @@ class QuotaServiceTests(unittest.TestCase):
 
     def test_unsupported_routes_unknown_account_and_exception_guard_do_not_expose_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
-            for options in ([], ["--model-api", "codex", "--model", "muse-spark-1.3"],
-                            ["--model-api", "codex", "--model", "test", "--api-url", "https://example.org"]):
+            for options in ([], ["--endpoint-api", "codex", "--model", "muse-spark-1.3"],
+                            ["--endpoint-api", "codex", "--model", "test",
+                             "--endpoint-url", "https://example.org/responses",
+                             "--endpoint-auth", "none"]):
                 args = cli._build_parser().parse_args(options)
                 environment = user_tools.create_user_environment(args, notify=mock.Mock(), cancel=threading.Event())
                 with mock.patch.object(user_tools, "login") as login, mock.patch.object(user_tools, "query_quota") as quota:
@@ -375,7 +377,10 @@ class QuotaServiceTests(unittest.TestCase):
                         self.assertFalse(environment.execute_tool_calls((ToolCall(name, "one", "{}"),)).items[0].success)
                     login.assert_not_called()
                     quota.assert_not_called()
-            args = cli._build_parser().parse_args(["--model-api", "codex", "--model", "test", "--codex-home", directory])
+            args = cli._build_parser().parse_args([
+                "--endpoint-api", "codex", "--model", "test",
+                "--endpoint-auth-home", directory,
+            ])
             environment = user_tools.create_user_environment(args, notify=mock.Mock(), cancel=threading.Event(), provider_history=True)
             with mock.patch.object(user_tools, "login") as login:
                 result = environment.execute_tool_calls((ToolCall("login", "one", "{}"),)).items[0]

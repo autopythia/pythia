@@ -17,10 +17,9 @@ from typing import Mapping
 
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .messages import resolve_messages_max_output_tokens
-from .model import ResolvedSamplingOptions
-from .model import SamplingOptions
-from .model_catalog import get_model_spec
-from .model_catalog import binding_from_namespace, ModelBinding, freeze_request_params, thaw_json
+from .model import ResolvedSamplingParams
+from .model import SamplingParams
+from .model_catalog import binding_from_namespace, freeze_request_params, thaw_json
 
 
 ConfigValue = Union[bool, int, None, Mapping]
@@ -122,13 +121,13 @@ class InteractionConfigSnapshot:
         return {key: thaw_json(getattr(self, key)) for key in CONFIG_KEYS}
 
     def sampling_params(
-        self, base: Optional[SamplingOptions] = None,
-    ) -> ResolvedSamplingOptions:
+        self, base: Optional[SamplingParams] = None,
+    ) -> ResolvedSamplingParams:
         """Project effective policy, preserving unrelated sampling preferences."""
-        if base is not None and not isinstance(base, SamplingOptions):
-            raise TypeError("base must be SamplingOptions or None")
-        base = base or SamplingOptions()
-        return ResolvedSamplingOptions(
+        if base is not None and not isinstance(base, SamplingParams):
+            raise TypeError("base must be SamplingParams or None")
+        base = base or SamplingParams()
+        return ResolvedSamplingParams(
             max_output_tokens=self.max_output_tokens,
             enable_auto_compaction=self.enable_auto_compaction,
             auto_compact_tokens=self.auto_compact_tokens,
@@ -138,10 +137,6 @@ class InteractionConfigSnapshot:
             seed=base.seed,
             request_params=self.request_params,
         )
-
-    # Compatibility spelling; the projection has only one implementation.
-    sampling_options = sampling_params
-
 
 class InteractionConfig:
     """Thread-safe effective policy with immutable launch and default baselines.
@@ -243,9 +238,8 @@ class InteractionConfig:
         )
         if binding.api == "messages":
             max_output_tokens = resolve_messages_max_output_tokens(
-                args.model,
+                binding,
                 max_output_tokens,
-                binding=binding,
             )
         return cls(
             InteractionConfigSnapshot(

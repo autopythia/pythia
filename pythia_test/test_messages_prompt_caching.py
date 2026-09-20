@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import messages_endpoint
+
 import io
 import unittest
 from contextlib import redirect_stderr
@@ -18,7 +20,7 @@ from pythia.interaction import InteractionContext
 from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
-from pythia.interaction import SamplingOptions
+from pythia.interaction import SamplingParams
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
@@ -66,7 +68,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
         for policy in (True, False, "5m", {}, {"type": "ephemeral"}):
             with self.subTest(policy=policy):
                 with self.assertRaisesRegex(TypeError, "prompt_caching"):
-                    MessagesEndpoint(
+                    messages_endpoint(
                         api_url="http://localhost", model="model",
                         max_output_tokens=100,
                         prompt_caching=policy,
@@ -74,7 +76,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
 
     def test_direct_endpoint_caching_is_off_by_default(self):
         opener = _ScriptedOpener(_response())
-        endpoint = MessagesEndpoint(
+        endpoint = messages_endpoint(
             api_url="http://localhost",
             model="model",
             max_output_tokens=100,
@@ -91,7 +93,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
             _FakeResponse({"error": "cache_control is unsupported"}, status=400),
             _response(),
         )
-        model = MessagesModel(MessagesEndpoint(
+        model = MessagesModel(messages_endpoint(
             api_url="http://localhost", model="model",
             max_output_tokens=100,
             prompt_caching=MessagesPromptCaching(),
@@ -111,7 +113,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                     ], stop_reason="tool_use"),
                     _response(),
                 )
-                endpoint = MessagesEndpoint(
+                endpoint = messages_endpoint(
                     api_url="http://localhost", model="model",
                     max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(ttl=ttl),
@@ -122,13 +124,15 @@ class MessagesPromptCachingTests(unittest.TestCase):
                     Instructions("Be concise."), Message("user", "Check facts."),
                 ))
                 tools = (ToolSpec("lookup", "Look up facts.", {"type": "object"}),)
-                options = SamplingOptions(max_output_tokens=128)
+                options = SamplingParams(max_output_tokens=128)
                 control = {"type": "ephemeral", "ttl": ttl}
 
                 for turn in range(2):
                     before = [interaction_item_to_dict(item) for item in context]
                     expected = uncached._build_request_payload(context, tools, options)
-                    sample = model.sample(context, tools=tools, options=options)
+                    sample = model.sample(
+                        context, tools=tools, sampling_params=options,
+                    )
                     self.assertEqual(_payload(opener), {**expected, "cache_control": control})
                     self.assertEqual(
                         [interaction_item_to_dict(item) for item in context], before,
@@ -159,7 +163,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
         ):
             with self.subTest(context=context):
                 opener = _ScriptedOpener(_response())
-                endpoint = MessagesEndpoint(
+                endpoint = messages_endpoint(
                     api_url="http://localhost", model="model",
                     max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
@@ -185,7 +189,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                 ))
                 before = [interaction_item_to_dict(item) for item in context]
                 opener = _ScriptedOpener(_response())
-                model = MessagesModel(MessagesEndpoint(
+                model = MessagesModel(messages_endpoint(
                     api_url="http://localhost", model="model",
                     max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(ttl="1h"),
@@ -230,7 +234,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
         for usage, expected in cases:
             with self.subTest(usage=usage):
                 opener = _ScriptedOpener(_response(usage=usage))
-                model = MessagesModel(MessagesEndpoint(
+                model = MessagesModel(messages_endpoint(
                     api_url="http://localhost", model="model",
                     max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
@@ -259,7 +263,7 @@ class MessagesPromptCachingTests(unittest.TestCase):
                     "cache_creation_input_tokens": 50, "cache_read_input_tokens": 110,
                     "iterations": iterations,
                 }))
-                model = MessagesModel(MessagesEndpoint(
+                model = MessagesModel(messages_endpoint(
                     api_url="http://localhost", model="model",
                     max_output_tokens=100,
                     prompt_caching=MessagesPromptCaching(),
@@ -277,11 +281,11 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
                 ["--enable-auto-compaction"],
                 ["--enable-auto-compaction=False"],
                 ["--resume"],
-                ["--api-url", "http://localhost"],
+                ["--endpoint-url", "http://localhost/v1/messages"],
             ):
                 with self.subTest(frontend=frontend.__name__, flags=flags):
                     args = frontend._build_parser().parse_args([
-                        "--model-api", "messages", "--model", "model",
+                        "--endpoint-api", "messages", "--model", "model",
                         "--max-output-tokens", "100", "--endpoint-auth", "none", *flags,
                     ])
                     model = build_model(args)

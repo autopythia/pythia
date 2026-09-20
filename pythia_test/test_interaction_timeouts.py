@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pythia_test.interaction_helpers import chat_endpoint
+from pythia_test.interaction_helpers import messages_endpoint
+from pythia_test.interaction_helpers import responses_endpoint
+from pythia_test.interaction_helpers import codex_model
+
 import inspect
 import io
 import tempfile
@@ -41,12 +46,12 @@ def _no_retry_sleep(_delay):
 def _models(opener, **options):
     return (
         ("chat", ChatCompletionsModel(
-            ChatCompletionsEndpoint(api_url="http://localhost", **options),
+            chat_endpoint(api_url="http://localhost", **options),
             opener=opener,
             retry_sleep=_no_retry_sleep,
         )),
         ("messages", MessagesModel(
-            MessagesEndpoint(
+            messages_endpoint(
                 api_url="http://localhost",
                 model="model",
                 max_output_tokens=100,
@@ -55,14 +60,14 @@ def _models(opener, **options):
             opener=opener,
             retry_sleep=_no_retry_sleep,
         )),
-        ("responses endpoint", CodexResponsesModel(
-            StreamingResponsesEndpoint(
+        ("responses endpoint", codex_model(
+            responses_endpoint(
                 api_url="http://localhost", model="model", bearer_token="FAKE", **options,
             ),
             opener=opener,
             retry_sleep=_no_retry_sleep,
         )),
-        ("responses convenience", CodexResponsesModel(
+        ("responses convenience", codex_model(
             model="model", auth=CodexAuth("FAKE"), opener=opener,
             retry_sleep=_no_retry_sleep, **options,
         )),
@@ -121,38 +126,49 @@ class InteractionTimeoutTests(unittest.TestCase):
         self.assertIsNone(
             inspect.signature(CodexResponsesModel).parameters["request_timeout_seconds"].default
         )
-        endpoint = StreamingResponsesEndpoint(
+        endpoint = responses_endpoint(
             api_url="http://localhost", model="model", bearer_token="FAKE",
             request_timeout_seconds=17.5,
         )
-        self.assertIs(CodexResponsesModel(endpoint).endpoint, endpoint)
+        self.assertIs(codex_model(endpoint).endpoint, endpoint)
         self.assertIs(
-            CodexResponsesModel(endpoint, request_timeout_seconds=None).endpoint, endpoint,
+            codex_model(endpoint, request_timeout_seconds=None).endpoint, endpoint,
         )
         with self.assertRaisesRegex(ModelConfigurationError, "endpoint cannot be combined"):
-            CodexResponsesModel(endpoint, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)
+            CodexResponsesModel(
+                endpoint,
+                request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            )
 
     def test_endpoint_timeout_validation_is_unchanged(self):
-        for endpoint_type, fields in (
-            (ChatCompletionsEndpoint, {}),
-            (MessagesEndpoint, {"model": "model", "max_output_tokens": 100}),
-            (StreamingResponsesEndpoint, {"model": "model", "bearer_token": "FAKE"}),
+        for endpoint_factory in (
+            lambda value: chat_endpoint(
+                "http://localhost", request_timeout_seconds=value,
+            ),
+            lambda value: messages_endpoint(
+                "http://localhost", "model", max_output_tokens=100,
+                request_timeout_seconds=value,
+            ),
+            lambda value: responses_endpoint(
+                "http://localhost", "model", "FAKE",
+                request_timeout_seconds=value,
+            ),
         ):
             for value in (None, True, 0, -1, float("inf"), float("nan"), "300"):
-                with self.subTest(endpoint=endpoint_type, value=value):
+                with self.subTest(endpoint=endpoint_factory, value=value):
                     with self.assertRaises(ModelConfigurationError):
-                        endpoint_type(api_url="http://localhost", request_timeout_seconds=value, **fields)
+                        endpoint_factory(value)
 
     def test_cli_and_demo_share_defaults_and_preserve_explicit_overrides(self):
         for frontend in (cli, demo):
-            for api in ("chat-completions", "messages", "codex", "codex-responses"):
+            for api in ("chat-completions", "messages", "codex"):
                 for flags, expected in (
                     ([], DEFAULT_REQUEST_TIMEOUT_SECONDS),
                     (["--request-timeout-seconds", "9.5"], 9.5),
                 ):
                     with self.subTest(frontend=frontend.__name__, api=api, flags=flags):
                         args = frontend._build_parser().parse_args([
-                            "--model-api", api, "--model", "model",
+                            "--endpoint-api", api, "--model", "model",
                             *(
                                 ("--max-output-tokens", "100", "--endpoint-auth", "none")
                                 if api == "messages"
@@ -199,8 +215,8 @@ class InteractionTimeoutTests(unittest.TestCase):
         ):
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
                 args = cli._build_parser().parse_args([
-                    "--model-api", "codex", "--model", "model",
-                    "--codex-home", directory, *flags,
+                    "--endpoint-api", "codex", "--model", "model",
+                    "--endpoint-auth-home", directory, *flags,
                 ])
                 environment = user_tools.create_user_environment(
                     args, notify=mock.Mock(), cancel=threading.Event(),

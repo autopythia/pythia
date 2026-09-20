@@ -24,8 +24,7 @@ from .items import SampleMetadata
 from .model import Model
 from .model import ModelContextWindowError
 from .model import ModelSample
-from .model import SamplingOptions
-from .model import UNSET_SAMPLING_PARAMS, select_sampling_params, sample_model
+from .model import SamplingParams
 from .model import TokenUsage
 
 if TYPE_CHECKING:
@@ -195,11 +194,11 @@ def create_default_compactor(model: Model) -> Compactor:
         if model.supports_remote_compaction:
             return ResponsesOpaqueCompactor(model)
         # Responses intentionally supports only max_output_tokens from the
-        # generic SamplingOptions surface. Do not give its local fallback the
+        # generic SamplingParams surface. Do not give its local fallback the
         # prompt compactor's temperature=0 default.
         return PromptSummarizingCompactor(
             model,
-            options=SamplingOptions(
+            sampling_params=SamplingParams(
                 max_output_tokens=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
             ),
         )
@@ -301,8 +300,7 @@ class PromptSummarizingCompactor:
         prompt: str = DEFAULT_COMPACTION_PROMPT,
         summary_prefix: str = DEFAULT_SUMMARY_PREFIX,
         retained_user_message_tokens: int = 20_000,
-        options=UNSET_SAMPLING_PARAMS,
-        sampling_params=UNSET_SAMPLING_PARAMS,
+        sampling_params: Optional[SamplingParams] = None,
         retain_user_message: Optional[Callable[[Message], bool]] = None,
     ) -> None:
         if not hasattr(model, "sample") or not callable(model.sample):
@@ -319,7 +317,8 @@ class PromptSummarizingCompactor:
             raise ValueError(
                 "retained_user_message_tokens must be a nonnegative integer"
             )
-        options = select_sampling_params(sampling_params, options)
+        if sampling_params is not None and not isinstance(sampling_params, SamplingParams):
+            raise TypeError("sampling_params must be SamplingParams or None")
         if retain_user_message is not None and not callable(retain_user_message):
             raise TypeError("retain_user_message must be callable or None")
 
@@ -327,7 +326,7 @@ class PromptSummarizingCompactor:
         self._prompt = prompt
         self._summary_prefix = summary_prefix
         self._retained_user_message_tokens = retained_user_message_tokens
-        self._options = options or SamplingOptions(
+        self._sampling_params = sampling_params or SamplingParams(
             temperature=0.0,
             max_output_tokens=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
         )
@@ -375,11 +374,10 @@ class PromptSummarizingCompactor:
                 temporary_context = InteractionContext(
                     (*request_items, compaction_prompt)
                 )
-                sample = sample_model(
-                    self._model,
+                sample = self._model.sample(
                     temporary_context,
                     tools=(),
-                    sampling_params=self._options,
+                    sampling_params=self._sampling_params,
                 )
                 if not isinstance(sample, ModelSample):
                     raise CompactionError(

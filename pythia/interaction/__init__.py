@@ -58,7 +58,6 @@ from .local_tools import create_apply_patch_tool
 from .local_tools import create_exec_command_tool
 from .local_tools import create_update_plan_tool
 from .local_tools import create_write_stdin_tool
-from .messages import ANTHROPIC_MESSAGES_API_URL
 from .messages import DEFAULT_ANTHROPIC_VERSION
 from .messages import MESSAGES_COMPACTION_BETA
 from .messages import MessagesEndpoint
@@ -74,26 +73,22 @@ from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
-from .model import SamplingOptions
-from .model import ResolvedSamplingOptions
 from .model import SamplingParams, ResolvedSamplingParams
-from .model import sample_model
 from .model import TokenUsage
 from .model_catalog import ModelLimits
-from .model_catalog import ModelRoute
 from .model_catalog import ModelSpec
 from .model_catalog import ModelCatalog, ModelBinding, BUILTIN_MODEL_CATALOG
 from .model_catalog import EndpointSpec
+from .model_catalog import ANTHROPIC_MESSAGES_API_URL
+from .model_catalog import CODEX_RESPONSES_API_URL
+from .model_catalog import META_RESPONSES_API_URL
+from .model_catalog import OPENAI_RESPONSES_API_URL
 from .model_catalog_config import load_model_catalog, parse_model_catalog
 from .model_catalog import MessagesDefaults
 from .model_catalog import ResponsesDefaults
-from .model_catalog import get_model_route
 from .model_catalog import get_model_spec
 from .model_catalog import list_model_specs
-from .responses import CODEX_RESPONSES_API_URL
 from .responses import CodexResponsesModel
-from .responses import META_RESPONSES_API_URL
-from .responses import OPENAI_RESPONSES_API_URL
 from .responses import REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
 from .responses import ResponsesOpaqueCompactor
 from .responses import StreamingResponsesEndpoint
@@ -165,7 +160,6 @@ __all__ = [
     "ModelFailure",
     "ModelLimits",
     "ModelResponseError",
-    "ModelRoute",
     "ModelSample",
     "ModelSampleBoundary",
     "ModelSpec",
@@ -182,11 +176,8 @@ __all__ = [
     "ResponsesDefaults",
     "ResponsesOpaqueCompactor",
     "StreamingResponsesEndpoint",
-    "SamplingOptions",
-    "ResolvedSamplingOptions",
     "SamplingParams",
     "ResolvedSamplingParams",
-    "sample_model",
     "ModelCatalog",
     "ModelBinding",
     "EndpointSpec",
@@ -216,7 +207,6 @@ __all__ = [
     "create_exec_command_tool",
     "create_update_plan_tool",
     "create_write_stdin_tool",
-    "get_model_route",
     "get_model_spec",
     "list_model_specs",
     "render_interaction_items",
