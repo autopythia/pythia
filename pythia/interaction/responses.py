@@ -1683,6 +1683,8 @@ def _response_header(response: Any, name: str) -> Optional[str]:
 class CodexResponsesModel:
     """Codex-compatible Responses model with model and endpoint routing."""
 
+    auto_compaction_owner = "host"
+
     def __init__(
         self,
         endpoint: Optional[StreamingResponsesEndpoint] = None,

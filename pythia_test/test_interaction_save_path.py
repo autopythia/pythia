@@ -329,7 +329,7 @@ class SaveEntrypointTests(_SavePathTestCase):
         self.assert_default_untouched()
 
     def test_programmatic_demo_can_still_disable_persistence(self):
-        model = mock.Mock()
+        model = mock.Mock(spec=["sample"])
         model.sample.return_value = _answer()
         with mock.patch("builtins.print"), mock.patch.object(demo, "save_interaction_save") as save:
             self.assertEqual(demo.run(model, Environment(), prompt="hello", save_path=None), "done")

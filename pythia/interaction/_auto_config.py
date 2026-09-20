@@ -23,11 +23,14 @@ DEFAULTS = {
     "cwd": ".", "max_samples": None, "max_output_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
     "enable_workspace": True, "enable_auto_compaction": True,
+    "auto_compact_tokens": None, "max_context_tokens": None,
     "instructions": None,
 }
 _APIS = {"chat-completions", "messages", "codex", "codex-responses"}
 _PROVIDER_FIELDS = ("model", "api_url", "api_key_env", "codex_home", "codex_auth_file")
 _PATHS = ("cwd", "codex_home", "codex_auth_file")
+# Added after the original v1 saved schema; other fields remain required.
+_V1_OPTIONAL_FIELDS = frozenset(("auto_compact_tokens", "max_context_tokens"))
 
 
 def _layer(value, base):
@@ -60,6 +63,7 @@ def _merge(current, value):
 
 
 def resolve_config(path=None, overrides=None, saved=None):
+    """Merge raw per-context inputs; runtime owners resolve catalog policy later."""
     document = {}
     base = Path.cwd()
     if path is not None:
@@ -103,15 +107,20 @@ def load_saved_config(path):
     except (OSError, ValueError, RecursionError):
         raise ValueError("Could not load saved auto configuration.") from None
     expected = set(DEFAULTS) | {"name"}
+    required = expected - _V1_OPTIONAL_FIELDS
     contexts = document.get("contexts") if isinstance(document, dict) else None
     if (not isinstance(document, dict)
             or set(document) != {"version", "contexts"}
             or type(document.get("version")) is not int or document["version"] != 1
             or not isinstance(contexts, dict) or set(contexts) != {"1", "2", "-1"}
-            or any(not isinstance(value, dict) or set(value) != expected
+            or any(not isinstance(value, dict) or not required <= set(value) <= expected
                    for value in contexts.values())):
         raise ValueError("Invalid saved auto configuration.")
-    return {index: _layer(contexts[str(index)], path.parent) for index in NAMES}
+    return {
+        index: _layer({**{key: None for key in _V1_OPTIONAL_FIELDS},
+                       **contexts[str(index)]}, path.parent)
+        for index in NAMES
+    }
 
 
 def _validate(settings):
@@ -207,5 +216,9 @@ def build_parser():
                         help="Optional sample limit per turn; unlimited when unset.")
     parser.add_argument("--max-output-tokens", type=int, default=argparse.SUPPRESS,
                         help="Optional output-token limit; uses model/API defaults when unset.")
+    parser.add_argument("--auto-compact-tokens", type=int, default=argparse.SUPPRESS,
+                        help="Common initial compaction threshold; defaults to each context's catalog.")
+    parser.add_argument("--max-context-tokens", type=int, default=argparse.SUPPRESS,
+                        help="Common informational context ceiling; defaults to each context's catalog.")
     parser.add_argument("--request-timeout-seconds", type=float, default=argparse.SUPPRESS)
     return parser

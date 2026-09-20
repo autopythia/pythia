@@ -212,6 +212,50 @@ class MessagesEndpointTests(unittest.TestCase):
                 server_compaction=object(),
             )
 
+    def test_server_compaction_honors_sampling_options_override(self):
+        policy = MessagesServerCompaction()
+        model = MessagesModel(_endpoint(
+            api_url="https://api.anthropic.com",
+            model="claude-fable-5-1",
+            api_key="test-key",
+            server_compaction=policy,
+        ))
+
+        payload = model._build_request_payload(
+            InteractionContext((Message("user", "Hello."),)),
+            (),
+            SamplingOptions(auto_compact_tokens=123_456),
+        )
+
+        self.assertEqual(
+            payload["context_management"]["edits"][0]["trigger"]["value"],
+            123_456,
+        )
+        with self.assertRaisesRegex(ModelConfigurationError, "at least"):
+            model._build_request_payload(
+                InteractionContext((Message("user", "Hello."),)),
+                (),
+                SamplingOptions(auto_compact_tokens=49_999),
+            )
+
+        explicit = MessagesModel(_endpoint(
+            api_url="https://api.anthropic.com",
+            model="claude-fable-5-1",
+            api_key="test-key",
+            server_compaction=MessagesServerCompaction(
+                trigger_input_tokens=150_000,
+            ),
+        ))
+        explicit_payload = explicit._build_request_payload(
+            InteractionContext((Message("user", "Hello."),)),
+            (),
+            SamplingOptions(auto_compact_tokens=200_000),
+        )
+        self.assertEqual(
+            explicit_payload["context_management"]["edits"][0]["trigger"]["value"],
+            150_000,
+        )
+
     def test_server_compaction_uses_catalog_auto_compact_threshold(self):
         policy = MessagesServerCompaction()
         model = MessagesModel(_endpoint(

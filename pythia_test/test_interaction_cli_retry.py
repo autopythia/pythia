@@ -11,7 +11,7 @@ from pythia.interaction import (
     CompactionResult, ContextPrefix, Environment, Init, InteractionContext,
     Message, ModelAuthenticationError, ModelFailure, ModelResponseError,
     ModelSample, ModelSampleBoundary, ModelTimeoutError, OpaqueCompaction,
-    Reasoning, SamplingOptions, SaveError, Tool, ToolCall, ToolOutcome,
+    Reasoning, ResolvedSamplingOptions, SaveError, Tool, ToolCall, ToolOutcome,
     ToolResult, ToolSpec, TurnSummary, UserInteractionBoundary, UserToolCall,
     cli, load_interaction_save, save_interaction_save,
 )
@@ -177,7 +177,7 @@ class RetryControllerTests(_ControllerTestCase):
         login.assert_called_once()
         build.assert_called_once()  # /login activation only; retry reuses it.
         self.assertEqual(len(model.calls), 2)
-        self.assertEqual(model.calls[1][2], SamplingOptions(max_output_tokens=17))
+        self.assertEqual(model.calls[1][2], ResolvedSamplingOptions(max_output_tokens=17))
         self.assertEqual(model.calls[1][1], ())
         self.assertIn(Message("user", "summary"), model.calls[1][0].model_items())
         self.assertEqual([i.call.name for i in load_interaction_save(self.path) if isinstance(i, UserToolCall)],
@@ -226,7 +226,6 @@ class RetryControllerTests(_ControllerTestCase):
                 sample = (ModelSample((OpaqueCompaction.from_messages("summary"),), stop_reason="compaction")
                           if kind == "limit" else ModelSample((ToolCall("record", "call", "{}"),)))
                 model = _Model(self.path, sample)
-                model.auto_compact_context_tokens = 100
                 environment = Environment()
                 submitted = False
 
@@ -245,7 +244,9 @@ class RetryControllerTests(_ControllerTestCase):
                 with mock.patch.object(environment, "execute_tool_calls", side_effect=RuntimeError("lost tool result")) as execute, \
                         mock.patch.object(cli, "should_auto_compact", return_value=kind == "compaction"), \
                         mock.patch.object(cli, "create_default_compactor", return_value=compactor):
-                    self.assertEqual(await self._run(model, terminal, ["--prompt", "hello", "--max-samples", "1"], environment), 1)
+                    self.assertEqual(await self._run(model, terminal, [
+                        "--prompt", "hello", "--max-samples", "1", "--auto-compact-tokens", "100",
+                    ], environment), 1)
                 self.assertEqual(execute.call_count, int(kind == "tool"))
                 self.assertEqual(len(model.calls), int(kind != "compaction"))
                 self.assertNotIn(HINT, [i.text for i in terminal.items])

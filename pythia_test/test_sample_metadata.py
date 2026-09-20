@@ -24,6 +24,7 @@ from pythia.interaction import ModelTimeoutError
 from pythia.interaction import SampleMetadata
 from pythia.interaction import SaveError
 from pythia.interaction import SamplingOptions
+from pythia.interaction import ResolvedSamplingOptions
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
 from pythia.interaction import TurnSummary
@@ -338,7 +339,7 @@ class SampleMetadataTests(unittest.TestCase):
                     self.assertEqual(encode((*items, metadata)), encode(items))
 
     def test_demo_records_independent_active_turn_elapsed_time(self):
-        model = mock.Mock()
+        model = mock.Mock(spec=["sample"])
         model.sample.return_value = ModelSample((Message("assistant", "Done."),))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interaction.jsonl"
@@ -411,7 +412,7 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             model.options,
-            [None],
+            [ResolvedSamplingOptions(auto_compact_tokens=100)],
         )
         self.assertEqual(model.contexts[0].model_items(), (
             Message("user", "follow up"),
@@ -461,7 +462,7 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             model.options,
-            [SamplingOptions(enable_auto_compaction=False)],
+            [ResolvedSamplingOptions(enable_auto_compaction=False, auto_compact_tokens=100)],
         )
         self.assertIn(
             Message("assistant", "uncompacted"),

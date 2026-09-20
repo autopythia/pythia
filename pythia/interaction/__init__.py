@@ -75,6 +75,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .model import ResolvedSamplingOptions
 from .model import TokenUsage
 from .model_catalog import ModelLimits
 from .model_catalog import ModelRoute
@@ -177,6 +178,7 @@ __all__ = [
     "ResponsesOpaqueCompactor",
     "StreamingResponsesEndpoint",
     "SamplingOptions",
+    "ResolvedSamplingOptions",
     "Init",
     "SaveError",
     "TextPart",

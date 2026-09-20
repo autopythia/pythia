@@ -13,6 +13,7 @@ from .messages import MessagesEndpoint
 from .messages import MessagesModel
 from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
+from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
 from .model_catalog import ANTHROPIC_MESSAGES_API_URL as ANTHROPIC_MESSAGES_API_URL
 from .model_catalog import CODEX_RESPONSES_API_URL
@@ -74,6 +75,15 @@ def supports_account_services(args: argparse.Namespace) -> bool:
 
 
 def build_model(args: argparse.Namespace) -> Model:
+    for name in ("auto_compact_tokens", "max_context_tokens"):
+        value = getattr(args, name, None)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(
+                f"--{name.replace('_', '-')} must be a positive integer"
+            )
+
     if args.model_api == "chat-completions":
         if args.codex_home is not None or args.codex_auth_file is not None:
             raise ValueError(
@@ -96,6 +106,16 @@ def build_model(args: argparse.Namespace) -> Model:
             )
         if args.model is None or not args.model.strip():
             raise ValueError("--model is required with --model-api messages")
+        auto_compact_tokens = getattr(args, "auto_compact_tokens", None)
+        if (
+            auto_compact_tokens is not None
+            and auto_compact_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
+        ):
+            raise ValueError(
+                "--auto-compact-tokens must be at least "
+                f"{MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS} for "
+                "--model-api messages"
+            )
         compaction_options = (
             MessagesServerCompaction()
             if args.enable_auto_compaction
@@ -222,6 +242,29 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
             "experimental: convert leading @path-or-uri tokens in user "
             "prompts into media message content; launch-only "
             "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--auto-compact-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "initial automatic-compaction token threshold; overrides the model "
+            "catalog value and is tunable at runtime with "
+            "/config auto_compact_tokens (default: catalog value, if known; "
+            "setting null restores that value)"
+        ),
+    )
+    parser.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "initial context-window ceiling in tokens; informational only and "
+            "tunable with /config max_context_tokens "
+            "(default: catalog value, if known)"
         ),
     )
     parser.add_argument(

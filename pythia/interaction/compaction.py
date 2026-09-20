@@ -124,6 +124,11 @@ class Compactor(Protocol):
         ...
 
 
+def uses_host_auto_compaction(model: Model) -> bool:
+    """Ownership is independent of numeric limits; custom models default to host."""
+    return getattr(model, "auto_compaction_owner", "host") == "host"
+
+
 def should_auto_compact(
     context: InteractionContext,
     threshold_tokens: int,
@@ -447,4 +452,5 @@ __all__ = [
     "PromptSummarizingCompactor",
     "create_default_compactor",
     "should_auto_compact",
+    "uses_host_auto_compaction",
 ]

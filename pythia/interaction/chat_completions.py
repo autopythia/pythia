@@ -50,6 +50,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .model import ResolvedSamplingOptions
 from .model import TokenUsage
 from .model import _timed_sample
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -367,6 +368,11 @@ def _apply_sampling_options(
         payload["stop"] = list(options.stop)
     if options.seed is not None:
         payload["seed"] = options.seed
+    # Host-only policy must not activate unrelated sampling wire extensions.
+    if (isinstance(options, ResolvedSamplingOptions)
+            and options.max_output_tokens is None and options.temperature is None
+            and options.top_p is None and not options.stop and options.seed is None):
+        return
 
 
 def _coerce_content_text(value: Any, field_name: str) -> str:
@@ -636,6 +642,8 @@ def _close_response(response: Any) -> None:
 
 
 class ChatCompletionsModel:
+    auto_compaction_owner = "host"
+
     def __init__(
         self,
         endpoint: ChatCompletionsEndpoint,

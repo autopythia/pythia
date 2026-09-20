@@ -21,7 +21,7 @@ from pythia.interaction import InteractionContext
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import Reasoning
-from pythia.interaction import SamplingOptions
+from pythia.interaction import ResolvedSamplingOptions
 from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
@@ -44,6 +44,8 @@ DEMO_ARGUMENT_DEFAULTS = {
     "enable_auto_compaction": True,
     "enable_workspace": True,
     "enable_experimental_media": False,
+    "auto_compact_tokens": None,
+    "max_context_tokens": None,
     "max_samples": None,
     "max_output_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -239,7 +241,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 UserInteractionBoundary(),
             ),
         )
-        self.assertIsNone(options)
+        self.assertEqual(options, ResolvedSamplingOptions())
 
     def test_initial_query_is_one_item_once_across_tool_follow_up(self):
         query = "/quit\nInspect café without splitting this query.\n"
@@ -286,7 +288,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
             )
             self.assertEqual(
                 options,
-                SamplingOptions(max_output_tokens=77),
+                ResolvedSamplingOptions(max_output_tokens=77),
             )
         self.assertEqual(
             tuple(

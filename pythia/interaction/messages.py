@@ -49,6 +49,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .model import ResolvedSamplingOptions
 from .model import _timed_sample
 from .model_catalog import ANTHROPIC_MESSAGES_API_URL
 from .model_catalog import get_model_spec
@@ -58,6 +59,8 @@ from .usage import TokenUsage
 
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
+# Anthropic requires a context-management edit trigger at or above this floor.
+MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS = 50_000
 _RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 409, 425, 429, 500, 502, 503, 504, 529}
 )
@@ -844,6 +847,8 @@ def _close_response(response: Any) -> None:
 
 
 class MessagesModel:
+    auto_compaction_owner = "server"
+
     def __init__(
         self,
         endpoint: MessagesEndpoint,
@@ -882,11 +887,17 @@ class MessagesModel:
         context.assert_model_ready()
         system, messages = _encode_context(context.model_items())
         spec = get_model_spec("messages", self.endpoint.model)
+        resolved = isinstance(options, ResolvedSamplingOptions)
+        output_budget = (
+            options.max_output_tokens if resolved else self.endpoint.max_output_tokens
+        )
+        if output_budget is None:
+            raise ModelConfigurationError("Resolved Messages max_output_tokens is required")
         payload: Dict[str, Any] = {
             "model": (
                 self.endpoint.model if spec is None else spec.api_model
             ),
-            "max_tokens": self.endpoint.max_output_tokens,
+            "max_tokens": output_budget,
             "messages": messages,
             "stream": False,
         }
@@ -914,19 +925,30 @@ class MessagesModel:
             compaction = MessagesServerCompaction()
         enable_auto_compaction = auto_compaction_override is not False
         if compaction is not None and enable_auto_compaction:
-            auto_compact_context = (
-                None
-                if spec is None
-                else spec.limits.auto_compact_context_tokens
-            )
+            if resolved:
+                # None explicitly delegates to the server; never re-inherit an
+                # endpoint/catalog number after frontend config resolution.
+                auto_compact_context = options.auto_compact_tokens
+            else:
+                # Direct library calls retain endpoint > options > catalog.
+                auto_compact_context = compaction.trigger_input_tokens
+                if auto_compact_context is None and options is not None:
+                    auto_compact_context = options.auto_compact_tokens
+                if auto_compact_context is None and spec is not None:
+                    auto_compact_context = spec.limits.auto_compact_context_tokens
             if (
-                compaction.trigger_input_tokens is None
-                and auto_compact_context is not None
+                auto_compact_context is not None
+                and auto_compact_context
+                < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
             ):
-                compaction = replace(
-                    compaction,
-                    trigger_input_tokens=auto_compact_context,
+                raise ModelConfigurationError(
+                    "auto-compaction trigger must be at least "
+                    f"{MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS} tokens"
                 )
+            compaction = replace(
+                compaction,
+                trigger_input_tokens=auto_compact_context,
+            )
             payload["context_management"] = {
                 "edits": [compaction.request_edit()]
             }

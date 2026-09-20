@@ -35,6 +35,7 @@ from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import create_default_compactor
 from .compaction import should_auto_compact
+from .compaction import uses_host_auto_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
@@ -518,12 +519,11 @@ async def _turn(
                 "model did not produce a final answer within "
                 f"{turn_config.max_samples} samples"
             )
-        threshold = getattr(model, "auto_compact_context_tokens", None)
+        threshold = turn_config.auto_compact_tokens
         if (
             turn_config.enable_auto_compaction
-            and isinstance(threshold, int)
-            and not isinstance(threshold, bool)
-            and threshold > 0
+            and uses_host_auto_compaction(model)
+            and threshold is not None
             and should_auto_compact(context, threshold)
         ):
             state.set_phase("compacting")

@@ -26,6 +26,7 @@ from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
 from ._prompt import load_prompt
 from .compaction import CompactionResult, create_default_compactor, should_auto_compact
+from .compaction import uses_host_auto_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem, render_interaction_items
@@ -507,8 +508,9 @@ class _Session:
         samples = 0
         while config.max_samples is None or samples < config.max_samples:
             self._check_running()
-            threshold = getattr(model, "auto_compact_context_tokens", None)
-            if (config.enable_auto_compaction and type(threshold) is int and threshold > 0
+            threshold = config.auto_compact_tokens
+            if (config.enable_auto_compaction and uses_host_auto_compaction(model)
+                    and threshold is not None
                     and should_auto_compact(context, threshold)):
                 self._phase(index, "compacting")
                 result = create_default_compactor(model).compact(context.copy(), tools=environment.tool_specs)

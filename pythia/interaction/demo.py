@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -12,6 +11,7 @@ from typing import Union
 from .compaction import CompactionResult
 from .compaction import create_default_compactor
 from .compaction import should_auto_compact
+from .compaction import uses_host_auto_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
@@ -30,14 +30,19 @@ from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import summarize_turn_usage
 from .media import parse_user_prompt
+from .messages import MessagesModel
+from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
 from .model import ModelError
 from .model import SamplingOptions
+from .model import ResolvedSamplingOptions
 from .model_config import DEFAULT_SAVE_PATH as DEFAULT_SAVE_PATH
 from .model_config import build_model
 from .model_config import build_parser
 from .model_config import initial_model_name
 from .model_config import resolve_save_path
+from .runtime_config import InteractionConfig
+from .runtime_config import InteractionConfigSnapshot
 from .save import load_interaction_save
 from .save import save_interaction_save
 from .user import UserInteraction
@@ -77,6 +82,8 @@ def run(
     enable_media: bool = False,
     enable_workspace: bool = True,
     cwd: Path = Path("."),
+    auto_compact_tokens: Optional[int] = None,
+    max_context_tokens: Optional[int] = None,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
@@ -90,6 +97,14 @@ def run(
         raise TypeError("enable_media must be a bool")
     if not isinstance(enable_workspace, bool):
         raise TypeError("enable_workspace must be a bool")
+    for field_name, value in (
+        ("auto_compact_tokens", auto_compact_tokens),
+        ("max_context_tokens", max_context_tokens),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(f"{field_name} must be a positive integer or None")
     if prompt is not None and (
         not isinstance(prompt, str) or not prompt.strip()
     ):
@@ -115,18 +130,38 @@ def run(
         raise ValueError("max_samples must be a positive integer or None")
     if options is not None and not isinstance(options, SamplingOptions):
         raise TypeError("options must be SamplingOptions or None")
-    enable_auto_compaction = (
-        enable_auto_compaction
-        and (
-            options is None
-            or options.enable_auto_compaction is not False
-        )
+    base_options = options or SamplingOptions()
+    if auto_compact_tokens is not None and (
+        base_options.auto_compact_tokens is not None
+        or isinstance(base_options, ResolvedSamplingOptions)
+    ) and auto_compact_tokens != base_options.auto_compact_tokens:
+        raise ValueError("Conflicting auto_compact_tokens keyword and sampling option")
+    inputs = InteractionConfigSnapshot(
+        enable_workspace=enable_workspace,
+        max_samples=max_samples,
+        max_output_tokens=base_options.max_output_tokens,
+        enable_auto_compaction=(
+            enable_auto_compaction and base_options.enable_auto_compaction is not False
+        ),
+        auto_compact_tokens=(
+            auto_compact_tokens if auto_compact_tokens is not None
+            else base_options.auto_compact_tokens
+        ),
+        max_context_tokens=max_context_tokens,
     )
-    if not enable_auto_compaction:
-        options = replace(
-            options or SamplingOptions(),
-            enable_auto_compaction=False,
-        )
+    # Resolved options must not be sent through model-default inheritance again.
+    if isinstance(base_options, ResolvedSamplingOptions):
+        messages = isinstance(model, MessagesModel)
+        turn_config = InteractionConfig(
+            inputs,
+            require_max_output_tokens=messages,
+            min_auto_compact_tokens=(
+                MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS if messages else None
+            ),
+        ).snapshot()
+    else:
+        turn_config = InteractionConfig.from_model(model, inputs).snapshot()
+    options = turn_config.sampling_options(base_options)
 
     resumed_existing_save = False
     if resume and Path(save_path).exists():
@@ -202,13 +237,12 @@ def run(
 
     turn_started = perf_counter()
     sample_count = 0
-    while max_samples is None or sample_count < max_samples:
-        threshold = getattr(model, "auto_compact_context_tokens", None)
+    while turn_config.max_samples is None or sample_count < turn_config.max_samples:
+        threshold = turn_config.auto_compact_tokens
         if (
-            enable_auto_compaction
-            and isinstance(threshold, int)
-            and not isinstance(threshold, bool)
-            and threshold > 0
+            turn_config.enable_auto_compaction
+            and uses_host_auto_compaction(model)
+            and threshold is not None
             and should_auto_compact(context, threshold)
         ):
             compaction = create_default_compactor(model).compact(
@@ -299,7 +333,7 @@ def run(
             print(display_item)
 
     raise RuntimeError(
-        f"model did not produce a final answer within {max_samples} samples"
+        f"model did not produce a final answer within {turn_config.max_samples} samples"
     )
 
 
@@ -353,17 +387,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     cwd = Path(args.cwd).expanduser().resolve()
     prompt = args.prompt
-    options = (
-        SamplingOptions(
-            max_output_tokens=args.max_output_tokens,
-            enable_auto_compaction=(
-                False if not args.enable_auto_compaction else None
-            ),
-        )
-        if args.max_output_tokens is not None or not args.enable_auto_compaction
-        else None
-    )
-
     print(
         "Warning: exec_command runs without a sandbox; use only with a "
         "trusted model and workspace.",
@@ -377,6 +400,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             file=sys.stderr,
         )
     try:
+        config = InteractionConfig.from_namespace(args).snapshot()
         save_path = resolve_save_path(args.save_path)
         if prompt is None and (not args.resume or not save_path.exists()):
             # A missing resume file is also a fresh session. Existing saves
@@ -402,14 +426,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 environment,
                 prompt=prompt,
                 instructions=args.instructions,
-                max_samples=args.max_samples,
-                options=options,
+                max_samples=config.max_samples,
+                options=config.sampling_options(),
                 save_path=save_path,
                 resume=args.resume,
-                enable_auto_compaction=args.enable_auto_compaction,
+                enable_auto_compaction=config.enable_auto_compaction,
                 enable_media=args.enable_experimental_media,
-                enable_workspace=args.enable_workspace,
+                enable_workspace=config.enable_workspace,
                 cwd=cwd,
+                auto_compact_tokens=config.auto_compact_tokens,
+                max_context_tokens=config.max_context_tokens,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

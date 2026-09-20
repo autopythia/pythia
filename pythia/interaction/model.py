@@ -100,6 +100,8 @@ class SamplingOptions:
     seed: Optional[int] = None
     # Host/provider context-management control, never a sampling wire field.
     enable_auto_compaction: Optional[bool] = None
+    # Host context-management threshold override, never a sampling wire field.
+    auto_compact_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.max_output_tokens is not None:
@@ -142,6 +144,32 @@ class SamplingOptions:
             raise TypeError(
                 "enable_auto_compaction must be a bool or None"
             )
+        if self.auto_compact_tokens is not None and (
+            isinstance(self.auto_compact_tokens, bool)
+            or not isinstance(self.auto_compact_tokens, int)
+            or self.auto_compact_tokens <= 0
+        ):
+            raise ValueError(
+                "auto_compact_tokens must be a positive integer or None"
+            )
+
+
+@dataclass(frozen=True)
+class ResolvedSamplingOptions(SamplingOptions):
+    """Frontend policy already resolved against its model binding.
+
+    Unlike ordinary SamplingOptions, max_output_tokens/auto_compact_tokens=None
+    mean no application-specified number, not inheritance from the endpoint or
+    catalog. The compaction boolean is authoritative. Other sampling fields
+    retain their usual semantics. Adapters must not serialize this distinction.
+    """
+
+    enable_auto_compaction: bool = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.enable_auto_compaction, bool):
+            raise TypeError("resolved enable_auto_compaction must be a bool")
 
 
 @dataclass(frozen=True)
@@ -290,5 +318,6 @@ __all__ = [
     "ModelTimeoutError",
     "ModelTransportError",
     "SamplingOptions",
+    "ResolvedSamplingOptions",
     "TokenUsage",
 ]

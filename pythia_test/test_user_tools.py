@@ -15,7 +15,7 @@ from pythia.interaction import (
     CodexResponsesModel, CompactionError, CompactionMetadata, CompactionResult, ContextPrefix,
     ContextValidationError, DefaultEnvironment, Environment,
     Instructions, InteractionConfig, Message, MessagesEndpoint, MessagesModel, InteractionContext, ModelSample,
-    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, SamplingOptions, Init,
+    ModelSampleBoundary, OpaqueCompaction, PromptSummarizingCompactor, ResolvedSamplingOptions, Init,
     TokenUsage, ToolCall, ToolResult, SampleMetadata, TurnSummary, UserInteraction,
     UserInteractionBoundary, UserToolCall, UserToolResult, load_interaction_save,
     render_interaction_items, save_interaction_save,
@@ -101,18 +101,26 @@ class UserToolValueTests(unittest.TestCase):
             "max_samples = None",
             "max_output_tokens = None",
             "enable_auto_compaction = True",
+            "auto_compact_tokens = None",
+            "max_context_tokens = None",
         )))
         json_dump = execute("/config.json")
         self.assertTrue(json_dump.success)
-        self.assertEqual(json.loads(json_dump.output), config.values())
+        self.assertEqual(
+            json.loads(json_dump.output),
+            {**config.values(), "__init__": config.initial_values()},
+        )
 
         updated = execute("/config max_output_tokens 2048")
         self.assertTrue(updated.success)
-        self.assertEqual(updated.output, "max_output_tokens = 2048")
+        self.assertEqual(updated.output, "# init: max_output_tokens = None\nmax_output_tokens = 2048")
         self.assertEqual(config.get("max_output_tokens"), 2048)
         cleared = execute("/config.json max_output_tokens None")
         self.assertTrue(cleared.success)
-        self.assertEqual(json.loads(cleared.output), {"max_output_tokens": None})
+        self.assertEqual(
+            json.loads(cleared.output),
+            {"max_output_tokens": None, "__init__": {"max_output_tokens": None}},
+        )
         self.assertIsNone(config.get("max_output_tokens"))
         workspace = execute("/config enable_workspace False")
         self.assertTrue(workspace.success)
@@ -400,7 +408,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.run_cli(model, terminal), 0)
 
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(model.calls[0][2], SamplingOptions(max_output_tokens=17))
+        self.assertEqual(model.calls[0][2], ResolvedSamplingOptions(max_output_tokens=17))
         self.assertFalse(any(
             isinstance(item, (UserToolCall, UserToolResult))
             for item in model.calls[0][0].model_items()
@@ -423,9 +431,20 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 "max_samples": None,
                 "max_output_tokens": None,
                 "enable_auto_compaction": True,
+                "auto_compact_tokens": None,
+                "max_context_tokens": None,
+                "__init__": {
+                    "enable_workspace": True,
+                    "max_samples": None,
+                    "max_output_tokens": None,
+                    "enable_auto_compaction": True,
+                    "auto_compact_tokens": None,
+                    "max_context_tokens": None,
+                },
             },
         )
-        self.assertEqual(config_results[1].result.output, "max_output_tokens = 17")
+        self.assertEqual(config_results[1].result.output,
+                         "# init: max_output_tokens = None\nmax_output_tokens = 17")
 
     async def test_config_is_available_without_an_authenticated_model(self):
         submitted = False
@@ -512,7 +531,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         terminal = _Terminal(second_frame)
         self.assertEqual(await self.run_cli(model, terminal), 0)
 
-        self.assertIsNone(model.calls[0][2])
+        self.assertEqual(model.calls[0][2], ResolvedSamplingOptions())
         self.assertTrue(any(
             "saved config commands were not replayed" in item.text
             for item in terminal.items
@@ -550,14 +569,14 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 terminal.key("c-d")
 
         model = _Model(self.path, _answer("uncompacted"))
-        model.auto_compact_context_tokens = 100
+        self.args.auto_compact_tokens = 100
         with mock.patch.object(cli, "create_default_compactor") as create:
             self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
 
         create.assert_not_called()
         self.assertEqual(
             model.calls[0][2],
-            SamplingOptions(enable_auto_compaction=False),
+            ResolvedSamplingOptions(enable_auto_compaction=False, auto_compact_tokens=100),
         )
 
     async def test_config_max_samples_applies_to_the_next_turn(self):

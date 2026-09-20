@@ -28,7 +28,7 @@ from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
-from pythia.interaction import SamplingOptions
+from pythia.interaction import ResolvedSamplingOptions
 from pythia.interaction import SampleMetadata
 from pythia.interaction import SaveError
 from pythia.interaction import Tool
@@ -201,6 +201,20 @@ for module in (cli, demo):
             self.assertFalse(cli_args.pop("headless"))
             self.assertIsNone(cli_args.pop("prompt_file"))
             self.assertEqual(cli_args, demo_args)
+
+    def test_context_limit_arguments_validate(self):
+        # Context-limit args are positive ints (or unset) and chat-completions
+        # accepts them; Messages enforces its compaction minimum.
+        for option in ("--auto-compact-tokens", "--max-context-tokens"):
+            args = cli._build_parser().parse_args(["--model", "m", option, "0"])
+            with self.assertRaisesRegex(ValueError, option.lstrip("-")):
+                cli.build_model(args)
+        messages = cli._build_parser().parse_args([
+            "--model-api", "messages", "--model", "claude-fable-5-1",
+            "--auto-compact-tokens", "100",
+        ])
+        with self.assertRaisesRegex(ValueError, "at least 50000"):
+            cli.build_model(messages)
 
     def test_enable_arguments_accept_bare_and_explicit_booleans(self):
         cases = (
@@ -487,7 +501,6 @@ class CLIDisabledToolsTests(_ControllerTestCase):
             ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100),
         )))
         model = _Model(self.path, _answer("continued"))
-        model.auto_compact_context_tokens = 100
         commands = deque(("/config max_output_tokens 17", "/config.json", "/compact", "/quit"))
         terminal = _Terminal(lambda t, e, s: t.submit(commands.popleft())
                              if s == "idle" and commands else None)
@@ -498,6 +511,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
         with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--enable-default-tools=False", "--resume", "--prompt", "continue",
+                "--auto-compact-tokens", "100",
             ]), 0)
         self.assertEqual(compactor.compact.call_count, 2)  # automatic, then /compact
         for call in compactor.compact.call_args_list:
@@ -514,6 +528,32 @@ class CLIDisabledToolsTests(_ControllerTestCase):
 
 
 class CLIControllerTests(_ControllerTestCase):
+    async def test_auto_compact_tokens_config_drives_compaction(self):
+        save_interaction_save(self.path, InteractionContext((
+            Init("old"), Message("assistant", "old answer"),
+            SampleMetadata(TokenUsage(total_tokens=100)),
+            ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100),
+        )))
+        model = _Model(self.path, _answer("continued"))
+        # The config value drives compaction even though the model exposes no
+        # auto-compaction attribute of its own.
+        self.assertFalse(hasattr(model, "auto_compact_context_tokens"))
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult((
+            ContextPrefix((Message("assistant", "summary"),)),
+        ))
+        commands = deque(("/quit",))
+        terminal = _Terminal(
+            lambda t, e, s: t.submit(commands.popleft())
+            if s == "idle" and commands else None
+        )
+        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+            self.assertEqual(await self._run(model, terminal, [
+                "--enable-default-tools=False", "--resume",
+                "--auto-compact-tokens", "100", "--prompt", "continue",
+            ]), 0)
+        self.assertEqual(compactor.compact.call_count, 1)
+        self.assertEqual(len(model.calls), 1)
     async def test_sampling_spinner_changes_and_returns_to_idle_prompt(self):
         release = threading.Event()
         sampling_prompts = []
@@ -609,7 +649,7 @@ class CLIControllerTests(_ControllerTestCase):
         )
         self.assertEqual(
             [call[2] for call in model.calls],
-            [SamplingOptions(max_output_tokens=77)] * 2,
+            [ResolvedSamplingOptions(max_output_tokens=77)] * 2,
         )
         texts = [item.text for item in terminal.items]
         self.assertEqual(texts.count("[assistant] first"), 1)
@@ -803,7 +843,7 @@ class CLIControllerTests(_ControllerTestCase):
             ),
         )
 
-    async def test_codex_threshold_auto_compacts_before_sampling(self):
+    async def test_config_threshold_auto_compacts_before_sampling(self):
         original = (
             Init("saved"),
             Message("user", "old request"),
@@ -823,7 +863,6 @@ class CLIControllerTests(_ControllerTestCase):
         )
         save_interaction_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("after auto compact"))
-        model.auto_compact_context_tokens = 100
         compacted = []
 
         class Compactor:
@@ -848,7 +887,7 @@ class CLIControllerTests(_ControllerTestCase):
                 await self._run(
                     model,
                     terminal,
-                    ["--resume", "--prompt", "follow up"],
+                    ["--resume", "--prompt", "follow up", "--auto-compact-tokens", "100"],
                 ),
                 0,
             )
@@ -895,7 +934,6 @@ class CLIControllerTests(_ControllerTestCase):
         )
         save_interaction_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("done"))
-        model.auto_compact_context_tokens = 100
         terminal = _Terminal(
             lambda t, e, s: t.key("c-d") if s == "idle" else None
         )
@@ -910,6 +948,7 @@ class CLIControllerTests(_ControllerTestCase):
                         "--prompt",
                         "follow up",
                         "--enable-auto-compaction=False",
+                        "--auto-compact-tokens", "100",
                     ],
                 ),
                 0,
@@ -919,7 +958,7 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(
             model.calls[0][2],
-            SamplingOptions(enable_auto_compaction=False),
+            ResolvedSamplingOptions(enable_auto_compaction=False, auto_compact_tokens=100),
         )
         self.assertIn(
             Message("assistant", "uncompacted answer"),
