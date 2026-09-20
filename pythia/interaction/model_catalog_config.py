@@ -1,0 +1,215 @@
+"""Explicit file I/O for the user catalog. Importing model_catalog stays pure."""
+
+from __future__ import annotations
+
+import configparser
+from dataclasses import replace
+from pathlib import Path
+import re
+
+from ._config_file import read_config_bytes
+from .model_catalog import BUILTIN_MODEL_CATALOG, CODEX_RESPONSES_API_URL
+from .model_catalog import ModelCatalog, ModelLimits, ModelRoute, ModelSpec
+from .model_catalog import EndpointSpec
+from .model_catalog import MessagesDefaults, ResponsesDefaults
+from .model_catalog import _normalize_profile, parse_json_value, validate_route_url
+
+
+MAX_CATALOG_BYTES = 1_048_576
+MAX_CATALOG_MODELS = 1024
+_ROUTE_FIELDS = frozenset(("provider", "api_url", "auth_source", "api_key_environment_variable"))
+_LIMIT_FIELDS = frozenset(("auto_compact_context_tokens", "max_context_tokens", "max_output_tokens"))
+_RESPONSES_FIELDS = frozenset(("reasoning_effort", "reasoning_summary", "text_verbosity"))
+_MESSAGES_FIELDS = frozenset(("output_effort",))
+_INTEGER = re.compile(r"^[+-]?[0-9]+$")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def default_model_catalog_path():
+    return Path.home() / ".pythia" / "model-catalog.ini"
+
+
+def _text(value):
+    if value == "null":
+        return None
+    if value.startswith('"'):
+        value = parse_json_value(value)
+        if not isinstance(value, str):
+            raise ValueError("Expected text.")
+    return value
+
+
+def _entry(section, values, base, version):
+    name = section.removeprefix("model.")
+    values = dict(values)
+    if version == 1:
+        for short, full in (("api", "route.api"), ("api_model", "route.api_model")):
+            if short in values:
+                if full in values:
+                    raise ValueError("Duplicate route field spelling.")
+                values[full] = values.pop(short)
+        if any(key.startswith("endpoint.") for key in values):
+            raise ValueError("endpoint.* requires catalog version 2.")
+    elif any(key.startswith("route.") or key in {"api", "api_model"} for key in values):
+        raise ValueError("Version 2 uses endpoint.*; do not mix legacy route fields.")
+    override = values.pop("override", "false").lower()
+    if override not in configparser.ConfigParser.BOOLEAN_STATES:
+        raise ValueError("override must be a boolean.")
+    override = configparser.ConfigParser.BOOLEAN_STATES[override]
+    api_key = "route.api" if version == 1 else "endpoint.api"
+    has_api = api_key in values
+    api = _text(values.pop(api_key)) if has_api else None
+    if has_api and api is None:
+        raise ValueError("route.api cannot be null.")
+    if api is not None:
+        api = _normalize_profile(api)
+    if override:
+        candidates = tuple(spec for spec in base.matches(name, canonical_only=True)
+                           if api is None or spec.profile == api)
+        if len(candidates) != 1:
+            raise ValueError("Override requires one existing canonical model; specify route.api if ambiguous.")
+        original = candidates[0]
+        api = original.profile
+    else:
+        if api is None:
+            raise ValueError("New entries require route.api.")
+        if base.get_model_spec(api, name) is not None:
+            raise ValueError("Existing entries require override = true.")
+        original = None
+
+    fields = {}
+    route = {} if original is None or version == 2 else dict(vars(original.route))
+    endpoint = {} if original is None else dict(vars(original.endpoint))
+    if api is not None:
+        endpoint["api"] = api
+    limits = {} if original is None else dict(vars(original.limits))
+    responses = {} if original is None or original.responses is None else dict(vars(original.responses))
+    messages = {} if original is None or original.messages is None else dict(vars(original.messages))
+    params = {} if original is None else dict(original.request_params)
+    if "request_params" in values and any(key.startswith("request_params.") for key in values):
+        raise ValueError("Cannot combine whole-map and per-key request params.")
+    for key, value in values.items():
+        if version == 2 and key in {"endpoint.model", "endpoint.url", "endpoint.auth"}:
+            endpoint[key[9:]] = _text(value)
+            if key == "endpoint.auth":
+                endpoint["auth_file"] = None
+        elif key == "route.api_model":
+            fields["api_model"] = _text(value)
+        elif key == "aliases":
+            fields[key] = parse_json_value(value)
+            if not isinstance(fields[key], list):
+                raise ValueError("aliases must be a JSON array.")
+        elif key == "source":
+            fields[key] = _text(value)
+        elif key.startswith("route.") and key[6:] in _ROUTE_FIELDS:
+            route[key[6:]] = _text(value)
+        elif key.startswith("limits.") and key[7:] in _LIMIT_FIELDS:
+            if value != "null" and _INTEGER.fullmatch(value) is None:
+                raise ValueError("Limits require integers or null.")
+            limits[key[7:]] = None if value == "null" else int(value)
+        elif key.startswith("responses.") and key[10:] in _RESPONSES_FIELDS:
+            responses[key[10:]] = _text(value)
+        elif key.startswith("messages.") and key[9:] in _MESSAGES_FIELDS:
+            messages[key[9:]] = _text(value)
+        elif key == "request_params":
+            params = parse_json_value(value)
+        elif key.startswith("request_params."):
+            params[key[15:]] = parse_json_value(value)
+        else:
+            raise ValueError("Unknown model field.")
+
+    if version == 1:
+        route["api_url"] = validate_route_url(route.get("api_url"))
+        variable = route.get("api_key_environment_variable")
+        if variable is not None and (not isinstance(variable, str) or _ENV_NAME.fullmatch(variable) is None):
+            raise ValueError("Invalid environment variable reference.")
+        parsed_route = ModelRoute(**route)
+        endpoint = EndpointSpec.from_route(api, fields.pop("api_model", None if original is None else original.api_model), parsed_route)
+        fields["provider_label"] = parsed_route.provider
+    else:
+        if original is None and not {"api", "url", "model", "auth"} <= endpoint.keys():
+            raise ValueError("New entries require endpoint.api, url, model, and auth.")
+        if (original is not None and "endpoint.url" in values
+                and endpoint["url"] != original.endpoint.url and original.endpoint.auth != "none"
+                and "endpoint.auth" not in values):
+            raise ValueError("Changing a credentialed endpoint URL requires endpoint.auth.")
+        endpoint = EndpointSpec(**endpoint)
+    if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
+        raise ValueError("Catalog Codex login requires the official Codex route.")
+    fields.update(endpoint=endpoint, limits=ModelLimits(**limits), request_params=params)
+    if responses:
+        fields["responses"] = ResponsesDefaults(**responses)
+    if messages:
+        fields["messages"] = MessagesDefaults(**messages)
+    spec = (ModelSpec(name=name, **fields) if original is None
+            else replace(original, **fields))
+    return spec
+
+
+def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
+    """Parse and validate transactionally. Neither the base nor globals change."""
+    if not isinstance(base, ModelCatalog):
+        raise TypeError("base must be ModelCatalog")
+    if not isinstance(text, str):
+        raise TypeError("catalog text must be a string")
+    if len(text.encode("utf-8")) > MAX_CATALOG_BYTES:
+        raise ValueError("Model catalog exceeds the size limit.")
+    parser = configparser.ConfigParser(
+        interpolation=None, strict=True, delimiters=("=",), allow_no_value=False,
+        inline_comment_prefixes=None, empty_lines_in_values=False,
+    )
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+        if parser.defaults() or not parser.has_section("catalog"):
+            raise ValueError()
+        version = parser.getint("catalog", "version")
+        if set(parser["catalog"]) != {"version"} or version not in {1, 2}:
+            raise ValueError()
+        sections = [section for section in parser.sections() if section != "catalog"]
+        if len(sections) > MAX_CATALOG_MODELS or any(not section.startswith("model.") for section in sections):
+            raise ValueError()
+    except (configparser.Error, ValueError):
+        raise ValueError(f"Invalid model catalog header/INI syntax: {source}") from None
+    specs = {(spec.profile, spec.name): spec for spec in base.specs}
+    origins = dict(base.origins)
+    seen = set()
+    for section in sections:
+        try:
+            spec = _entry(section, parser[section], base, version)
+            identity = (spec.profile, spec.name)
+            if identity in seen:
+                raise ValueError("Duplicate normalized model identity.")
+            seen.add(identity)
+            specs[identity] = spec
+            origins[identity] = str(source)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            # No values from request params/credentials should appear in errors.
+            raise ValueError(f"Invalid model catalog entry {section!r} in {source}") from None
+    try:
+        return ModelCatalog(tuple(specs.values()), origins)
+    except ValueError:
+        raise ValueError(f"Model catalog selector/alias collision in {source}") from None
+
+
+def load_model_catalog(path=None, *, enabled=True, base=BUILTIN_MODEL_CATALOG):
+    """Only this opt-in boundary reads the default home file; a missing default is OK."""
+    if not enabled:
+        if path is not None:
+            raise ValueError("Cannot select and disable the user model catalog.")
+        return base
+    explicit = path is not None
+    path = (default_model_catalog_path() if path is None else Path(path)).expanduser().absolute()
+    try:
+        data = read_config_bytes(path, MAX_CATALOG_BYTES)
+        text = data.decode("utf-8")
+    except FileNotFoundError:
+        if not explicit:
+            return base
+        raise ValueError(f"Model catalog file not found: {path}") from None
+    except (OSError, UnicodeError):
+        raise ValueError(f"Could not read model catalog: {path}") from None
+    return parse_model_catalog(text, base=base, source=str(path))
+
+
+__all__ = ["default_model_catalog_path", "load_model_catalog", "parse_model_catalog"]

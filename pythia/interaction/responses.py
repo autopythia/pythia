@@ -69,6 +69,7 @@ from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
+from .model import ResolvedSamplingParams, UNSET_SAMPLING_PARAMS, select_sampling_params
 from .model import _timed_sample
 from .model_catalog import CODEX_RESPONSES_API_URL
 from .model_catalog import META_RESPONSES_API_URL
@@ -76,6 +77,7 @@ from .model_catalog import OPENAI_RESPONSES_API_URL
 from .model_catalog import ModelSpec
 from .model_catalog import get_model_route
 from .model_catalog import get_model_spec
+from .model_catalog import ModelBinding, BUILTIN_MODEL_CATALOG, bind_endpoint, bound_transport_inputs
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
@@ -161,31 +163,50 @@ def _normalize_configuration(
 
 @dataclass(frozen=True)
 class StreamingResponsesEndpoint:
-    api_url: str
-    model: str
-    bearer_token: str = field(repr=False)
+    api_url: Optional[str] = None
+    model: Optional[str] = None
+    bearer_token: Optional[str] = field(default=None, repr=False)
     account_id: Optional[str] = None
-    api_provider: str = "api"
+    api_provider: Optional[str] = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    binding: Optional[ModelBinding] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        bound = self.binding is not None
+        if self.api_provider is not None and not isinstance(self.api_provider, str):
+            raise TypeError("api_provider must be a string")
+        provider = None if self.api_provider is None else self.api_provider.strip().lower()
+        expected = "codex" if bound and self.binding.api == "codex" else "api"
+        if bound and provider is not None and provider != expected:
+            raise ModelConfigurationError("API dialect conflicts with resolved endpoint")
+        object.__setattr__(self, "api_provider", expected if provider is None else provider)
+        api = "codex" if self.api_provider == "codex" else "responses"
+        model, prefix = bound_transport_inputs(api, self.model, self.api_url, self.binding)
         api_url, model, timeout = _normalize_configuration(
-            self.api_url, self.model, self.request_timeout_seconds
+            prefix or (self.binding.endpoint.url if bound else prefix),
+            model, self.request_timeout_seconds,
         )
+        if bound:
+            api_url = prefix
         object.__setattr__(self, "api_url", api_url)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "request_timeout_seconds", timeout)
 
-        if not isinstance(self.bearer_token, str):
-            raise TypeError("bearer_token must be a string")
-        bearer_token = self.bearer_token.strip()
-        if not bearer_token:
-            raise ModelConfigurationError("bearer_token must not be empty")
-        if any(character.isspace() for character in bearer_token):
-            raise ModelConfigurationError(
-                "bearer_token must not contain whitespace"
-            )
-        object.__setattr__(self, "bearer_token", bearer_token)
+        anonymous = bound and self.binding.endpoint.auth == "none"
+        if anonymous:
+            if self.bearer_token is not None or self.account_id is not None:
+                raise ModelConfigurationError("Anonymous endpoint cannot receive credentials")
+        else:
+            if not isinstance(self.bearer_token, str):
+                raise TypeError("bearer_token must be a string")
+            bearer_token = self.bearer_token.strip()
+            if not bearer_token:
+                raise ModelConfigurationError("bearer_token must not be empty")
+            if any(character.isspace() for character in bearer_token):
+                raise ModelConfigurationError(
+                    "bearer_token must not contain whitespace"
+                )
+            object.__setattr__(self, "bearer_token", bearer_token)
 
         if not isinstance(self.api_provider, str):
             raise TypeError("api_provider must be a string")
@@ -195,6 +216,10 @@ class StreamingResponsesEndpoint:
                 "api_provider must be 'api' or 'codex'"
             )
         object.__setattr__(self, "api_provider", api_provider)
+        object.__setattr__(self, "binding", bind_endpoint(
+            "codex" if api_provider == "codex" else "responses",
+            model, api_url, self.binding, auth="supplied",
+        ))
 
         if self.account_id is not None:
             if not isinstance(self.account_id, str):
@@ -214,7 +239,7 @@ class StreamingResponsesEndpoint:
 
     @property
     def url(self) -> str:
-        return f"{self.api_url}/responses"
+        return self.binding.endpoint.url
 
 
 @dataclass(frozen=True)
@@ -238,20 +263,21 @@ class _RemoteCompactionResponse:
 
 
 def _resolve_model_spec(endpoint: StreamingResponsesEndpoint) -> Optional[ModelSpec]:
-    profile = "codex" if endpoint.api_provider == "codex" else "responses"
-    return get_model_spec(profile, endpoint.model)
+    return endpoint.binding.spec
 
 
 @dataclass(frozen=True)
 class _CredentialSnapshot:
-    auth: CodexAuth
+    auth: Optional[CodexAuth]
     credentials: Optional[CodexCredentials] = field(default=None, repr=False)
 
 
 class _StaticCredentialSource:
     kind = "static"
 
-    def __init__(self, auth: CodexAuth) -> None:
+    def __init__(self, auth: Optional[CodexAuth]) -> None:
+        if auth is None:
+            self.kind = "none"
         self._snapshot = _CredentialSnapshot(auth)
 
     def load(self) -> _CredentialSnapshot:
@@ -323,47 +349,30 @@ class _FileCredentialSource:
         return _CredentialSnapshot(refreshed.auth, refreshed)
 
 
-def _load_default_model_auth(
-    model: str,
-    *,
-    codex_home: Optional[CodexAuthPath],
-    auth_file: Optional[CodexAuthPath],
-) -> CodexAuth:
-    route = get_model_route("codex", model)
-    api_key_environment_variable = route.api_key_environment_variable
-    if (
-        api_key_environment_variable is not None
-        and codex_home is None
-        and auth_file is None
-    ):
-        api_key = os.environ.get(api_key_environment_variable)
-        if api_key is None or not api_key.strip():
-            raise ModelConfigurationError(
-                f"{api_key_environment_variable} is required for model "
-                f"{model!r}"
-            )
-        return CodexAuth(access_token=api_key)
-    return load_codex_auth(
-        codex_home=codex_home,
-        auth_file=auth_file,
-    )
+def _load_default_model_auth(model, *, codex_home=None, auth_file=None, endpoint=None):
+    endpoint = BUILTIN_MODEL_CATALOG.bind("codex", model).endpoint if endpoint is None else endpoint
+    if endpoint.auth == "none":
+        return None
+    if endpoint.environment_variable is not None:
+        token = os.environ.get(endpoint.environment_variable)
+        if token is None or not token.strip():
+            raise ModelConfigurationError(f"{endpoint.environment_variable} is required for this model")
+        return CodexAuth(access_token=token)
+    if endpoint.auth == "codex-login":
+        return load_codex_auth(codex_home=None, auth_file=endpoint.auth_file)
+    raise ModelConfigurationError("This endpoint requires supplied credentials")
 
 
-def _default_credential_source(
-    model: str,
-    *,
-    codex_home: Optional[CodexAuthPath],
-    auth_file: Optional[CodexAuthPath],
-):
-    route = get_model_route("codex", model)
-    variable = route.api_key_environment_variable
-    if variable is not None and codex_home is None and auth_file is None:
-        return _EnvironmentCredentialSource(variable)
-    path = _resolve_auth_file(
-        codex_home=codex_home,
-        auth_file=auth_file,
-    ).resolve()
-    return _FileCredentialSource(path)
+def _default_credential_source(model, *, codex_home=None, auth_file=None, endpoint=None):
+    endpoint = BUILTIN_MODEL_CATALOG.bind("codex", model).endpoint if endpoint is None else endpoint
+    if endpoint.auth == "none":
+        return _StaticCredentialSource(None)
+    if endpoint.environment_variable is not None:
+        return _EnvironmentCredentialSource(endpoint.environment_variable)
+    if endpoint.auth == "codex-login":
+        path = _resolve_auth_file(codex_home=None, auth_file=endpoint.auth_file).resolve()
+        return _FileCredentialSource(path)
+    raise ModelConfigurationError("This endpoint requires supplied credentials")
 
 
 def _encode_context_items(
@@ -532,12 +541,14 @@ def _encode_tools(tools: Sequence[Any]) -> List[Dict[str, Any]]:
     return encoded
 
 
-def _apply_sampling_options(
+def _apply_sampling_params(
     payload: Dict[str, Any],
     options: Optional[SamplingOptions],
 ) -> None:
     if options is None:
         return
+    if isinstance(options, ResolvedSamplingParams) and options.request_params:
+        raise ModelConfigurationError("request_params is unsupported for Responses")
     unsupported = []
     if options.temperature is not None:
         unsupported.append("temperature")
@@ -554,6 +565,10 @@ def _apply_sampling_options(
         )
     if options.max_output_tokens is not None:
         payload["max_output_tokens"] = options.max_output_tokens
+
+
+# Compatibility spelling for callers of the former encoder helper.
+_apply_sampling_options = _apply_sampling_params
 
 
 def _new_identifier(factory: Callable[[], Any], field_name: str) -> str:
@@ -1699,6 +1714,7 @@ class CodexResponsesModel:
         auth_opener: Optional[Callable[..., Any]] = None,
         identifier_factory: Optional[Callable[[], Any]] = None,
         retry_sleep: Optional[Callable[[float], None]] = None,
+        binding: Optional[ModelBinding] = None,
     ) -> None:
         if endpoint is not None:
             if not isinstance(endpoint, StreamingResponsesEndpoint):
@@ -1717,6 +1733,7 @@ class CodexResponsesModel:
                     ),
                     ("codex_home", codex_home),
                     ("auth_file", auth_file),
+                    ("binding", binding),
                 )
                 if value is not None
             ]
@@ -1728,9 +1745,15 @@ class CodexResponsesModel:
                 )
             resolved_endpoint = endpoint
             credential_source = _StaticCredentialSource(
-                CodexAuth(endpoint.bearer_token, endpoint.account_id)
+                None if endpoint.bearer_token is None else CodexAuth(endpoint.bearer_token, endpoint.account_id)
             )
         else:
+            bound_input = binding is not None
+            if binding is not None:
+                if not isinstance(binding, ModelBinding) or binding.api not in {"codex", "responses"}:
+                    raise ModelConfigurationError("Invalid Responses model binding")
+                if model is None:
+                    model = binding.selector if binding.selector is not None else binding.api_model
             if model is None:
                 raise ModelConfigurationError(
                     "model is required when endpoint is not supplied"
@@ -1740,8 +1763,26 @@ class CodexResponsesModel:
             model = model.strip()
             if not model:
                 raise ModelConfigurationError("model must not be empty")
+            if binding is None:
+                binding = BUILTIN_MODEL_CATALOG.bind("codex", model, api_url=api_url)
+            else:
+                binding = bind_endpoint(binding.api, model, api_url, binding)
+            if bound_input and (codex_home is not None or auth_file is not None):
+                raise ModelConfigurationError("Credential paths are already resolved by the endpoint binding")
+            if not bound_input and (codex_home is not None or auth_file is not None):
+                binding = replace(binding, endpoint=replace(
+                    binding.endpoint, auth="codex-login",
+                    auth_file=str(_resolve_auth_file(codex_home=codex_home, auth_file=auth_file).resolve()),
+                ))
+            if auth is None and binding.endpoint.auth == "codex-login" and binding.endpoint.auth_file is None:
+                binding = replace(binding, endpoint=replace(binding.endpoint,
+                    auth_file=str(_resolve_auth_file(codex_home=None, auth_file=None).resolve())))
+            try:
+                legacy_url = binding.endpoint.legacy_api_url
+            except ValueError:
+                legacy_url = None
             resolved_url, model, resolved_timeout = _normalize_configuration(
-                get_model_route("codex", model).api_url if api_url is None else api_url,
+                legacy_url or binding.endpoint.url,
                 model,
                 (
                     DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -1756,6 +1797,9 @@ class CodexResponsesModel:
                     raise ModelConfigurationError(
                         "auth cannot be combined with codex_home or auth_file"
                     )
+                if bound_input and binding.endpoint.auth != "supplied":
+                    raise ModelConfigurationError("Supplied credentials conflict with endpoint auth policy")
+                binding = replace(binding, endpoint=replace(binding.endpoint, auth="supplied", auth_file=None))
                 resolved_auth = auth
                 credential_source = _StaticCredentialSource(auth)
             else:
@@ -1763,19 +1807,22 @@ class CodexResponsesModel:
                     model,
                     codex_home=codex_home,
                     auth_file=auth_file,
+                    endpoint=binding.endpoint,
                 )
                 resolved_auth = _load_default_model_auth(
                     model,
                     codex_home=codex_home,
                     auth_file=auth_file,
+                    endpoint=binding.endpoint,
                 )
             resolved_endpoint = StreamingResponsesEndpoint(
-                api_url=resolved_url,
+                api_url=None,
                 model=model,
-                bearer_token=resolved_auth.access_token,
-                account_id=resolved_auth.account_id,
-                api_provider="codex",
+                bearer_token=None if resolved_auth is None else resolved_auth.access_token,
+                account_id=None if resolved_auth is None else resolved_auth.account_id,
+                api_provider="codex" if binding.api == "codex" else "api",
                 request_timeout_seconds=resolved_timeout,
+                binding=binding,
             )
 
         if identifier_factory is not None and not callable(identifier_factory):
@@ -1785,6 +1832,7 @@ class CodexResponsesModel:
         if retry_sleep is not None and not callable(retry_sleep):
             raise TypeError("retry_sleep must be callable or None")
         self.endpoint = resolved_endpoint
+        self.binding = resolved_endpoint.binding
         self._opener = opener or urllib.request.urlopen
         self._auth_opener = auth_opener
         self._identifier_factory = identifier_factory or uuid.uuid4
@@ -1825,11 +1873,7 @@ class CodexResponsesModel:
         """
         if self.endpoint.api_provider != "codex":
             return False
-        route = get_model_route("codex", self.endpoint.model)
-        return (
-            route.provider == "chatgpt"
-            and self.endpoint.api_url == CODEX_RESPONSES_API_URL
-        )
+        return self.binding.supports_remote_compaction
 
     def _build_request_payload(
         self,
@@ -1851,7 +1895,7 @@ class CodexResponsesModel:
 
         spec = _resolve_model_spec(self.endpoint)
         payload: Dict[str, Any] = {
-            "model": self.endpoint.model if spec is None else spec.api_model,
+            "model": self.binding.api_model,
             "input": _encode_context_items(
                 context.model_items(),
                 system_role="developer" if self.endpoint.api_provider == "codex" else "system",
@@ -1876,7 +1920,7 @@ class CodexResponsesModel:
             payload["text"] = {"verbosity": defaults.text_verbosity}
         if provider_state.session_id is not None:
             payload["prompt_cache_key"] = provider_state.session_id
-        _apply_sampling_options(payload, options)
+        _apply_sampling_params(payload, options)
         return payload, provider_state
 
     def _build_headers(
@@ -1886,16 +1930,15 @@ class CodexResponsesModel:
         *,
         beta_features: Sequence[str] = (),
     ) -> Dict[str, str]:
-        auth = auth or CodexAuth(
-            self.endpoint.bearer_token,
-            self.endpoint.account_id,
-        )
+        if auth is None and self.endpoint.bearer_token is not None:
+            auth = CodexAuth(self.endpoint.bearer_token, self.endpoint.account_id)
         headers = {
             "Accept": "text/event-stream",
-            "Authorization": f"Bearer {auth.access_token}",
             "Content-Type": "application/json",
             "User-Agent": USER_AGENT,
         }
+        if auth is not None:
+            headers["Authorization"] = f"Bearer {auth.access_token}"
         normalized_beta_features = tuple(
             feature.strip()
             for feature in beta_features
@@ -1908,7 +1951,7 @@ class CodexResponsesModel:
         if self.endpoint.api_provider != "codex":
             return headers
 
-        if auth.account_id is not None:
+        if auth is not None and auth.account_id is not None:
             headers["ChatGPT-Account-ID"] = auth.account_id
         if provider_state.session_id is not None:
             headers["session_id"] = provider_state.session_id
@@ -1937,7 +1980,7 @@ class CodexResponsesModel:
                 auth_source=self._credential_source.kind,
             )
             raise ModelAuthenticationError(message, failure=failure) from exc
-        account_id = snapshot.auth.account_id
+        account_id = None if snapshot.auth is None else snapshot.auth.account_id
         if self._expected_account_id is None and account_id is not None:
             self._expected_account_id = account_id
         if (
@@ -1955,7 +1998,7 @@ class CodexResponsesModel:
             raise ModelAuthenticationError(message, failure=failure)
         self.endpoint = replace(
             self.endpoint,
-            bearer_token=snapshot.auth.access_token,
+            bearer_token=None if snapshot.auth is None else snapshot.auth.access_token,
             account_id=account_id,
         )
         return snapshot
@@ -1999,8 +2042,10 @@ class CodexResponsesModel:
         context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
-        options: Optional[SamplingOptions] = None,
+        options=UNSET_SAMPLING_PARAMS,
+        sampling_params=UNSET_SAMPLING_PARAMS,
     ) -> ModelSample:
+        options = select_sampling_params(sampling_params, options)
         with self._credential_lock:
             return self._sample_locked(context, tools, options)
 
@@ -2130,7 +2175,7 @@ class CodexResponsesModel:
                                     headers=headers,
                                     attempt_count=attempts,
                                     recovery=tuple(recovery),
-                                    forbidden_values=(snapshot.auth.access_token,),
+                                    forbidden_values=() if snapshot.auth is None else (snapshot.auth.access_token,),
                                 )
                             if loaded is not None:
                                 snapshot = loaded
@@ -2179,7 +2224,7 @@ class CodexResponsesModel:
                         headers=headers,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
-                        forbidden_values=(snapshot.auth.access_token,),
+                        forbidden_values=() if snapshot.auth is None else (snapshot.auth.access_token,),
                     )
 
                 assert response is not None
@@ -2209,7 +2254,7 @@ class CodexResponsesModel:
                         attempt_count=attempts,
                         recovery=tuple(recovery),
                         response_headers=headers,
-                        forbidden_values=(snapshot.auth.access_token,),
+                        forbidden_values=() if snapshot.auth is None else (snapshot.auth.access_token,),
                     )
                 except ModelError as exc:
                     retry_label = _stream_retry_label(exc)

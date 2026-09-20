@@ -50,17 +50,18 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import ResolvedSamplingOptions
+from .model import UNSET_SAMPLING_PARAMS, select_sampling_params
 from .model import _timed_sample
 from .model_catalog import ANTHROPIC_MESSAGES_API_URL
 from .model_catalog import get_model_spec
+from .model_catalog import ModelBinding, bind_endpoint, bound_transport_inputs
+from .model_catalog import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .usage import TokenUsage
 
 
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
-# Anthropic requires a context-management edit trigger at or above this floor.
-MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS = 50_000
 _RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 409, 425, 429, 500, 502, 503, 504, 529}
 )
@@ -69,6 +70,8 @@ _RETRYABLE_HTTP_STATUSES = frozenset(
 def resolve_messages_max_output_tokens(
     model: str,
     explicit_value: Optional[int],
+    *,
+    binding: Optional[ModelBinding] = None,
 ) -> int:
     """Resolve an explicit request limit or a catalogued model maximum."""
     if explicit_value is not None:
@@ -81,7 +84,7 @@ def resolve_messages_max_output_tokens(
                 "max_output_tokens must be a positive integer"
             )
         return explicit_value
-    spec = get_model_spec("messages", model)
+    spec = get_model_spec("messages", model) if binding is None else binding.spec
     catalog_value = (
         None if spec is None else spec.limits.max_output_tokens
     )
@@ -129,7 +132,7 @@ class MessagesServerCompaction:
         if trigger is not None and (
             isinstance(trigger, bool)
             or not isinstance(trigger, int)
-            or trigger < 50_000
+            or trigger < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
         ):
             raise ModelConfigurationError(
                 "trigger_input_tokens must be an integer of at least 50000 "
@@ -163,64 +166,70 @@ class MessagesServerCompaction:
 
 @dataclass(frozen=True)
 class MessagesEndpoint:
-    api_url: str
-    model: str
+    api_url: Optional[str] = None
+    model: Optional[str] = None
     api_key: Optional[str] = field(default=None, repr=False)
     anthropic_version: str = DEFAULT_ANTHROPIC_VERSION
     max_output_tokens: Optional[int] = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     server_compaction: Optional[MessagesServerCompaction] = None
     prompt_caching: Optional[MessagesPromptCaching] = None
+    binding: Optional[ModelBinding] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.api_url, str):
-            raise TypeError("api_url must be a string")
-        api_url = self.api_url.strip()
-        if not api_url:
-            raise ModelConfigurationError("api_url must not be empty")
-        if any(character.isspace() for character in api_url):
-            raise ModelConfigurationError("api_url must not contain whitespace")
-        try:
-            parsed = urllib.parse.urlsplit(api_url)
-            hostname = parsed.hostname
-            port = parsed.port
-        except ValueError as exc:
-            raise ModelConfigurationError("api_url is invalid") from exc
-        scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https"}:
-            raise ModelConfigurationError(
-                "api_url scheme must be 'http' or 'https'"
+        bound = self.binding is not None
+        model, prefix = bound_transport_inputs("messages", self.model, self.api_url, self.binding)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "api_url", prefix)
+        if not bound:
+            if not isinstance(self.api_url, str):
+                raise TypeError("api_url must be a string")
+            api_url = self.api_url.strip()
+            if not api_url:
+                raise ModelConfigurationError("api_url must not be empty")
+            if any(character.isspace() for character in api_url):
+                raise ModelConfigurationError("api_url must not contain whitespace")
+            try:
+                parsed = urllib.parse.urlsplit(api_url)
+                hostname = parsed.hostname
+                port = parsed.port
+            except ValueError as exc:
+                raise ModelConfigurationError("api_url is invalid") from exc
+            scheme = parsed.scheme.lower()
+            if scheme not in {"http", "https"}:
+                raise ModelConfigurationError(
+                    "api_url scheme must be 'http' or 'https'"
+                )
+            if not parsed.netloc or hostname is None:
+                raise ModelConfigurationError(
+                    "api_url must be an absolute URL with a host"
+                )
+            if port == 0:
+                raise ModelConfigurationError(
+                    "api_url port must be from 1 through 65535"
+                )
+            if parsed.username is not None or parsed.password is not None:
+                raise ModelConfigurationError(
+                    "api_url must not contain user information"
+                )
+            if parsed.query:
+                raise ModelConfigurationError("api_url must not contain a query")
+            if parsed.fragment:
+                raise ModelConfigurationError(
+                    "api_url must not contain a fragment"
+                )
+            path_prefix = parsed.path.rstrip("/")
+            if path_prefix.endswith("/v1/messages"):
+                raise ModelConfigurationError(
+                    "api_url must not include the fixed /v1/messages path"
+                )
+            object.__setattr__(
+                self,
+                "api_url",
+                urllib.parse.urlunsplit(
+                    (scheme, parsed.netloc, path_prefix, "", "")
+                ),
             )
-        if not parsed.netloc or hostname is None:
-            raise ModelConfigurationError(
-                "api_url must be an absolute URL with a host"
-            )
-        if port == 0:
-            raise ModelConfigurationError(
-                "api_url port must be from 1 through 65535"
-            )
-        if parsed.username is not None or parsed.password is not None:
-            raise ModelConfigurationError(
-                "api_url must not contain user information"
-            )
-        if parsed.query:
-            raise ModelConfigurationError("api_url must not contain a query")
-        if parsed.fragment:
-            raise ModelConfigurationError(
-                "api_url must not contain a fragment"
-            )
-        path_prefix = parsed.path.rstrip("/")
-        if path_prefix.endswith("/v1/messages"):
-            raise ModelConfigurationError(
-                "api_url must not include the fixed /v1/messages path"
-            )
-        object.__setattr__(
-            self,
-            "api_url",
-            urllib.parse.urlunsplit(
-                (scheme, parsed.netloc, path_prefix, "", "")
-            ),
-        )
 
         if not isinstance(self.model, str):
             raise TypeError("model must be a string")
@@ -253,6 +262,11 @@ class MessagesEndpoint:
                 "anthropic_version must not contain newlines"
             )
         object.__setattr__(self, "anthropic_version", anthropic_version)
+        binding = bind_endpoint("messages", model, self.api_url, self.binding,
+                                auth="supplied" if self.api_key is not None else "none")
+        if bound and ((binding.endpoint.auth == "none") != (self.api_key is None)):
+            raise ModelConfigurationError("Credentials do not match the resolved endpoint auth policy")
+        object.__setattr__(self, "binding", binding)
 
         object.__setattr__(
             self,
@@ -260,6 +274,7 @@ class MessagesEndpoint:
             resolve_messages_max_output_tokens(
                 model,
                 self.max_output_tokens,
+                binding=binding,
             ),
         )
 
@@ -292,7 +307,7 @@ class MessagesEndpoint:
 
     @property
     def url(self) -> str:
-        return f"{self.api_url}/v1/messages"
+        return self.binding.endpoint.url
 
 
 def _append_block(
@@ -528,7 +543,7 @@ def _encode_tools(tools: Sequence[Any]) -> List[Dict[str, Any]]:
     return encoded
 
 
-def _apply_sampling_options(
+def _apply_sampling_params(
     payload: Dict[str, Any],
     options: Optional[SamplingOptions],
 ) -> None:
@@ -546,6 +561,10 @@ def _apply_sampling_options(
         payload["top_p"] = options.top_p
     if options.stop:
         payload["stop_sequences"] = list(options.stop)
+
+
+# Compatibility spelling for callers of the former encoder helper.
+_apply_sampling_options = _apply_sampling_params
 
 
 def _require_string(
@@ -861,19 +880,20 @@ class MessagesModel:
         if retry_sleep is not None and not callable(retry_sleep):
             raise TypeError("retry_sleep must be callable or None")
         self.endpoint = endpoint
+        self.binding = endpoint.binding
         self._opener = opener or urllib.request.urlopen
         self._retry_sleep = time.sleep if retry_sleep is None else retry_sleep
 
     @property
     def max_context_tokens(self) -> Optional[int]:
         """Known context ceiling and implicit compaction trigger, or None."""
-        spec = get_model_spec("messages", self.endpoint.model)
+        spec = self.binding.spec
         return None if spec is None else spec.limits.max_context_tokens
 
     @property
     def max_output_tokens(self) -> Optional[int]:
         """Known output ceiling, or None; does not change request max_tokens."""
-        spec = get_model_spec("messages", self.endpoint.model)
+        spec = self.binding.spec
         return None if spec is None else spec.limits.max_output_tokens
 
     def _build_request_payload(
@@ -886,8 +906,10 @@ class MessagesModel:
             raise TypeError("context must be InteractionContext")
         context.assert_model_ready()
         system, messages = _encode_context(context.model_items())
-        spec = get_model_spec("messages", self.endpoint.model)
+        spec = self.binding.spec
         resolved = isinstance(options, ResolvedSamplingOptions)
+        if resolved and options.request_params:
+            raise ModelConfigurationError("request_params is unsupported for Messages")
         output_budget = (
             options.max_output_tokens if resolved else self.endpoint.max_output_tokens
         )
@@ -895,7 +917,7 @@ class MessagesModel:
             raise ModelConfigurationError("Resolved Messages max_output_tokens is required")
         payload: Dict[str, Any] = {
             "model": (
-                self.endpoint.model if spec is None else spec.api_model
+                self.binding.api_model
             ),
             "max_tokens": output_budget,
             "messages": messages,
@@ -952,7 +974,7 @@ class MessagesModel:
             payload["context_management"] = {
                 "edits": [compaction.request_edit()]
             }
-        _apply_sampling_options(payload, options)
+        _apply_sampling_params(payload, options)
         return payload
 
     @_timed_sample
@@ -961,10 +983,10 @@ class MessagesModel:
         context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
-        options: Optional[SamplingOptions] = None,
+        options=UNSET_SAMPLING_PARAMS,
+        sampling_params=UNSET_SAMPLING_PARAMS,
     ) -> ModelSample:
-        if options is not None and not isinstance(options, SamplingOptions):
-            raise TypeError("options must be SamplingOptions or None")
+        options = select_sampling_params(sampling_params, options)
         payload = self._build_request_payload(context, tools, options)
         try:
             request_data = json.dumps(payload, ensure_ascii=False).encode(

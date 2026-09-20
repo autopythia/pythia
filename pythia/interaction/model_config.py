@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import os
 from pathlib import Path
 
@@ -19,6 +20,11 @@ from .model_catalog import ANTHROPIC_MESSAGES_API_URL as ANTHROPIC_MESSAGES_API_
 from .model_catalog import CODEX_RESPONSES_API_URL
 from .model_catalog import get_model_route
 from .model_catalog import list_model_specs
+from .model_catalog import BUILTIN_MODEL_CATALOG, binding_from_namespace
+from .model_catalog import parse_json_value, freeze_request_params, thaw_json
+from .model_catalog import EndpointSpec
+from .codex_auth import CodexAuth, _resolve_auth_file
+from .model_catalog_config import load_model_catalog
 from .responses import CodexResponsesModel
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
@@ -64,17 +70,116 @@ def initial_model_name(model: Optional[Model]) -> Optional[str]:
 
 def supports_account_services(args: argparse.Namespace) -> bool:
     """Only the official ChatGPT route supports the initial login/quota tools."""
-    if args.model_api not in {"codex", "codex-responses"} or not args.model:
+    if not getattr(args, "model", None):
         return False
-    name = args.model.strip()
-    route = get_model_route("codex", name)
-    if route.provider != "chatgpt" or route.auth_source != "codex-login":
-        return False
-    url = args.api_url if args.api_url is not None else route.api_url
-    return url.strip().rstrip("/") == CODEX_RESPONSES_API_URL
+    return binding_from_namespace(args).supports_account_services
 
 
-def build_model(args: argparse.Namespace) -> Model:
+def prepare_namespace(args, catalog=None):
+    """Resolve without changing raw launch/saved input or rereading a catalog."""
+    api = getattr(args, "model_api", None)
+    if api is not None and api not in {"chat-completions", "messages", "codex", "codex-responses", "responses"}:
+        raise ValueError(f"unsupported model API: {api!r}")
+    binding = binding_from_namespace(args, catalog)
+    endpoint = binding.endpoint
+    if (endpoint.auth == "codex-login" and not endpoint.is_official_codex
+            and not binding.api_explicit):
+        raise ValueError("A custom Codex destination requires explicit --api codex; use --api chat-completions for a local chat model.")
+    if binding.api not in {"chat-completions", "messages", "codex"}:
+        raise ValueError(f"The frontend does not support the {binding.api} API.")
+    if not getattr(args, "_endpoint_prepared", False):
+        if getattr(args, "codex_home", None) is not None or getattr(args, "codex_auth_file", None) is not None:
+            if endpoint.api != "codex":
+                raise ValueError("--codex-home and --codex-auth-file require --model-api codex-responses")
+            if endpoint.auth != "codex-login":
+                raise ValueError("Codex credential files require endpoint-auth codex-login.")
+    if endpoint.auth == "codex-login" and endpoint.auth_file is None:
+        endpoint = replace(endpoint, auth_file=str(_resolve_auth_file(
+            codex_home=getattr(args, "codex_home", None), auth_file=getattr(args, "codex_auth_file", None),
+        ).resolve()))
+        overrides = set(binding.endpoint_overrides)
+        if getattr(args, "codex_home", None) is not None or getattr(args, "codex_auth_file", None) is not None:
+            overrides.add("auth_file")
+        binding = replace(binding, endpoint=endpoint, endpoint_overrides=frozenset(overrides))
+    values = vars(args).copy()
+    values.update(model_api=binding.api, model_binding=binding, _endpoint_prepared=True,
+                  model=binding.selector if binding.selector is not None else endpoint.model)
+    return argparse.Namespace(**values)
+
+
+def frontend_catalog(args):
+    return load_model_catalog(
+        getattr(args, "model_catalog", None),
+        enabled=not getattr(args, "no_user_model_catalog", False),
+    )
+
+
+def render_model_catalog(catalog):
+    lines = []
+    for spec in catalog.specs:
+        aliases = f" (aliases: {', '.join(spec.aliases)})" if spec.aliases else ""
+        origin = catalog.origins[(spec.profile, spec.name)]
+        lines.append(f"{spec.name}{aliases}: api={spec.profile}, model={spec.api_model}, "
+                     f"url={spec.endpoint.url}, auth={spec.endpoint.auth}, source={origin}")
+    return "\n".join(lines)
+
+
+def _request_params_argument(text):
+    try:
+        value = parse_json_value(text)
+        return None if value is None else thaw_json(freeze_request_params(value))
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected a JSON object of request params or null") from None
+
+
+def add_catalog_arguments(parser, *, suppress_request_params=False):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--model-catalog", type=Path,
+                       help="INI user catalog (default: ~/.pythia/model-catalog.ini)")
+    group.add_argument("--no-user-model-catalog", action="store_true", help="use only the built-in model catalog")
+    parser.add_argument("--list-models", action="store_true", help="list the selected catalog without loading credentials")
+    parser.add_argument("--request-params", type=_request_params_argument,
+                        default=argparse.SUPPRESS if suppress_request_params else None,
+                        help="JSON object of model-specific request-body extensions; launch-only")
+
+
+def add_endpoint_arguments(parser, *, auto=False):
+    default = argparse.SUPPRESS if auto else None
+    parser.add_argument("--endpoint-api", "--api", "--model-api", dest="model_api",
+                        choices=("chat-completions", "messages", "codex", "codex-responses"),
+                        default=default, help="endpoint API; omitted infers a unique catalog selection")
+    urls = parser.add_mutually_exclusive_group()
+    urls.add_argument("--endpoint-url", default=default, help="complete model POST URL (no suffix is appended)")
+    urls.add_argument("--api-url", default=default, help="legacy URL prefix; retains the selected API's v1 append rule")
+    parser.add_argument("--endpoint-model", default=default, help="wire model ID (not a catalog selector)")
+    parser.add_argument("--endpoint-auth", default=default, help="none, env:NAME, codex-login, or supplied")
+    if not auto:
+        parser.add_argument("--endpoint-api-key", "--api-key", dest="api_key", default=None,
+                            help="supplied credential; prefer an env:NAME reference")
+    else:
+        parser.add_argument("--endpoint-api-key-env", "--api-key-env", dest="api_key_env", default=default)
+    parser.add_argument("--endpoint-auth-home", "--codex-home", dest="codex_home", default=default)
+    parser.add_argument("--endpoint-auth-file", "--codex-auth-file", dest="codex_auth_file", default=default)
+
+
+def _route_api_key(args, binding):
+    endpoint = binding.endpoint
+    if endpoint.auth == "none":
+        return None
+    if endpoint.auth == "supplied":
+        value = args.api_key
+    elif endpoint.environment_variable is not None:
+        value = os.environ.get(endpoint.environment_variable)
+    else:
+        raise ValueError("This endpoint requires its Codex credential manager.")
+    if value is None or not isinstance(value, str) or not value.strip():
+        raise ValueError("Required endpoint credential is unavailable.")
+    return value
+
+
+def build_model(args: argparse.Namespace, *, catalog=None) -> Model:
+    args = prepare_namespace(args, catalog)
+    binding = args.model_binding
     for name in ("auto_compact_tokens", "max_context_tokens"):
         value = getattr(args, name, None)
         if value is not None and (
@@ -91,10 +196,11 @@ def build_model(args: argparse.Namespace) -> Model:
                 "--model-api codex-responses"
             )
         endpoint = ChatCompletionsEndpoint(
-            api_url=args.api_url or get_model_route("chat-completions", args.model).api_url,
+            api_url=None,
             model=args.model,
             request_timeout_seconds=args.request_timeout_seconds,
-            api_key=args.api_key,
+            api_key=_route_api_key(args, binding),
+            binding=binding,
         )
         return ChatCompletionsModel(endpoint)
 
@@ -121,37 +227,31 @@ def build_model(args: argparse.Namespace) -> Model:
             if args.enable_auto_compaction
             else None
         )
-        route = get_model_route("messages", args.model)
+        # Validate required budgets before touching credential sources.
+        from .runtime_config import InteractionConfig
+        output_budget = InteractionConfig.from_namespace(args).get("max_output_tokens")
         endpoint = MessagesEndpoint(
-            api_url=args.api_url or route.api_url,
+            api_url=None,
             model=args.model,
-            max_output_tokens=args.max_output_tokens,
+            max_output_tokens=output_budget,
             request_timeout_seconds=args.request_timeout_seconds,
-            api_key=args.api_key or (
-                os.environ.get(route.api_key_environment_variable)
-                if route.api_key_environment_variable is not None else None
-            ),
+            api_key=_route_api_key(args, binding),
+            binding=binding,
             server_compaction=compaction_options,
             prompt_caching=MessagesPromptCaching(),
         )
         return MessagesModel(endpoint)
 
     if args.model_api in ("codex", "codex-responses"):
-        if args.api_key is not None:
-            raise ValueError(
-                "--api-key is not used with --model-api codex-responses; "
-                "use an existing Codex login"
-            )
         if args.model is None or not args.model.strip():
             raise ValueError(
                 "--model is required with --model-api codex-responses"
             )
         return CodexResponsesModel(
             model=args.model,
-            api_url=args.api_url,
             request_timeout_seconds=args.request_timeout_seconds,
-            codex_home=args.codex_home,
-            auth_file=args.codex_auth_file,
+            binding=binding,
+            auth=CodexAuth(_route_api_key(args, binding)) if binding.endpoint.auth == "supplied" else None,
         )
 
     raise ValueError(f"unsupported model API: {args.model_api!r}")
@@ -160,7 +260,7 @@ def build_model(args: argparse.Namespace) -> Model:
 def _model_argument_help() -> str:
     entries = []
     for spec in list_model_specs():
-        details = [f"{spec.profile}/{spec.route.provider}"]
+        details = [f"{spec.profile}/{spec.provider_label}"]
         if spec.responses is not None:
             for label, value in (
                 ("effort", spec.responses.reasoning_effort),
@@ -174,8 +274,8 @@ def _model_argument_help() -> str:
                 details.append(
                     f"effort={spec.messages.output_effort}"
                 )
-        if spec.route.api_key_environment_variable is not None:
-            details.append(spec.route.api_key_environment_variable)
+        if spec.endpoint.environment_variable is not None:
+            details.append(spec.endpoint.environment_variable)
         if spec.aliases:
             details.append("aliases: " + ", ".join(spec.aliases))
         entries.append(f"{spec.name} ({', '.join(details)})")
@@ -184,27 +284,9 @@ def _model_argument_help() -> str:
 
 def build_parser(description: str, *, allow_prompt_file: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
-        "--model-api",
-        choices=("chat-completions", "messages", "codex", "codex-responses"),
-        default="chat-completions",
-        help=(
-            "model API (messages uses automatic 5m prompt caching; "
-            "codex is shorthand for codex-responses)"
-        ),
-    )
-    parser.add_argument("--api-url")
-    parser.add_argument(
-        "--model",
-        help=_model_argument_help(),
-    )
-    parser.add_argument(
-        "--api-key",
-        default=None,
-        help="API key (Messages defaults to ANTHROPIC_API_KEY)",
-    )
-    parser.add_argument("--codex-home")
-    parser.add_argument("--codex-auth-file")
+    add_endpoint_arguments(parser)
+    add_catalog_arguments(parser)
+    parser.add_argument("--model", help=_model_argument_help())
     parser.add_argument("--cwd", default=".")
     parser.add_argument(
         "--enable-auto-compaction",

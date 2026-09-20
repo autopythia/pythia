@@ -154,7 +154,7 @@ class InteractionTimeoutTests(unittest.TestCase):
                         args = frontend._build_parser().parse_args([
                             "--model-api", api, "--model", "model",
                             *(
-                                ("--max-output-tokens", "100")
+                                ("--max-output-tokens", "100", "--endpoint-auth", "none")
                                 if api == "messages"
                                 else ()
                             ),

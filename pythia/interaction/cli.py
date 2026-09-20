@@ -65,6 +65,7 @@ from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
 from .model import SamplingOptions
+from .model import sample_model
 from .model_config import DEFAULT_SAVE_PATH
 from .model_config import _boolean_argument
 from .model_config import build_model
@@ -72,6 +73,8 @@ from .model_config import build_parser
 from .model_config import initial_model_name
 from .model_config import resolve_save_path
 from .model_config import supports_account_services
+from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
+from ._catalog_session import catalog_manifest_path, check_catalog_manifest, save_catalog_manifest
 from .runtime_config import InteractionConfig
 from .save import load_interaction_save
 from .save import save_interaction_save
@@ -507,7 +510,7 @@ async def _turn(
     # sampling failure below can arm a new one, not a tool/compaction/save error.
     state.retry = None
     turn_config = config.snapshot()
-    options = turn_config.sampling_options()
+    options = turn_config.sampling_params()
     turn_started = time.perf_counter()
     samples = 0
     while not state.closing:
@@ -550,10 +553,11 @@ async def _turn(
         state.set_phase("sampling")
         try:
             sample = await asyncio.to_thread(
-                model.sample,
+                sample_model,
+                model,
                 context.copy(),
                 tools=environment.tool_specs,
-                options=options,
+                sampling_params=options,
             )
         except ModelError as exc:
             contribution = (
@@ -776,6 +780,9 @@ async def _drive_interaction(
                     instructions = Instructions(args.instructions)
                     await _append(context, (instructions,), state, path)
                     state.displays.extend(render_interaction_items((instructions,)))
+                if getattr(args, "model_binding", None) is not None:
+                    await asyncio.to_thread(save_catalog_manifest, catalog_manifest_path(path),
+                                            {"main": args.model_binding})
                 query = initial_query
                 should_sample = model is not None and (query is not None or (
                     existing and args.instructions is not None
@@ -952,6 +959,8 @@ def _runtime_config(environment, args):
 
 def _startup_notices(state, args, path):
     state.notice(f"Save log: {path}")
+    for notice in getattr(args, "_catalog_notices", ()):
+        state.notice(notice)
     if args.enable_default_tools:
         state.notice(
             "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
@@ -1113,6 +1122,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        catalog = frontend_catalog(args)
+        if args.list_models:
+            print(render_model_catalog(catalog))
+            return 0
+        reselected = {"main"} if any(value is not None for value in (
+            args.model, args.model_api, args.endpoint_model,
+        )) else set()
+        args = prepare_namespace(args, catalog)
         args.prompt = load_prompt(args)
         if not args.headless and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty()):
             raise ValueError(
@@ -1126,6 +1143,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.max_output_tokens is not None:
             SamplingOptions(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
+        if args.resume and save_path.is_file():
+            args._catalog_notices = check_catalog_manifest(
+                catalog_manifest_path(save_path), {"main": args.model_binding}, reselected=reselected,
+            )
         if (args.headless and args.prompt is None
                 and not (args.resume and args.instructions is not None and save_path.is_file())):
             raise ValueError(

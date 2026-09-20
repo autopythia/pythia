@@ -126,7 +126,7 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(fable_max.aliases, ("claude-fable-5.1-max",))
         self.assertEqual(fable_max.api_model, "claude-fable-5-1")
         self.assertIs(fable_max.limits, fable.limits)
-        self.assertIs(fable_max.route, fable.route)
+        self.assertIs(fable_max.endpoint, fable.endpoint)
         self.assertEqual(
             fable_max.messages,
             MessagesDefaults(
@@ -142,7 +142,7 @@ class ModelCatalogTests(unittest.TestCase):
             preset = get_model_spec("codex", preset_name)
             self.assertIsNot(base, preset)
             self.assertIs(base.limits, preset.limits)
-            self.assertIs(base.route, preset.route)
+            self.assertIs(base.endpoint, preset.endpoint)
             self.assertNotEqual(base.responses, preset.responses)
         self.assertIs(get_model_spec("codex-responses", "gpt-6-astra"),
                       get_model_spec("codex", "gpt-6-astra"))
@@ -323,8 +323,8 @@ class CatalogAuthParityTests(unittest.TestCase):
                 with self.subTest(options=options):
                     with mock.patch.object(responses, "load_codex_auth", return_value=CodexAuth("file-token")) as load:
                         model = CodexResponsesModel(model="muse-spark-1.3", **options)
-                    load.assert_called_once_with(codex_home=options.get("codex_home"),
-                                                 auth_file=options.get("auth_file"))
+                    load.assert_called_once_with(codex_home=None,
+                                                 auth_file=model.binding.endpoint.auth_file)
                     self.assertEqual(model.endpoint.bearer_token, "file-token")
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(ModelConfigurationError, "META_API_KEY"):
@@ -339,7 +339,7 @@ class CatalogAuthParityTests(unittest.TestCase):
                     "--max-output-tokens", "100", *flags,
                 ])
                 self.assertEqual(build_model(args).endpoint.api_key, expected)
-            args = demo._build_parser().parse_args(["--model", "muse-spark-1.3"])
+            args = demo._build_parser().parse_args(["--api", "chat-completions", "--model", "muse-spark-1.3"])
             model = build_model(args)
             self.assertEqual(model.endpoint.api_url, "http://127.0.0.1:8000")
             self.assertIsNone(model.endpoint.api_key)

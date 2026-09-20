@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import inspect
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
@@ -12,6 +13,7 @@ from typing import Protocol
 from typing import Sequence
 from typing import TYPE_CHECKING
 from typing import Tuple
+from typing import Mapping
 
 from .context import InteractionContext
 from .items import InteractionItem
@@ -24,6 +26,7 @@ from .items import ToolCall
 from .items import SampleMetadata
 from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
+from .model_catalog import freeze_request_params
 
 if TYPE_CHECKING:
     from .display import DisplayItem
@@ -92,7 +95,7 @@ def _validate_optional_finite_number(
 
 
 @dataclass(frozen=True)
-class SamplingOptions:
+class SamplingParams:
     max_output_tokens: Optional[int] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
@@ -155,21 +158,60 @@ class SamplingOptions:
 
 
 @dataclass(frozen=True)
-class ResolvedSamplingOptions(SamplingOptions):
+class ResolvedSamplingParams(SamplingParams):
     """Frontend policy already resolved against its model binding.
 
-    Unlike ordinary SamplingOptions, max_output_tokens/auto_compact_tokens=None
+    Unlike ordinary SamplingParams, max_output_tokens/auto_compact_tokens=None
     mean no application-specified number, not inheritance from the endpoint or
     catalog. The compaction boolean is authoritative. Other sampling fields
     retain their usual semantics. Adapters must not serialize this distinction.
     """
 
     enable_auto_compaction: bool = True
+    request_params: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if not isinstance(self.enable_auto_compaction, bool):
             raise TypeError("resolved enable_auto_compaction must be a bool")
+        object.__setattr__(self, "request_params", freeze_request_params(self.request_params))
+
+
+# Exact aliases preserve equality/isinstance dispatch for existing Python callers.
+SamplingOptions = SamplingParams
+ResolvedSamplingOptions = ResolvedSamplingParams
+UNSET_SAMPLING_PARAMS = object()
+
+
+def select_sampling_params(sampling_params=UNSET_SAMPLING_PARAMS, options=UNSET_SAMPLING_PARAMS):
+    """Normalize the keyword alias before effects; explicit None counts as supplied."""
+    if sampling_params is not UNSET_SAMPLING_PARAMS and options is not UNSET_SAMPLING_PARAMS:
+        raise TypeError("Supply sampling_params or options, not both")
+    value = options if sampling_params is UNSET_SAMPLING_PARAMS else sampling_params
+    if value is UNSET_SAMPLING_PARAMS:
+        value = None
+    if value is not None and not isinstance(value, SamplingParams):
+        raise TypeError("sampling_params must be SamplingParams or None")
+    return value
+
+
+def sample_model(model, context, *, tools=(), sampling_params=None):
+    """Call modern or legacy models exactly once, without TypeError retry probes.
+
+    Uninspectable/**kwargs-only callables keep the legacy keyword. Explicit
+    sampling_params implementations (including the built-ins) use the new one.
+    """
+    sample = model.sample
+    try:
+        parameter = inspect.signature(sample).parameters.get("sampling_params")
+    except (TypeError, ValueError):
+        parameter = None
+    modern = parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+    )
+    return sample(context, tools=tools, **{
+        "sampling_params" if modern else "options": sampling_params,
+    })
 
 
 @dataclass(frozen=True)
@@ -302,7 +344,7 @@ class Model(Protocol):
         context: InteractionContext,
         *,
         tools: Sequence["ToolSpec"] = (),
-        options: Optional[SamplingOptions] = None,
+        sampling_params: Optional[SamplingParams] = None,
     ) -> ModelSample:
         ...
 
@@ -319,5 +361,8 @@ __all__ = [
     "ModelTransportError",
     "SamplingOptions",
     "ResolvedSamplingOptions",
+    "SamplingParams",
+    "ResolvedSamplingParams",
+    "sample_model",
     "TokenUsage",
 ]

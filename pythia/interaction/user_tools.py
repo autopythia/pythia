@@ -12,6 +12,7 @@ from .codex_login import login
 from .codex_quota import query_quota
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
 from .model_config import supports_account_services
+from .model_catalog import binding_from_namespace
 from .runtime_config import CONFIG_KEYS
 from .runtime_config import ConfigError
 from .runtime_config import InteractionConfig
@@ -118,7 +119,9 @@ def create_user_environment(
             return ToolOutcome("Invalid workspace ID. Do not supply authorization codes or tokens.", False)
         if provider_history and expected_account is None:
             return ToolOutcome("Cannot verify the account for saved provider state; start a fresh session to log in.", False)
-        path = _resolve_auth_file(codex_home=args.codex_home, auth_file=args.codex_auth_file).resolve()
+        endpoint = binding_from_namespace(args).endpoint
+        path = _resolve_auth_file(codex_home=None if endpoint.auth_file else args.codex_home,
+                                  auth_file=endpoint.auth_file or args.codex_auth_file).resolve()
         login(path, notify=notify, cancel=cancel, workspace_id=workspace,
               expected_account=expected_account, timeout_seconds=timeout_seconds,
               request_timeout_seconds=args.request_timeout_seconds)
@@ -127,7 +130,9 @@ def create_user_environment(
     def quota(arguments, timeout_seconds):
         if arguments:
             return ToolOutcome("Quota takes no arguments.", False)
-        auth = load_codex_auth(codex_home=args.codex_home, auth_file=args.codex_auth_file)
+        endpoint = binding_from_namespace(args).endpoint
+        auth = load_codex_auth(codex_home=None if endpoint.auth_file else args.codex_home,
+                               auth_file=endpoint.auth_file or args.codex_auth_file)
         if expected_account is not None and auth.account_id != expected_account:
             return ToolOutcome("Credential account changed; start a fresh session before using it.", False)
         return ToolOutcome(query_quota(auth, timeout_seconds=timeout_seconds))

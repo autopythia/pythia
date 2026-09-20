@@ -51,6 +51,8 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import ResolvedSamplingOptions
+from .model import UNSET_SAMPLING_PARAMS, select_sampling_params
+from .model_catalog import ModelBinding, bind_endpoint, bound_transport_inputs, thaw_json
 from .model import TokenUsage
 from .model import _timed_sample
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -62,61 +64,68 @@ _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 @dataclass(frozen=True)
 class ChatCompletionsEndpoint:
-    api_url: str
+    api_url: Optional[str] = None
     model: Optional[str] = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     api_key: Optional[str] = field(default=None, repr=False)
+    binding: Optional[ModelBinding] = field(default=None, repr=False)
+    request_params: Optional[Mapping] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.api_url, str):
-            raise TypeError("api_url must be a string")
-        api_url = self.api_url.strip()
-        if not api_url:
-            raise ModelConfigurationError("api_url must not be empty")
-        if any(character.isspace() for character in api_url):
-            raise ModelConfigurationError(
-                "api_url must not contain whitespace"
-            )
+        bound = self.binding is not None
+        model, prefix = bound_transport_inputs("chat-completions", self.model, self.api_url, self.binding)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "api_url", prefix)
+        if not bound:
+            if not isinstance(self.api_url, str):
+                raise TypeError("api_url must be a string")
+            api_url = self.api_url.strip()
+            if not api_url:
+                raise ModelConfigurationError("api_url must not be empty")
+            if any(character.isspace() for character in api_url):
+                raise ModelConfigurationError(
+                    "api_url must not contain whitespace"
+                )
 
-        try:
-            parsed = urllib.parse.urlsplit(api_url)
-            hostname = parsed.hostname
-            port = parsed.port
-        except ValueError as exc:
-            raise ModelConfigurationError("api_url is invalid") from exc
-        scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https"}:
-            raise ModelConfigurationError(
-                "api_url scheme must be 'http' or 'https'"
+            try:
+                parsed = urllib.parse.urlsplit(api_url)
+                hostname = parsed.hostname
+                port = parsed.port
+            except ValueError as exc:
+                raise ModelConfigurationError("api_url is invalid") from exc
+            scheme = parsed.scheme.lower()
+            if scheme not in {"http", "https"}:
+                raise ModelConfigurationError(
+                    "api_url scheme must be 'http' or 'https'"
+                )
+            if not parsed.netloc or hostname is None:
+                raise ModelConfigurationError(
+                    "api_url must be an absolute URL with a host"
+                )
+            if port == 0:
+                raise ModelConfigurationError(
+                    "api_url port must be from 1 through 65535"
+                )
+            if parsed.username is not None or parsed.password is not None:
+                raise ModelConfigurationError(
+                    "api_url must not contain user information"
+                )
+            if parsed.query:
+                raise ModelConfigurationError("api_url must not contain a query")
+            if parsed.fragment:
+                raise ModelConfigurationError(
+                    "api_url must not contain a fragment"
+                )
+            path_prefix = parsed.path.rstrip("/")
+            if path_prefix.endswith("/v1/chat/completions"):
+                raise ModelConfigurationError(
+                    "api_url must not include the fixed "
+                    "/v1/chat/completions path"
+                )
+            api_url = urllib.parse.urlunsplit(
+                (scheme, parsed.netloc, path_prefix, "", "")
             )
-        if not parsed.netloc or hostname is None:
-            raise ModelConfigurationError(
-                "api_url must be an absolute URL with a host"
-            )
-        if port == 0:
-            raise ModelConfigurationError(
-                "api_url port must be from 1 through 65535"
-            )
-        if parsed.username is not None or parsed.password is not None:
-            raise ModelConfigurationError(
-                "api_url must not contain user information"
-            )
-        if parsed.query:
-            raise ModelConfigurationError("api_url must not contain a query")
-        if parsed.fragment:
-            raise ModelConfigurationError(
-                "api_url must not contain a fragment"
-            )
-        path_prefix = parsed.path.rstrip("/")
-        if path_prefix.endswith("/v1/chat/completions"):
-            raise ModelConfigurationError(
-                "api_url must not include the fixed "
-                "/v1/chat/completions path"
-            )
-        api_url = urllib.parse.urlunsplit(
-            (scheme, parsed.netloc, path_prefix, "", "")
-        )
-        object.__setattr__(self, "api_url", api_url)
+            object.__setattr__(self, "api_url", api_url)
 
         if self.model is not None:
             if not isinstance(self.model, str):
@@ -147,10 +156,17 @@ class ChatCompletionsEndpoint:
                 "request_timeout_seconds must be positive and finite"
             )
         object.__setattr__(self, "request_timeout_seconds", float(timeout))
+        binding = bind_endpoint("chat-completions", self.model, self.api_url,
+                                self.binding, self.request_params,
+                                auth="supplied" if self.api_key is not None else "none")
+        if bound and ((binding.endpoint.auth == "none") != (self.api_key is None)):
+            raise ModelConfigurationError("Credentials do not match the resolved endpoint auth policy")
+        object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "request_params", binding.request_params)
 
     @property
     def url(self) -> str:
-        return f"{self.api_url}/v1/chat/completions"
+        return self.binding.endpoint.url
 
 
 def _append_text(existing: Optional[str], value: str, separator: str = "") -> str:
@@ -352,7 +368,7 @@ def _encode_tools(tools: Sequence[Any]) -> List[Dict[str, Any]]:
     return encoded
 
 
-def _apply_sampling_options(
+def _apply_sampling_params(
     payload: Dict[str, Any],
     options: Optional[SamplingOptions],
 ) -> None:
@@ -368,11 +384,10 @@ def _apply_sampling_options(
         payload["stop"] = list(options.stop)
     if options.seed is not None:
         payload["seed"] = options.seed
-    # Host-only policy must not activate unrelated sampling wire extensions.
-    if (isinstance(options, ResolvedSamplingOptions)
-            and options.max_output_tokens is None and options.temperature is None
-            and options.top_p is None and not options.stop and options.seed is None):
-        return
+
+
+# Compatibility spelling for callers of the former encoder helper.
+_apply_sampling_options = _apply_sampling_params
 
 
 def _coerce_content_text(value: Any, field_name: str) -> str:
@@ -656,6 +671,7 @@ class ChatCompletionsModel:
         if retry_sleep is not None and not callable(retry_sleep):
             raise TypeError("retry_sleep must be callable or None")
         self.endpoint = endpoint
+        self.binding = endpoint.binding
         self._opener = opener or urllib.request.urlopen
         self._retry_sleep = time.sleep if retry_sleep is None else retry_sleep
 
@@ -672,13 +688,16 @@ class ChatCompletionsModel:
             "messages": _encode_context_messages(context.model_items()),
             "stream": False,
         }
-        if self.endpoint.model is not None:
-            payload["model"] = self.endpoint.model
+        if self.binding.api_model is not None:
+            payload["model"] = self.binding.api_model
         encoded_tools = _encode_tools(tools)
         if encoded_tools:
             payload["tools"] = encoded_tools
             payload["parallel_tool_calls"] = False
-        _apply_sampling_options(payload, options)
+        _apply_sampling_params(payload, options)
+        params = (options.request_params if isinstance(options, ResolvedSamplingOptions)
+                  else self.binding.request_params)
+        payload.update(thaw_json(params))
         return payload
 
     @_timed_sample
@@ -687,10 +706,10 @@ class ChatCompletionsModel:
         context: InteractionContext,
         *,
         tools: Sequence[Any] = (),
-        options: Optional[SamplingOptions] = None,
+        options=UNSET_SAMPLING_PARAMS,
+        sampling_params=UNSET_SAMPLING_PARAMS,
     ) -> ModelSample:
-        if options is not None and not isinstance(options, SamplingOptions):
-            raise TypeError("options must be SamplingOptions or None")
+        options = select_sampling_params(sampling_params, options)
         payload = self._build_request_payload(context, tools, options)
         try:
             request_data = json.dumps(

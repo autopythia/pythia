@@ -38,6 +38,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "enable_auto_compaction = True",
                 "auto_compact_tokens = None",
                 "max_context_tokens = None",
+                "request_params = {}",
             )),
         )
         rendered_json = config.render(json_output=True)
@@ -48,6 +49,7 @@ class InteractionConfigTests(unittest.TestCase):
             "enable_auto_compaction": True,
             "auto_compact_tokens": None,
             "max_context_tokens": None,
+            "request_params": {},
             "__init__": {
                 "enable_workspace": True,
                 "max_samples": None,
@@ -55,6 +57,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "enable_auto_compaction": True,
                 "auto_compact_tokens": None,
                 "max_context_tokens": None,
+                "request_params": {},
             },
         })
         self.assertEqual(list(json.loads(rendered_json)), ["__init__", *CONFIG_KEYS])
@@ -85,6 +88,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "# init: auto_compact_tokens = 500000",
                 "auto_compact_tokens = 100",
                 "max_context_tokens = None",
+                "request_params = {}",
             )),
         )
         payload = json.loads(config.render(json_output=True))
@@ -113,6 +117,7 @@ class InteractionConfigTests(unittest.TestCase):
             "enable_auto_compaction": False,
             "auto_compact_tokens": 500000,
             "max_context_tokens": 1000000,
+            "request_params": {},
         })
         self.assertEqual(
             config.snapshot().sampling_options(),

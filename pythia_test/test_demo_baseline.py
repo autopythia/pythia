@@ -34,8 +34,15 @@ from pythia.interaction import save_interaction_save
 
 
 DEMO_ARGUMENT_DEFAULTS = {
-    "model_api": "chat-completions",
+    "model_api": None,
     "api_url": None,
+    "endpoint_url": None,
+    "endpoint_model": None,
+    "endpoint_auth": None,
+    "model_catalog": None,
+    "no_user_model_catalog": False,
+    "list_models": False,
+    "request_params": None,
     "model": None,
     "api_key": None,
     "codex_home": None,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field
 from dataclasses import replace
 import json
 import re
@@ -12,15 +13,17 @@ from types import SimpleNamespace
 from typing import Dict
 from typing import Optional
 from typing import Union
+from typing import Mapping
 
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .messages import resolve_messages_max_output_tokens
 from .model import ResolvedSamplingOptions
 from .model import SamplingOptions
 from .model_catalog import get_model_spec
+from .model_catalog import binding_from_namespace, ModelBinding, freeze_request_params, thaw_json
 
 
-ConfigValue = Union[bool, int, None]
+ConfigValue = Union[bool, int, None, Mapping]
 CONFIG_KEYS = (
     "enable_workspace",
     "max_samples",
@@ -28,6 +31,7 @@ CONFIG_KEYS = (
     "enable_auto_compaction",
     "auto_compact_tokens",
     "max_context_tokens",
+    "request_params",
 )
 _BOOLEAN_KEYS = frozenset(("enable_workspace", "enable_auto_compaction"))
 _OPTIONAL_POSITIVE_INTEGER_KEYS = frozenset((
@@ -53,6 +57,11 @@ def _require_key(key: object) -> str:
 
 def validate_config_value(key: str, value: object) -> ConfigValue:
     key = _require_key(key)
+    if key == "request_params":
+        try:
+            return freeze_request_params(value)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
     if key in _BOOLEAN_KEYS:
         if not isinstance(value, bool):
             raise ConfigError(f"{key} requires True or False.")
@@ -71,6 +80,8 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
 def parse_config_literal(key: str, text: object) -> ConfigValue:
     """Parse the intentionally small JSON/Python scalar input grammar."""
     key = _require_key(key)
+    if key == "request_params":
+        raise ConfigError("request_params is launch-only; use /config.json to inspect it.")
     if not isinstance(text, str):
         raise ConfigError(f"Invalid value for {key}.")
     literal = text.strip()
@@ -101,15 +112,16 @@ class InteractionConfigSnapshot:
     enable_auto_compaction: bool = True
     auto_compact_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
+    request_params: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for key in CONFIG_KEYS:
-            validate_config_value(key, getattr(self, key))
+            object.__setattr__(self, key, validate_config_value(key, getattr(self, key)))
 
     def as_dict(self) -> Dict[str, ConfigValue]:
-        return {key: getattr(self, key) for key in CONFIG_KEYS}
+        return {key: thaw_json(getattr(self, key)) for key in CONFIG_KEYS}
 
-    def sampling_options(
+    def sampling_params(
         self, base: Optional[SamplingOptions] = None,
     ) -> ResolvedSamplingOptions:
         """Project effective policy, preserving unrelated sampling preferences."""
@@ -124,7 +136,11 @@ class InteractionConfigSnapshot:
             top_p=base.top_p,
             stop=base.stop,
             seed=base.seed,
+            request_params=self.request_params,
         )
+
+    # Compatibility spelling; the projection has only one implementation.
+    sampling_options = sampling_params
 
 
 class InteractionConfig:
@@ -214,19 +230,22 @@ class InteractionConfig:
         args,
         *,
         on_enable_workspace: Optional[Callable[[bool], None]] = None,
+        catalog=None,
     ) -> "InteractionConfig":
         """Seed one final namespace; do not write resolved values back into it."""
-        spec = get_model_spec(args.model_api, args.model)
+        binding = binding_from_namespace(args, catalog)
+        spec = binding.spec
         limits = None if spec is None else spec.limits
         max_output_tokens = args.max_output_tokens
         max_output_tokens_fallback = (
             limits.max_output_tokens
-            if args.model_api == "messages" and limits is not None else None
+            if binding.api == "messages" and limits is not None else None
         )
-        if args.model_api == "messages":
+        if binding.api == "messages":
             max_output_tokens = resolve_messages_max_output_tokens(
                 args.model,
                 max_output_tokens,
+                binding=binding,
             )
         return cls(
             InteractionConfigSnapshot(
@@ -236,9 +255,10 @@ class InteractionConfig:
                 enable_auto_compaction=args.enable_auto_compaction,
                 auto_compact_tokens=getattr(args, "auto_compact_tokens", None),
                 max_context_tokens=getattr(args, "max_context_tokens", None),
+                request_params=binding.request_params,
             ),
             on_enable_workspace=on_enable_workspace,
-            require_max_output_tokens=args.model_api == "messages",
+            require_max_output_tokens=binding.api == "messages",
             max_output_tokens_fallback=max_output_tokens_fallback,
             auto_compact_tokens_fallback=(
                 None if limits is None else limits.auto_compact_context_tokens
@@ -248,7 +268,7 @@ class InteractionConfig:
             ),
             min_auto_compact_tokens=(
                 MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
-                if args.model_api == "messages" else None
+                if binding.api == "messages" else None
             ),
         )
 
@@ -287,7 +307,7 @@ class InteractionConfig:
             profile = "messages"
         elif isinstance(model, CodexResponsesModel):
             endpoint = model.endpoint
-            profile = "codex" if endpoint.api_provider == "codex" else "responses"
+            profile = model.binding.endpoint.api
         elif isinstance(model, ChatCompletionsModel):
             endpoint = model.endpoint
             profile = "chat-completions"
@@ -300,7 +320,9 @@ class InteractionConfig:
                 max_context_tokens_fallback=getattr(model, "max_context_tokens", None),
             )
         return cls.from_namespace(SimpleNamespace(
-            model_api=profile, model=endpoint.model, **snapshot.as_dict(),
+            model_api=profile, model=endpoint.model,
+            model_binding=model.binding.with_request_params(snapshot.request_params),
+            **snapshot.as_dict(),
         ))
 
     def snapshot(self) -> InteractionConfigSnapshot:
@@ -317,6 +339,8 @@ class InteractionConfig:
 
     def set(self, key: str, value: object) -> ConfigValue:
         key = _require_key(key)
+        if key == "request_params":
+            raise ConfigError("request_params is launch-only; use /config.json to inspect it.")
         value = validate_config_value(key, value)
         if value is None and key in self._fallbacks:
             value = self._fallbacks[key]
@@ -342,14 +366,14 @@ class InteractionConfig:
         snapshot = self.snapshot()
         if key is not None:
             key = _require_key(key)
-            return {key: getattr(snapshot, key)}
+            return {key: snapshot.as_dict()[key]}
         return snapshot.as_dict()
 
     def initial_values(self, key: Optional[str] = None) -> Dict[str, ConfigValue]:
         initial = self.initial_snapshot()
         if key is not None:
             key = _require_key(key)
-            return {key: getattr(initial, key)}
+            return {key: initial.as_dict()[key]}
         return initial.as_dict()
 
     def render(self, key: Optional[str] = None, *, json_output: bool) -> str:

@@ -76,10 +76,15 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SamplingOptions
 from .model import ResolvedSamplingOptions
+from .model import SamplingParams, ResolvedSamplingParams
+from .model import sample_model
 from .model import TokenUsage
 from .model_catalog import ModelLimits
 from .model_catalog import ModelRoute
 from .model_catalog import ModelSpec
+from .model_catalog import ModelCatalog, ModelBinding, BUILTIN_MODEL_CATALOG
+from .model_catalog import EndpointSpec
+from .model_catalog_config import load_model_catalog, parse_model_catalog
 from .model_catalog import MessagesDefaults
 from .model_catalog import ResponsesDefaults
 from .model_catalog import get_model_route
@@ -179,6 +184,15 @@ __all__ = [
     "StreamingResponsesEndpoint",
     "SamplingOptions",
     "ResolvedSamplingOptions",
+    "SamplingParams",
+    "ResolvedSamplingParams",
+    "sample_model",
+    "ModelCatalog",
+    "ModelBinding",
+    "EndpointSpec",
+    "BUILTIN_MODEL_CATALOG",
+    "load_model_catalog",
+    "parse_model_catalog",
     "Init",
     "SaveError",
     "TextPart",

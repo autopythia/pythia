@@ -12,31 +12,54 @@ from ._auto_board import parse_json
 from ._prompt import add_prompt_arguments
 from .model import SamplingOptions
 from .model_config import _boolean_argument
+from .model_config import add_catalog_arguments, add_endpoint_arguments, prepare_namespace
+from .model_catalog import BUILTIN_MODEL_CATALOG, freeze_request_params, thaw_json
 from .runtime_config import InteractionConfig
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 NAMES = {1: "main", 2: "worker", -1: "watcher"}
 DEFAULTS = {
-    "model_api": "chat-completions", "model": None, "api_url": None,
+    "model_api": None, "model": None, "api_url": None,
+    "endpoint_url": None, "endpoint_model": None, "endpoint_auth": None,
     "api_key_env": None, "codex_home": None, "codex_auth_file": None,
     "cwd": ".", "max_samples": None, "max_output_tokens": None,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
     "enable_workspace": True, "enable_auto_compaction": True,
     "auto_compact_tokens": None, "max_context_tokens": None,
+    "request_params": None,
     "instructions": None,
 }
 _APIS = {"chat-completions", "messages", "codex", "codex-responses"}
-_PROVIDER_FIELDS = ("model", "api_url", "api_key_env", "codex_home", "codex_auth_file")
+_PROVIDER_FIELDS = ("model", "api_url", "endpoint_url", "endpoint_model", "endpoint_auth",
+                    "api_key_env", "codex_home", "codex_auth_file")
 _PATHS = ("cwd", "codex_home", "codex_auth_file")
 # Added after the original v1 saved schema; other fields remain required.
-_V1_OPTIONAL_FIELDS = frozenset(("auto_compact_tokens", "max_context_tokens"))
+_V1_OPTIONAL_FIELDS = frozenset(("auto_compact_tokens", "max_context_tokens", "request_params",
+                                  "endpoint_url", "endpoint_model", "endpoint_auth"))
+
+
+class AutoSettings(dict):
+    """Raw JSON settings plus non-serialized invocation metadata."""
+    def __init__(self, catalog):
+        super().__init__()
+        self.catalog = catalog
+        self.explicit_selections = set()
 
 
 def _layer(value, base):
     if not isinstance(value, dict) or set(value) - (set(DEFAULTS) | {"name"}):
         raise ValueError("Invalid auto configuration fields (use credential references, not API keys).")
     value = dict(value)
+    if value.get("api_url") is not None and value.get("endpoint_url") is not None:
+        raise ValueError("Use endpoint_url or legacy api_url, not both.")
+    if value.get("endpoint_auth") is not None and value.get("api_key_env") is not None:
+        raise ValueError("Use endpoint_auth or api_key_env, not both.")
+    api = value.get("model_api")
+    if api is not None and (not isinstance(api, str) or api not in _APIS):
+        raise ValueError("Unsupported auto model API.")
+    if value.get("request_params") is not None:
+        value["request_params"] = thaw_json(freeze_request_params(value["request_params"]))
     for key in _PATHS:
         if key == "cwd" and key in value and value[key] is None:
             raise ValueError("cwd must be an existing directory path.")
@@ -49,20 +72,61 @@ def _layer(value, base):
     return value
 
 
-def _merge(current, value):
-    def canonical(api):
-        return "codex" if api == "codex-responses" else api
+def _identity(settings, catalog):
+    api, name = settings["model_api"], settings["model"]
+    if api == "codex-responses":
+        api = "codex"
+    if api is None:
+        matches = catalog.matches(name) if isinstance(name, str) else ()
+        api = matches[0].profile if len(matches) == 1 else (None if matches else "chat-completions")
+    if api in _APIS and isinstance(name, str):
+        spec = catalog.get_model_spec(api, name)
+        name = spec.name if spec is not None else name.strip()
+    return api, name
 
+
+def _merge(current, value, catalog):
     current = dict(current)
-    api = value.get("model_api", current["model_api"])
-    if canonical(api) != canonical(current["model_api"]):
+    before = _identity(current, catalog)
+    after = _identity({**current, **value}, catalog)
+    def route_for(identity):
+        api, name = identity
+        if api in _APIS:
+            spec = catalog.get_model_spec(api, name)
+            return None if spec is None else spec.endpoint.connection_identity
+        return None
+
+    route_change = before != after and route_for(before) != route_for(after)
+    if after[0] != before[0] or route_change:
         for key in _PROVIDER_FIELDS:
+            # Clearing the API asks the catalog about this selector; retain it.
+            if key == "model" and (
+                current["model_api"] is None or value.get("model_api") is None
+                or after[0] == before[0]
+            ):
+                continue
             current[key] = None
+    if before != after:
+        current["request_params"] = None
+    if value.get("endpoint_url") is not None:
+        current["api_url"] = None
+    if value.get("api_url") is not None:
+        current["endpoint_url"] = None
+    if value.get("endpoint_auth") is not None:
+        current["api_key_env"] = None
+        if value["endpoint_auth"] != "codex-login":
+            current["codex_home"] = current["codex_auth_file"] = None
+    if value.get("api_key_env") is not None:
+        current["endpoint_auth"] = None
+        current["codex_home"] = current["codex_auth_file"] = None
+    previous_params = current.get("request_params") or {}
     current.update(value)
+    if isinstance(value.get("request_params"), dict):
+        current["request_params"] = {**previous_params, **value["request_params"]}
     return current
 
 
-def resolve_config(path=None, overrides=None, saved=None):
+def resolve_config(path=None, overrides=None, saved=None, *, catalog=BUILTIN_MODEL_CATALOG):
     """Merge raw per-context inputs; runtime owners resolve catalog policy later."""
     document = {}
     base = Path.cwd()
@@ -87,15 +151,19 @@ def resolve_config(path=None, overrides=None, saved=None):
     defaults = _layer(document.get("defaults", {}), base)
     if "name" in defaults:
         raise ValueError("Names must be configured per context.")
-    resolved = {}
+    resolved = AutoSettings(catalog)
     for index, name in NAMES.items():
         initial = {**DEFAULTS, "name": name} if saved is None else dict(saved[index])
-        settings = _merge(_merge(_merge(initial, defaults), launch),
-                          _layer(contexts.get(str(index), {}), base))
+        specific = _layer(contexts.get(str(index), {}), base)
+        settings = initial
+        for layer in (defaults, launch, specific):
+            settings = _merge(settings, layer, catalog)
+            if {"model", "model_api", "endpoint_model"} & layer.keys():
+                resolved.explicit_selections.add(index)
         if index == 1 and main_instruction_override and "instructions" not in contexts.get("1", {}):
             settings["instructions"] = main_instructions
         settings["cwd"] = str(Path(settings["cwd"]).expanduser().absolute())
-        _validate(settings)
+        _validate(settings, catalog)
         resolved[index] = settings
     return resolved
 
@@ -123,14 +191,16 @@ def load_saved_config(path):
     }
 
 
-def _validate(settings):
+def _validate(settings, catalog):
     api = settings["model_api"]
-    if not isinstance(api, str) or api not in _APIS:
+    if api is not None and (not isinstance(api, str) or api not in _APIS):
         raise ValueError("Unsupported auto model API.")
     model = settings["model"]
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise ValueError("model must be a nonempty string or null.")
-    if api != "chat-completions" and model is None:
+    args = namespace(settings, catalog)
+    api = args.model_api
+    if api != "chat-completions" and args.model is None:
         raise ValueError("A model is required for Messages/Codex.")
     name = settings["name"]
     if (not isinstance(name, str) or not name.strip() or len(name) > 64 or
@@ -142,11 +212,6 @@ def _validate(settings):
     env = settings["api_key_env"]
     if env is not None and (not isinstance(env, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env) is None):
         raise ValueError("api_key_env must name an environment variable.")
-    if api in {"codex", "codex-responses"}:
-        if env is not None:
-            raise ValueError("Codex uses codex_auth_file/codex_home, not api_key_env.")
-    elif settings["codex_home"] is not None or settings["codex_auth_file"] is not None:
-        raise ValueError("Codex credential paths require the Codex API.")
     timeout = settings["request_timeout_seconds"]
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
             not math.isfinite(timeout) or timeout <= 0):
@@ -171,11 +236,14 @@ def _validate(settings):
         raise ValueError("Context cwd must be an existing directory.")
     SamplingOptions(max_output_tokens=settings["max_output_tokens"])
     # Reuse provider-aware max-output-token and runtime setting validation.
-    InteractionConfig.from_namespace(namespace(settings))
+    InteractionConfig.from_namespace(args)
 
 
-def namespace(settings):
-    return argparse.Namespace(**settings, api_key=None)
+def namespace(settings, catalog=BUILTIN_MODEL_CATALOG, *, binding=None):
+    args = argparse.Namespace(**settings, api_key=None)
+    if binding is not None:
+        args.model_binding = binding
+    return prepare_namespace(args, catalog)
 
 
 def build_parser():
@@ -209,8 +277,9 @@ def build_parser():
               "False enables unsafe local debugging (default: %(default)s)"),
     )
     parser.add_argument("--board-port", type=int, default=0, help="Loopback port (0 chooses an available port).")
-    parser.add_argument("--model-api", choices=sorted(_APIS), default=argparse.SUPPRESS)
-    for key in ("model", "api_url", "api_key_env", "codex_home", "codex_auth_file", "cwd", "instructions"):
+    add_endpoint_arguments(parser, auto=True)
+    add_catalog_arguments(parser, suppress_request_params=True)
+    for key in ("model", "cwd", "instructions"):
         parser.add_argument("--" + key.replace("_", "-"), default=argparse.SUPPRESS)
     parser.add_argument("--max-samples", type=int, default=argparse.SUPPRESS,
                         help="Optional sample limit per turn; unlimited when unset.")

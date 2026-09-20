@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -36,11 +37,16 @@ from .model import Model
 from .model import ModelError
 from .model import SamplingOptions
 from .model import ResolvedSamplingOptions
+from .model import UNSET_SAMPLING_PARAMS, select_sampling_params
+from .model import sample_model
 from .model_config import DEFAULT_SAVE_PATH as DEFAULT_SAVE_PATH
 from .model_config import build_model
 from .model_config import build_parser
 from .model_config import initial_model_name
 from .model_config import resolve_save_path
+from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
+from .model_catalog import ModelBinding
+from ._catalog_session import catalog_manifest_path, check_catalog_manifest, save_catalog_manifest
 from .runtime_config import InteractionConfig
 from .runtime_config import InteractionConfigSnapshot
 from .save import load_interaction_save
@@ -75,7 +81,8 @@ def run(
     prompt: Optional[str] = DEFAULT_PROMPT,
     instructions: Optional[Union[str, Instructions]] = None,
     max_samples: Optional[int] = None,
-    options: Optional[SamplingOptions] = None,
+    options=UNSET_SAMPLING_PARAMS,
+    sampling_params=UNSET_SAMPLING_PARAMS,
     save_path: Optional[Union[str, Path]] = None,
     resume: bool = False,
     enable_auto_compaction: bool = True,
@@ -85,6 +92,7 @@ def run(
     auto_compact_tokens: Optional[int] = None,
     max_context_tokens: Optional[int] = None,
 ) -> str:
+    options = select_sampling_params(sampling_params, options)
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
     if not isinstance(environment, Environment):
@@ -148,6 +156,8 @@ def run(
             else base_options.auto_compact_tokens
         ),
         max_context_tokens=max_context_tokens,
+        request_params=(base_options.request_params
+                        if isinstance(base_options, ResolvedSamplingOptions) else {}),
     )
     # Resolved options must not be sent through model-default inheritance again.
     if isinstance(base_options, ResolvedSamplingOptions):
@@ -161,7 +171,16 @@ def run(
         ).snapshot()
     else:
         turn_config = InteractionConfig.from_model(model, inputs).snapshot()
-    options = turn_config.sampling_options(base_options)
+    options = turn_config.sampling_params(base_options)
+    binding = getattr(model, "binding", None)
+    if isinstance(binding, ModelBinding):
+        binding = replace(binding, request_params=turn_config.request_params)
+    else:
+        binding = None
+    if binding is not None and resume and Path(save_path).is_file():
+        for notice in check_catalog_manifest(catalog_manifest_path(save_path), {"main": binding},
+                                            reselected={"main"}):
+            print(notice, file=sys.stderr)
 
     resumed_existing_save = False
     if resume and Path(save_path).exists():
@@ -189,6 +208,8 @@ def run(
 
     if save_path is not None:
         save_interaction_save(save_path, context)
+        if binding is not None:
+            save_catalog_manifest(catalog_manifest_path(save_path), {"main": binding})
 
     def _persist() -> None:
         if save_path is not None:
@@ -260,10 +281,11 @@ def run(
                 print(display_item)
         sample_count += 1
         try:
-            sample = model.sample(
+            sample = sample_model(
+                model,
                 context,
                 tools=environment.tool_specs,
-                options=options,
+                sampling_params=options,
             )
         except ModelError as exc:
             contribution = (
@@ -385,23 +407,34 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    cwd = Path(args.cwd).expanduser().resolve()
-    prompt = args.prompt
-    print(
-        "Warning: exec_command runs without a sandbox; use only with a "
-        "trusted model and workspace.",
-        file=sys.stderr,
-    )
-    if not args.enable_workspace:
+    try:
+        catalog = frontend_catalog(args)
+        if args.list_models:
+            print(render_model_catalog(catalog))
+            return 0
+        reselected = {"main"} if any(value is not None for value in (
+            args.model, args.model_api, args.endpoint_model,
+        )) else set()
+        args = prepare_namespace(args, catalog)
+        cwd = Path(args.cwd).expanduser().resolve()
+        prompt = args.prompt
         print(
-            "Warning: workspace path restrictions are disabled; "
-            "exec_command workdir and apply_patch paths may resolve "
-            "outside --cwd.",
+            "Warning: exec_command runs without a sandbox; use only with a "
+            "trusted model and workspace.",
             file=sys.stderr,
         )
-    try:
+        if not args.enable_workspace:
+            print(
+                "Warning: workspace path restrictions are disabled; "
+                "exec_command workdir and apply_patch paths may resolve "
+                "outside --cwd.",
+                file=sys.stderr,
+            )
         config = InteractionConfig.from_namespace(args).snapshot()
         save_path = resolve_save_path(args.save_path)
+        if args.resume and save_path.is_file():
+            check_catalog_manifest(catalog_manifest_path(save_path), {"main": args.model_binding},
+                                   reselected=reselected)
         if prompt is None and (not args.resume or not save_path.exists()):
             # A missing resume file is also a fresh session. Existing saves
             # must not receive the seed prompt again just to enable the tool.
@@ -427,7 +460,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 prompt=prompt,
                 instructions=args.instructions,
                 max_samples=config.max_samples,
-                options=config.sampling_options(),
+                sampling_params=config.sampling_params(),
                 save_path=save_path,
                 resume=args.resume,
                 enable_auto_compaction=config.enable_auto_compaction,

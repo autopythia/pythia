@@ -925,6 +925,7 @@ class MessagesDemoTests(unittest.TestCase):
             "messages",
             "--model",
             "claude-fable-5-1",
+            "--endpoint-auth", "none",
         ])
 
         model = _build_model(args)
@@ -965,6 +966,7 @@ class MessagesDemoTests(unittest.TestCase):
             "claude-sonnet-5",
             "--max-output-tokens",
             "100",
+            "--endpoint-auth", "none",
         ]
         enabled = _build_model(_build_parser().parse_args(base))
         disabled = _build_model(_build_parser().parse_args([

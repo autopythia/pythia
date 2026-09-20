@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import os
@@ -22,6 +23,7 @@ import uuid
 
 from ._auto_board import Board, BoardError, BoardService, atomic_text
 from ._auto_config import DEFAULTS, NAMES, build_parser, load_saved_config, namespace, resolve_config
+from ._catalog_session import check_catalog_manifest, save_catalog_manifest
 from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
 from ._prompt import load_prompt
@@ -35,7 +37,10 @@ from .items import Init, Instructions, Message, ModelSampleBoundary, ToolCall, T
 from .items import UserToolResult
 from .items import summarize_turn_usage
 from .model import ModelError, ModelSample
+from .model import sample_model
 from .model_config import build_model
+from .model_config import frontend_catalog, render_model_catalog
+from .model_catalog import BUILTIN_MODEL_CATALOG
 from .runtime_config import InteractionConfig
 from .save import SaveError, load_interaction_save, save_interaction_save
 from .user import UserInteraction
@@ -170,12 +175,6 @@ class _Binding:
 
 def _model_factory(index, args):
     del index
-    variable = args.api_key_env
-    if variable is not None:
-        value = os.environ.get(variable)
-        if not value or not value.strip():
-            raise ValueError("Configured API-key environment variable is unavailable.")
-        args.api_key = value
     return build_model(args)
 
 
@@ -194,7 +193,10 @@ class _Session:
         if type(enable_board_auth) is not bool:
             raise TypeError("enable_board_auth must be a bool.")
         self.path = Path(path).expanduser().absolute()
-        self.settings = {i: dict(s) for i, s in settings.items()}
+        self.catalog = getattr(settings, "catalog", BUILTIN_MODEL_CATALOG)
+        self._explicit_selections = {str(i) for i in getattr(settings, "explicit_selections", ())}
+        self.settings = {i: deepcopy(s) for i, s in settings.items()}
+        self.bindings = {i: namespace(s, self.catalog).model_binding for i, s in self.settings.items()}
         self.names = {i: self.settings[i]["name"] for i in NAMES}
         self._model_factory, self._environment_factory = model_factory, environment_factory
         self._port = board_port
@@ -268,6 +270,12 @@ class _Session:
         try:
             self._lock()
             self._resumed = exists
+            manifests = {str(i): binding for i, binding in self.bindings.items()}
+            if exists:
+                notices = check_catalog_manifest(self.path / "catalog.json", manifests,
+                                                  reselected=self._explicit_selections)
+                for notice in notices:
+                    self._emit(None, (DisplayItem(notice),))
             restored = None
             if self._resumed:
                 contexts_path = self.path / "contexts"
@@ -299,6 +307,7 @@ class _Session:
                 ready.wait()
             if self._fatal:
                 raise RuntimeError("Auto context initialization failed (see context error notices).")
+            save_catalog_manifest(self.path / "catalog.json", manifests)
             with self.service.board.changed:
                 self.service.board.accepting = True
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
@@ -308,7 +317,7 @@ class _Session:
                     "Resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
                 ),))
             summaries = "\n".join(
-                f"#{i} ({s['name']}): {s['model_api']} / {s['model'] or '(server default)'}"
+                f"#{i} ({s['name']}): {self.bindings[i].api} / {s['model'] or '(server default)'}"
                 for i, s in self.settings.items()
             )
             self._emit(None, (DisplayItem(summaries),))
@@ -387,7 +396,7 @@ class _Session:
     def _owner(self, index):
         environment = None
         try:
-            args = namespace(self.settings[index])
+            args = namespace(self.settings[index], self.catalog, binding=self.bindings[index])
             config = InteractionConfig.from_namespace(args).snapshot()
             binding = _Binding(index, self.service.client(str(index)))
             environment = self._environment_factory(index, args, () if index == -1 else binding.tools())
@@ -504,7 +513,7 @@ class _Session:
 
     def _turn(self, index, model, environment, config, context):
         started = time.perf_counter()
-        options = config.sampling_options()
+        options = config.sampling_params()
         samples = 0
         while config.max_samples is None or samples < config.max_samples:
             self._check_running()
@@ -522,7 +531,7 @@ class _Session:
             self._phase(index, "sampling")
             samples += 1
             try:
-                sample = model.sample(context.copy(), tools=environment.tool_specs, options=options)
+                sample = sample_model(model, context.copy(), tools=environment.tool_specs, sampling_params=options)
             except ModelError as exc:
                 contribution = (*exc.completed_items, *((exc.failure,) if exc.failure is not None else ()))
                 if contribution:
@@ -775,6 +784,10 @@ def main(argv=None):
     session = None
     exit_code = 1
     try:
+        catalog = frontend_catalog(args)
+        if args.list_models:
+            print(render_model_catalog(catalog))
+            return 0
         args.prompt = load_prompt(args)
         if not 0 <= args.board_port <= 65535:
             raise ValueError("board-port must be between 0 and 65535.")
@@ -791,7 +804,7 @@ def main(argv=None):
         saved = None
         if args.resume and save_path.exists():
             saved = load_saved_config(save_path / "config.json")
-        settings = resolve_config(args.context_config, overrides, saved=saved)
+        settings = resolve_config(args.context_config, overrides, saved=saved, catalog=catalog)
         session = _Session(save_path, settings, board_port=args.board_port,
                            resume=args.resume, enable_board_auth=args.enable_board_auth)
         session.start()

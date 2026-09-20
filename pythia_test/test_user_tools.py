@@ -103,6 +103,7 @@ class UserToolValueTests(unittest.TestCase):
             "enable_auto_compaction = True",
             "auto_compact_tokens = None",
             "max_context_tokens = None",
+            "request_params = {}",
         )))
         json_dump = execute("/config.json")
         self.assertTrue(json_dump.success)
@@ -433,6 +434,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 "enable_auto_compaction": True,
                 "auto_compact_tokens": None,
                 "max_context_tokens": None,
+                "request_params": {},
                 "__init__": {
                     "enable_workspace": True,
                     "max_samples": None,
@@ -440,6 +442,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     "enable_auto_compaction": True,
                     "auto_compact_tokens": None,
                     "max_context_tokens": None,
+                    "request_params": {},
                 },
             },
         )

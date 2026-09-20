@@ -282,7 +282,7 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
                 with self.subTest(frontend=frontend.__name__, flags=flags):
                     args = frontend._build_parser().parse_args([
                         "--model-api", "messages", "--model", "model",
-                        "--max-output-tokens", "100", *flags,
+                        "--max-output-tokens", "100", "--endpoint-auth", "none", *flags,
                     ])
                     model = build_model(args)
                     self.assertEqual(model.endpoint.prompt_caching, MessagesPromptCaching())
