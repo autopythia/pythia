@@ -16,7 +16,7 @@ from unittest import mock
 from pythia.interaction import (
     BUILTIN_MODEL_CATALOG, ConfigError, Environment, InteractionConfig,
     InteractionContext, Message, ModelCatalog, ModelSample, ResolvedSamplingParams,
-    SamplingParams,
+    SamplingParams, LATEST_MODEL_CATALOG_VERSION,
     load_model_catalog, parse_model_catalog,
 )
 from pythia.interaction import auto, cli, demo, model_catalog, responses
@@ -88,6 +88,28 @@ def no_credentials(key, default=None):
 
 
 class CatalogParserTests(unittest.TestCase):
+    def test_missing_header_or_version_assumes_latest_and_warns_after_validation(self):
+        for text in (
+            (HEADER + LOCAL).replace("version = 2\n", ""),
+            LOCAL,
+        ):
+            with self.subTest(text=text), self.assertWarnsRegex(
+                UserWarning,
+                r"does not specify a version; assuming latest supported version 2",
+            ):
+                registry = parse_model_catalog(text, source="catalog.ini")
+            self.assertEqual(
+                registry.get_model_spec("chat-completions", "local-max").name,
+                "local-max",
+            )
+        self.assertEqual(LATEST_MODEL_CATALOG_VERSION, 2)
+
+        invalid = LOCAL + "unknown = value\n"
+        with mock.patch("warnings.warn") as warn:
+            with self.assertRaises(ValueError):
+                parse_model_catalog(invalid, source="catalog.ini")
+        warn.assert_not_called()
+
     def test_new_entry_routes_aliases_and_preserves_structured_values(self):
         registry = catalog(LOCAL + MESSAGE)
         spec = registry.get_model_spec("chat-completions", "local-alias")
@@ -198,7 +220,7 @@ limits.auto_compact_context_tokens = null
             HEADER + "[DEFAULT]\noverride = true\n" + LOCAL,
             HEADER.replace("version = 2", "version = 1") + LOCAL,
             HEADER.replace("version = 2", "version = 3") + LOCAL,
-            LOCAL, HEADER + "[other]\nx = 1\n", HEADER + "unknown = 1\n",
+            HEADER + "[other]\nx = 1\n", HEADER + "unknown = 1\n",
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_model_catalog(text)

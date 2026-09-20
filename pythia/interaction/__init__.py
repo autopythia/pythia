@@ -83,6 +83,7 @@ from .model_catalog import ANTHROPIC_MESSAGES_API_URL
 from .model_catalog import CODEX_RESPONSES_API_URL
 from .model_catalog import META_RESPONSES_API_URL
 from .model_catalog import OPENAI_RESPONSES_API_URL
+from .model_catalog_config import LATEST_MODEL_CATALOG_VERSION
 from .model_catalog_config import load_model_catalog, parse_model_catalog
 from .model_catalog import MessagesDefaults
 from .model_catalog import ResponsesDefaults
@@ -184,6 +185,7 @@ __all__ = [
     "BUILTIN_MODEL_CATALOG",
     "load_model_catalog",
     "parse_model_catalog",
+    "LATEST_MODEL_CATALOG_VERSION",
     "Init",
     "SaveError",
     "TextPart",

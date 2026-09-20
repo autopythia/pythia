@@ -6,6 +6,7 @@ import configparser
 from dataclasses import replace
 from pathlib import Path
 import re
+import warnings
 
 from ._config_file import read_config_bytes
 from .model_catalog import BUILTIN_MODEL_CATALOG
@@ -17,6 +18,7 @@ from .model_catalog import _normalize_profile, parse_json_value
 
 MAX_CATALOG_BYTES = 1_048_576
 MAX_CATALOG_MODELS = 1024
+LATEST_MODEL_CATALOG_VERSION = 2
 _LIMIT_FIELDS = frozenset(("auto_compact_context_tokens", "max_context_tokens", "max_output_tokens"))
 _RESPONSES_FIELDS = frozenset(("reasoning_effort", "reasoning_summary", "text_verbosity"))
 _MESSAGES_FIELDS = frozenset(("output_effort",))
@@ -121,7 +123,7 @@ def _entry(section, values, base):
 
 
 def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
-    """Parse and validate transactionally. Neither the base nor globals change."""
+    """Parse transactionally; omitted version metadata uses the latest schema."""
     if not isinstance(base, ModelCatalog):
         raise TypeError("base must be ModelCatalog")
     if not isinstance(text, str):
@@ -133,13 +135,25 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
         inline_comment_prefixes=None, empty_lines_in_values=False,
     )
     parser.optionxform = str
+    assumed_version = False
     try:
         parser.read_string(text)
-        if parser.defaults() or not parser.has_section("catalog"):
+        if parser.defaults():
             raise ValueError()
-        version = parser.getint("catalog", "version")
-        if set(parser["catalog"]) != {"version"} or version != 2:
-            raise ValueError()
+        if parser.has_section("catalog"):
+            catalog_fields = set(parser["catalog"])
+            if catalog_fields - {"version"}:
+                raise ValueError()
+            if "version" in catalog_fields:
+                version = parser.getint("catalog", "version")
+                if version != LATEST_MODEL_CATALOG_VERSION:
+                    raise ValueError()
+            else:
+                version = LATEST_MODEL_CATALOG_VERSION
+                assumed_version = True
+        else:
+            version = LATEST_MODEL_CATALOG_VERSION
+            assumed_version = True
         sections = [section for section in parser.sections() if section != "catalog"]
         if len(sections) > MAX_CATALOG_MODELS or any(not section.startswith("model.") for section in sections):
             raise ValueError()
@@ -161,9 +175,17 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             # No values from request params/credentials should appear in errors.
             raise ValueError(f"Invalid model catalog entry {section!r} in {source}") from None
     try:
-        return ModelCatalog(tuple(specs.values()), origins)
+        catalog = ModelCatalog(tuple(specs.values()), origins)
     except ValueError:
         raise ValueError(f"Model catalog selector/alias collision in {source}") from None
+    if assumed_version:
+        warnings.warn(
+            f"Model catalog {source!r} does not specify a version; assuming latest "
+            f"supported version {version}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return catalog
 
 
 def load_model_catalog(path=None, *, enabled=True, base=BUILTIN_MODEL_CATALOG):
@@ -186,4 +208,9 @@ def load_model_catalog(path=None, *, enabled=True, base=BUILTIN_MODEL_CATALOG):
     return parse_model_catalog(text, base=base, source=str(path))
 
 
-__all__ = ["default_model_catalog_path", "load_model_catalog", "parse_model_catalog"]
+__all__ = [
+    "LATEST_MODEL_CATALOG_VERSION",
+    "default_model_catalog_path",
+    "load_model_catalog",
+    "parse_model_catalog",
+]
