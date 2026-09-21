@@ -96,10 +96,7 @@ def prepare_namespace(args, catalog=None):
         endpoint = replace(endpoint, auth_file=str(_resolve_auth_file(
             codex_home=getattr(args, "codex_home", None), auth_file=getattr(args, "codex_auth_file", None),
         ).resolve()))
-        overrides = set(binding.endpoint_overrides)
-        if getattr(args, "codex_home", None) is not None or getattr(args, "codex_auth_file", None) is not None:
-            overrides.add("auth_file")
-        binding = replace(binding, endpoint=endpoint, endpoint_overrides=frozenset(overrides))
+        binding = replace(binding, endpoint=endpoint)
     values = vars(args).copy()
     values.update(model_api=binding.api, model_binding=binding, _endpoint_prepared=True,
                   model=binding.selector if binding.selector is not None else endpoint.model)
@@ -137,6 +134,14 @@ def add_catalog_arguments(parser, *, suppress_request_params=False):
                        help="INI user catalog (default: ~/.pythia/model-catalog.ini)")
     group.add_argument("--no-user-model-catalog", action="store_true", help="use only the built-in model catalog")
     parser.add_argument("--list-models", action="store_true", help="list the selected catalog without loading credentials")
+    parser.add_argument(
+        "--debug-save-model-binding",
+        action="store_true",
+        help=(
+            "write an opt-in resolved model-binding snapshot next to the save; "
+            "may include endpoint and request configuration"
+        ),
+    )
     parser.add_argument("--request-params", type=_request_params_argument,
                         default=argparse.SUPPRESS if suppress_request_params else None,
                         help="JSON object of model-specific request-body extensions; launch-only")

@@ -40,7 +40,6 @@ class AutoSettings(dict):
     def __init__(self, catalog):
         super().__init__()
         self.catalog = catalog
-        self.explicit_selections = set()
 
 
 def _layer(value, base):
@@ -141,8 +140,6 @@ def resolve_config(path=None, overrides=None, saved=None, *, catalog=BUILTIN_MOD
         settings = initial
         for layer in (defaults, launch, specific):
             settings = _merge(settings, layer, catalog)
-            if {"model", "model_api", "endpoint_model"} & layer.keys():
-                resolved.explicit_selections.add(index)
         if index == 1 and main_instruction_override and "instructions" not in contexts.get("1", {}):
             settings["instructions"] = main_instructions
         settings["cwd"] = str(Path(settings["cwd"]).expanduser().absolute())

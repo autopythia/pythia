@@ -44,7 +44,8 @@ from .model_config import initial_model_name
 from .model_config import resolve_save_path
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
 from .model_catalog import ModelBinding
-from ._catalog_session import catalog_manifest_path, check_catalog_manifest, save_catalog_manifest
+from ._model_binding_debug import debug_model_binding_path
+from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import InteractionConfig
 from .runtime_config import InteractionConfigSnapshot
 from .save import load_interaction_save
@@ -88,6 +89,7 @@ def run(
     cwd: Path = Path("."),
     auto_compact_tokens: Optional[int] = None,
     max_context_tokens: Optional[int] = None,
+    debug_save_model_binding: bool = False,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
@@ -101,6 +103,10 @@ def run(
         raise TypeError("enable_media must be a bool")
     if not isinstance(enable_workspace, bool):
         raise TypeError("enable_workspace must be a bool")
+    if not isinstance(debug_save_model_binding, bool):
+        raise TypeError("debug_save_model_binding must be a bool")
+    if debug_save_model_binding and save_path is None:
+        raise ValueError("debug_save_model_binding requires save_path")
     for field_name, value in (
         ("auto_compact_tokens", auto_compact_tokens),
         ("max_context_tokens", max_context_tokens),
@@ -168,15 +174,14 @@ def run(
     else:
         turn_config = InteractionConfig.from_model(model, inputs).snapshot()
     sampling_params = turn_config.sampling_params(base_params)
-    binding = getattr(model, "binding", None)
-    if isinstance(binding, ModelBinding):
-        binding = replace(binding, request_params=turn_config.request_params)
-    else:
-        binding = None
-    if binding is not None and resume and Path(save_path).is_file():
-        for notice in check_catalog_manifest(catalog_manifest_path(save_path), {"main": binding},
-                                            reselected={"main"}):
-            print(notice, file=sys.stderr)
+    binding = None
+    if debug_save_model_binding:
+        candidate = getattr(model, "binding", None)
+        if isinstance(candidate, ModelBinding):
+            binding = replace(
+                candidate,
+                request_params=turn_config.request_params,
+            )
 
     resumed_existing_save = False
     if resume and Path(save_path).exists():
@@ -205,7 +210,17 @@ def run(
     if save_path is not None:
         save_interaction_save(save_path, context)
         if binding is not None:
-            save_catalog_manifest(catalog_manifest_path(save_path), {"main": binding})
+            warning = save_debug_model_bindings(
+                debug_model_binding_path(save_path), {"main": binding},
+            )
+            if warning is not None:
+                print(warning, file=sys.stderr)
+        elif debug_save_model_binding:
+            print(
+                "Warning: model does not expose a resolved model binding; "
+                "debug snapshot was not written.",
+                file=sys.stderr,
+            )
 
     def _persist() -> None:
         if save_path is not None:
@@ -407,9 +422,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.list_models:
             print(render_model_catalog(catalog))
             return 0
-        reselected = {"main"} if any(value is not None for value in (
-            args.model, args.model_api, args.endpoint_model,
-        )) else set()
         args = prepare_namespace(args, catalog)
         cwd = Path(args.cwd).expanduser().resolve()
         prompt = args.prompt
@@ -427,9 +439,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         config = InteractionConfig.from_namespace(args).snapshot()
         save_path = resolve_save_path(args.save_path)
-        if args.resume and save_path.is_file():
-            check_catalog_manifest(catalog_manifest_path(save_path), {"main": args.model_binding},
-                                   reselected=reselected)
         if prompt is None and (not args.resume or not save_path.exists()):
             # A missing resume file is also a fresh session. Existing saves
             # must not receive the seed prompt again just to enable the tool.
@@ -464,6 +473,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cwd=cwd,
                 auto_compact_tokens=config.auto_compact_tokens,
                 max_context_tokens=config.max_context_tokens,
+                debug_save_model_binding=args.debug_save_model_binding,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

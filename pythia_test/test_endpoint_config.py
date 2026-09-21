@@ -17,12 +17,10 @@ from pythia.interaction import (
 )
 from pythia.interaction import cli, demo, responses
 from pythia.interaction._auto_config import resolve_config, namespace
-from pythia.interaction._catalog_session import check_catalog_manifest, save_catalog_manifest
 from pythia.interaction.chat_completions import ChatCompletionsEndpoint, ChatCompletionsModel
 from pythia.interaction.messages import MessagesEndpoint, MessagesModel
 from pythia.interaction.codex_auth import CodexAuth
 from pythia.interaction.model_config import build_model, prepare_namespace, supports_account_services
-from pythia.interaction.save import SaveError
 
 
 V2 = '''[catalog]
@@ -289,26 +287,6 @@ source = metadata only
             endpoint = namespace(settings[2], registry).model_binding.endpoint
             self.assertEqual(endpoint.url, "http://host.test/exact")
             self.assertEqual(endpoint.model, "worker-wire")
-
-    def test_provenance_separates_endpoint_retargeting_from_policy_changes(self):
-        old = parse_model_catalog(V2).bind(name="local")
-        other = replace(old, endpoint=replace(old.endpoint, url="https://other.test/infer"))
-        policy = old.with_request_params({"reasoning_effort": "low"})
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "catalog.json"
-            save_catalog_manifest(path, {"main": old})
-            self.assertTrue(check_catalog_manifest(path, {"main": policy}))
-            with self.assertRaisesRegex(SaveError, "endpoint changed"):
-                check_catalog_manifest(path, {"main": other})
-            other = replace(other, endpoint_overrides=frozenset(("url",)))
-            self.assertTrue(check_catalog_manifest(path, {"main": other}))
-            outdated = json.loads(path.read_text())
-            outdated["version"] = 1
-            outdated["bindings"]["main"].pop("endpoint")
-            path.write_text(json.dumps(outdated))
-            with self.assertRaisesRegex(SaveError, "Invalid"):
-                check_catalog_manifest(path, {"main": other})
-
 
 if __name__ == "__main__":
     unittest.main()

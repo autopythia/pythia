@@ -23,7 +23,7 @@ import uuid
 
 from ._auto_board import Board, BoardError, BoardService, atomic_text
 from ._auto_config import DEFAULTS, NAMES, build_parser, load_saved_config, namespace, resolve_config
-from ._catalog_session import check_catalog_manifest, save_catalog_manifest
+from ._model_binding_debug import save_debug_model_bindings
 from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
 from ._prompt import load_prompt
@@ -188,12 +188,14 @@ class _Session:
     """Private fixed-role runtime; no dynamic manager/template API."""
     def __init__(self, path, settings, *, board_port=0,
                  model_factory=_model_factory, environment_factory=_environment_factory,
-                 resume=False, enable_board_auth=True):
+                 resume=False, enable_board_auth=True,
+                 debug_save_model_binding=False):
         if type(enable_board_auth) is not bool:
             raise TypeError("enable_board_auth must be a bool.")
+        if type(debug_save_model_binding) is not bool:
+            raise TypeError("debug_save_model_binding must be a bool.")
         self.path = Path(path).expanduser().absolute()
         self.catalog = getattr(settings, "catalog", BUILTIN_MODEL_CATALOG)
-        self._explicit_selections = {str(i) for i in getattr(settings, "explicit_selections", ())}
         self.settings = {i: deepcopy(s) for i, s in settings.items()}
         self.bindings = {i: namespace(s, self.catalog).model_binding for i, s in self.settings.items()}
         self.names = {i: self.settings[i]["name"] for i in NAMES}
@@ -201,6 +203,7 @@ class _Session:
         self._port = board_port
         self._resume = resume
         self._enable_board_auth = enable_board_auth
+        self._debug_save_model_binding = debug_save_model_binding
         self._resumed = False
         self._baseline = 0
         self._contexts = {}
@@ -269,12 +272,6 @@ class _Session:
         try:
             self._lock()
             self._resumed = exists
-            manifests = {str(i): binding for i, binding in self.bindings.items()}
-            if exists:
-                notices = check_catalog_manifest(self.path / "catalog.json", manifests,
-                                                  reselected=self._explicit_selections)
-                for notice in notices:
-                    self._emit(None, (DisplayItem(notice),))
             restored = None
             if self._resumed:
                 contexts_path = self.path / "contexts"
@@ -306,7 +303,13 @@ class _Session:
                 ready.wait()
             if self._fatal:
                 raise RuntimeError("Auto context initialization failed (see context error notices).")
-            save_catalog_manifest(self.path / "catalog.json", manifests)
+            if self._debug_save_model_binding:
+                warning = save_debug_model_bindings(
+                    self.path / "model-bindings.json",
+                    {str(i): binding for i, binding in self.bindings.items()},
+                )
+                if warning is not None:
+                    self._emit(None, (DisplayItem(warning),))
             with self.service.board.changed:
                 self.service.board.accepting = True
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
@@ -808,7 +811,8 @@ def main(argv=None):
             saved = load_saved_config(save_path / "config.json")
         settings = resolve_config(args.context_config, overrides, saved=saved, catalog=catalog)
         session = _Session(save_path, settings, board_port=args.board_port,
-                           resume=args.resume, enable_board_auth=args.enable_board_auth)
+                           resume=args.resume, enable_board_auth=args.enable_board_auth,
+                           debug_save_model_binding=args.debug_save_model_binding)
         session.start()
         if not args.enable_board_auth:
             print("Warning: board authentication is disabled; local clients can read board data "

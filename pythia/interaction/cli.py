@@ -73,7 +73,8 @@ from .model_config import initial_model_name
 from .model_config import resolve_save_path
 from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
-from ._catalog_session import catalog_manifest_path, check_catalog_manifest, save_catalog_manifest
+from ._model_binding_debug import debug_model_binding_path
+from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import InteractionConfig
 from .save import load_interaction_save
 from .save import save_interaction_save
@@ -778,9 +779,15 @@ async def _drive_interaction(
                     instructions = Instructions(args.instructions)
                     await _append(context, (instructions,), state, path)
                     state.displays.extend(render_interaction_items((instructions,)))
-                if getattr(args, "model_binding", None) is not None:
-                    await asyncio.to_thread(save_catalog_manifest, catalog_manifest_path(path),
-                                            {"main": args.model_binding})
+                if (getattr(args, "debug_save_model_binding", False)
+                        and getattr(args, "model_binding", None) is not None):
+                    warning = await asyncio.to_thread(
+                        save_debug_model_bindings,
+                        debug_model_binding_path(path),
+                        {"main": args.model_binding},
+                    )
+                    if warning is not None:
+                        state.notice(warning)
                 query = initial_query
                 should_sample = model is not None and (query is not None or (
                     existing and args.instructions is not None
@@ -956,8 +963,6 @@ def _runtime_config(environment, args):
 
 def _startup_notices(state, args, path):
     state.notice(f"Save log: {path}")
-    for notice in getattr(args, "_catalog_notices", ()):
-        state.notice(notice)
     if args.enable_default_tools:
         state.notice(
             "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
@@ -1123,9 +1128,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.list_models:
             print(render_model_catalog(catalog))
             return 0
-        reselected = {"main"} if any(value is not None for value in (
-            args.model, args.model_api, args.endpoint_model,
-        )) else set()
         args = prepare_namespace(args, catalog)
         args.prompt = load_prompt(args)
         if not args.headless and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty()):
@@ -1140,10 +1142,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.max_output_tokens is not None:
             SamplingParams(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
-        if args.resume and save_path.is_file():
-            args._catalog_notices = check_catalog_manifest(
-                catalog_manifest_path(save_path), {"main": args.model_binding}, reselected=reselected,
-            )
         if (args.headless and args.prompt is None
                 and not (args.resume and args.instructions is not None and save_path.is_file())):
             raise ValueError(

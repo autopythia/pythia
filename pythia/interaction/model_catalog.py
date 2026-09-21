@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
-import hashlib
 import json
 import math
 import re
@@ -178,12 +177,6 @@ class EndpointSpec:
     @property
     def is_official_codex(self):
         return self.api == "codex" and self.url.rstrip("/") == CODEX_RESPONSES_API_URL + "/responses"
-
-    def as_dict(self):
-        return {"api": self.api, "url": self.url, "model": self.model,
-                "auth": self.auth, "auth_file": self.auth_file}
-
-
 
 @dataclass(frozen=True)
 class ModelLimits:
@@ -422,7 +415,6 @@ class ModelBinding:
     request_params: Mapping = field(default_factory=dict)
     origin: str = "builtin"
     api_explicit: bool = True
-    endpoint_overrides: frozenset = field(default_factory=frozenset, repr=False, compare=False)
 
     def __post_init__(self):
         if not isinstance(self.endpoint, EndpointSpec):
@@ -440,7 +432,6 @@ class ModelBinding:
             if self.selector not in (self.spec.name, *self.spec.aliases):
                 raise ValueError("binding selector does not select its spec")
         object.__setattr__(self, "request_params", freeze_request_params(self.request_params, self.api))
-        object.__setattr__(self, "endpoint_overrides", frozenset(self.endpoint_overrides))
 
     @property
     def api(self):
@@ -463,23 +454,6 @@ class ModelBinding:
         if overlay is not None:
             params.update(freeze_request_params(overlay, self.api))
         return replace(self, request_params=params)
-
-    def manifest_entry(self):
-        spec = self.spec
-        facts = {
-            "api": self.api, "selector": self.selector, "endpoint": self.endpoint.as_dict(),
-            "limits": {name: getattr(self.limits, name) for name in (
-                "auto_compact_context_tokens", "max_context_tokens", "max_output_tokens",
-            )},
-            "request_params": thaw_json(self.request_params),
-            "responses": None if spec is None or spec.responses is None else vars(spec.responses),
-            "messages": None if spec is None or spec.messages is None else vars(spec.messages),
-        }
-        fingerprint = hashlib.sha256(json.dumps(facts, sort_keys=True, allow_nan=False).encode()).hexdigest()
-        return {"api": self.api, "selector": self.selector, "model": self.endpoint.model,
-                "canonical": None if spec is None else spec.name, "source": self.origin,
-                "fingerprint": fingerprint, "endpoint": self.endpoint.as_dict()}
-
 
 @dataclass(frozen=True)
 class ModelCatalog:
@@ -561,7 +535,7 @@ class ModelCatalog:
             name, endpoint, spec,
             {} if spec is None else spec.request_params,
             "builtin" if spec is None else self.origins[(spec.endpoint.api, spec.name)],
-            explicit, frozenset(changes),
+            explicit,
         )
         return binding.with_request_params(request_params)
 

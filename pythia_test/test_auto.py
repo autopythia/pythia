@@ -507,6 +507,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(summary.split("\n")), 3)
         self.assertFalse(summary.endswith("\n"))
         self.assertEqual(auto._display_events(session, events)[-1], events[1].items[0])
+        self.assertFalse((self.path / "model-bindings.json").exists())
+
+    def test_debug_model_binding_snapshot_is_opt_in(self):
+        self.session({}, debug_save_model_binding=True)
+        path = self.path / "model-bindings.json"
+        self.assertTrue(path.is_file())
+        document = json.loads(path.read_text())
+        self.assertEqual(set(document["bindings"]), {"1", "2", "-1"})
+        self.assertEqual(
+            document["bindings"]["1"]["endpoint"]["api"],
+            "chat-completions",
+        )
 
     def test_busy_phase_classification(self):
         session = self.session({})

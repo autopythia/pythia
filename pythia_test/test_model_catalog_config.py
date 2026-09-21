@@ -21,13 +21,12 @@ from pythia.interaction import (
 )
 from pythia.interaction import auto, cli, demo, model_catalog, responses
 from pythia.interaction._auto_config import build_parser, load_saved_config, namespace, resolve_config
-from pythia.interaction._catalog_session import (
-    catalog_manifest_path, check_catalog_manifest, save_catalog_manifest,
+from pythia.interaction._model_binding_debug import (
+    debug_model_binding_path, save_debug_model_bindings,
 )
 from pythia.interaction.chat_completions import ChatCompletionsEndpoint, ChatCompletionsModel
 from pythia.interaction.messages import MessagesEndpoint, MessagesModel
 from pythia.interaction.model_config import build_model, prepare_namespace, supports_account_services
-from pythia.interaction.save import SaveError
 from pythia.interaction.model_catalog_config import MAX_CATALOG_BYTES
 
 
@@ -553,7 +552,7 @@ class CatalogEntrypointTests(unittest.TestCase):
                 self.assertIn("local-max", output.getvalue())
                 self.assertIn("served-local", output.getvalue())
 
-    def test_cli_headless_runs_catalog_model_and_persists_provenance(self):
+    def test_cli_debug_binding_snapshot_is_opt_in(self):
         requests = []
         class Response:
             status = 200
@@ -574,6 +573,8 @@ class CatalogEntrypointTests(unittest.TestCase):
             path = Path(directory) / "catalog.ini"
             log = Path(directory) / "log.jsonl"
             path.write_text(HEADER + LOCAL)
+            stale_sidecar = log.with_name(log.name + ".catalog.json")
+            stale_sidecar.write_text("not valid catalog provenance")
             with mock.patch.object(cli, "build_model", side_effect=model_factory), \
                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 result = cli.main(["--headless", "--enable-default-tools", "false",
@@ -581,44 +582,86 @@ class CatalogEntrypointTests(unittest.TestCase):
                                    "--prompt", "hello", "--save", str(log)])
             self.assertEqual(result, 0)
             self.assertTrue(log.is_file())
-            self.assertTrue(catalog_manifest_path(log).is_file())
+            self.assertFalse(debug_model_binding_path(log).exists())
+            self.assertEqual(stale_sidecar.read_text(), "not valid catalog provenance")
             self.assertEqual(requests[0]["model"], "served-local")
             self.assertEqual(requests[0]["reasoning_effort"], "max")
+            debug_log = Path(directory) / "debug.jsonl"
+            with mock.patch.object(cli, "build_model", side_effect=model_factory), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = cli.main([
+                    "--headless", "--enable-default-tools", "false",
+                    "--model-catalog", str(path), "--model", "local-max",
+                    "--prompt", "hello", "--save", str(debug_log),
+                    "--debug-save-model-binding",
+                ])
+            self.assertEqual(result, 0)
+            snapshot_path = debug_model_binding_path(debug_log)
+            self.assertTrue(snapshot_path.is_file())
+            snapshot = json.loads(snapshot_path.read_text())
+            self.assertEqual(snapshot["bindings"]["main"]["selector"], "local-max")
+            self.assertEqual(
+                snapshot["bindings"]["main"]["endpoint"]["model"],
+                "served-local",
+            )
 
-
-class CatalogProvenanceTests(unittest.TestCase):
-    def test_missing_and_changed_catalog_on_resume(self):
-        old = catalog().bind(name="local-max")
-        new = catalog(LOCAL.replace('"max"', '"high"')).bind(name="local-max")
+    def test_demo_debug_binding_snapshot_is_opt_in(self):
+        class Response:
+            status = 200
+            headers = {}
+            def read(self):
+                return b'{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}'
+            def close(self):
+                pass
+        original = demo.build_model
+        def model_factory(args):
+            model = original(args)
+            model._opener = lambda request, **kwargs: Response()
+            return model
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "catalog.json"
-            self.assertEqual(check_catalog_manifest(path, {"main": old}), ())
-            save_catalog_manifest(path, {"main": old})
-            self.assertEqual(check_catalog_manifest(path, {"main": old}), ())
-            self.assertEqual(len(check_catalog_manifest(path, {"main": new})), 1)
-            missing = BUILTIN_MODEL_CATALOG.bind(name="local-max")
-            for reselected in ((), ("main",)):
-                with self.assertRaisesRegex(SaveError, "unavailable"):
-                    check_catalog_manifest(path, {"main": missing}, reselected=reselected)
-            literal = BUILTIN_MODEL_CATALOG.bind("chat-completions", "served-local")
-            self.assertTrue(check_catalog_manifest(path, {"main": literal}, reselected={"main"}))
-            contents = path.read_text()
-            self.assertNotIn("request_params", contents)
-            self.assertNotIn("thinking", contents)
+            catalog_path = Path(directory) / "catalog.ini"
+            log = Path(directory) / "demo.jsonl"
+            catalog_path.write_text(HEADER + LOCAL)
+            with mock.patch.object(demo, "_build_model", side_effect=model_factory), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = demo.main([
+                    "--model-catalog", str(catalog_path),
+                    "--model", "local-max",
+                    "--prompt", "hello",
+                    "--save", str(log),
+                    "--debug-save-model-binding",
+                ])
+            self.assertEqual(result, 0)
+            snapshot = json.loads(debug_model_binding_path(log).read_text())
+            self.assertEqual(snapshot["bindings"]["main"]["selector"], "local-max")
 
-    def test_moving_api_requires_explicit_reselection(self):
-        old = catalog().bind(name="local-max")
-        moved = catalog(MESSAGE.replace("worker", "local-max")).bind(name="local-max")
+
+class DebugModelBindingTests(unittest.TestCase):
+    def test_snapshot_is_readable_and_omits_credential_paths(self):
+        binding = catalog().bind(name="local-max")
+        codex = BUILTIN_MODEL_CATALOG.bind("codex", "gpt-6-astra")
+        codex = replace(
+            codex,
+            endpoint=replace(codex.endpoint, auth_file="/secret/auth.json"),
+        )
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "catalog.json"
-            save_catalog_manifest(path, {"main": old})
-            with self.assertRaises(SaveError):
-                check_catalog_manifest(path, {"main": moved}, reselected={"main"})
-            self.assertTrue(check_catalog_manifest(path, {"main": replace(moved, api_explicit=True)},
-                                                   reselected={"main"}))
-            path.write_text('{"version":1,"bindings":[]}')
-            with self.assertRaises(SaveError):
-                check_catalog_manifest(path, {"main": old})
+            path = Path(directory) / "bindings.json"
+            self.assertIsNone(save_debug_model_bindings(
+                path, {"main": binding, "codex": codex},
+            ))
+            document = json.loads(path.read_text())
+        entry = document["bindings"]["main"]
+        self.assertEqual(document["version"], 1)
+        self.assertNotIn("auth_file", document["bindings"]["codex"]["endpoint"])
+        self.assertNotIn("/secret/auth.json", json.dumps(document))
+        self.assertEqual(entry["request_params"]["reasoning_effort"], "max")
+
+    def test_snapshot_failure_returns_warning_and_removes_temporary_file(self):
+        binding = catalog().bind(name="local-max")
+        with tempfile.TemporaryDirectory() as directory:
+            warning = save_debug_model_bindings(directory, {"main": binding})
+            self.assertIn("could not save debug model-binding snapshot", warning)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
 
 
 if __name__ == "__main__":

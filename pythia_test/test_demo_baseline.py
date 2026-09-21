@@ -41,6 +41,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "model_catalog": None,
     "no_user_model_catalog": False,
     "list_models": False,
+    "debug_save_model_binding": False,
     "request_params": None,
     "model": None,
     "api_key": None,
