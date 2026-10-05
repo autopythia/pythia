@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -233,6 +234,115 @@ class TraceFailureTests(_TraceTestCase):
         [(request, _)] = self.pairs()
         self.assertIsNone(request["op"])
         self.assertIsNone(request["retry"])
+
+
+class EventTraceTests(unittest.TestCase):
+    def test_incremental_bytes_explicit_scope_and_append(self):
+        with tempfile.TemporaryDirectory() as root:
+            save = Path(root) / 'ctx.jsonl'
+            trace = DebugTrace.open(save, events=True, context_id=1, role='main')
+            try:
+                with trace.operation('compact', context_revision=12):
+                    scope = _debug_trace.capture_trace_scope()
+                    thread = threading.Thread(target=lambda: trace.event('native', scope=scope, data=b'\xff\x00'))
+                    thread.start(); thread.join()
+            finally:
+                trace.close()
+            rows = _rows(trace.event_path)
+            self.assertEqual([r['sequence'] for r in rows], [1, 2, 3])
+            self.assertEqual(base64.b64decode(rows[1]['payload_base64']), b'\xff\x00')
+            self.assertEqual(rows[1]['op'], 'compact')
+            self.assertEqual(rows[1]['context_revision'], 12)
+            self.assertTrue(all(r['operation_id'] == rows[0]['operation_id'] for r in rows))
+            self.assertFalse(trace._writer.is_alive())
+            data = trace.event_path.read_bytes()
+            other = DebugTrace.open(save, events=True)
+            other.event('new_run'); other.close()
+            self.assertTrue(trace.event_path.read_bytes().startswith(data))
+            self.assertNotEqual(_rows(trace.event_path)[-1]['run_id'], rows[0]['run_id'])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX private-file and symlink policy')
+    def test_unsafe_existing_trace_files_are_not_chmodded_or_followed(self):
+        with tempfile.TemporaryDirectory() as root:
+            save = Path(root) / 'ctx.jsonl'
+            request = debug_trace_paths(save)[0]
+            target = Path(root) / 'target'
+            target.write_text('unchanged')
+            request.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                DebugTrace.open(save)
+            self.assertEqual(target.read_text(), 'unchanged')
+            request.unlink()
+            request.write_text('public')
+            if os.name == 'posix':
+                os.chmod(request, 0o644)
+                with self.assertRaisesRegex(ValueError, 'private'):
+                    DebugTrace.open(save)
+                self.assertEqual(request.stat().st_mode & 0o777, 0o644)
+
+    def test_bounded_queue_does_not_wait_for_disk_and_warns_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            trace = DebugTrace.open(Path(root) / 'ctx.jsonl', events=True)
+            entered, release = threading.Event(), threading.Event()
+            real_open = _debug_trace._private_opener
+            def blocked(path, flags):
+                if Path(path) == trace.event_path:
+                    entered.set()
+                    release.wait(5)
+                return real_open(path, flags)
+            try:
+                with mock.patch.object(_debug_trace, '_private_opener', side_effect=blocked):
+                    trace.event('first')
+                    self.assertTrue(entered.wait(2))
+                    with mock.patch.object(_debug_trace, 'MAX_EVENT_QUEUE_BYTES', 1):
+                        started = time.monotonic()
+                        trace.event('second')
+                        self.assertLess(time.monotonic() - started, .5)
+                    self.assertFalse(trace.enabled)
+                    self.assertIn('incomplete', trace.take_warning())
+                    self.assertIsNone(trace.take_warning())
+                    release.set()
+                    trace.close()
+            finally:
+                release.set(); trace.close()
+            self.assertFalse(trace._writer.is_alive())
+
+    def test_event_write_error_is_not_raised_into_the_model(self):
+        with tempfile.TemporaryDirectory() as root:
+            trace = DebugTrace.open(Path(root) / 'ctx.jsonl', events=True)
+            with mock.patch.object(_debug_trace, '_private_opener', side_effect=OSError('disk failure')):
+                trace.event('failure')
+                trace.close()
+            self.assertFalse(trace.enabled)
+            self.assertIn('event write failed', trace.take_warning())
+            self.assertIsNone(trace.take_warning())
+
+    def test_concurrent_contexts_do_not_share_operation_or_retry_counters(self):
+        with tempfile.TemporaryDirectory() as root:
+            traces = [DebugTrace.open(Path(root) / f'{i}.jsonl', events=True, run_id='shared-run', context_id=i)
+                      for i in (1, 2)]
+            barrier = threading.Barrier(2)
+            def exchange(trace):
+                opener = trace.opener(lambda *_: _JSONResponse(CHAT_OK))
+                self.assertIs(trace.opener(opener), opener)  # no double wrapping
+                with trace.operation('sample'):
+                    barrier.wait(3)
+                    for _ in range(2):
+                        with opener(urllib.request.Request(CHAT_URL, b'{}')) as response:
+                            response.read()
+            threads = [threading.Thread(target=exchange, args=(trace,)) for trace in traces]
+            try:
+                for thread in threads: thread.start()
+                for thread in threads: thread.join(5)
+                ids = []
+                for index, trace in enumerate(traces, 1):
+                    requests = _rows(trace.request_path)
+                    self.assertEqual([r['retry'] for r in requests], [0, 1])
+                    self.assertTrue(all(r['context_id'] == index for r in requests))
+                    ids.append(requests[0]['operation_id'])
+                self.assertNotEqual(*ids)
+            finally:
+                for trace in traces: trace.close()
 
 
 class ModelExchangeTests(_TraceTestCase):
@@ -664,7 +774,17 @@ class CLITraceTests(unittest.TestCase):
             cli._build_model(args, None)
         traced, plain = build.call_args_list
         self.assertEqual(plain, mock.call(args))
-        opener, auth_opener = traced.kwargs["opener"], traced.kwargs["auth_opener"]
+        self.assertIs(traced.kwargs['trace'], trace)
+        from pythia.interaction import model_config
+        with mock.patch.object(model_config, 'ChatCompletionsModel') as build:
+            model_config.build_model(args, trace=trace)
+        opener = build.call_args.kwargs['opener']
+        codex_args = cli._build_parser().parse_args([
+            '--endpoint-api', 'codex', '--model', 'codex-test',
+            '--endpoint-auth', 'supplied', '--endpoint-api-key', 'FAKE-KEY'])
+        with mock.patch.object(model_config, 'CodexResponsesModel') as build:
+            model_config.build_model(codex_args, trace=trace)
+        auth_opener = build.call_args.kwargs['auth_opener']
         self.assertIsInstance(opener, TracingOpener)
         self.assertIs(opener.inner, urllib.request.urlopen)
         self.assertIsNone(opener.op)

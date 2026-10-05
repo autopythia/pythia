@@ -13,20 +13,24 @@ import threading
 
 from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelTimeoutError
 from ..model import ModelAuthenticationError, ModelContextWindowError
-from ._cli_protocol import Assembler, MAX_RECORD, decode
+from ._cli_protocol import Assembler, MAX_RECORD, PROFILE, decode
 from ._mcp import Mailbox, MCPServer
 from ._sampling import ResolvedSampling
+from ._diagnostics import Diagnostics
+from ._trace import RelayTrace
 
 
 class Runtime:
-    def __init__(self, endpoint, tools, generation, *, sampling=None):
+    def __init__(self, endpoint, tools, generation, *, sampling=None, trace=None):
         self.endpoint = endpoint
         self.sampling = sampling if sampling is not None else ResolvedSampling()
         self.generation = generation
+        self.diagnostics = Diagnostics()
+        self.trace = RelayTrace(trace, generation)
         self.names = {'mcp__pythia__' + t.name: t.name for t in tools}
         if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', t.name) for t in tools):
             raise ModelResponseError('MCP tool names must be simple identifiers')
-        self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds)
+        self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds, trace=self.trace)
         self.mcp = MCPServer(self.mailbox, tool_id_pointer=endpoint.tool_id_pointer) if tools else None
         self.events = queue.Queue(maxsize=32)
         self.loop = asyncio.new_event_loop()
@@ -39,10 +43,20 @@ class Runtime:
         self.result_seen = False
         self.final_message = None
         self.stderr_tail = bytearray()
-        self.event_types = []
         self._stop_lock = None
         self.thread.start()
         self.mailbox.on_failure = self.fail
+
+    @property
+    def event_types(self):
+        return self.diagnostics.snapshot().event_types
+
+    def begin_sample(self, started, scope):
+        with self.diagnostics.lock:
+            if self.error is not None:
+                raise self.error  # preserve the parked failure's origin and counters
+            self.diagnostics.begin(started)
+            self.trace.begin_sample(scope)
 
     def _owner(self):
         asyncio.set_event_loop(self.loop)
@@ -99,10 +113,20 @@ class Runtime:
                 raise ModelTransportError('Relay client and parents must be trusted, owned paths')
         # Always a Python client under A. A mistaken native-binary path is never
         # executed as A, and caller PYTHONPATH/user-site imports are ignored.
+        environment = self.environment()
+        self.trace.invocation(argv, native_version_expected=self.endpoint.expected_version,
+                              profile=PROFILE, requested_effort=self.sampling.effort,
+                              requested_controls={k: environment[k] for k in (
+                                  'DISABLE_AUTO_COMPACT', 'ENABLE_TOOL_SEARCH', 'CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS')},
+                              generation_timeout_seconds=self.endpoint.generation_timeout_seconds,
+                              parked_timeout_seconds=self.endpoint.parked_timeout_seconds,
+                              startup_timeout_seconds=self.endpoint.startup_timeout_seconds,
+                              stop_timeout_seconds=self.endpoint.stop_timeout_seconds)
         self.proc = await asyncio.create_subprocess_exec(
             '/usr/bin/python3', '-I', '-S', str(launcher), *argv, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=self.environment(), cwd='/', limit=MAX_RECORD + 1)
+            env=environment, cwd='/', limit=MAX_RECORD + 1)
+        self.trace.emit('relay_client_started', client_pid=self.proc.pid)
         if self.closed.is_set():
             await self._stop_process()
             raise ModelTransportError('Claude Relay continuation retired')
@@ -110,6 +134,7 @@ class Runtime:
 
     async def _start(self, snapshot):
         try:
+            self.diagnostics.set_phase('version_query')
             probe = await self._spawn(['--version'])
             probe.stdin.close()
             async def bounded(stream, limit):
@@ -118,6 +143,9 @@ class Runtime:
                     part = await stream.read(min(8192, limit + 1 - len(data)))
                     if not part:
                         return bytes(data)
+                    if stream is probe.stdout:
+                        self.diagnostics.received()
+                    self.trace.data('stdout' if stream is probe.stdout else 'stderr', part)
                     data.extend(part)
                     if len(data) > limit:
                         raise ModelResponseError('Native version output exceeds limit')
@@ -125,6 +153,7 @@ class Runtime:
                                               self.endpoint.startup_timeout_seconds)
             self.stderr_tail.extend(err[:65536])
             rc = await asyncio.wait_for(probe.wait(), self.endpoint.stop_timeout_seconds)
+            self.trace.exit(rc)
             self.proc = None
             if rc != 0 or len(out) > 4096 or len(err) > 65536:
                 raise ModelTransportError('Relayed native version query failed')
@@ -134,11 +163,14 @@ class Runtime:
                 raise ModelResponseError('Native version query is not UTF-8') from None
             if not version.startswith(self.endpoint.expected_version + ' ') and version != self.endpoint.expected_version:
                 raise ModelResponseError('Native CLI version differs from the explicitly selected compatibility version')
+            self.diagnostics.native_version = self.endpoint.expected_version
+            self.trace.emit('native_version_verified', native_version=self.endpoint.expected_version)
             config = {'mcpServers': {}}
             if self.mcp:
                 # Env interpolation was live-checked on 2.1.289; retain the
                 # authentication check for every deployment/version. The bearer
-                # is never in argv, logs, history, or the model binding snapshot.
+                # is never in argv, ordinary logs/history, or binding snapshots.
+                # Opt-in raw native traces can still contain sensitive diagnostics.
                 config['mcpServers']['pythia'] = {
                     'type': 'http', 'url': self.mcp.url,
                     'headers': {'Authorization': 'Bearer ${PYTHIA_CLAUDE_MCP_TOKEN}'},
@@ -155,12 +187,15 @@ class Runtime:
             argv += self.sampling.cli_args()
             if self.names:
                 argv += ['--allowedTools', ','.join(self.names)]
+            self.diagnostics.invocation()
+            self.diagnostics.set_phase('native_startup')
             proc = await self._spawn(argv)
             self.tasks = [asyncio.create_task(self._stdout()), asyncio.create_task(self._stderr())]
             initial = {'type': 'user', 'message': {'role': 'user', 'content': snapshot.prompt()}}
             data = (json.dumps(initial, ensure_ascii=False, allow_nan=False) + '\n').encode()
             if len(data) > MAX_RECORD:
                 raise ModelResponseError('Cold-import record exceeds protocol limit')
+            self.trace.data('stdin', data)  # attempted write, not proof of native receipt
             proc.stdin.write(data)
             await asyncio.wait_for(proc.stdin.drain(), self.endpoint.startup_timeout_seconds)
         except asyncio.TimeoutError:
@@ -180,7 +215,9 @@ class Runtime:
             while True:
                 data = await self.proc.stderr.read(8192)
                 if not data:
+                    self.trace.emit('claude_eof', stream='stderr')
                     return
+                self.trace.data('stderr', data)
                 self.stderr_tail.extend(data)
                 del self.stderr_tail[:-65536]
         except asyncio.CancelledError:
@@ -197,14 +234,22 @@ class Runtime:
             self.loop.call_soon_threadsafe(self._failure, error)
 
     def _failure(self, error):
-        if self.error is None and not self.closed.is_set():
+        with self.diagnostics.lock:
+            if self.error is not None or self.closed.is_set():
+                return
+            diagnostic = self.diagnostics.snapshot(freeze=True)
             self.error = error
-            self.mailbox.close()
-            with contextlib.suppress(queue.Empty):
-                while True:
-                    self.events.get_nowait()
-            self._put(error)
-            asyncio.create_task(self._stop_process())
+            scope = self.trace.scope()
+        self.trace.emit('native_failure', scope=scope, exception_type=type(error).__name__,
+                        last_event_type=diagnostic.last_event_type,
+                        error_code=diagnostic.error_code, event_count=diagnostic.event_count,
+                        invocation_event_count=diagnostic.invocation_event_count)
+        self.mailbox.close()
+        with contextlib.suppress(queue.Empty):
+            while True:
+                self.events.get_nowait()
+        self._put(error)
+        asyncio.create_task(self._stop_process())
 
     def _inventory(self, record):
         tools = record.get('tools')
@@ -233,23 +278,51 @@ class Runtime:
                 raise ModelResponseError('Invalid native thinking telemetry')
         raise ModelResponseError('Unexpected system event, hook, or internal compaction')
 
+    async def _records(self):
+        """Bounded framing, observing partial bytes even without a trailing LF."""
+        buffer = bytearray()
+        search_from = 0
+        while True:
+            chunk = await self.proc.stdout.read(8192)
+            if not chunk:
+                self.trace.emit('claude_eof', stream='stdout')
+                if buffer:
+                    self.diagnostics.malformed('truncated_record')
+                    raise ModelResponseError('Truncated native protocol record')
+                return
+            self.diagnostics.received()
+            self.trace.data('stdout', chunk)
+            buffer.extend(chunk)
+            while True:
+                index = buffer.find(b'\n', search_from)
+                if index < 0:
+                    search_from = len(buffer)
+                    break
+                if index + 1 > MAX_RECORD:
+                    self.diagnostics.malformed('oversized_record')
+                    raise ModelResponseError('Native protocol record exceeds limit')
+                line = bytes(buffer[:index + 1])
+                del buffer[:index + 1]
+                search_from = 0
+                yield line
+            if len(buffer) > MAX_RECORD:
+                self.diagnostics.malformed('oversized_record')
+                raise ModelResponseError('Native protocol record exceeds limit')
+
     async def _stdout(self):
         assembler = Assembler()
         try:
-            while True:
-                line = await self.proc.stdout.readline()
-                if not line:
-                    if not self.result_seen:
-                        raise ModelTransportError('Native CLI exited without a successful run result')
-                    break
-                if not line.endswith(b'\n'):
-                    raise ModelResponseError('Truncated native protocol record')
-                value = decode(line)
+            async for line in self._records():
+                try:
+                    value = decode(line)
+                except (ModelResponseError, RecursionError):
+                    self.diagnostics.malformed('invalid_record')
+                    raise
+                label = self.diagnostics.record(value)
+                self.trace.emit('native_record', event_type=label)
                 if value.get('parent_tool_use_id') is not None:
                     raise ModelResponseError('Native subagent output is unsupported')
                 kind = value['type']
-                self.event_types.append(kind)
-                del self.event_types[:-64]
                 if self.result_seen:
                     raise ModelResponseError('Native records after terminal result')
                 error_code = value.get('error')
@@ -263,19 +336,28 @@ class Runtime:
                     raise ModelResponseError('Native CLI reported a model error')
                 if kind == 'system':
                     self._system(value)
+                    if value.get('subtype') in ('init', 'status'):
+                        self.diagnostics.set_phase('awaiting_model_message')
                     continue
                 if kind in ('assistant', 'stream_event'):
                     if not self.initialized:
                         raise ModelResponseError('Native model output before verified initialization')
+                    if assembler.current is not None or (kind == 'stream_event'
+                            and isinstance(value.get('event'), dict)
+                            and value['event'].get('type') == 'message_start'):
+                        self.diagnostics.set_phase('message_stream')
                     message = assembler.feed(value)
                     if message is not None:
+                        self.diagnostics.completed()
                         if not self.mailbox.all_returned() or self.final_message is not None:
                             raise ModelResponseError('Native continued before host handoff or run completion')
                         items, calls = message.sample_items(self.generation, self.names)
                         if calls:
                             self.mailbox.register(calls)
+                            self.diagnostics.set_phase('awaiting_host_results')
                             self._put((message, items, calls))
                         else:
+                            self.diagnostics.set_phase('awaiting_run_result')
                             self.final_message = (message, items, calls)
                 elif kind == 'user':
                     content = value.get('message', {}).get('content')
@@ -291,6 +373,7 @@ class Runtime:
                     if not self.initialized or assembler.current is not None or self.final_message is None or not self.mailbox.all_returned():
                         raise ModelResponseError('Native run ended with incomplete message/handoff state')
                     self.result_seen = True
+                    self.diagnostics.set_phase('awaiting_exit')
                     self.proc.stdin.close()
                 elif kind in ('control_request', 'control_response'):
                     # This print/HTTP profile uses no SDK control handshake.
@@ -304,7 +387,10 @@ class Runtime:
                         raise ModelResponseError('Progress for an unknown native tool')
                 else:
                     raise ModelResponseError('Unsupported native record type')
+            if not self.result_seen:
+                raise ModelTransportError('Native CLI exited without a successful run result')
             rc = await asyncio.wait_for(self.proc.wait(), self.endpoint.stop_timeout_seconds)
+            self.trace.exit(rc)
             await self.tasks[1]
             if rc != 0:
                 raise ModelTransportError('Native process failed after final result')
@@ -320,7 +406,13 @@ class Runtime:
         try:
             event = self.events.get(timeout=self.endpoint.generation_timeout_seconds)
         except queue.Empty:
-            raise ModelTimeoutError('Claude Relay generation wait exceeded deadline') from None
+            diagnostic = self.diagnostics.snapshot(freeze=True)
+            self.trace.emit('generation_timeout', budget_seconds=self.endpoint.generation_timeout_seconds,
+                            phase=diagnostic.phase, last_byte_age=diagnostic.last_byte_age,
+                            last_record_age=diagnostic.last_record_age,
+                            last_completion_age=diagnostic.last_completion_age)
+            raise ModelTimeoutError('Claude Relay generation wait exceeded deadline '
+                                    f'(budget={self.endpoint.generation_timeout_seconds:g}s)') from None
         if isinstance(event, Exception):
             raise event
         if self.closed.is_set():
@@ -340,19 +432,23 @@ class Runtime:
         if proc is None:
             return
         if proc.returncode is None:
+            self.trace.emit('process_signal', signal='TERM', client_pid=proc.pid)
             with contextlib.suppress(ProcessLookupError):
                 proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), self.endpoint.stop_timeout_seconds)
         except asyncio.TimeoutError:
+            self.trace.emit('process_signal', signal='KILL', client_pid=proc.pid)
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             await asyncio.wait_for(proc.wait(), self.endpoint.stop_timeout_seconds)
+        self.trace.exit(proc.returncode)
 
     def close(self):
         if self.closed.is_set():
             return
         self.closed.set()
+        self.trace.emit('continuation_retire')
         self.mailbox.close()
         with contextlib.suppress(queue.Full):
             self.events.put_nowait(ModelTransportError('Claude Relay continuation retired'))

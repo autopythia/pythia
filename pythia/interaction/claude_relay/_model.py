@@ -6,21 +6,24 @@ Pin expected_version and recheck the profile after native upgrades. Missing nati
 correlation or permissions fail closed, never by matching tool names/arguments.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import json
 from pathlib import Path
 import re
 import secrets
 import threading
+import time
 
 from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelSample, _timed_sample
 from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
 from ._context import Snapshot, record, handoff
+from ._cli_protocol import PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
+from .._debug_trace import DebugTrace, capture_trace_scope
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,10 @@ class ClaudeRelayEndpoint:
 class ClaudeRelayModel:
     auto_compaction_owner = 'host'
 
-    def __init__(self, endpoint: ClaudeRelayEndpoint):
+    def __init__(self, endpoint: ClaudeRelayEndpoint, *, trace=None):
+        if trace is not None and (not isinstance(trace, DebugTrace) or trace.event_path is None):
+            raise ModelConfigurationError('Claude Relay tracing requires a DebugTrace with events=True')
+        self.trace = trace
         self.endpoint = endpoint
         self.binding = endpoint.binding
         self._sample_lock = threading.Lock()
@@ -95,6 +101,7 @@ class ClaudeRelayModel:
 
     @_timed_sample
     def sample(self, context, *, tools=(), sample_params=None):
+        started = time.monotonic()
         with self._sample_lock:
             with self._state_lock:
                 if self._closed:
@@ -102,7 +109,17 @@ class ClaudeRelayModel:
                 runtime = self._runtime
                 epoch = self._epoch
                 previous_signature, acknowledged, pending = self._signature, self._acknowledged, self._pending
+            scope = {**capture_trace_scope(), 'sample_id': secrets.token_hex(16)}
+            executing = None
             try:
+                try:
+                    revision = len(context)
+                except Exception:
+                    revision = None  # diagnostics must not add a new context requirement
+                scope['model_context_revision'] = revision
+                scope.setdefault('context_revision', revision)  # retain Pi's source revision
+                if self.trace:
+                    self.trace.event('sample_begin', scope=scope, model=self.endpoint.model)
                 sampling = resolve_sampling(self.endpoint.binding, sample_params)
                 tools = tuple(tools)
                 try:
@@ -122,7 +139,9 @@ class ClaudeRelayModel:
                     # live catalog after the immutable signature was captured.
                     fixed_tools = tuple(ToolSpec(row['name'], row['description'], row['schema'])
                                         for row in json.loads(snapshot.catalog))
-                    runtime = Runtime(self.endpoint, fixed_tools, secrets.token_hex(12), sampling=sampling)
+                    runtime = Runtime(self.endpoint, fixed_tools, secrets.token_hex(12), sampling=sampling, trace=self.trace)
+                    executing = runtime
+                    runtime.begin_sample(started, scope)
                     with self._state_lock:
                         if self._closed or self._epoch != epoch:
                             runtime.close()
@@ -131,6 +150,10 @@ class ClaudeRelayModel:
                         self._signature = signature
                     runtime.start(snapshot)
                 else:
+                    executing = runtime
+                    runtime.begin_sample(started, scope)
+                    runtime.trace.emit('continuation_reuse')
+                    runtime.diagnostics.set_phase('awaiting_model_message')
                     with self._state_lock:
                         if self._epoch != epoch or self._runtime is not runtime:
                             raise ModelTransportError('Claude Relay was retired before handoff')
@@ -148,20 +171,53 @@ class ClaudeRelayModel:
                                      provider_turn_id=message.id)
                 if not calls:
                     self.retire()
+                runtime.trace.emit('sample_end', scope={**runtime.trace.scope(), **scope},
+                                   stop_reason=message.stop_reason,
+                                   input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens)
+                if calls:
+                    runtime.trace.parked()
                 return sample
             except ModelError as error:
                 if error.failure is None:
+                    diagnostic = executing.diagnostics.snapshot(freeze=True) if executing is not None else None
+                    message = str(error)
+                    if diagnostic is not None:
+                        message = (f'{message[:512]} ({diagnostic.detail()}; codec={PROFILE}; '
+                                   f'last_event={diagnostic.last_event_type or "none"})')
                     error.failure = ModelFailure(
-                        category=type(error).__name__, message=str(error), provider='claude-relay',
+                        category=type(error).__name__, message=message, provider='claude-relay',
                         model=self.endpoint.model, auth_source='runtime',
-                        event_types=tuple(runtime.event_types) if runtime is not None else (),
-                        event_count=len(runtime.event_types) if runtime is not None else 0,
+                        event_types=diagnostic.event_types if diagnostic else (),
+                        event_count=diagnostic.event_count if diagnostic else 0,
+                        last_event_type=diagnostic.last_event_type if diagnostic else None,
+                        error_code=diagnostic.error_code if diagnostic else None,
+                        elapsed_seconds=diagnostic.elapsed_seconds if diagnostic else time.monotonic() - started,
                     )
-                self.retire()
+                if self.trace:
+                    self.trace.event('sample_end', scope=scope,
+                                     runtime_id=runtime.generation if runtime else None,
+                                     exception_type=type(error).__name__,
+                                     last_event_type=error.failure.last_event_type,
+                                     elapsed_seconds=error.failure.elapsed_seconds,
+                                     event_count=error.failure.event_count, error_code=error.failure.error_code)
+                self._retire_after_failure(error)
                 raise
-            except BaseException:
-                self.retire()
+            except BaseException as error:
+                if self.trace:
+                    self.trace.event('sample_end', scope=scope, exception_type=type(error).__name__)
+                self._retire_after_failure(error)
                 raise
+
+    def _retire_after_failure(self, error):
+        try:
+            self.retire()
+        except Exception as cleanup:
+            # Keep the causal error, but never claim that teardown succeeded.
+            if isinstance(error, ModelError) and error.failure is not None:
+                error.failure = replace(error.failure, message=error.failure.message[:880]
+                                        + f'; cleanup failed ({type(cleanup).__name__[:64]})')
+            if self.trace:
+                self.trace.event('cleanup_failure', exception_type=type(cleanup).__name__)
 
     def retire(self):
         """Cancel a live continuation without waiting for the sampling lock."""

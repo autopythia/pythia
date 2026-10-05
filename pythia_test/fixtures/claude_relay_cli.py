@@ -103,6 +103,26 @@ def tool_result(block):
 
 
 emit({'type': 'system', 'subtype': 'init', 'tools': names + (['Bash'] if text == 'inventory-bad' else []), 'mcp_servers': servers})
+if text in ('trace-ping', 'trace-error', 'trace-missing', 'trace-malformed'):
+    os.write(2, b'private-native-stderr\xff\n')
+    emit({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {'id': 'failing'}}})
+    for _ in range(90):
+        emit({'type': 'system', 'subtype': 'thinking_tokens', 'estimated_tokens': 50, 'estimated_tokens_delta': 1})
+    if text == 'trace-malformed':
+        os.write(1, b'{private-invalid-json\xff}\n')
+    else:
+        event = ({'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'PRIVATE_UPSTREAM_BODY'}}
+                 if text == 'trace-error' else {'type': 'ping'} if text == 'trace-ping' else {})
+        emit({'type': 'stream_event', 'event': event})
+    sys.stdin.read()
+    raise SystemExit(0)
+if text == 'trace-progress':
+    os.write(1, b'{')
+    for _ in range(200):
+        os.write(1, b' ')
+        time.sleep(.01)  # receive activity, but never a complete model message
+    sys.stdin.read()
+    raise SystemExit(0)
 if text in ('system-compacting', 'system-compact-boundary', 'system-hook'):
     record = {'type': 'system', 'subtype': {'system-compacting': 'status',
               'system-compact-boundary': 'compact_boundary', 'system-hook': 'hook_started'}[text]}

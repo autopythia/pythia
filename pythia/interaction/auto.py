@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -32,6 +33,7 @@ from ._auto_board import Board, BoardError, BoardService, atomic_text
 from ._auto_config import (DEFAULTS, NAMES, ROLE_INDEX, build_parser, load_saved_config,
                            namespace, resolve_config, saved_document)
 from ._model_binding_debug import save_debug_model_bindings
+from ._debug_trace import DebugTrace
 from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
 from ._prompt import load_prompt
@@ -275,7 +277,8 @@ class _Binding:
 
 def _model_factory(index, args):
     del index
-    return build_model(args)
+    trace = getattr(args, "_debug_trace", None)
+    return build_model(args) if trace is None else build_model(args, trace=trace)
 
 
 def _read_items(view, start, limit):
@@ -393,8 +396,9 @@ def _compact(session, index, model, environment, config, context, sample_params)
     session._phase(index, "compacting")
     compactor = create_default_compactor(model, config.compaction_settings())
     try:
-        result = compactor.compact(context.copy(), tools=environment.tool_specs,
-                                   sample_params=sample_params)
+        with session._traced_operation(index, "compact", context_revision=len(context)):
+            result = compactor.compact(context.copy(), tools=environment.tool_specs,
+                                       sample_params=sample_params)
     except NothingToCompact:
         return False
     if not isinstance(result, CompactionResult):
@@ -415,13 +419,15 @@ class _Session:
     def __init__(self, path, settings, *, board_port=0,
                  model_factory=_model_factory, environment_factory=_environment_factory,
                  resume=False, enable_board_auth=True,
-                 debug_save_model_binding=False,
+                 debug_save_model_binding=False, debug_trace=False,
                  enable_experimental_worker_board=False,
                  watcher_max_resumes=None):
         if type(enable_board_auth) is not bool:
             raise TypeError("enable_board_auth must be a bool.")
         if type(debug_save_model_binding) is not bool:
             raise TypeError("debug_save_model_binding must be a bool.")
+        if type(debug_trace) is not bool:
+            raise TypeError("debug_trace must be a bool.")
         if type(enable_experimental_worker_board) is not bool:
             raise TypeError("enable_experimental_worker_board must be a bool.")
         if watcher_max_resumes is not None and (
@@ -452,6 +458,10 @@ class _Session:
         self._resume = resume
         self._enable_board_auth = enable_board_auth
         self._debug_save_model_binding = debug_save_model_binding
+        self._debug_trace = debug_trace
+        self._traces = {}
+        self._trace_run_id = uuid.uuid4().hex
+        self._trace_to_events = False
         self._started = False
         self._resumed = False
         self._baseline = 0
@@ -554,6 +564,17 @@ class _Session:
                             self._done[record.reply_to] = record.success
             else:
                 (self.path / "contexts").mkdir(mode=0o700)
+            if self._debug_trace:
+                for index in self.roles:
+                    if index == -1 and not self._supervising:
+                        continue
+                    trace = DebugTrace.open(self.path / "contexts" / f"{index}.jsonl",
+                                            events=True, run_id=self._trace_run_id,
+                                            context_id=index, role=NAMES[index])
+                    self._traces[index] = trace
+                    print(f"Debug trace #{index}: {trace.request_path}, {trace.response_path}, "
+                          f"{trace.event_path} (append-only; sensitive payloads and credentials).",
+                          file=sys.stderr, flush=True)
             atomic_text(self.path / "config.json", json.dumps(saved_document(
                 {i: self.settings[i] for i in self.roles}, self.sources,
             ), indent=2, ensure_ascii=False) + "\n")
@@ -600,6 +621,28 @@ class _Session:
         except BaseException:
             self.close()
             raise
+
+    def _trace_warning(self, index):
+        trace = self._traces.get(index)
+        warning = trace.take_warning() if trace is not None else None
+        if warning:
+            with suppress(OSError, ValueError):
+                if self._trace_to_events:
+                    self._emit(index, (DisplayItem(warning),), "debug")
+                else:
+                    print(f"#{index}: {warning}", file=sys.stderr, flush=True)
+
+    @contextmanager
+    def _traced_operation(self, index, op, **tags):
+        trace = self._traces.get(index)
+        if trace is None:
+            yield
+            return
+        try:
+            with trace.operation(op, **tags):
+                yield
+        finally:
+            self._trace_warning(index)
 
     def _emit(self, index, items, kind="output"):
         with self._changed:
@@ -677,6 +720,8 @@ class _Session:
         try:
             args = namespace(self.settings[index], self.catalog, binding=self.bindings[index])
             vars(args).update(self._relay_options)
+            if index in self._traces:
+                args._debug_trace = self._traces[index]  # invocation only, never saved settings
             config = InteractionConfig.from_namespace(args).snapshot()
             service = self.service
             binding = None if service is None else _Binding(index, service.client(str(index)))
@@ -969,10 +1014,11 @@ class _Session:
                 self._check_running()
             self._phase(index, "sampling")
             try:
-                sample = model.sample(
-                    context.copy(), tools=environment.tool_specs,
-                    sample_params=sample_params,
-                )
+                with self._traced_operation(index, "sample", context_revision=len(context)):
+                    sample = model.sample(
+                        context.copy(), tools=environment.tool_specs,
+                        sample_params=sample_params,
+                    )
             except ModelError as exc:
                 contribution = (*exc.completed_items, *((exc.failure,) if exc.failure is not None else ()))
                 if contribution:
@@ -1117,33 +1163,38 @@ class _Session:
             if self._closed:
                 return
             self._closed = True
-            self.request_stop()
-            # Producers finish before the watcher sentinel and HTTP shutdown.
-            for index in (1, 2):
-                thread = self._threads.get(index)
-                if thread is not None and thread.ident is not None:
-                    thread.join()
-            # The yield channel's transport: no yield can follow this sentinel.
-            self._watch_queue.put(None)
-            watcher = self._threads.get(-1)
-            if watcher is not None and watcher.ident is not None:
-                watcher.join()
-            if self.service is not None:
-                pending = sum(r.kind in {"user", "plan"} and r.record_id not in self._done
-                              for r in self.service.board.records())
-                if pending:
-                    self._emit(None, (DisplayItem(
-                        f"Stopped with {pending} queued/unresolved tasks in the saved board; they were not executed or replayed."),))
-                self.service.close()
-            else:
-                # Owners have exited, so every task without an outcome never started.
-                with self._changed:
-                    queued = sum(task.record_id not in self._done for task in self._tasks)
-                if queued:
-                    self._emit(None, (DisplayItem(
-                        f"Stopped with {queued} queued user tasks that were not executed; "
-                        "without the board, queued tasks are not saved or replayed."),))
-            self._unlock()
+            try:
+                self.request_stop()
+                # Producers finish before the watcher sentinel and HTTP shutdown.
+                for index in (1, 2):
+                    thread = self._threads.get(index)
+                    if thread is not None and thread.ident is not None:
+                        thread.join()
+                # The yield channel's transport: no yield can follow this sentinel.
+                self._watch_queue.put(None)
+                watcher = self._threads.get(-1)
+                if watcher is not None and watcher.ident is not None:
+                    watcher.join()
+                if self.service is not None:
+                    pending = sum(r.kind in {"user", "plan"} and r.record_id not in self._done
+                                  for r in self.service.board.records())
+                    if pending:
+                        self._emit(None, (DisplayItem(
+                            f"Stopped with {pending} queued/unresolved tasks in the saved board; they were not executed or replayed."),))
+                    self.service.close()
+                else:
+                    # Owners have exited, so every task without an outcome never started.
+                    with self._changed:
+                        queued = sum(task.record_id not in self._done for task in self._tasks)
+                    if queued:
+                        self._emit(None, (DisplayItem(
+                            f"Stopped with {queued} queued user tasks that were not executed; "
+                            "without the board, queued tasks are not saved or replayed."),))
+            finally:
+                for index, trace in self._traces.items():
+                    trace.close()
+                    self._trace_warning(index)
+                self._unlock()
 
 
 def _display_events(session, events):
@@ -1386,9 +1437,11 @@ def main(argv=None):
         session = _Session(save_path, settings, board_port=args.board_port,
                            resume=args.resume, enable_board_auth=args.enable_board_auth,
                            debug_save_model_binding=args.debug_save_model_binding,
+                           debug_trace=args.debug_trace,
                            enable_experimental_worker_board=args.enable_experimental_worker_board,
                            watcher_max_resumes=args.watcher_max_resumes)
         session.start()
+        session._trace_to_events = not args.headless and args.prompt is None
         if args.enable_experimental_worker_board:
             if not args.enable_board_auth:
                 print("Warning: board authentication is disabled; local clients can read board data "

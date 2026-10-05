@@ -8,6 +8,7 @@ import secrets
 import socket
 import threading
 import time
+import uuid
 
 from ..model import ModelResponseError
 from ..model_catalog import parse_json_value, thaw_json
@@ -34,7 +35,8 @@ def pointer(document, path):
 
 
 class Mailbox:
-    def __init__(self, tools, *, wait_seconds=1800):
+    def __init__(self, tools, *, wait_seconds=1800, trace=None):
+        self.trace = trace
         self.tools = {t.name: t for t in tools}
         if len(self.tools) != len(tools):
             raise ValueError('duplicate tool names')
@@ -67,6 +69,8 @@ class Mailbox:
                 if name not in self.tools:
                     raise self.fail('Native tool is not in the current catalog')
                 self.slots[ident] = dict(name=name, args=canonical(args), claimed=False, returned=False, result=None)
+            if self.trace:
+                self.trace.register(calls)
             self.condition.notify_all()
 
     def release(self, results):
@@ -89,6 +93,8 @@ class Mailbox:
                 prepared[ident] = value
             for ident, value in prepared.items():
                 self.slots[ident]['result'] = value
+            if self.trace:
+                self.trace.emit('mailbox_release', native_tool_use_ids=list(prepared))
             self.condition.notify_all()
 
     def call(self, ident, name, args):
@@ -116,6 +122,8 @@ class Mailbox:
             if slot['claimed'] or slot['name'] != name or slot['args'] != expected:
                 raise self.fail('MCP callback does not match its native tool use')
             slot['claimed'] = True
+            if self.trace:
+                self.trace.emit('mailbox_claim', scope=self.trace.scope(ident), native_tool_use_id=ident)
             deadline = time.monotonic() + self.wait_seconds
             while slot['result'] is None and not self.closed:
                 remaining = deadline - time.monotonic()
@@ -125,6 +133,8 @@ class Mailbox:
             if self.closed:
                 raise self.failure or ModelResponseError('Mailbox retired')
             slot['returned'] = True
+            if self.trace:
+                self.trace.emit('mailbox_return', scope=self.trace.scope(ident), native_tool_use_id=ident)
             return slot['result']
 
     def unreleased(self):
@@ -196,17 +206,35 @@ class MCPServer:
             def setup(self):
                 super().setup()
                 self.connection.settimeout(10)
+                self.trace_id = uuid.uuid4().hex
+                self.trace_scope = owner.mailbox.trace.scope() if owner.mailbox.trace else {}
+                self.trace_authorized = False
+            def audit(self, kind, data=None, **fields):
+                trace = owner.mailbox.trace
+                if trace:
+                    fields.update(mcp_exchange_id=self.trace_id)
+                    if data is not None:
+                        trace.payload(kind, data, scope=self.trace_scope, **fields)
+                    else:
+                        trace.emit(kind, scope=self.trace_scope, **fields)
             def log_message(self, *args):
                 pass
             def respond(self, status, value=None):
                 data = b'' if value is None else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+                self.audit('mcp_response' if self.trace_authorized else 'mcp_rejected',
+                           data=data if self.trace_authorized else None, status=status)
                 self.send_response(status)
                 self.send_header('Content-Length', str(len(data)))
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Connection', 'close')
                 self.end_headers()
-                if data:
-                    self.wfile.write(data)
+                try:
+                    if data:
+                        self.wfile.write(data)
+                    self.audit('mcp_response_written', status=status)
+                except OSError as error:
+                    self.audit('mcp_response_write_failed', exception_type=type(error).__name__)
+                    raise
                 self.close_connection = True
             def authorized(self):
                 if self.path != '/mcp' or self.headers.get_all('Host') != [f'127.0.0.1:{owner.server.server_port}']:
@@ -222,6 +250,7 @@ class MCPServer:
                 if owner.closed:
                     self.respond(410)
                     return False
+                self.trace_authorized = True
                 return True
             def do_GET(self):
                 if self.authorized():
@@ -242,6 +271,7 @@ class MCPServer:
                 rpc_code = -32700
                 try:
                     raw = self.rfile.read(int(lengths[0]))
+                    self.audit('mcp_request', data=raw)
                     if len(raw) != int(lengths[0]):
                         raise ValueError()
                     message = parse_json_value(raw.decode())
@@ -256,6 +286,12 @@ class MCPServer:
                 except (ValueError, UnicodeError):
                     self.respond(400, {'jsonrpc': '2.0', 'id': None, 'error': {'code': rpc_code, 'message': 'Invalid JSON-RPC request'}})
                     return
+                native_id = pointer(message, owner.tool_id_pointer)
+                if owner.mailbox.trace:
+                    self.trace_scope = owner.mailbox.trace.scope(native_id)
+                self.audit('mcp_request_meta', method=message['method'], rpc_id=ident,
+                           native_tool_use_id=native_id if isinstance(native_id, str) else None,
+                           protocol_version=self.headers.get('MCP-Protocol-Version'))
                 try:
                     result = owner.dispatch(message, self.headers.get('MCP-Protocol-Version'))
                 except (ValueError, ModelResponseError) as error:

@@ -1,4 +1,4 @@
-"""Opt-in verbatim HTTP debug trace; never filtered, never resume authority.
+"""Opt-in HTTP and incremental event traces; never resume authority.
 
 Each traced exchange appends one ``http_request`` line to ``STEM.trace.req.jsonl``
 before the request is sent, and one ``http_response`` line to
@@ -14,11 +14,17 @@ statuses, headers, body bytes, and exceptions as without tracing. It never
 raises its own errors into the caller: adapters treat an ``OSError`` from the
 opener as a retryable connection failure. After its first internal failure,
 tracing stops and a one-time warning is kept for the frontend to report.
+
+Frontends also opt into ``STEM.trace.events.jsonl`` for lifecycle/native/MCP
+events. A byte-bounded queue keeps its writer off the native IO paths. HTTP
+payloads remain verbatim; selected MCP metadata deliberately omits auth headers.
+All payload-bearing traces are sensitive, including raw native stdout/stderr.
 """
 
 from __future__ import annotations
 
 import base64
+from collections import deque
 from contextlib import contextmanager
 import contextvars
 from datetime import datetime
@@ -29,6 +35,7 @@ import os
 from pathlib import Path
 import stat
 import threading
+import time
 import traceback
 from typing import Any
 from typing import Callable
@@ -40,6 +47,9 @@ import uuid
 
 TRACE_REQUEST_SUFFIX = ".trace.req.jsonl"
 TRACE_RESPONSE_SUFFIX = ".trace.res.jsonl"
+TRACE_EVENT_SUFFIX = ".trace.events.jsonl"
+MAX_EVENT_QUEUE_BYTES = 8 * 1024 * 1024
+MAX_EVENT_QUEUE_ITEMS = 512
 
 
 def debug_trace_paths(save_path) -> tuple[Path, Path]:
@@ -64,8 +74,10 @@ def _timestamp() -> str:
 class _Operation:
     """Retry counters for the exchanges of one traced frontend operation."""
 
-    def __init__(self, op: str) -> None:
+    def __init__(self, op: str, tags=None) -> None:
         self.op = op
+        self.id = uuid.uuid4().hex
+        self.tags = dict(tags or {})
         self._lock = threading.Lock()
         self._counts: dict[Optional[str], int] = {}
 
@@ -83,7 +95,7 @@ _OPERATION: contextvars.ContextVar[Optional[_Operation]] = contextvars.ContextVa
 
 
 @contextmanager
-def trace_operation(op: str) -> Iterator[None]:
+def trace_operation(op: str, **tags) -> Iterator[None]:
     """Tag exchanges started in this context (including ``asyncio.to_thread``).
 
     Within one operation, ``retry`` counts the preceding exchanges with the
@@ -92,15 +104,35 @@ def trace_operation(op: str) -> Iterator[None]:
     """
     if not isinstance(op, str) or not op:
         raise ValueError("trace operation must be a non-empty string")
-    token = _OPERATION.set(_Operation(op))
+    token = _OPERATION.set(_Operation(op, tags))
     try:
         yield
     finally:
         _OPERATION.reset(token)
 
 
+def capture_trace_scope():
+    """Copy operation metadata for explicit transfer to persistent IO threads."""
+    scope = _OPERATION.get()
+    return ({"op": None, "operation_id": None} if scope is None else
+            {**scope.tags, "op": scope.op, "operation_id": scope.id})
+
+
 def _private_opener(path, flags):
-    return os.open(path, flags | getattr(os, "O_CLOEXEC", 0), 0o600)
+    if Path(path).is_symlink():
+        raise ValueError(f"debug trace destination must not be a symlink: {path}")
+    fd = os.open(path, flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"debug trace destination must be a regular file: {path}")
+        if os.name == 'posix' and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise ValueError(f"debug trace destination must be owned by this user and private (0600): {path}")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _prepare_log(path: Path) -> None:
@@ -108,11 +140,7 @@ def _prepare_log(path: Path) -> None:
     if path.exists() and not path.is_file():
         raise ValueError(f"debug trace destination must be a regular file: {path}")
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-        )
+        descriptor = _private_opener(path, os.O_RDWR | os.O_CREAT | os.O_APPEND)
     except OSError as exc:
         raise ValueError(
             f"cannot open debug trace {path}: {exc.strerror or exc}"
@@ -198,26 +226,119 @@ class _FailingReader(io.RawIOBase):
 
 
 class DebugTrace:
-    """Append-only request/response logs derived from one interaction save."""
+    """Append-only HTTP logs and optional event sidecar for one context save."""
 
-    def __init__(self, request_path, response_path) -> None:
+    def __init__(self, request_path, response_path, *, event_path=None, run_id=None,
+                 context_id=None, role=None) -> None:
         self.request_path = Path(request_path)
         self.response_path = Path(response_path)
         self._lock = threading.RLock()
+        self._write_lock = threading.RLock()
         self._failed = False
         self._warning: Optional[str] = None
+        self.event_path = None if event_path is None else Path(event_path)
+        self.run_id = run_id or uuid.uuid4().hex
+        self.context_id, self.role = context_id, role
+        self._event_condition = threading.Condition()
+        self._event_queue = deque()
+        self._event_bytes = 0
+        self._event_sequence = 0
+        self._closed = False
+        self._writer = None
 
     @classmethod
-    def open(cls, save_path) -> "DebugTrace":
-        """Create both logs, or raise ValueError before any request is traced."""
-        trace = cls(*debug_trace_paths(save_path))
-        for path in (trace.request_path, trace.response_path):
+    def open(cls, save_path, *, events=False, run_id=None, context_id=None, role=None) -> "DebugTrace":
+        """Prepare private logs before model construction; optionally start an event writer."""
+        trace = cls(*debug_trace_paths(save_path),
+                    event_path=Path(save_path).with_suffix(TRACE_EVENT_SUFFIX) if events else None,
+                    run_id=run_id, context_id=context_id, role=role)
+        for path in (trace.request_path, trace.response_path, trace.event_path):
+            if path is None:
+                continue
             _prepare_log(path)
+        if events:
+            trace._writer = threading.Thread(target=trace._write_events, name='debug-trace-writer', daemon=True)
+            trace._writer.start()
         return trace
+
+    def identity(self):
+        return {"run_id": self.run_id, "context_id": self.context_id, "role": self.role}
+
+    @contextmanager
+    def operation(self, op, **tags):
+        started = time.monotonic()
+        error = None
+        with trace_operation(op, **tags):
+            self.event('operation_begin')
+            try:
+                yield
+            except BaseException as exc:
+                error = type(exc).__name__
+                raise
+            finally:
+                self.event('operation_end', exception_type=error, elapsed_seconds=time.monotonic() - started)
+
+    def event(self, kind, *, scope=None, data=None, **fields):
+        """Best-effort incremental capture, never blocking on filesystem IO.
+
+        ``data`` is private opt-in payload, not safe ModelFailure metadata.
+        Scope must be passed explicitly by persistent/background runtimes.
+        """
+        if self.event_path is None or self._failed or self._closed:
+            return
+        try:
+            row = {**self.identity(), **(capture_trace_scope() if scope is None else scope), **fields,
+                   "schema": "pythia.debug-event.v1", "type": kind,
+                   "timestamp": _timestamp(), "monotonic_seconds": time.monotonic()}
+            if data is not None:
+                row.update(_payload_fields(data))
+            with self._event_condition:
+                if self._closed or self._failed:
+                    return
+                self._event_sequence += 1
+                row['sequence'] = self._event_sequence
+                line = (json.dumps(row, ensure_ascii=True, allow_nan=False) + '\n').encode()
+                if (len(line) + self._event_bytes > MAX_EVENT_QUEUE_BYTES
+                        or len(self._event_queue) >= MAX_EVENT_QUEUE_ITEMS):
+                    self._fail('Warning: debug trace disabled; event queue full; trace is incomplete.')
+                    return
+                self._event_queue.append(line)
+                self._event_bytes += len(line)
+                self._event_condition.notify()
+        except Exception:
+            self._fail('Warning: debug trace disabled after an event-recording failure; trace is incomplete.')
+
+    def _write_events(self):
+        while True:
+            with self._event_condition:
+                while not self._event_queue and not self._closed:
+                    self._event_condition.wait()
+                if not self._event_queue:
+                    return
+                line = self._event_queue.popleft()
+                # Count the in-flight row against the bound until the write ends.
+            if not self._failed:
+                try:
+                    with open(self.event_path, 'ab', opener=_private_opener) as stream:
+                        stream.write(line)
+                except Exception as exc:
+                    self._fail(f'Warning: debug trace disabled; event write failed ({type(exc).__name__}); trace is incomplete.')
+            with self._event_condition:
+                self._event_bytes -= len(line)
+
+    def close(self, timeout=2):
+        """Call after model/IO cleanup. Never indefinitely join a blocked writer."""
+        with self._event_condition:
+            self._closed = True
+            self._event_condition.notify_all()
+        if self._writer is not None:
+            self._writer.join(timeout)
+            if self._writer.is_alive():
+                self._fail('Warning: debug trace shutdown timed out; trace may be incomplete.')
 
     @property
     def enabled(self) -> bool:
-        return not self._failed
+        return not self._failed and not self._closed
 
     def opener(
         self,
@@ -226,6 +347,10 @@ class DebugTrace:
         op: Optional[str] = None,
     ) -> "TracingOpener":
         """Wrap ``inner``; a fixed ``op`` overrides the ambient operation tag."""
+        if isinstance(inner, TracingOpener) and inner.trace is self:
+            if op is None or op == inner.op:
+                return inner
+            inner = inner.inner
         return TracingOpener(self, inner, op=op)
 
     def take_warning(self) -> Optional[str]:
@@ -241,7 +366,7 @@ class DebugTrace:
                 self._warning = message
 
     def _write(self, path: Path, row: dict[str, Any]) -> None:
-        with self._lock:
+        with self._write_lock:
             if self._failed:
                 return
             try:
@@ -263,7 +388,7 @@ class DebugTrace:
                 )
 
     def _begin(self, request: Any, fixed_op: Optional[str]) -> Optional["_Exchange"]:
-        if self._failed:
+        if self._failed or self._closed:
             return None
         try:
             scope = _OPERATION.get()
@@ -307,6 +432,7 @@ class _Exchange:
         url: Optional[str],
     ) -> None:
         self._trace = trace
+        self._scope = capture_trace_scope()
         self._op = op
         self._id = uuid.uuid4().hex
         self._retry = retry
@@ -317,7 +443,7 @@ class _Exchange:
         self._lock = threading.Lock()
 
     def _common(self) -> dict[str, Any]:
-        return {"op": self._op, "id": self._id, "retry": self._retry}
+        return {**self._trace.identity(), **self._scope, "op": self._op, "id": self._id, "retry": self._retry}
 
     def write_request(self, headers: Any, data: Any) -> None:
         row = {
@@ -558,7 +684,9 @@ __all__ = [
     "DebugTrace",
     "TRACE_REQUEST_SUFFIX",
     "TRACE_RESPONSE_SUFFIX",
+    "TRACE_EVENT_SUFFIX",
     "TracingOpener",
     "debug_trace_paths",
     "trace_operation",
+    "capture_trace_scope",
 ]

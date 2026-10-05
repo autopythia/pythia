@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Iterable
 from contextlib import contextmanager
 from contextlib import nullcontext
+from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import field
 import json
@@ -23,7 +24,6 @@ import signal
 import sys
 import threading
 import time
-import urllib.request
 import uuid
 from typing import Optional
 from typing import Sequence
@@ -34,7 +34,6 @@ from ._cli_editor import Editor
 from ._cli_editor import safe_text
 from ._cli_terminal import PosixTerminal
 from ._debug_trace import DebugTrace
-from ._debug_trace import trace_operation
 from ._prompt import load_prompt
 from .codex_auth import CodexAuthUnavailable
 from .compaction import CompactionError
@@ -207,30 +206,26 @@ class _UIState:
 
 
 def _build_model(args: argparse.Namespace, trace: Optional[DebugTrace]) -> Model:
-    """Build the model; with --debug-trace, route its HTTP through the trace."""
+    """Build with backend-aware tracing; account user tools retain their opener."""
     if trace is None:
         return build_model(args)
-    return build_model(
-        args,
-        opener=trace.opener(urllib.request.urlopen),
-        # Codex OAuth refresh during a sample's 401 recovery.
-        auth_opener=trace.opener(default_account_opener(), op="auth_refresh"),
-    )
+    return build_model(args, trace=trace)
 
 
 @contextmanager
-def _traced_operation(state: _UIState, op: str):
+def _traced_operation(state: _UIState, op: str, **tags):
     """Tag the enclosed worker call's HTTP exchanges; report trace failures."""
     if state.trace is None:
         yield
         return
     try:
-        with trace_operation(op):
+        with state.trace.operation(op, **tags):
             yield
     finally:
         warning = state.trace.take_warning()
         if warning is not None:
-            state.notice(warning)
+            with suppress(OSError, ValueError):
+                state.notice(warning)
 
 
 async def _checkpoint(context: InteractionContext, state: _UIState, path: Path) -> None:
@@ -453,7 +448,7 @@ async def _compact_user_tool(
                 compactor = create_default_compactor(
                     model, snapshot.compaction_settings(),
                 )
-                with _traced_operation(state, "compact"):
+                with _traced_operation(state, "compact", context_revision=len(source_context)):
                     compaction = await asyncio.to_thread(
                         compactor.compact,
                         source_context,
@@ -554,7 +549,7 @@ async def _user_tool(
             }),
         )
         state.set_phase(f"user tool: {intent.name}")
-        with _traced_operation(state, intent.name):
+        with _traced_operation(state, intent.name, context_revision=len(context)):
             outcome = await asyncio.to_thread(
                 environment.execute_tool_calls, (call.call,),
             )
@@ -645,7 +640,7 @@ async def _auto_compact(
     state.set_phase("compacting")
     compactor = create_default_compactor(model, turn_config.compaction_settings())
     try:
-        with _traced_operation(state, "compact"):
+        with _traced_operation(state, "compact", context_revision=len(context)):
             compaction = await asyncio.to_thread(
                 compactor.compact,
                 context.copy(),
@@ -707,7 +702,7 @@ async def _turn_body(
                 return
         state.set_phase("sampling")
         try:
-            with _traced_operation(state, "sample"):
+            with _traced_operation(state, "sample", context_revision=len(context)):
                 sample = await asyncio.to_thread(
                     model.sample,
                     context.copy(),
@@ -1147,8 +1142,8 @@ def _startup_notices(state, args, path):
     if state.trace is not None:
         state.notice(
             f"Debug trace: {state.trace.request_path} and "
-            f"{state.trace.response_path} (append-only; verbatim HTTP "
-            "payloads and headers, including credentials)."
+            f"{state.trace.response_path}; events: {state.trace.event_path} "
+            "(append-only; sensitive payloads, headers, native/MCP data and possibly credentials)."
         )
     if args.enable_default_tools:
         state.notice(
@@ -1318,10 +1313,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--debug-trace",
         action="store_true",
         help=(
-            "append every HTTP request and response (model sampling and "
-            "compaction, /quota, and Codex OAuth) verbatim, including "
-            "credentials, to the --save path with its extension replaced by "
-            ".trace.req.jsonl and .trace.res.jsonl; "
+            "append HTTP requests/responses and native/MCP events, including "
+            "sensitive payloads and credentials, to the --save path with its extension replaced by "
+            ".trace.req.jsonl, .trace.res.jsonl and .trace.events.jsonl; "
             "never truncated, even when --resume=False replaces the save; launch-only"
         ),
     )
@@ -1331,6 +1325,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     model = None
+    trace = None
     try:
         catalog = frontend_catalog(args)
         if args.list_models:
@@ -1356,7 +1351,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "--headless requires --prompt or --prompt-file, or "
                 "--resume with --instructions and an existing save."
             )
-        trace = DebugTrace.open(save_path) if args.debug_trace else None
+        trace = DebugTrace.open(save_path, events=True, context_id=1, role="main") if args.debug_trace else None
         try:
             model = _build_model(args, trace)
         except CodexAuthUnavailable:
@@ -1383,7 +1378,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"interaction CLI failed: {exc}", file=sys.stderr)
         return 1
     finally:
-        close_model(model)
+        try:
+            close_model(model)
+        finally:
+            if trace is not None:
+                trace.close()
+                warning = trace.take_warning()
+                if warning:
+                    with suppress(OSError, ValueError):
+                        print(warning, file=sys.stderr)
 
 
 if __name__ == "__main__":

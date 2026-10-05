@@ -385,10 +385,33 @@ abandoning it and `close()` in `finally` on final shutdown.
 | Missing native tool ID | Verify the raw native metadata path. The default was observed with CLI 2.1.289. Never substitute JSON-RPC IDs or match by arguments/order. |
 | File-backed config/system prompt required | Remote staging is not implemented. A cannot write B's 0700 home; do not share A's cwd or `/tmp` to work around it. |
 
-`--debug-trace` is intentionally rejected: it traces HTTP providers, not this
-subprocess/MCP protocol. The library's `model.stderr_tail` is a bounded **private**
-diagnostic buffer retained after failure. Inspect/print it only deliberately;
-it can contain sensitive native diagnostics and is never automatically saved.
+### Diagnose a native stream failure
+
+Safe failure records now include nested event identities (for example
+`stream_event/error`), a bounded event tail, the true attempt event count,
+structured error code and elapsed time. A timeout message includes the configured
+generation budget and recent stdout-byte/record activity. The generation timeout
+still waits for a completed model message; activity does not reset it.
+
+For the next launch, add **`--debug-trace`** to CLI or auto. CLI writes
+`SAVE_STEM.trace.events.jsonl`; auto writes
+`SAVE_DIR/contexts/1.trace.events.jsonl` for main and the analogous sidecars for
+other model-running roles. HTTP-backed roles also use `.trace.req.jsonl` /
+`.trace.res.jsonl`. The flag must be repeated on resume and requires no broker
+restart. It cannot recover the event missing from an older saved failure.
+
+**These are sensitive, opt-in traces, not safe transcripts:** native
+stdin/stdout/stderr and MCP JSON bodies are captured incrementally before parsing.
+HTTP traces remain verbatim, including credentials. MCP Authorization headers
+and environment variables are not deliberately dumped, but native/tool text can
+still contain secrets. Logs are private (0600), append-only and can grow large;
+unsafe existing targets are refused. Trace write failures warn without replaying
+tools or model requests. No trace is used as conversation or resume state.
+
+This observes A's relay pipes and MCP endpoint, not Claude's upstream HTTPS.
+The library's bounded `model.stderr_tail` remains private; do not print it
+automatically. See the [diagnostics/tracing design](../doc/interaction-diagnostics-tracing-plan.md)
+for event correlation, lifecycle and verification details.
 
 Ctrl-C/termination of a client retires its invocation; loss of A's driver or B's
 broker also triggers child cleanup. To shut down the service, stop B's broker

@@ -495,6 +495,9 @@ def build_parser():
                         help=("print each role's resolved model and the configuration a save "
                               "would keep, then exit without starting or saving"))
     parser.add_argument("--cwd", default=argparse.SUPPRESS)
+    parser.add_argument("--debug-trace", action="store_true",
+                        help=("append private per-context HTTP/native/MCP trace sidecars, including "
+                              "sensitive payloads and credentials; launch-only, repeat on resume"))
     parser.add_argument("--instructions", default=argparse.SUPPRESS,
                         help="main's instructions; other roles keep their own")
     parser.add_argument(

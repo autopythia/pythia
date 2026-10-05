@@ -101,6 +101,13 @@ restart or modify the running service.
 
 ## Setup and use
 
+Both CLI and auto now support `--debug-trace` for relay runs. Private event
+sidecars capture native/MCP traffic before decoding; normal failure records also
+retain safe nested event identities, counts and timing without tracing. HTTP
+provider traces remain separate and verbatim. See
+[diagnostics setup](SETUP.md#diagnose-a-native-stream-failure) and the
+[design/verification notes](../doc/interaction-diagnostics-tracing-plan.md).
+
 Follow [SETUP.md](SETUP.md) for the complete A/B deployment procedure:
 
 1. Identify A's UID and place trusted, same-version script copies where A/B can

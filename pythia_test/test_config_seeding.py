@@ -5,7 +5,7 @@ from pythia_test.interaction_helpers import messages_endpoint
 from pythia_test.interaction_helpers import responses_endpoint
 from pythia_test.interaction_helpers import codex_model
 
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import replace
 import io
 import json
@@ -366,6 +366,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         session = SimpleNamespace(
             _check_running=lambda: None, _phase=lambda *args: None, _emit=lambda *args: None,
             _checkpoint=lambda index, context, items: context.extend(items),
+            _traced_operation=lambda *args, **kwargs: nullcontext(),
         )
         for model in (CaptureHost(), CaptureMessages(trigger=150_000)):
             for threshold in (None, 100_000):

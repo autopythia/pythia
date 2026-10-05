@@ -7,6 +7,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import urllib.request
 
 from ._prompt import add_prompt_arguments
 from .chat_completions import ChatCompletionsEndpoint
@@ -56,8 +57,6 @@ def relay_endpoint(args, binding):
         raise ValueError("Claude Relay does not yet support explicit output-token budgets")
     if getattr(args, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS) != DEFAULT_REQUEST_TIMEOUT_SECONDS:
         raise ValueError("Use --claude-relay-generation-timeout; HTTP request timeouts do not apply")
-    if getattr(args, "debug_trace", False):
-        raise ValueError("--debug-trace is HTTP-only, not a Claude Relay trace")
     return ClaudeRelayEndpoint(
         model=binding.endpoint.model,
         launcher=value("launcher", "CLAUDE_RELAY_LAUNCHER"),
@@ -240,11 +239,14 @@ def build_model(
     catalog=None,
     opener=None,
     auth_opener=None,
+    trace=None,
 ) -> Model:
     """Build the configured model.
 
     ``opener`` replaces the adapter's model HTTP opener. ``auth_opener``
     replaces the Codex OAuth refresh opener; other APIs make no auth requests.
+    ``trace`` is invocation-only: it wraps HTTP openers or is passed directly
+    to Claude Relay for native/MCP events, never included in a model binding.
     """
     args = prepare_namespace(args, catalog)
     binding = args.model_binding
@@ -279,7 +281,13 @@ def build_model(
         from .claude_relay import ClaudeRelayModel
         if opener is not None or auth_opener is not None:
             raise ValueError("Claude Relay does not use model HTTP openers")
-        return ClaudeRelayModel(relay_endpoint(args, binding))
+        return ClaudeRelayModel(relay_endpoint(args, binding), trace=trace)
+
+    if trace is not None:
+        from ._account_http import default_account_opener
+        opener = trace.opener(opener if opener is not None else urllib.request.urlopen)
+        auth_opener = trace.opener(auth_opener if auth_opener is not None else default_account_opener(),
+                                   op="auth_refresh")
 
     if args.model_api == "chat-completions":
         if args.codex_home is not None or args.codex_auth_file is not None:

@@ -47,7 +47,7 @@ class PackageTests(unittest.TestCase):
         self.assertIs(public.ClaudeRelayEndpoint, package.ClaudeRelayEndpoint)
         self.assertIs(public.ClaudeRelayModel, package.ClaudeRelayModel)
         directory = Path(package.__file__).parent
-        for name in ('_model', '_runtime', '_cli_protocol', '_mcp', '_context', '_sampling'):
+        for name in ('_model', '_runtime', '_cli_protocol', '_mcp', '_context', '_sampling', '_diagnostics', '_trace'):
             module = importlib.import_module(f'pythia.interaction.claude_relay.{name}')
             self.assertEqual(Path(module.__file__).parent, directory)
         self.assertEqual(ClaudeRelayModel.__module__, 'pythia.interaction.claude_relay._model')
