@@ -1,6 +1,7 @@
 from ._http import USER_AGENT
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
+from .claude_relay import ClaudeRelayEndpoint, ClaudeRelayModel
 from .codex_auth import CodexAuth
 from .codex_auth import CodexCredentials
 from .codex_auth import CodexAuthError
@@ -122,6 +123,7 @@ from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .user import UserInteraction
 
 __all__ = [
+    "ClaudeRelayEndpoint", "ClaudeRelayModel",
     "ANTHROPIC_MESSAGES_API_URL",
     "ChatCompletionsEndpoint",
     "ChatCompletionsModel",

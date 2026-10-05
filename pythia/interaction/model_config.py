@@ -31,6 +31,45 @@ from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 DEFAULT_SAVE_PATH = Path("interaction.jsonl")
 
+# Invocation-only, never restored from conversation/auto config snapshots.
+CLAUDE_RELAY_FIELDS = (
+    "claude_relay_launcher", "claude_relay_socket", "claude_relay_server_uid",
+    "claude_relay_cli_version", "claude_relay_tool_id_pointer",
+    "claude_relay_generation_timeout", "claude_relay_parked_timeout",
+    "claude_relay_startup_timeout", "claude_relay_stop_timeout",
+)
+
+
+def relay_endpoint(args, binding):
+    from .claude_relay import ClaudeRelayEndpoint
+    def value(name, env=None, default=None):
+        supplied = getattr(args, "claude_relay_" + name, None)
+        return supplied if supplied is not None else os.environ.get(env, default) if env else default
+    raw_uid = value("server_uid", "CLAUDE_RELAY_SERVER_UID")
+    try:
+        uid = int(raw_uid) if raw_uid is not None and not isinstance(raw_uid, bool) else None
+    except (ValueError, TypeError):
+        raise ValueError("Claude Relay expected server UID must be an integer") from None
+    if getattr(args, "max_output_tokens", None) is not None or getattr(args, "compaction_max_output_tokens", None) is not None:
+        # TODO(claude-relay output-budgets): remove this guard only alongside the
+        # verified _sampling/runtime mapping and relay/wrapper capability checks.
+        raise ValueError("Claude Relay does not yet support explicit output-token budgets")
+    if getattr(args, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS) != DEFAULT_REQUEST_TIMEOUT_SECONDS:
+        raise ValueError("Use --claude-relay-generation-timeout; HTTP request timeouts do not apply")
+    if getattr(args, "debug_trace", False):
+        raise ValueError("--debug-trace is HTTP-only, not a Claude Relay trace")
+    return ClaudeRelayEndpoint(
+        model=binding.endpoint.model,
+        launcher=value("launcher", "CLAUDE_RELAY_LAUNCHER"),
+        socket_path=value("socket", "CLAUDE_RELAY_SOCKET"), server_uid=uid,
+        expected_version=value("cli_version", "CLAUDE_RELAY_CLI_VERSION"),
+        tool_id_pointer=value("tool_id_pointer", default="/params/_meta/claudecode~1toolUseId"),
+        generation_timeout_seconds=value("generation_timeout", default=300),
+        parked_timeout_seconds=value("parked_timeout", default=1800),
+        startup_timeout_seconds=value("startup_timeout", default=30),
+        stop_timeout_seconds=value("stop_timeout", default=5), binding=binding,
+    )
+
 
 def _boolean_argument(value: str) -> bool:
     if not isinstance(value, str):
@@ -78,7 +117,7 @@ def supports_account_services(args: argparse.Namespace) -> bool:
 def prepare_namespace(args, catalog=None):
     """Resolve without changing raw launch/saved input or rereading a catalog."""
     api = getattr(args, "model_api", None)
-    if api is not None and api not in {"chat-completions", "messages", "codex", "responses"}:
+    if api is not None and api not in {"chat-completions", "messages", "codex", "responses", "claude-relay"}:
         raise ValueError(f"unsupported model API: {api!r}")
     binding = binding_from_namespace(args, catalog)
     endpoint = binding.endpoint
@@ -88,7 +127,7 @@ def prepare_namespace(args, catalog=None):
             "A custom Codex destination requires explicit --endpoint-api codex; "
             "use --endpoint-api chat-completions for a local chat model."
         )
-    if binding.api not in {"chat-completions", "messages", "codex", "responses"}:
+    if binding.api not in {"chat-completions", "messages", "codex", "responses", "claude-relay"}:
         raise ValueError(f"The frontend does not support the {binding.api} API.")
     if not getattr(args, "_endpoint_prepared", False):
         if getattr(args, "codex_home", None) is not None or getattr(args, "codex_auth_file", None) is not None:
@@ -159,11 +198,20 @@ def add_catalog_arguments(parser, *, suppress_extra_sample_params=False):
 def add_endpoint_arguments(parser, *, auto=False):
     default = argparse.SUPPRESS if auto else None
     parser.add_argument("--endpoint-api", dest="model_api",
-                        choices=("chat-completions", "messages", "codex", "responses"),
+                        choices=("chat-completions", "messages", "codex", "responses", "claude-relay"),
                         default=default, help="endpoint API; omitted infers a unique catalog selection")
     parser.add_argument("--endpoint-url", default=default, help="complete model POST URL")
     parser.add_argument("--endpoint-model", default=default, help="wire model ID (not a catalog selector)")
-    parser.add_argument("--endpoint-auth", default=default, help="none, env:NAME, codex-login, or supplied")
+    parser.add_argument("--endpoint-auth", default=default, help="none, env:NAME, codex-login, supplied, or runtime (claude-relay)")
+    parser.add_argument("--claude-relay-launcher", default=argparse.SUPPRESS, help="absolute standalone relay client path; launch-only")
+    parser.add_argument("--claude-relay-socket", default=argparse.SUPPRESS, help="broker UNIX socket; launch-only")
+    parser.add_argument("--claude-relay-server-uid", type=int, default=argparse.SUPPRESS, help="expected non-root broker UID")
+    parser.add_argument("--claude-relay-cli-version", default=argparse.SUPPRESS, help="required pinned native version (not live-verified by Pythia)")
+    parser.add_argument("--claude-relay-tool-id-pointer", default=argparse.SUPPRESS,
+                        help="JSON pointer into MCP params._meta; default /params/_meta/claudecode~1toolUseId")
+    for name in ("generation", "parked", "startup", "stop"):
+        parser.add_argument(f"--claude-relay-{name}-timeout", type=float, default=argparse.SUPPRESS,
+                            help=f"Claude Relay {name} deadline in seconds; launch-only")
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")
@@ -226,6 +274,12 @@ def build_model(
         raise ValueError(
             "--compaction-max-output-tokens must be a positive integer"
         )
+
+    if args.model_api == "claude-relay":
+        from .claude_relay import ClaudeRelayModel
+        if opener is not None or auth_opener is not None:
+            raise ValueError("Claude Relay does not use model HTTP openers")
+        return ClaudeRelayModel(relay_endpoint(args, binding))
 
     if args.model_api == "chat-completions":
         if args.codex_home is not None or args.codex_auth_file is not None:

@@ -339,7 +339,22 @@ class Model(Protocol):
         ...
 
 
+def retire_model(model) -> None:
+    """Optional, idempotent cancellation of a resource-owning continuation."""
+    retire = getattr(model, "retire", None)
+    if callable(retire):
+        retire()
+
+
+def close_model(model) -> None:
+    """Optional, idempotent final cleanup; stateless models need no new methods."""
+    close = getattr(model, "close", None)
+    if callable(close):
+        close()
+
+
 __all__ = [
+    "retire_model", "close_model",
     "Model",
     "ModelAuthenticationError",
     "ModelConfigurationError",

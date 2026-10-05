@@ -33,7 +33,7 @@ ANTHROPIC_MESSAGES_API_URL = "https://api.anthropic.com"
 # Shared protocol constraint for catalog validation and Messages request policy.
 MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS = 50_000
 
-_PROFILES = frozenset(("codex", "responses", "messages", "chat-completions"))
+_PROFILES = frozenset(("codex", "responses", "messages", "chat-completions", "claude-relay"))
 
 # Extensions are not a second path for typed policy or adapter-owned structure.
 _RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
@@ -58,6 +58,7 @@ _PROFILE_RESERVED_EXTRA_SAMPLE_PARAMS = MappingProxyType({
     "messages": _RESERVED_EXTRA_SAMPLE_PARAMS | {"system", "cache_control"},
     "responses": _RESERVED_EXTRA_SAMPLE_PARAMS | _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS,
     "codex": _RESERVED_EXTRA_SAMPLE_PARAMS | _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS,
+    "claude-relay": _RESERVED_EXTRA_SAMPLE_PARAMS,
 })
 MAX_EXTRA_SAMPLE_PARAMS_BYTES = 65_536
 
@@ -75,8 +76,14 @@ def parse_json_value(text: str):
     def constant(_value):
         raise ValueError("non-finite JSON number")
 
+    def floating(value):
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("non-finite JSON number")
+        return result
+
     try:
-        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=floating)
     except (ValueError, RecursionError):
         raise ValueError("Invalid JSON value.") from None
 
@@ -160,10 +167,10 @@ def _require_identifier(value: object, field_name: str) -> None:
 
 @dataclass(frozen=True)
 class EndpointSpec:
-    """The single non-secret delivery authority. url is a complete POST URL."""
+    """Non-secret delivery authority; only claude-relay has no HTTP URL."""
 
     api: str
-    url: str
+    url: Optional[str]
     model: Optional[str] = None
     auth: str = "none"
     # Resolved login reference, not file contents. Filled at the launch boundary.
@@ -171,11 +178,17 @@ class EndpointSpec:
 
     def __post_init__(self):
         object.__setattr__(self, "api", _normalize_profile(self.api))
-        validate_endpoint_url(self.url)
+        if self.api == "claude-relay":
+            if self.url is not None or self.auth != "runtime" or self.auth_file is not None:
+                raise ValueError("claude-relay requires no URL, runtime-owned auth, and no auth file")
+        else:
+            validate_endpoint_url(self.url)
+            if self.auth == "runtime":
+                raise ValueError("runtime-owned auth is only valid for claude-relay")
         if self.model is not None:
             _require_identifier(self.model, "endpoint.model")
         if not isinstance(self.auth, str) or not (
-            self.auth in {"none", "supplied", "codex-login"}
+            self.auth in {"none", "supplied", "codex-login", "runtime"}
             or (self.auth.startswith("env:") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.auth[4:]))
         ):
             raise ValueError("endpoint.auth must be none, supplied, codex-login, or env:NAME")
@@ -297,6 +310,7 @@ _ANTHROPIC = EndpointSpec(
     auth="env:ANTHROPIC_API_KEY",
 )
 _PROFILE_DEFAULT_ENDPOINTS = MappingProxyType({
+    "claude-relay": EndpointSpec("claude-relay", None, auth="runtime"),
     "codex": _CHATGPT,
     "responses": EndpointSpec(
         "responses", OPENAI_RESPONSES_API_URL + "/responses",

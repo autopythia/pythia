@@ -47,6 +47,8 @@ from .items import UserToolResult
 from .items import summarize_turn_usage
 from .model import ModelContextWindowError, ModelError, ModelSample
 from .model_config import build_model
+from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
+from .model import close_model, retire_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .runtime_config import InteractionConfig
@@ -192,7 +194,8 @@ def _role_summary(index, settings, binding, source, runs_model):
     text = f"#{index} ({name}): {binding.api} / {settings['model'] or '(server default)'}"
     if binding.spec is None:
         # Not catalogued: name the endpoint, which may be a local default.
-        text += f" at {urlsplit(binding.endpoint.url).netloc}"
+        text += (" via Claude Relay" if binding.api == "claude-relay"
+                 else f" at {urlsplit(binding.endpoint.url).netloc}")
     return text if source is None else f"{text} ({source})"
 
 
@@ -202,6 +205,10 @@ def _check_credentials(settings, indices, catalog):
     for index in indices:
         value = settings[index]
         endpoint = namespace(value, catalog).model_binding.endpoint
+        if endpoint.api == "claude-relay":
+            args = namespace(value, catalog)
+            vars(args).update(getattr(settings, "relay_options", {}))
+            relay_endpoint(args, args.model_binding)  # no connection or native execution
         who = (f"#{index} ({value['name']}) uses "
                f"{value['model'] or 'the server default model'}")
         if endpoint.auth == "supplied":
@@ -434,6 +441,9 @@ class _Session:
         self.path = Path(path).expanduser().absolute()
         self.catalog = getattr(settings, "catalog", BUILTIN_MODEL_CATALOG)
         self.settings = {i: deepcopy(s) for i, s in settings.items()}
+        self._relay_options = dict(getattr(settings, "relay_options", {}))
+        self._models = {}
+        self._model_lock = threading.Lock()
         self.sources = dict(getattr(settings, "sources", {}))
         self.bindings = {i: namespace(self.settings[i], self.catalog).model_binding for i in self.roles}
         self.names = {i: self.settings[i]["name"] for i in self.roles}
@@ -663,9 +673,10 @@ class _Session:
             raise SaveError("Auto context checkpoint failed; further effects are blocked.") from None
 
     def _owner(self, index):
-        environment = context = None
+        environment = context = model = None
         try:
             args = namespace(self.settings[index], self.catalog, binding=self.bindings[index])
+            vars(args).update(self._relay_options)
             config = InteractionConfig.from_namespace(args).snapshot()
             service = self.service
             binding = None if service is None else _Binding(index, service.client(str(index)))
@@ -680,6 +691,10 @@ class _Session:
             # initialization. A supervising watcher runs its own model turns.
             needs_model = index != -1 or self._supervising
             model = self._model_factory(index, args) if needs_model else None
+            with self._model_lock:
+                self._models[index] = model
+            if self._stop.is_set():
+                return
             if needs_model and not callable(getattr(model, "sample", None)):
                 raise TypeError("Model factory must return a model with sample().")
             current = _instructions(index, self.settings[index],
@@ -742,6 +757,12 @@ class _Session:
                     reason=type(exc).__name__, revision=0 if context is None else len(context)))
         finally:
             self._ready[index].set()
+            try:
+                close_model(model)
+            except Exception as exc:
+                self._error(index, f"Model cleanup failed ({type(exc).__name__}).", fatal=True)
+            with self._model_lock:
+                self._models.pop(index, None)
             if environment is not None:
                 close = getattr(environment, "close", None)
                 if callable(close):
@@ -930,6 +951,12 @@ class _Session:
                 self._changed.notify_all()
 
     def _turn(self, index, model, environment, config, context):
+        try:
+            return _Session._turn_body(self, index, model, environment, config, context)
+        finally:
+            retire_model(model)
+
+    def _turn_body(self, index, model, environment, config, context):
         started = time.perf_counter()
         sample_params = config.sample_params()
         samples = 0
@@ -1065,6 +1092,16 @@ class _Session:
 
     def request_stop(self):
         self._stop.set()
+        # Model-only cancellation wakes a parked sampler. Host-side effects still
+        # finish/checkpoint under their owners before environment cleanup.
+        with self._model_lock:
+            models = tuple(self._models.values())
+        for model in models:
+            try:
+                retire_model(model)
+            except Exception:
+                self._fatal = True
+                self._emit(None, (DisplayItem("Model retirement failed; final cleanup will run."),), "error")
         with self._changed:
             self._accepting = False
             self._changed.notify_all()  # Wakes an idle main waiting for a task.
@@ -1335,6 +1372,8 @@ def main(argv=None):
         settings = resolve_config(args.context_config, overrides, saved=saved, catalog=catalog,
                                   role_models=role_models, role_defaults=role_defaults,
                                   roles=roles)
+        settings.relay_options = {name: getattr(args, name) for name in CLAUDE_RELAY_FIELDS
+                                  if getattr(args, name, None) is not None}
         if args.print_config:
             for index in roles:
                 print(_role_summary(index, settings[index],

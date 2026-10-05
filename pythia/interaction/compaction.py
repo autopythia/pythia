@@ -183,7 +183,9 @@ _TURN_PREFIX_PART = "the earlier part of the current turn"
 # A truncated, refused, or paused summary must never become a checkpoint.
 _INCOMPLETE_STOP_REASONS = frozenset({
     "max_tokens",
+    "length",
     "refusal",
+    "pause_turn",
     "compaction",
     "model_context_window_exceeded",
 })

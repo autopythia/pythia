@@ -61,7 +61,7 @@ _SHARED = ("cwd", "max_samples", "request_timeout_seconds", "enable_workspace",
 assert _KEYS == frozenset(_IDENTITY + _ROUTE + _MODEL_SPECIFIC + _SHARED)
 # Where a role's model came from, for display; FOLLOWS_MAIN roles save none.
 FOLLOWS_MAIN = "same as main"
-_APIS = {"chat-completions", "messages", "codex", "responses"}
+_APIS = {"chat-completions", "messages", "codex", "responses", "claude-relay"}
 _PROVIDER_FIELDS = ("model", "endpoint_url", "endpoint_model", "endpoint_auth",
                     "codex_home", "codex_auth_file")
 _PATHS = ("cwd", "codex_home", "codex_auth_file")
@@ -375,6 +375,8 @@ def _validate(settings, catalog):
     args = namespace(settings, catalog)
     api = args.model_api
     if api != "chat-completions" and args.model is None:
+        if api == "claude-relay":
+            raise ValueError("A native CLI model ID is required for Claude Relay.")
         raise ValueError("A model is required for Messages, Codex, and Responses.")
     name = settings["name"]
     if (not isinstance(name, str) or not name.strip() or len(name) > 64 or

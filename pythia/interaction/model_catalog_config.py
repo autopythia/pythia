@@ -106,6 +106,9 @@ def _entry(section, values, base):
         else:
             raise ValueError("Unknown model field.")
 
+    if api == "claude-relay":
+        endpoint.setdefault("url", None)
+        endpoint.setdefault("auth", "runtime")
     if original is None and not {"api", "url", "model", "auth"} <= endpoint.keys():
         raise ValueError("New entries require endpoint.api, url, model, and auth.")
     if (original is not None and "endpoint.url" in values

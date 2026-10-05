@@ -74,6 +74,7 @@ from .model import ModelAuthenticationError
 from .model import ModelContextWindowError
 from .model import ModelError
 from .model import SampleParams
+from .model import close_model, retire_model
 from .model_config import DEFAULT_SAVE_PATH
 from .model_config import _boolean_argument
 from .model_config import build_model
@@ -124,6 +125,7 @@ class _UIState:
     transient: queue.Queue[tuple[str, str]] = field(default_factory=lambda: queue.Queue(maxsize=8))
     active_user_call: Optional[str] = None
     trace: Optional[DebugTrace] = None
+    active_model: object = field(default=None, repr=False)
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -136,11 +138,20 @@ class _UIState:
             self.displays.append(DisplayItem(f"[cli] {text}"))
 
     def request_exit(self) -> None:
+        first = not self.closing
         self.closing = True
         self.retry = None
         self.pending.clear()
         self.login_cancel.set()
         self.changed.set()
+        if first and callable(getattr(self.active_model, "retire", None)):
+            model = self.active_model
+            def retire():
+                try:
+                    retire_model(model)
+                except Exception:
+                    self.notice("Model retirement failed; final cleanup will run.")
+            threading.Thread(target=retire, name="interaction-model-retire", daemon=True).start()
 
     def handle_key(self, key: str, data: str) -> None:
         if key in {"c-c", "c-d"}:
@@ -327,7 +338,9 @@ def _mark_auth_required(
     exc: ModelAuthenticationError,
 ) -> None:
     state.auth_required = True
-    if exc.failure is not None and exc.failure.auth_source == "environment":
+    if exc.failure is not None and exc.failure.auth_source == "runtime":
+        state.auth_notice = "Authenticate as the broker account through the sandbox wrapper, then /retry; /login is not Claude login."
+    elif exc.failure is not None and exc.failure.auth_source == "environment":
         state.auth_notice = (
             "Environment credential rejected; update it and restart the process."
         )
@@ -552,12 +565,15 @@ async def _user_tool(
         state.active_user_call = None
     if intent.name == "login" and result.result.success and not state.closing:
         state.set_phase("loading model")
+        candidate = None
         try:
-            model = await asyncio.to_thread(_build_model, args, state.trace)
+            candidate = await asyncio.to_thread(_build_model, args, state.trace)
+            model = candidate
             if (expected_account is not None and
                     getattr(getattr(model, "endpoint", None), "account_id", None) != expected_account):
                 raise ValueError("credential account changed during activation")
         except Exception:
+            await asyncio.to_thread(close_model, candidate)
             model = None
             state.exit_code = 1
             state.pending.clear()
@@ -648,7 +664,15 @@ async def _auto_compact(
     return True
 
 
-async def _turn(
+async def _turn(context, model, environment, state, path, config):
+    try:
+        return await _turn_body(context, model, environment, state, path, config)
+    finally:
+        if callable(getattr(model, "retire", None)):
+            await asyncio.to_thread(retire_model, model)
+
+
+async def _turn_body(
     context: InteractionContext,
     model: Model,
     environment: Environment,
@@ -767,6 +791,7 @@ async def _reload_retry_model(
             "Cannot verify the account for saved provider state; start a fresh session."
         )
         return None
+    model = None
     try:
         model = await asyncio.to_thread(_build_model, args, state.trace)
         account = getattr(getattr(model, "endpoint", None), "account_id", None)
@@ -775,8 +800,10 @@ async def _reload_retry_model(
                 "Credential account changed; no model request was started. "
                 "Restore the original account or start a fresh session."
             )
+            await asyncio.to_thread(close_model, model)
             return None
     except Exception:
+        await asyncio.to_thread(close_model, model)
         # As with /login activation, do not reflect credential/provider details.
         state.notice("Model reload failed; no model request was started. Details withheld.")
         state.notice(state.auth_notice)
@@ -850,7 +877,16 @@ def _resume_notice(context: InteractionContext) -> Optional[str]:
     return None
 
 
-async def _drive_interaction(
+async def _drive_interaction(model, environment, state, args, path, config):
+    state.active_model = model
+    try:
+        return await _drive_interaction_body(model, environment, state, args, path, config)
+    finally:
+        if callable(getattr(state.active_model, "close", None)):
+            await asyncio.to_thread(close_model, state.active_model)
+
+
+async def _drive_interaction_body(
     model: Optional[Model],
     environment: Environment,
     state: _UIState,
@@ -964,6 +1000,7 @@ async def _drive_interaction(
                         continue
                     if model is None:
                         model = await _reload_retry_model(context, state, args)
+                        state.active_model = model
                         if model is None:
                             state.set_phase("auth needed")
                             continue
@@ -978,6 +1015,7 @@ async def _drive_interaction(
                     if state.closing:
                         return
                     if isinstance(query, UserToolIntent):
+                        previous_model = model
                         model = await _user_tool(
                             query,
                             model,
@@ -988,6 +1026,9 @@ async def _drive_interaction(
                             environment,
                             config,
                         )
+                        if previous_model is not model:
+                            await asyncio.to_thread(close_model, previous_model)
+                        state.active_model = model
                         state.set_phase("auth needed" if state.auth_required else "idle")
                         continue
                     if model is None:
@@ -1052,7 +1093,9 @@ async def _drive_interaction(
                     state.bound_account_id = getattr(
                         getattr(model, "endpoint", None), "account_id", None
                     )
+                await asyncio.to_thread(close_model, model)
                 model = None
+                state.active_model = None
                 _mark_auth_required(state, exc)
             state.notice(f"{type(exc).__name__}: {exc}")
             if state.pending:
@@ -1111,6 +1154,8 @@ def _startup_notices(state, args, path):
         state.notice(
             "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
         )
+        if args.model_api == "claude-relay":
+            state.notice("Claude Relay host tools run as the Pythia user, outside the Claude sandbox.")
         if not args.enable_workspace:
             state.notice(
                 "Warning: workspace path restrictions are disabled; "
@@ -1285,6 +1330,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    model = None
     try:
         catalog = frontend_catalog(args)
         if args.list_models:
@@ -1336,6 +1382,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:
         print(f"interaction CLI failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        close_model(model)
 
 
 if __name__ == "__main__":
