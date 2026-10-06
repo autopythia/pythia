@@ -1,6 +1,8 @@
 """Canonical endpoint builders used by interaction adapter tests."""
 
+import contextlib
 from dataclasses import replace
+from unittest import mock
 
 from pythia.interaction import BUILTIN_MODEL_CATALOG
 from pythia.interaction import ChatCompletionsEndpoint
@@ -128,3 +130,20 @@ def codex_model(
         request_timeout_seconds=request_timeout_seconds,
         **kwargs,
     )
+
+
+@contextlib.contextmanager
+def patch_compaction(app, name, *args, **kwargs):
+    """Patch a compaction hook with one mock wherever an app uses it.
+
+    Automatic compaction runs in the shared turn loop, while the CLI's manual
+    /compact keeps its own reference. Modules lacking the name are skipped.
+    """
+    from pythia.interaction.loop import kernel
+
+    targets = [module for module in (app, kernel) if hasattr(module, name)]
+    with mock.patch.object(targets[0], name, *args, **kwargs) as patched:
+        with contextlib.ExitStack() as stack:
+            for target in targets[1:]:
+                stack.enter_context(mock.patch.object(target, name, patched))
+            yield patched

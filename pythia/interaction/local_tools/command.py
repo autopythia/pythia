@@ -21,6 +21,10 @@ from ..environment import ToolOutcome
 from ..environment import ToolSpec
 from ._workspace import WorkspacePolicy
 
+# After stdout reaches EOF, the shell may still be exiting. Wait at least this
+# long for it, even on a zero-length poll, before reporting a live session.
+_EOF_EXIT_GRACE_SECONDS = 0.05
+
 
 @dataclass
 class _CommandSession:
@@ -408,6 +412,7 @@ class CommandRuntime:
         fd = process.stdout.fileno()
         chunks = []
         deadline = time.monotonic() + max(0.0, timeout_seconds)
+        eof = False
 
         while True:
             remaining = deadline - time.monotonic()
@@ -421,10 +426,11 @@ class CommandRuntime:
             except BlockingIOError:
                 continue
             if not data:
+                eof = True
                 break
             chunks.append(data)
 
-        while True:
+        while not eof:
             ready, _, _ = select.select([fd], [], [], 0)
             if not ready:
                 break
@@ -433,8 +439,20 @@ class CommandRuntime:
             except BlockingIOError:
                 break
             if not data:
+                eof = True
                 break
             chunks.append(data)
+
+        if eof:
+            # EOF only means every writer closed stdout: the shell may not have
+            # been reaped yet. Wait for it (within the yield time, plus a short
+            # grace) so a finished command reports its exit code rather than a
+            # session that is already done.
+            try:
+                process.wait(timeout=max(
+                    deadline - time.monotonic(), _EOF_EXIT_GRACE_SECONDS))
+            except subprocess.TimeoutExpired:
+                pass
 
         return b"".join(chunks).decode("utf-8", errors="replace")
 

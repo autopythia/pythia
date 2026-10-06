@@ -5,6 +5,7 @@ import json
 import threading
 from types import SimpleNamespace
 import unittest
+from pythia_test.interaction_helpers import patch_compaction
 from unittest import mock
 
 from pythia.interaction import (
@@ -90,7 +91,7 @@ class RetryControllerTests(_ControllerTestCase):
         for outcome, diagnostic in (
             (ModelTimeoutError("timed out"), "ModelTimeoutError: timed out"),
             (RuntimeError("adapter failed"), "RuntimeError: adapter failed"),
-            (_answer(" "), "RuntimeError: model returned no final assistant text"),
+            (_answer(" "), "MissingFinalText: Model returned no final assistant text."),
         ):
             with self.subTest(diagnostic=diagnostic):
                 model = _Model(self.path, outcome, _answer("recovered"))
@@ -204,7 +205,7 @@ class RetryControllerTests(_ControllerTestCase):
         with mock.patch.object(user_tools, "query_quota", return_value="quota"), \
                 mock.patch.object(user_tools, "login") as login, \
                 mock.patch.object(cli, "build_model", return_value=model) as build, \
-                mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+                patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--prompt", "hello", "--endpoint-api", "codex", "--model", "test",
                 "--endpoint-auth-file", str(auth), "--enable-default-tools=False",
@@ -280,8 +281,8 @@ class RetryControllerTests(_ControllerTestCase):
                 compactor.compact.side_effect = ModelTimeoutError("compaction failed")
                 terminal = _Terminal(frame)
                 with mock.patch.object(environment, "execute_tool_calls", side_effect=RuntimeError("lost tool result")) as execute, \
-                        mock.patch.object(cli, "auto_compaction_due", return_value=kind == "compaction"), \
-                        mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+                        patch_compaction(cli, "auto_compaction_due", return_value=kind == "compaction"), \
+                        patch_compaction(cli, "create_default_compactor", return_value=compactor):
                     self.assertEqual(await self._run(model, terminal, [
                         "--prompt", "hello", "--max-samples", "1", "--auto-compact-tokens", "100",
                     ], environment), 1)
@@ -332,7 +333,7 @@ class RetryControllerTests(_ControllerTestCase):
             if entered.is_set() and step == 0:
                 t.submit("queued task")
                 step = 1
-            if "queued=1" in s:
+            if "steers=1" in s:  # text typed mid-turn is a pending steer
                 release.set()
             if s == "failed":
                 t.key("c-d")
@@ -497,7 +498,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
         model = _Model(self.path, overflow(), _answer("recovered"))
         compactor = self.compactor()
         terminal = _Terminal(quit_when_settled)
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor) as create:
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
         create.assert_called_once_with(model, CompactionSettings())
         compactor.compact.assert_called_once()
@@ -518,7 +519,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
     async def test_second_overflow_in_a_turn_fails_and_arms_retry(self):
         model = _Model(self.path, overflow(), overflow(), _answer("after retry"))
         compactor = self.compactor()
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, _Terminal(retry_then_quit()), ["--prompt", "hello"]), 1)
         # One recovery per turn; the explicit /retry starts a new attempt.
         compactor.compact.assert_called_once()
@@ -530,7 +531,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
             "the context fits in compaction_keep_recent_tokens",
         ))
         terminal = _Terminal(quit_when_settled)
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 1)
         self.assertEqual(len(model.calls), 1)
         texts = [item.text for item in terminal.items]
@@ -546,7 +547,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
         model = _Model(self.path, overflow(), _answer("after retry"))
         compactor = self.compactor(side_effect=CompactionContextWindowError(message))
         terminal = _Terminal(retry_then_quit())
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 1)
         texts = [item.text for item in terminal.items]
         self.assertIn(f"[cli] CompactionContextWindowError: {message}", texts)
@@ -563,7 +564,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
                 model.auto_compaction_owner = owner
                 compactor = self.compactor()
                 terminal = _Terminal(quit_when_settled)
-                with mock.patch.object(cli, "create_default_compactor", return_value=compactor) as create:
+                with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
                     self.assertEqual(await self._run(model, terminal, ["--prompt", "hello", *argv]), 1)
                 create.assert_not_called()
                 self.assertIn(HINT, [item.text for item in terminal.items])
@@ -571,7 +572,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
     async def test_threshold_nothing_to_compact_samples_normally(self):
         model = _Model(self.path, _answer("done"))
         compactor = self.compactor(side_effect=NothingToCompact("nothing precedes the recent tail"))
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, _Terminal(quit_when_settled), [
                 "--prompt", "hello", "--auto-compact-tokens", "1",
             ]), 0)
@@ -584,7 +585,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
         model = _Model(self.path)
         compactor = self.compactor(side_effect=CompactionContextWindowError(message))
         terminal = _Terminal(quit_when_settled)
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--prompt", "hello", "--auto-compact-tokens", "1",
             ]), 1)

@@ -727,7 +727,7 @@ class SessionResumeTests(unittest.TestCase):
             with DefaultEnvironment(cwd=root) as environment:
                 with mock.patch("builtins.print"):
                     with mock.patch(
-                        "pythia.interaction.demo.perf_counter",
+                        "pythia.interaction.loop.kernel.perf_counter",
                         side_effect=(10.0, 12.5),
                     ):
                         summary = run_repository_summary(

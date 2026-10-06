@@ -12,6 +12,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from pythia_test.interaction_helpers import patch_compaction
 from unittest import mock
 
 from pythia.interaction import (
@@ -625,7 +626,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         model = _Model(self.path, _answer("uncompacted"))
         self.args.auto_compact_tokens = 100
-        with mock.patch.object(cli, "create_default_compactor") as create:
+        with patch_compaction(cli, "create_default_compactor") as create:
             self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
 
         create.assert_not_called()
@@ -1063,7 +1064,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         terminal = _Terminal(frame)
         compactor = FakeCompactor()
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor) as create:
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
             self.assertEqual(await self.run_cli(model, terminal), 0)
         # The official Codex route defaults to provider compaction.
         create.assert_called_once_with(model, CompactionSettings(mode="provider"))
@@ -1120,7 +1121,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         # emits the incomplete-model-turn warning used for provider pauses.
         before = self.path.read_bytes()
         replay = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-        with mock.patch.object(cli, "create_default_compactor") as replay_create:
+        with patch_compaction(cli, "create_default_compactor") as replay_create:
             with mock.patch.object(cli, "save_interaction_save") as save:
                 self.assertEqual(await self.run_cli(model, replay), 0)
         replay_create.assert_not_called()
@@ -1214,7 +1215,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         )
         compactor = mock.Mock()
         compactor.compact.side_effect = CompactionContextWindowError(message)
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(
                 await self.run_cli(_Model(self.path), _Terminal(self.compact_frame("/compact"))), 0,
             )
@@ -1263,9 +1264,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     t.key("c-d")
 
         try:
-            with mock.patch.object(
-                cli,
-                "create_default_compactor",
+            with patch_compaction(cli, "create_default_compactor",
                 return_value=BlockingCompactor(),
             ):
                 self.assertEqual(
@@ -1405,7 +1404,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         compactor = mock.Mock()
         compactor.compact.side_effect = CompactionError("invalid remote checkpoint")
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
         saved = load_interaction_save(self.path)
         self.assertIsInstance(saved.items[-2], UserToolCall)
@@ -1429,7 +1428,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-        with mock.patch.object(cli, "create_default_compactor") as create:
+        with patch_compaction(cli, "create_default_compactor") as create:
             self.assertEqual(await self.run_cli(_Model(self.path), terminal), 0)
         create.assert_not_called()
         saved = load_interaction_save(self.path)
@@ -1471,7 +1470,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             elif status == "failed":
                 t.key("c-d")
 
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             with mock.patch.object(cli, "save_interaction_save", side_effect=fail_checkpoint):
                 self.assertEqual(await self.run_cli(model, _Terminal(frame)), 1)
         compactor.compact.assert_called_once()
@@ -1484,7 +1483,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         # Startup closes the pending audit record but cannot infer or recreate
         # the checkpoint that failed to persist.
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-        with mock.patch.object(cli, "create_default_compactor") as create:
+        with patch_compaction(cli, "create_default_compactor") as create:
             self.assertEqual(await self.run_cli(model, terminal), 0)
         create.assert_not_called()
         recovered = load_interaction_save(self.path)
@@ -1504,7 +1503,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(load_interaction_save(self.path).items[-1], UserToolResult):
                     t.key("c-d")
 
-        with mock.patch.object(cli, "create_default_compactor") as create:
+        with patch_compaction(cli, "create_default_compactor") as create:
             self.assertEqual(await self.run_cli(None, _Terminal(frame)), 0)
         create.assert_not_called()
         saved = load_interaction_save(self.path)
@@ -1539,7 +1538,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             elif status == "idle" and submitted and model.calls:
                 t.key("c-d")
 
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
         self.assertEqual(len(model.calls), 1)
         materialized = model.calls[0][0].model_items()

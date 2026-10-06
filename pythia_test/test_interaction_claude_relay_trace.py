@@ -116,7 +116,7 @@ class RelayTraceTests(unittest.TestCase):
     def test_frontend_failures_save_metadata_and_keep_payload_only_in_trace(self):
         for frontend in ('cli', 'auto'):
             save = self.root / (frontend + ('.jsonl' if frontend == 'cli' else ''))
-            opts = ['--resume', 'False'] if frontend == 'cli' else ['--watcher-max-resumes', '0']
+            opts = ['--resume', 'False'] if frontend == 'cli' else ['--watcher-observe-only']
             run = subprocess.run([
                 '/usr/bin/python3', '-I', '-S', '-c',
                 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); '

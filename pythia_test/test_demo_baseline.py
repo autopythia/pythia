@@ -30,6 +30,7 @@ from pythia.interaction import SampleMetadata
 from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import demo
+from pythia.interaction.loop import kernel
 from pythia.interaction import load_interaction_save
 from pythia.interaction import save_interaction_save
 
@@ -304,7 +305,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
             ),
         )
         with mock.patch.object(
-            demo,
+            kernel,
             "perf_counter",
             side_effect=(10.0, 12.5),
         ):

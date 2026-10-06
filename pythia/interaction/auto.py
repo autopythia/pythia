@@ -3,7 +3,7 @@
 All contexts initially wait. By default only #1 (main) and #-1 (watcher) run:
 frontend tasks wake main directly, and whenever main's turn loop stops it yields
 to the watcher, whose own model turn may resume main with a follow-up message
-(see ``_supervision``). ``--enable-experimental-worker-board`` adds the
+(see ``loop.supervision``). ``--enable-experimental-worker-board`` adds the
 experimental #2 (worker) and shared message board: user tasks then become board
 threads that wake main, main's posted plans wake the worker, and the watcher only
 displays main's end-of-turn condition.
@@ -37,17 +37,16 @@ from ._debug_trace import DebugTrace
 from ._cli_editor import Editor, safe_text
 from ._cli_terminal import PosixTerminal
 from ._prompt import load_prompt
-from ._supervision import Fault, SupervisedHandle, Yield, YieldChannel, supervise
-from .compaction import CompactionResult, NothingToCompact, auto_compaction_due
-from .compaction import create_default_compactor, uses_host_auto_compaction
+from .loop.supervision import Fault, SupervisedHandle, Yield, YieldChannel, supervise
+from .loop.supervision import SupervisorTools, YieldTool, decide, run_supervised_task
+from .loop import MissingFinalText, SampleLimitExceeded  # noqa: F401 (re-exported)
+from .loop import Interrupt, Steer, TurnHost, run_turn
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
-from .display import DisplayItem, render_interaction_items
+from .display import DisplayItem, render_interaction_items  # noqa: F401 (re-exported)
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
-from .items import Init, Instructions, Message, ModelSampleBoundary, ToolCall, ToolResult, Tools
+from .items import Init, Instructions, Message, ToolResult, Tools
 from .items import UserToolResult
-from .items import summarize_turn_usage
-from .model import ModelContextWindowError, ModelError, ModelSample
 from .model_config import build_model
 from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
 from .model import close_model, retire_model
@@ -66,8 +65,6 @@ _TIMED_PHASES = {"sampling", "compacting", "executing tools", "saving", "awaitin
 _ACTIVE_PHASES = {"starting", *_TIMED_PHASES}
 # Unfinished in-process tasks admitted without the board (its user-task limit).
 _MAX_PENDING_TASKS = 16
-# read_main_context paging: default/maximum items per read, characters per item.
-_READ_LIMIT, _READ_MAX_LIMIT, _READ_ITEM_CHARS = 20, 50, 2000
 
 
 _COOPERATION_PREAMBLE = (
@@ -127,15 +124,29 @@ _SUPERVISOR_INSTRUCTIONS = (
     "user's tasks in a shared workspace. Whenever main's turn loop stops, the host "
     "sends you a report: the user's request, how main stopped (ended or failed), "
     "main's final answer or a safe failure summary, and how many times main was "
-    "already resumed for that task. Your purpose is to recover main from errors and "
-    "to continue tasks main left unfinished.\n\n"
-    "Use read_main_context to inspect main's log when the report is not enough. If "
+    "already resumed for that task. Main can also hand off mid-task with its yield "
+    "tool (Outcome: yielded, with main's handoff note); that is not a finished task, "
+    "so respond to the note. Your purpose is to recover main from errors and to "
+    "continue tasks main left unfinished. If the report lists user steers (messages "
+    "the user sent during the task), judge main's work against the request as the "
+    "steers changed it; resuming main delivers any steers it has not received yet.\n\n"
+    "Use read_context to inspect main's log when the report is not enough. If "
     "main's work completes the request, or the task is blocked on the user, end your "
-    "turn without resuming main. Otherwise call resume_main once with a concise "
-    "message for main's next turn: what to retry or continue, and why. Do not add "
+    "turn without resuming main. Otherwise call resume once with a concise "
+    "message for main's next turn: what to retry or continue, and why. Releasing a "
+    "yielded task records it as incomplete; to finish it, or to put a question to the "
+    "user, resume main and have it write the answer. Do not add "
     "requirements beyond the user's request or repeat finished work. Main receives "
     "your message as an automated follow-up, not as the user. You have no "
     "workspace tools."
+)
+_SUPERVISED_MAIN_INSTRUCTIONS = (
+    "A watcher (#-1) supervises your work on the user's tasks: it reviews each final "
+    "answer or failure and may resume you with an automated follow-up. Use the yield "
+    "tool when you want the watcher's review or decision before going on; your turn "
+    "then ends once that tool batch is saved. If you need something only the user can "
+    "provide, ask in your final answer instead. When the task is done, give the final "
+    "answer; don't yield first."
 )
 _FOLLOW_UP_HEADER = "Automated follow-up from the watcher (#-1):\n\n"
 _RESTART_NOTICE = ("Restart notice: saved history was resumed without "
@@ -148,6 +159,7 @@ def _instructions(index, settings, base_url, *, supervisor=False):
     if base_url is None:
         if body is None:
             body = (_SUPERVISOR_INSTRUCTIONS if supervisor and index == -1
+                    else _SUPERVISED_MAIN_INSTRUCTIONS if supervisor and index == 1
                     else _STANDALONE_ROLE_INSTRUCTIONS.get(index))
         return None if body is None else Instructions(body)
     if body is None:
@@ -250,14 +262,6 @@ def _check_credentials(settings, indices, catalog):
                              "none was found.")
 
 
-class SampleLimitExceeded(RuntimeError):
-    """A turn reached its explicit per-turn sample limit."""
-
-
-class MissingFinalText(RuntimeError):
-    """A turn ended without nonblank final assistant text."""
-
-
 class _Binding:
     """Only touched on its context's owner thread; credentials never reach a model."""
     def __init__(self, index, client):
@@ -305,104 +309,11 @@ def _model_factory(index, args):
     return build_model(args) if trace is None else build_model(args, trace=trace)
 
 
-def _read_items(view, start, limit):
-    """Render items start..start+limit-1 of a read-only log view as plain text."""
-    calls = [item for item in view[:start] if isinstance(item, ToolCall)]
-    entries = []
-    for index in range(start, min(len(view), start + limit)):
-        item = view[index]
-        text = "\n".join(display.text for display in render_interaction_items(
-            (item,), source_calls=calls, color=False))
-        if isinstance(item, ToolCall):
-            calls.append(item)
-        if len(text) > _READ_ITEM_CHARS:
-            text = (text[:_READ_ITEM_CHARS]
-                    + f"\n[{len(text) - _READ_ITEM_CHARS} more characters omitted]")
-        entries.append({"index": index, "type": type(item).__name__, "text": text})
-    end = start + len(entries)
-    return {"revision": len(view), "start": start, "next": end,
-            "has_more": end < len(view), "items": entries}
-
-
-class _WatcherTools:
-    """Bound supervisor tools; touched only on the watcher's owner thread."""
-
-    def __init__(self):
-        self.handle = None  # SupervisedHandle while supervising
-        self._open = False
-        self._resume = None
-
-    def begin(self):
-        self._open, self._resume = True, None
-
-    def end(self):
-        resume, self._open, self._resume = self._resume, False, None
-        return resume
-
-    def tools(self):
-        def resume_main(arguments, *, timeout_seconds=None):
-            del timeout_seconds
-            content = arguments.get("content")
-            if set(arguments) != {"content"} or not isinstance(content, str) or not content.strip():
-                raise ValueError("resume_main requires only nonempty content.")
-            if not self._open:
-                raise ValueError("No main yield is awaiting a decision.")
-            if self._resume is not None:
-                raise ValueError("Main is already being resumed for this report; end your turn.")
-            self._resume = content
-            return ToolOutcome("Recorded: main resumes with this message after your turn ends.")
-
-        def read_main_context(arguments, *, timeout_seconds=None):
-            del timeout_seconds
-            view = () if self.handle is None else self.handle.view
-            if set(arguments) - {"start", "limit"}:
-                raise ValueError("read_main_context accepts only start and limit.")
-            limit = arguments.get("limit", _READ_LIMIT)
-            if type(limit) is not int or not 1 <= limit <= _READ_MAX_LIMIT:
-                raise ValueError(f"limit must be an integer from 1 to {_READ_MAX_LIMIT}.")
-            start = arguments.get("start", max(0, len(view) - limit))
-            if type(start) is not int or not 0 <= start <= len(view):
-                raise ValueError(f"start must be an integer from 0 to {len(view)}.")
-            return ToolOutcome(json.dumps(_read_items(view, start, limit), ensure_ascii=False))
-
-        return (
-            Tool(ToolSpec(
-                "resume_main",
-                "Resume main (#1) with a follow-up message once your turn ends. Call at "
-                "most once per report; end your turn without calling it to leave main idle.",
-                {"type": "object", "properties": {"content": {"type": "string"}},
-                 "required": ["content"], "additionalProperties": False}),
-                resume_main, timeout_seconds=10),
-            Tool(ToolSpec(
-                "read_main_context",
-                "Read main's log as of the current report. Items are addressed by index "
-                "0..revision-1; omit start for the last items. Follow next while has_more.",
-                {"type": "object", "properties": {
-                    "start": {"type": "integer", "minimum": 0},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": _READ_MAX_LIMIT}},
-                 "additionalProperties": False}),
-                read_main_context, timeout_seconds=10),
-        )
-
-
-def _yield_report(yield_):
-    """The watcher's user message for one main yield (no log contents)."""
-    outcome = yield_.kind if yield_.reason is None else f"{yield_.kind} ({yield_.reason})"
-    lines = [f"Main (#{yield_.context}) yielded on task {yield_.job_id} "
-             f"(watcher resumes so far: {yield_.resumes}).",
-             "", "User request:", yield_.job_text, "", f"Outcome: {outcome}"]
-    if yield_.failure is not None:
-        lines.append(f"Failure: {yield_.failure.category}: {yield_.failure.message}")
-    if yield_.final_text is not None:
-        lines += ["", "Main's final answer:", yield_.final_text]
-    lines += ["", f"Main's log has {yield_.revision} items (read_main_context indices "
-                  f"0..{yield_.revision - 1})."]
-    return "\n".join(lines)
-
-
 def _yield_debug(yield_):
     if yield_.kind == "ended":
         return f"[debug] main end-of-turn condition fired: #1 source={yield_.job_id}"
+    if yield_.kind == "yielded":
+        return f"[debug] main called yield: #1 source={yield_.job_id}"
     reason = "" if yield_.reason is None else f" ({yield_.reason})"
     resumable = "" if yield_.resumable else ", non-resumable"
     return f"[debug] main yielded: #1 source={yield_.job_id} {yield_.kind}{reason}{resumable}"
@@ -415,21 +326,37 @@ def _environment_factory(index, args, tools):
                               extra_tools=tools)
 
 
-def _compact(session, index, model, environment, config, context, sample_params):
-    """Install one automatic compaction; False when there is nothing to compact."""
-    session._phase(index, "compacting")
-    compactor = create_default_compactor(model, config.compaction_settings())
-    try:
-        with session._traced_operation(index, "compact", context_revision=len(context)):
-            result = compactor.compact(context.copy(), tools=environment.tool_specs,
-                                       sample_params=sample_params)
-    except NothingToCompact:
+class _AutoHost(TurnHost):
+    """Auto's side of the shared turn loop for one role, on its owner thread."""
+
+    def __init__(self, session, index):
+        self._session, self._index = session, index
+
+    def append(self, context, items):
+        self._session._checkpoint(self._index, context, items)
+
+    def show(self, items):
+        self._session._emit(self._index, items)
+
+    def phase(self, phase):
+        self._session._phase(self._index, phase)
+
+    def should_stop(self):
+        try:
+            self._session._check_running()  # a failed board raises
+        except _Stopping:
+            return True
         return False
-    if not isinstance(result, CompactionResult):
-        raise TypeError("Expected CompactionResult.")
-    session._checkpoint(index, context, result.context_items())
-    session._emit(index, result.display_items())
-    return True
+
+    def trace(self, op, **tags):
+        return self._session._traced_operation(self._index, op, **tags)
+
+    def interrupt(self):
+        answer = super().interrupt()
+        if answer is Interrupt.STOP or self._index != 1:
+            return answer
+        texts = self._session._take_steers()
+        return Steer(tuple(Message("user", text) for text in texts)) if texts else answer
 
 
 class _Session:
@@ -445,7 +372,7 @@ class _Session:
                  resume=False, enable_board_auth=True,
                  debug_save_model_binding=False, debug_trace=False,
                  enable_experimental_worker_board=False,
-                 watcher_max_resumes=None):
+                 watcher_observe_only=False):
         if type(enable_board_auth) is not bool:
             raise TypeError("enable_board_auth must be a bool.")
         if type(debug_save_model_binding) is not bool:
@@ -454,16 +381,14 @@ class _Session:
             raise TypeError("debug_trace must be a bool.")
         if type(enable_experimental_worker_board) is not bool:
             raise TypeError("enable_experimental_worker_board must be a bool.")
-        if watcher_max_resumes is not None and (
-                type(watcher_max_resumes) is not int or watcher_max_resumes < 0):
-            raise ValueError("watcher_max_resumes must be a nonnegative integer or None.")
-        if watcher_max_resumes is not None and enable_experimental_worker_board:
-            raise ValueError("watcher_max_resumes applies only without the experimental worker/board.")
+        if type(watcher_observe_only) is not bool:
+            raise TypeError("watcher_observe_only must be a bool.")
+        if watcher_observe_only and enable_experimental_worker_board:
+            raise ValueError("watcher_observe_only applies only without the experimental worker/board.")
         self.worker_board = enable_experimental_worker_board
-        # Per-task resume budget (None: unlimited). With 0 the watcher only
-        # observes main's yields and needs no model.
-        self._max_resumes = watcher_max_resumes
-        self._supervising = not self.worker_board and watcher_max_resumes != 0
+        # Resumes per task are not capped. An observe-only watcher only observes
+        # main's handoffs and needs no model.
+        self._supervising = not self.worker_board and not watcher_observe_only
         # Only these roles run, resolve, and are kept in config.json.
         self.roles = tuple(i for i in NAMES if i != 2 or self.worker_board)
         if set(self.roles) - set(settings):
@@ -504,11 +429,16 @@ class _Session:
         self._watch_queue = queue.Queue()
         # Without the board, main yields to the watcher over the same queue.
         self._channel = None if self.worker_board else YieldChannel(self._stop, self._watch_queue)
-        self._watcher_tools = _WatcherTools()
+        self._watcher_tools = SupervisorTools()
+        self._yield_tool = YieldTool()  # main's, when supervised
         self._ready = {i: threading.Event() for i in self.roles}
         # Without the board: retained in-process tasks, guarded by _changed.
         self._tasks = []
         self._accepting = False
+        # Main's open task without the board: from leaving quiescence with it
+        # until _settle. Submissions meanwhile steer it ([text, delivered]).
+        self._open_task = None
+        self._steers = []
         self._threads = {}
         self._errors = []
         self._fatal = False
@@ -703,9 +633,12 @@ class _Session:
     def status(self, index):
         with self._changed:
             phase, started = self._states[index]
+            task = self._open_task if index == 1 else None
         text = f"#{index} ({self.names[index]}) - {phase}"
         if phase in _TIMED_PHASES:
             text += f"... {int(time.monotonic() - started)}s"
+        if task is not None:
+            text += f" | Enter steers task {task.record_id}"
         return text
 
     def _is_busy(self, index):
@@ -751,6 +684,8 @@ class _Session:
             binding = None if service is None else _Binding(index, service.client(str(index)))
             if index == -1:
                 tools = self._watcher_tools.tools() if self._supervising else ()
+            elif index == 1 and self._supervising:
+                tools = self._yield_tool.tools()
             else:
                 tools = () if binding is None else binding.tools()
             environment = self._environment_factory(index, args, tools)
@@ -848,6 +783,8 @@ class _Session:
         with self._changed:
             while not self._stop.is_set():
                 if len(self._tasks) > cursor:
+                    if index == 1:
+                        self._open_task, self._steers = self._tasks[cursor], []
                     return self._tasks[cursor]
                 self._changed.wait()
             return None
@@ -893,27 +830,19 @@ class _Session:
     def _decide(self, yield_, model, environment, config, context):
         """One watcher decision: a follow-up message for main, or None to release it."""
         self._emit(-1, (DisplayItem(_yield_debug(yield_), label="debug"),), "debug")
-        within_budget = self._max_resumes is None or yield_.resumes < self._max_resumes
-        if model is not None and within_budget and not self._stop.is_set():
-            report = UserInteraction((Message("user", _yield_report(yield_)),))
-            self._watcher_tools.begin()
+        if model is not None and not self._stop.is_set():
             try:
-                self._checkpoint(-1, context, report.context_items())
-                self._emit(-1, report.display_items())
-                self._turn(-1, model, environment, config, context)
-            except _Stopping:
-                pass
-            except Exception as exc:
-                # The watcher's own failure releases main; it is not main's error.
-                message = (f"Watcher decision failed ({type(exc).__name__}); main was "
-                           "released. Details withheld.")
-                if isinstance(exc, SaveError) or context.pending_tool_calls():
-                    self._error(-1, message, fatal=True)
-                else:
-                    self._emit(-1, (DisplayItem(message),), "error")
+                resume, error = decide(yield_, context, model, environment, config,
+                                       _AutoHost(self, -1), self._watcher_tools)
+                if error is not None:
+                    # The watcher's own failure releases main; it is not main's error.
+                    message = (f"Watcher decision failed ({type(error).__name__}); main "
+                               "was released. Details withheld.")
+                    if isinstance(error, SaveError) or context.pending_tool_calls():
+                        self._error(-1, message, fatal=True)
+                    else:
+                        self._emit(-1, (DisplayItem(message),), "error")
             finally:
-                # A recorded resume_main call stands even if the turn then failed.
-                resume = self._watcher_tools.end()
                 self._phase(-1, "quiescent")
         else:
             resume = None
@@ -925,52 +854,32 @@ class _Session:
         return resume
 
     def _supervised_job(self, source, model, environment, config, context):
-        """One user task for main without the board: turns until the watcher releases it."""
-        text, resumes, yield_ = source.content, 0, None
-        try:
-            while True:
-                yield_ = self._attempt(source, text, resumes, model, environment, config, context)
-                if not yield_.resumable:
-                    with self._changed:
-                        self._accepting = False  # A faulted main admits no new tasks.
-                self._phase(1, "awaiting watcher")
-                resume = self._channel.signal(yield_, context.items)
-                if not yield_.resumable:
-                    # TODO(supervision): apply a watcher repair verdict here (e.g.
-                    # rewrite main's context, hot-reload code) instead of always
-                    # propagating the fault.
-                    break
-                if resume is None or self._stop.is_set():
-                    break
-                text, resumes = resume, resumes + 1
-        finally:
-            self._settle(source, yield_, context)
+        """One user task for main without the board: turns until the watcher releases it.
 
-    def _attempt(self, source, text, resumes, model, environment, config, context):
-        """Run one main turn on text and describe how its loop stopped."""
-        fields = {"context": 1, "job_id": source.record_id, "job_text": source.content,
-                  "resumes": resumes}
-        try:
-            content = text if resumes == 0 else _FOLLOW_UP_HEADER + text
-            user = UserInteraction((Message("user", content),))
-            self._checkpoint(1, context, user.context_items())
-            self._emit(1, user.display_items())
-            final = self._turn(1, model, environment, config, context)
-        except _Stopping:
-            return Yield(kind="stopped", resumable=False, revision=len(context), **fields)
-        except Exception as exc:
-            # Unsaved state or unresolved tool calls make the history unsafe to continue.
-            resumable = not (isinstance(exc, SaveError) or context.pending_tool_calls())
-            return Yield(kind="failed", resumable=resumable, reason=type(exc).__name__,
-                         failure=exc.failure if isinstance(exc, ModelError) else None,
-                         revision=len(context), **fields)
-        return Yield(kind="ended", resumable=True, final_text=final,
-                     revision=len(context), **fields)
+        The task loop is the supervision module's; auto supplies main's host,
+        its yield tool, the follow-up header, steers, and the task's outcome.
+        """
+        def on_fault(yield_):
+            with self._changed:
+                self._accepting = False  # A faulted main admits no new tasks.
+
+        run_supervised_task(
+            source.content, context, model, environment, config, _AutoHost(self, 1),
+            self._channel, job_id=source.record_id, context_id=1,
+            control=self._yield_tool if self._supervising else None,
+            follow_up=lambda text: _FOLLOW_UP_HEADER + text,
+            steers=self._steer_snapshot, stopping=self._stop.is_set, on_fault=on_fault,
+            settle=lambda yield_: self._settle(source, yield_, context),
+            waiting_phase="awaiting watcher")
 
     def _settle(self, source, yield_, context):
         """Record a task's outcome from main's last yield; recovery counts as success."""
         success = yield_ is not None and yield_.kind == "ended"
-        if not success:
+        if yield_ is not None and yield_.kind == "yielded":
+            # Released right after a handoff: not a success, and not an error.
+            self._emit(1, (DisplayItem("Task incomplete: main handed off with yield and "
+                                       "was released without a final answer."),))
+        elif not success:
             if yield_ is not None and yield_.kind == "stopped":
                 message = "Stopped before further effects; prior effects may have occurred."
             else:
@@ -982,7 +891,21 @@ class _Session:
             self._error(1, message, fatal=fatal)
         with self._changed:
             self._done[source.record_id] = success
+            # Steers main never received: on a release they become new tasks,
+            # in the same locked step, so none is pending once main is quiescent.
+            undelivered = [text for text, delivered in self._steers if not delivered]
+            self._open_task, self._steers = None, []
+            requeued = self._accepting and not self._stop.is_set()
+            for text in undelivered if requeued else ():
+                sequence = len(self._tasks) + 1
+                self._tasks.append(_Task(sequence, str(sequence), text))
             self._changed.notify_all()
+        if undelivered:
+            count = f"{len(undelivered)} steer{'s' if len(undelivered) > 1 else ''}"
+            self._emit(1, (DisplayItem(
+                f"Queued {count} that task {source.record_id} never received as new tasks."
+                if requeued else
+                f"Dropped {count} that task {source.record_id} never received."),))
 
     def _job(self, index, source, model, environment, config, context, binding):
         """Board-mode job for main or worker (one turn; outcome posted to the board)."""
@@ -994,7 +917,10 @@ class _Session:
             user = UserInteraction((Message("user", f"{label}\nBoard thread: {source.thread_id}\nSource record: {source.record_id}\n\n{source.content}"),))
             self._checkpoint(index, context, user.context_items())
             self._emit(index, user.display_items())
-            final = self._turn(index, model, environment, config, context)
+            result = self._turn(index, model, environment, config, context)
+            if result.kind == "stopped":
+                raise _Stopping()  # reported and published below, as before
+            final = result.final_text
             if index == 1:
                 with self._changed:
                     self._expected_watches.add(source.record_id)
@@ -1019,70 +945,10 @@ class _Session:
                 self._done[source.record_id] = success
                 self._changed.notify_all()
 
-    def _turn(self, index, model, environment, config, context):
-        try:
-            return _Session._turn_body(self, index, model, environment, config, context)
-        finally:
-            retire_model(model)
-
-    def _turn_body(self, index, model, environment, config, context):
-        started = time.perf_counter()
-        sample_params = config.sample_params()
-        samples = 0
-        # Pi's overflow recovery: one compact-and-retry per turn.
-        overflow_recovered = False
-        while config.max_samples is None or samples < config.max_samples:
-            self._check_running()
-            if auto_compaction_due(model, context, config):
-                _compact(self, index, model, environment, config, context, sample_params)
-                self._check_running()
-            self._phase(index, "sampling")
-            try:
-                with self._traced_operation(index, "sample", context_revision=len(context)):
-                    sample = model.sample(
-                        context.copy(), tools=environment.tool_specs,
-                        sample_params=sample_params,
-                    )
-            except ModelError as exc:
-                contribution = (*exc.completed_items, *((exc.failure,) if exc.failure is not None else ()))
-                if contribution:
-                    self._checkpoint(index, context, (*contribution, ModelSampleBoundary()))
-                    self._emit(index, render_interaction_items(contribution))
-                calls = tuple(i for i in exc.completed_items if isinstance(i, ToolCall))
-                if calls:
-                    results = tuple(ToolResult(c.call_id, "Not executed: the model response did not complete.", success=False) for c in calls)
-                    self._checkpoint(index, context, results)
-                    self._emit(index, render_interaction_items(results, source_calls=calls))
-                if (isinstance(exc, ModelContextWindowError) and not overflow_recovered
-                        and config.enable_auto_compaction and uses_host_auto_compaction(model)):
-                    overflow_recovered = True
-                    # A failed compaction fails the task; nothing to compact
-                    # leaves the sampling error.
-                    if _compact(self, index, model, environment, config, context, sample_params):
-                        continue
-                raise
-            # The failed attempt before an overflow retry does not count.
-            samples += 1
-            if not isinstance(sample, ModelSample):
-                raise TypeError("Expected ModelSample.")
-            self._checkpoint(index, context, sample.context_items())
-            self._emit(index, sample.display_items())
-            if sample.stop_reason == "compaction":
-                continue
-            if not sample.tool_calls:
-                text = sample.last_assistant_text
-                if not text or not text.strip():
-                    raise MissingFinalText("Model returned no final assistant text.")
-                summary = summarize_turn_usage(context.items, elapsed_seconds=time.perf_counter() - started)
-                self._checkpoint(index, context, (summary,))
-                self._emit(index, render_interaction_items((summary,)))
-                return text
-            self._check_running()
-            self._phase(index, "executing tools")
-            outcome = environment.execute_tool_calls(sample.tool_calls)
-            self._checkpoint(index, context, outcome.context_items())
-            self._emit(index, outcome.display_items(source_calls=sample.tool_calls))
-        raise SampleLimitExceeded("Model exceeded the per-turn sample limit.")
+    def _turn(self, index, model, environment, config, context, control=None):
+        """One turn of the shared loop on this role's owner thread."""
+        return run_turn(context, model, environment, config, _AutoHost(self, index),
+                        control=control)
 
     def _check_running(self):
         if self.board_failed:
@@ -1090,7 +956,19 @@ class _Session:
         if self._stop.is_set():
             raise _Stopping()
 
-    def submit(self, text, *, request_id=None):
+    def _take_steers(self):
+        """Main's undelivered steers, now marked delivered (main's owner thread)."""
+        with self._changed:
+            texts = [entry[0] for entry in self._steers if not entry[1]]
+            for entry in self._steers:
+                entry[1] = True
+            return texts
+
+    def _steer_snapshot(self):
+        with self._changed:
+            return tuple((text, delivered) for text, delivered in self._steers)
+
+    def submit(self, text, *, request_id=None, new_task=False):
         """Submit one user task for main; returns its handle for task_result().
 
         With the board this posts a fresh user thread (request_id makes an
@@ -1114,8 +992,14 @@ class _Session:
         with self._changed:
             if self._stop.is_set() or not self._accepting:
                 raise BoardError("Auto is not accepting new work.", 503)
-            if sum(task.record_id not in self._done for task in self._tasks) >= _MAX_PENDING_TASKS:
+            pending = (sum(task.record_id not in self._done for task in self._tasks)
+                       + sum(not delivered for _, delivered in self._steers))
+            if pending >= _MAX_PENDING_TASKS:
                 raise BoardError("Pending work limit reached; request was not accepted.", 429)
+            if not new_task and self._open_task is not None:
+                # Steer main's open task: delivered right before its next sample.
+                self._steers.append([text, False])
+                return {"record_id": self._open_task.record_id, "steer": True}
             sequence = len(self._tasks) + 1
             self._tasks.append(_Task(sequence, str(sequence), text))
             self._changed.notify_all()
@@ -1299,6 +1183,9 @@ def _local_command(text, selected, session):
 def _posted_notice(session, posted):
     if session.worker_board:
         return f"Posted user thread {posted['thread_id']}."
+    if posted.get("steer"):
+        return (f"Steer for task {posted['record_id']} of #1 ({session.names[1]}), "
+                "delivered before its next sample.")
     return f"Queued user task {posted['record_id']} for #1 ({session.names[1]})."
 
 
@@ -1323,7 +1210,12 @@ async def _interactive(session, terminal):
                         if key.key != "c-m":
                             editor = editor.edit(key.key, key.data or "")
                         elif editor.text.strip():
-                            if editor.text.lstrip().startswith("/"):
+                            words = editor.text.split(maxsplit=1)
+                            new_task = words[0] == "/task"
+                            if new_task and len(words) == 1:
+                                notices.append(DisplayItem("Usage: /task <text> queues a new task "
+                                                           "instead of steering the open one."))
+                            elif editor.text.lstrip().startswith("/") and not new_task:
                                 try:
                                     selected, result, quit_ = _local_command(editor.text, selected, session)
                                     notices.extend(result)
@@ -1342,7 +1234,10 @@ async def _interactive(session, terminal):
                                 submitted_text = editor.text
                                 request_id = retry[1] if retry and retry[0] == submitted_text else uuid.uuid4().hex
                                 retry = (submitted_text, request_id)
-                                pending = asyncio.create_task(asyncio.to_thread(session.submit, submitted_text, request_id=request_id))
+                                text = words[1] if new_task else submitted_text
+                                options = {"new_task": True} if new_task else {}
+                                pending = asyncio.create_task(asyncio.to_thread(
+                                    session.submit, text, request_id=request_id, **options))
                 if terminal.closed and closing is None:
                     session.request_stop()
                     closing = asyncio.create_task(asyncio.to_thread(session.close))
@@ -1411,18 +1306,15 @@ def main(argv=None):
             if args.headless and args.prompt is None:
                 raise ValueError("--headless without --prompt or --prompt-file requires "
                                  "--enable-experimental-worker-board, whose board accepts tasks.")
-        if args.watcher_max_resumes is not None:
-            if args.watcher_max_resumes < 0:
-                raise ValueError("--watcher-max-resumes must be a nonnegative integer.")
-            if args.enable_experimental_worker_board:
-                raise ValueError("--watcher-max-resumes does not apply with "
-                                 "--enable-experimental-worker-board.")
+        if args.watcher_observe_only and args.enable_experimental_worker_board:
+            raise ValueError("--watcher-observe-only does not apply with "
+                             "--enable-experimental-worker-board.")
         board = args.enable_experimental_worker_board
         if args.worker_model is not None and not board:
             raise ValueError("--worker-model requires --enable-experimental-worker-board.")
-        if args.watcher_model is not None and (board or args.watcher_max_resumes == 0):
+        if args.watcher_model is not None and (board or args.watcher_observe_only):
             raise ValueError("--watcher-model has no effect: the watcher runs no model with "
-                             "--enable-experimental-worker-board or --watcher-max-resumes 0.")
+                             "--enable-experimental-worker-board or --watcher-observe-only.")
         if args.prompt is not None and not args.prompt.strip():
             raise ValueError("prompt must not be empty.")
         if (not args.headless and args.prompt is None and not args.print_config
@@ -1434,7 +1326,7 @@ def main(argv=None):
         overrides = {k: v for k, v in vars(args).items() if k in DEFAULTS}
         roles = (1, 2, -1) if board else (1, -1)
         # Only roles that run a model take catalog defaults and need credentials.
-        sampling = (1, 2) if board else (1, -1) if args.watcher_max_resumes != 0 else (1,)
+        sampling = (1, 2) if board else (1,) if args.watcher_observe_only else (1, -1)
         role_models = {index: name for index, name in (
             (1, args.main_model), (-1, args.watcher_model), (2, args.worker_model),
         ) if name is not None}
@@ -1467,7 +1359,7 @@ def main(argv=None):
                            debug_save_model_binding=args.debug_save_model_binding,
                            debug_trace=args.debug_trace,
                            enable_experimental_worker_board=args.enable_experimental_worker_board,
-                           watcher_max_resumes=args.watcher_max_resumes)
+                           watcher_observe_only=args.watcher_observe_only)
         session.start()
         session._trace_to_events = not args.headless and args.prompt is None
         if args.enable_experimental_worker_board:

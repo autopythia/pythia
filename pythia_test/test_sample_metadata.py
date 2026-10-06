@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from pythia.interaction.loop import kernel
+from pythia_test.interaction_helpers import patch_compaction
 from unittest import mock
 
 from pythia.interaction import ChatCompletionsEndpoint
@@ -352,9 +354,7 @@ class SampleMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interaction.jsonl"
             with mock.patch("builtins.print"):
-                with mock.patch.object(
-                    demo,
-                    "perf_counter",
+                with mock.patch.object(kernel, "perf_counter",
                     side_effect=(100.0, 112.5),
                 ):
                     answer = demo.run(
@@ -401,9 +401,7 @@ class SampleMetadataTests(unittest.TestCase):
             path = Path(directory) / "interaction.jsonl"
             save_interaction_save(path, original)
             with mock.patch("builtins.print"):
-                with mock.patch.object(
-                    demo,
-                    "create_default_compactor",
+                with patch_compaction(demo, "create_default_compactor",
                     return_value=compactor,
                 ):
                     answer = demo.run(
@@ -449,7 +447,7 @@ class SampleMetadataTests(unittest.TestCase):
         )
         model = Model(ModelContextWindowError("too long"), ModelSample((Message("assistant", "Done."),)))
         with mock.patch("builtins.print"):
-            with mock.patch.object(demo, "create_default_compactor", return_value=compactor) as create:
+            with patch_compaction(demo, "create_default_compactor", return_value=compactor) as create:
                 answer = demo.run(
                     model, Environment(), prompt="hello", max_samples=1,
                     compaction_mode="pi", compaction_keep_recent_tokens=0,
@@ -466,7 +464,7 @@ class SampleMetadataTests(unittest.TestCase):
         # Nothing to compact leaves the sampling error.
         compactor.compact.side_effect = NothingToCompact("the context fits")
         with mock.patch("builtins.print"):
-            with mock.patch.object(demo, "create_default_compactor", return_value=compactor):
+            with patch_compaction(demo, "create_default_compactor", return_value=compactor):
                 with self.assertRaises(ModelContextWindowError):
                     demo.run(Model(ModelContextWindowError("too long")), Environment(), prompt="hello")
         with self.assertRaisesRegex(ConfigError, "no provider compaction"):
@@ -497,7 +495,7 @@ class SampleMetadataTests(unittest.TestCase):
             path = Path(directory) / "interaction.jsonl"
             save_interaction_save(path, original)
             with mock.patch("builtins.print"):
-                with mock.patch.object(demo, "create_default_compactor") as create:
+                with patch_compaction(demo, "create_default_compactor") as create:
                     answer = demo.run(
                         model,
                         Environment(),

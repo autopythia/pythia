@@ -13,6 +13,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from pythia_test.interaction_helpers import patch_compaction
 from unittest import mock
 
 from pythia.interaction import (
@@ -23,6 +24,7 @@ from pythia.interaction import (
     TurnSummary,
 )
 from pythia.interaction import auto, cli, demo
+from pythia.interaction.loop import kernel
 from pythia.interaction._auto_config import (
     DEFAULTS, build_parser, load_saved_config, namespace, resolve_config, saved_document,
 )
@@ -371,7 +373,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                     enable_auto_compaction=enabled, compaction_mode="provider",
                 ))
                 model = CaptureMessages(trigger=150_000)
-                with mock.patch.object(cli, "create_default_compactor", side_effect=AssertionError("host compaction")):
+                with patch_compaction(cli, "create_default_compactor", side_effect=AssertionError("host compaction")):
                     await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
                                     Path(directory) / "log.jsonl", config)
                 self.assertEqual(len(model.payloads), 1)
@@ -391,7 +393,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
             model.endpoint = replace(model.endpoint, server_compaction=None)
             compactor = mock.Mock()
             compactor.compact.return_value = CompactionResult((ContextPrefix((Message("user", "summary"),)),))
-            with mock.patch.object(cli, "create_default_compactor", return_value=compactor) as create:
+            with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
                 await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
                                 Path(directory) / "log.jsonl", config)
             create.assert_called_once_with(model, config.snapshot().compaction_settings())
@@ -407,7 +409,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                 config = InteractionConfig(InteractionConfigSnapshot(auto_compact_tokens=threshold))
                 compactor = mock.Mock()
                 compactor.compact.return_value = CompactionResult((ContextPrefix((Message("assistant", "summary"),)),))
-                with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+                with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
                     await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
                                     Path(directory) / "log.jsonl", config)
                 self.assertEqual(compactor.compact.call_count, int(threshold is not None))
@@ -418,6 +420,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
             _check_running=lambda: None, _phase=lambda *args: None, _emit=lambda *args: None,
             _checkpoint=lambda index, context, items: context.extend(items),
             _traced_operation=lambda *args, **kwargs: nullcontext(),
+            _take_steers=lambda: (),
         )
         for model in (CaptureHost(), CaptureMessages(trigger=150_000)):
             for threshold in (None, 100_000):
@@ -425,9 +428,9 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                     config = InteractionConfigSnapshot(auto_compact_tokens=threshold, max_output_tokens=77)
                     compactor = mock.Mock()
                     compactor.compact.return_value = CompactionResult((ContextPrefix((Message("assistant", "summary"),)),))
-                    with mock.patch.object(auto, "create_default_compactor", return_value=compactor):
+                    with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
                         result = auto._Session._turn(session, 1, model, Environment(), config, previous_context())
-                    self.assertEqual(result, "done")
+                    self.assertEqual(result.final_text, "done")
                     self.assertEqual(compactor.compact.call_count,
                                      int(isinstance(model, CaptureHost) and threshold is not None))
 
@@ -439,8 +442,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(kwargs=kwargs):
                 model = CaptureMessages()
-                with redirect_stdout(io.StringIO()), mock.patch.object(
-                    demo, "create_default_compactor", side_effect=AssertionError("host compaction"),
+                with redirect_stdout(io.StringIO()), patch_compaction(demo, "create_default_compactor", side_effect=AssertionError("host compaction"),
                 ):
                     demo.run(model, Environment(), prompt="hello", **kwargs)
                 self.assertEqual(model.payloads[0]["context_management"]["edits"][0]["trigger"]["value"], 100_000)

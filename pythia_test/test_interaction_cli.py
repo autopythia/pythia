@@ -12,6 +12,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from pythia_test.interaction_helpers import patch_compaction
 from unittest import mock
 
 from pythia.interaction import DefaultEnvironment
@@ -48,6 +49,7 @@ from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import UserToolCall
 from pythia.interaction import UserToolResult
 from pythia.interaction import cli
+from pythia.interaction.loop import kernel
 from pythia.interaction import demo
 from pythia.interaction import load_interaction_save
 from pythia.interaction import save_interaction_save
@@ -615,7 +617,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
         compactor.compact.return_value = CompactionResult((
             ContextPrefix((Message("assistant", "summary"),)),
         ))
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--enable-default-tools=False", "--resume", "--prompt", "continue",
                 "--auto-compact-tokens", "100",
@@ -654,7 +656,7 @@ class CLIControllerTests(_ControllerTestCase):
             lambda t, e, s: t.submit(commands.popleft())
             if s == "idle" and commands else None
         )
-        with mock.patch.object(cli, "create_default_compactor", return_value=compactor):
+        with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--enable-default-tools=False", "--resume",
                 "--auto-compact-tokens", "100", "--prompt", "continue",
@@ -962,7 +964,7 @@ class CLIControllerTests(_ControllerTestCase):
         checkpoint = OpaqueCompaction.from_messages("summary")
         model = _Model(self.path, ModelSample(items=(checkpoint,), stop_reason="compaction"), _answer())
         with mock.patch.object(
-            cli.time,
+            kernel,
             "perf_counter",
             side_effect=(50.0, 57.25),
         ):
@@ -1012,9 +1014,7 @@ class CLIControllerTests(_ControllerTestCase):
         terminal = _Terminal(
             lambda t, e, s: t.key("c-d") if s == "idle" else None
         )
-        with mock.patch.object(
-            cli,
-            "create_default_compactor",
+        with patch_compaction(cli, "create_default_compactor",
             return_value=Compactor(),
         ) as create:
             self.assertEqual(
@@ -1079,7 +1079,7 @@ class CLIControllerTests(_ControllerTestCase):
             lambda t, e, s: t.key("c-d") if s == "idle" else None
         )
 
-        with mock.patch.object(cli, "create_default_compactor") as create:
+        with patch_compaction(cli, "create_default_compactor") as create:
             self.assertEqual(
                 await self._run(
                     model,
@@ -1142,7 +1142,7 @@ class CLIControllerTests(_ControllerTestCase):
             if entered.is_set() and not queued:
                 queued = True
                 t.submit("queued")
-            elif "queued=1" in status:
+            elif "steers=1" in status:  # text typed mid-turn is a pending steer
                 release.set()
             if status == "idle" and any(i.text == "[assistant] second" for i in t.items):
                 t.key("c-d")
@@ -1156,6 +1156,48 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 2)
         self.assertNotIn(Message("user", "queued"), model.calls[0][0].items)
         self.assertIn(Message("user", "queued"), model.calls[1][0].items)
+
+    async def test_text_typed_during_a_tool_call_steers_the_next_sample(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def probe(arguments, *, timeout_seconds=None):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release tool")
+            return ToolOutcome("probed")
+
+        step = 0
+
+        def frame(t, editor, status):
+            nonlocal step
+            if step == 0 and entered.is_set():
+                t.submit("Also check the tests.")
+                step = 1
+            elif step == 1 and "steers=1" in status:
+                release.set()
+                step = 2
+            elif step == 2 and status == "idle" and any(
+                    i.text == "[assistant] done" for i in t.items):
+                t.key("c-d")
+                step = 3
+
+        terminal = _Terminal(frame)
+        environment = Environment((Tool(ToolSpec("probe", "", {}), probe),))
+        model = _Model(self.path, ModelSample(items=(ToolCall("probe", "p1", "{}"),)),
+                       _answer("done"))
+        try:
+            self.assertEqual(await self._run(
+                model, terminal, ["--prompt", "hello"], environment), 0)
+        finally:
+            release.set()
+        self.assertEqual(step, 3)
+        self.assertEqual(len(model.calls), 2)  # the steer joined the turn: no third query
+        steer = Message("user", "Also check the tests.")
+        self.assertNotIn(steer, model.calls[0][0].items)
+        # Right after the tool result, with no boundary: the turn continues.
+        self.assertEqual(model.calls[1][0].items[-2:], (ToolResult("p1", "probed"), steer))
+        self.assertIn("[user] Also check the tests.", [item.text for item in terminal.items])
+        self.assertFalse(any("queued=" in status for _editor, status, _prompt in terminal.frames))
 
     async def test_quit_drains_sample_without_executing_returned_tools(self):
         entered, release = threading.Event(), threading.Event()
@@ -1211,6 +1253,22 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(executions, [True])
         self.assertEqual(saved.items[-1], ToolResult("one", "completed before exit"))
         self.assertEqual(saved.pending_tool_calls(), (calls[1],))
+        # --resume closes the unstarted call as unavailable and never runs it.
+        resumed = _Model(self.path, _answer("resumed"))
+
+        def finish(t, editor, status):
+            if status == "idle" and any(i.text == "[assistant] resumed" for i in t.items):
+                t.key("c-d")
+        self.assertEqual(await self._run(
+            resumed, _Terminal(finish), ["--resume", "--prompt", "continue"], environment
+        ), 0)
+        self.assertEqual(executions, [True])
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.pending_tool_calls(), ())
+        closing = next(item for item in saved.items
+                       if isinstance(item, ToolResult) and item.call_id == "two")
+        self.assertFalse(closing.success)
+        self.assertIn("Result unavailable after", closing.output)
 
     async def test_command_session_survives_across_user_turns(self):
         step = 0

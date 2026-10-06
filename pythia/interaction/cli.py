@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 from collections import deque
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextlib import nullcontext
 from contextlib import suppress
@@ -39,9 +43,7 @@ from .codex_auth import CodexAuthUnavailable
 from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import NothingToCompact
-from .compaction import auto_compaction_due
 from .compaction import create_default_compactor
-from .compaction import uses_host_auto_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
@@ -65,12 +67,14 @@ from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
-from .items import summarize_turn_usage
 from .media import AttachmentError
 from .media import parse_user_prompt
+from .loop import Interrupt
+from .loop import Steer
+from .loop import TurnHost
+from .loop import run_turn
 from .model import Model
 from .model import ModelAuthenticationError
-from .model import ModelContextWindowError
 from .model import ModelError
 from .model import ModelTimeoutError
 from .model import SampleParams
@@ -126,6 +130,16 @@ class _UIState:
     active_user_call: Optional[str] = None
     trace: Optional[DebugTrace] = None
     active_model: object = field(default=None, repr=False)
+    # True while a model turn runs that started with nothing queued: plain text
+    # submitted then steers it. Otherwise it queues behind the older input.
+    turn_active: bool = False
+    # The context thread: this context's model, tools, and saves run here, so
+    # the event loop thread (terminal, redraw, exit keys) never blocks.
+    context_executor: ThreadPoolExecutor = field(
+        default_factory=lambda: ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="interaction-context"),
+        repr=False,
+    )
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -232,7 +246,7 @@ def _traced_operation(state: _UIState, op: str, **tags):
 async def _checkpoint(context: InteractionContext, state: _UIState, path: Path) -> None:
     state.set_phase("saving")
     try:
-        await asyncio.to_thread(save_interaction_save, path, context.copy())
+        await _on_context_thread(state, save_interaction_save, path, context.copy())
     except Exception:
         state.persistence_failed = True
         raise
@@ -246,18 +260,6 @@ async def _append(
 ) -> None:
     context.extend(items)
     await _checkpoint(context, state, path)
-
-
-async def _sweep_tools(
-    context: InteractionContext, environment: Environment, state: _UIState, path: Path
-) -> None:
-    for call in context.pending_tool_calls():
-        if state.closing:
-            return
-        state.set_phase(f"tool: {call.name}")
-        result = await asyncio.to_thread(environment.execute_tool_calls, (call,))
-        await _append(context, result.context_items(), state, path)
-        state.displays.extend(result.display_items(source_calls=(call,)))
 
 
 async def _fail_pending_tools(
@@ -450,7 +452,7 @@ async def _compact_user_tool(
                     model, snapshot.compaction_settings(),
                 )
                 with _traced_operation(state, "compact", context_revision=len(source_context)):
-                    compaction = await asyncio.to_thread(
+                    compaction = await _on_context_thread(state, 
                         compactor.compact,
                         source_context,
                         tools=model_environment.tool_specs,
@@ -551,7 +553,7 @@ async def _user_tool(
         )
         state.set_phase(f"user tool: {intent.name}")
         with _traced_operation(state, intent.name, context_revision=len(context)):
-            outcome = await asyncio.to_thread(
+            outcome = await _on_context_thread(state, 
                 environment.execute_tool_calls, (call.call,),
             )
         result = UserToolResult(outcome.items[0])
@@ -563,13 +565,13 @@ async def _user_tool(
         state.set_phase("loading model")
         candidate = None
         try:
-            candidate = await asyncio.to_thread(_build_model, args, state.trace)
+            candidate = await _on_context_thread(state, _build_model, args, state.trace)
             model = candidate
             if (expected_account is not None and
                     getattr(getattr(model, "endpoint", None), "account_id", None) != expected_account):
                 raise ValueError("credential account changed during activation")
         except Exception:
-            await asyncio.to_thread(close_model, candidate)
+            await _on_context_thread(state, close_model, candidate)
             model = None
             state.exit_code = 1
             state.pending.clear()
@@ -587,188 +589,182 @@ async def _user_tool(
     return model
 
 
-async def _record_sample_failure(
-    context: InteractionContext,
-    exc: ModelError,
-    state: _UIState,
-    path: Path,
-) -> None:
-    """Durably close a failed sample: its completed output and failure."""
-    contribution = (
-        *exc.completed_items,
-        *((exc.failure,) if exc.failure is not None else ()),
+async def _on_context_thread(state: _UIState, function, /, *args, **kwargs):
+    """Run blocking work on the context thread, like ``asyncio.to_thread``."""
+    call = functools.partial(contextvars.copy_context().run, function, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(state.context_executor, call)
+
+
+def _mark_persistence_failed(state: _UIState) -> None:
+    state.persistence_failed = True
+
+
+def _arm_retry(state: _UIState) -> None:
+    state.retry = _RetryIntent()
+
+
+def _bind_account(state: _UIState, account_id: str) -> None:
+    if state.bound_account_id is None:
+        state.bound_account_id = account_id
+
+
+def _query_message(query: str, args, cwd: Path) -> Message:
+    """The user message for submitted text; raises AttachmentError."""
+    message = parse_user_prompt(
+        query,
+        cwd=cwd,
+        enabled=args.enable_experimental_media,
+        enable_workspace=args.enable_workspace,
     )
-    if not contribution:
-        return
-    recovered = (*contribution, ModelSampleBoundary())
-    await _append(context, recovered, state, path)
-    state.displays.extend(render_interaction_items(contribution))
-    recovered_calls = tuple(
-        item for item in exc.completed_items
-        if isinstance(item, ToolCall)
-    )
-    if recovered_calls:
-        results = tuple(
-            ToolResult(
-                call_id=call.call_id,
-                output=(
-                    "Not executed because the model response did "
-                    "not complete."
-                ),
-                success=False,
-            )
-            for call in recovered_calls
+    if message.has_media and args.model_api not in {"codex", "responses", "chat-completions"}:
+        raise AttachmentError(
+            f"--endpoint-api {args.model_api} does not support "
+            "media prompts; use codex, responses, or chat-completions"
         )
-        await _append(context, results, state, path)
-        state.displays.extend(
-            render_interaction_items(
-                results,
-                source_calls=recovered_calls,
-            )
-        )
+    return message
 
 
-async def _auto_compact(
-    context: InteractionContext,
-    model: Model,
-    environment: Environment,
-    state: _UIState,
-    path: Path,
-    turn_config,
-    sample_params: SampleParams,
-) -> bool:
-    """Install one automatic compaction; False when there is nothing to compact."""
-    state.set_phase("compacting")
-    compactor = create_default_compactor(model, turn_config.compaction_settings())
-    try:
-        with _traced_operation(state, "compact", context_revision=len(context)):
-            compaction = await asyncio.to_thread(
-                compactor.compact,
-                context.copy(),
-                tools=environment.tool_specs,
-                sample_params=sample_params,
-            )
-    except NothingToCompact:
-        return False
-    if not isinstance(compaction, CompactionResult):
-        raise TypeError(
-            "compactor must return CompactionResult, got "
-            f"{type(compaction).__name__}"
-        )
-    await _append(context, compaction.context_items(), state, path)
-    state.displays.extend(compaction.display_items())
-    return True
+def _steer_count(state: _UIState) -> int:
+    """Leading plain-text entries of the queue: a running turn takes them as steers."""
+    if not state.turn_active:
+        return 0
+    count = 0
+    for entry in state.pending:
+        if not isinstance(entry, str):
+            break
+        count += 1
+    return count
 
 
-async def _turn(context, model, environment, state, path, config):
-    try:
-        return await _turn_body(context, model, environment, state, path, config)
-    finally:
-        if callable(getattr(model, "retire", None)):
-            await asyncio.to_thread(retire_model, model)
+def _take_steers(state: _UIState) -> tuple:
+    texts = []
+    while state.turn_active and state.pending and isinstance(state.pending[0], str):
+        texts.append(state.pending.popleft())
+    return tuple(texts)
 
 
-async def _turn_body(
-    context: InteractionContext,
-    model: Model,
-    environment: Environment,
-    state: _UIState,
-    path: Path,
-    config: InteractionConfig,
-) -> None:
-    # Each explicit attempt consumes the preceding failure's ticket. Only a
-    # sampling failure below can arm a new one, not a tool/compaction/save error.
-    state.retry = None
-    turn_config = config.snapshot()
-    sample_params = turn_config.sample_params()
-    turn_started = time.perf_counter()
-    samples = 0
-    # Pi's overflow recovery: one compact-and-retry per turn.
-    overflow_recovered = False
-    while not state.closing:
-        if (
-            turn_config.max_samples is not None
-            and samples >= turn_config.max_samples
-        ):
-            raise RuntimeError(
-                "model did not produce a final answer within "
-                f"{turn_config.max_samples} samples"
-            )
-        if auto_compaction_due(model, context, turn_config):
-            await _auto_compact(
-                context, model, environment, state, path,
-                turn_config, sample_params,
-            )
-            if state.closing:
-                return
-        state.set_phase("sampling")
-        try:
-            with _traced_operation(state, "sample", context_revision=len(context)):
-                sample = await asyncio.to_thread(
-                    model.sample,
-                    context.copy(),
-                    tools=environment.tool_specs,
-                    sample_params=sample_params,
-                )
-        except ModelError as exc:
-            await _record_sample_failure(context, exc, state, path)
-            if (
-                isinstance(exc, ModelContextWindowError)
-                and not overflow_recovered
-                and turn_config.enable_auto_compaction
-                and uses_host_auto_compaction(model)
-                and not state.closing
-            ):
-                overflow_recovered = True
-                state.notice(
-                    "Model context window exceeded; compacting before one retry."
-                )
+def _requeue(state: _UIState, texts) -> None:
+    state.pending.extendleft(reversed(tuple(texts)))
+
+
+def _safe_notice(state: _UIState, text: str) -> None:
+    with suppress(OSError, ValueError):
+        state.notice(text)
+
+
+class _CliHost(TurnHost):
+    """The CLI's side of the shared turn loop.
+
+    Its methods run on the context thread. Every change to terminal state is
+    posted to the event loop thread, in order, so the redraw (which copies and
+    clears ``state.displays``) never races an update. Posted changes run
+    before the turn's outcome reaches ``_drive_interaction``.
+    """
+
+    def __init__(self, state: _UIState, path: Path, loop, steer=None) -> None:
+        self._state, self._path, self._loop = state, path, loop
+        self._steer = steer  # text -> user Message; None: no steering
+
+    def _post(self, function, *args) -> None:
+        self._loop.call_soon_threadsafe(function, *args)
+
+    def _on_loop(self, function, *args):
+        """Run function on the event loop thread and wait for its result."""
+        future = concurrent.futures.Future()
+
+        def run():
+            if future.set_running_or_notify_cancel():
                 try:
-                    compacted = await _auto_compact(
-                        context, model, environment, state, path,
-                        turn_config, sample_params,
-                    )
-                except Exception:
-                    # The turn fails as it does for a sampling error.
-                    state.retry = _RetryIntent()
-                    raise
-                if compacted:
-                    if state.closing:
-                        return
-                    continue
-                # Nothing to compact: the sampling error stands.
-            state.retry = _RetryIntent()
-            raise
+                    future.set_result(function(*args))
+                except BaseException as exc:
+                    future.set_exception(exc)
+        self._loop.call_soon_threadsafe(run)
+        return future.result()
+
+    def interrupt(self):
+        """Right before a sample: plain text submitted since becomes steers.
+
+        Slash commands and /retry wait for the turn to end, and a steer never
+        overtakes one queued before it.
+        """
+        if self._steer is None or self._state.closing:
+            return super().interrupt()
+        texts = self._on_loop(_take_steers, self._state)
+        messages = []
+        for index, text in enumerate(texts):
+            try:
+                messages.append(self._steer(text))
+            except AttachmentError:
+                # The outer loop reports it, as for any query, after the turn.
+                self._on_loop(_requeue, self._state, texts[index:])
+                break
+        if self._state.closing:
+            return Interrupt.STOP
+        return Steer(tuple(messages)) if messages else Interrupt.CONTINUE
+
+    def append(self, context, items) -> None:
+        context.extend(items)
+        self.phase("saving")
+        try:
+            save_interaction_save(self._path, context.copy())
         except Exception:
-            # Adapters normally raise ModelError, but an exception at this
-            # sampling boundary is still distinct from a failed local effect.
-            state.retry = _RetryIntent()
+            self._post(_mark_persistence_failed, self._state)
             raise
-        samples += 1
-        model_account_id = getattr(
-            getattr(model, "endpoint", None),
-            "account_id",
-            None,
-        )
-        if state.bound_account_id is None and model_account_id is not None:
-            state.bound_account_id = model_account_id
-        await _append(context, sample.context_items(), state, path)
-        state.displays.extend(sample.display_items())
-        if sample.stop_reason == "compaction":
-            continue
-        if not sample.tool_calls:
-            final_text = sample.last_assistant_text
-            if not final_text or not final_text.strip():
-                state.retry = _RetryIntent()
-                raise RuntimeError("model returned no final assistant text")
-            summary = summarize_turn_usage(
-                context.items,
-                elapsed_seconds=time.perf_counter() - turn_started,
-            )
-            await _append(context, (summary,), state, path)
-            state.displays.extend(render_interaction_items((summary,)))
+
+    def show(self, items) -> None:
+        self._post(self._state.displays.extend, tuple(items))
+
+    def phase(self, phase: str) -> None:
+        self._post(self._state.set_phase, phase)
+
+    def tool_phase(self, call) -> None:
+        self.phase(f"tool: {call.name}")
+
+    def should_stop(self) -> bool:
+        return self._state.closing
+
+    @contextmanager
+    def trace(self, op: str, **tags):
+        trace = self._state.trace
+        if trace is None:
+            yield
             return
-        await _sweep_tools(context, environment, state, path)
+        try:
+            with trace.operation(op, **tags):
+                yield
+        finally:
+            warning = trace.take_warning()
+            if warning is not None:
+                self.notice(warning)
+
+    def notice(self, text: str) -> None:
+        self._post(_safe_notice, self._state, text)
+
+    def after_sample(self, model, sample) -> None:
+        account_id = getattr(getattr(model, "endpoint", None), "account_id", None)
+        if account_id is not None:
+            self._post(_bind_account, self._state, account_id)
+
+    def retryable_failure(self) -> None:
+        self._post(_arm_retry, self._state)
+
+
+async def _turn(context, model, environment, state, path, config, *, steer=None):
+    """One turn of the shared loop, on the context thread.
+
+    With ``steer`` (text -> user message), plain text submitted during the
+    turn reaches it right before the next sample.
+    """
+    # Each explicit attempt consumes the preceding failure's ticket; only a
+    # failure the loop reports as retryable arms a new one.
+    state.retry = None
+    host = _CliHost(state, path, asyncio.get_running_loop(), steer)
+    state.turn_active = not state.pending  # a steer never overtakes older input
+    try:
+        return await _on_context_thread(
+            state, run_turn, context, model, environment, config.snapshot(), host)
+    finally:
+        state.turn_active = False
 
 
 async def _reload_retry_model(
@@ -789,17 +785,17 @@ async def _reload_retry_model(
         return None
     model = None
     try:
-        model = await asyncio.to_thread(_build_model, args, state.trace)
+        model = await _on_context_thread(state, _build_model, args, state.trace)
         account = getattr(getattr(model, "endpoint", None), "account_id", None)
         if expected_account is not None and account != expected_account:
             state.notice(
                 "Credential account changed; no model request was started. "
                 "Restore the original account or start a fresh session."
             )
-            await asyncio.to_thread(close_model, model)
+            await _on_context_thread(state, close_model, model)
             return None
     except Exception:
-        await asyncio.to_thread(close_model, model)
+        await _on_context_thread(state, close_model, model)
         # As with /login activation, do not reflect credential/provider details.
         state.notice("Model reload failed; no model request was started. Details withheld.")
         state.notice(state.auth_notice)
@@ -879,7 +875,7 @@ async def _drive_interaction(model, environment, state, args, path, config):
         return await _drive_interaction_body(model, environment, state, args, path, config)
     finally:
         if callable(getattr(state.active_model, "close", None)):
-            await asyncio.to_thread(close_model, state.active_model)
+            await _on_context_thread(state, close_model, state.active_model)
 
 
 async def _drive_interaction_body(
@@ -892,9 +888,9 @@ async def _drive_interaction_body(
 ) -> None:
     attachment_cwd = Path(args.cwd).expanduser().resolve()
     tools_snapshot = Tools(environment.tool_specs)
-    existing = args.resume and await asyncio.to_thread(path.exists)
+    existing = args.resume and await _on_context_thread(state, path.exists)
     if existing:
-        context = await asyncio.to_thread(load_interaction_save, path)
+        context = await _on_context_thread(state, load_interaction_save, path)
         state.displays.extend(render_interaction_items(context.items))
         state.notice(
             "Command sessions and plan state were not restored. "
@@ -950,7 +946,7 @@ async def _drive_interaction_body(
                     state.displays.extend(render_interaction_items((instructions,)))
                 if (getattr(args, "debug_save_model_binding", False)
                         and getattr(args, "model_binding", None) is not None):
-                    warning = await asyncio.to_thread(
+                    warning = await _on_context_thread(state, 
                         save_debug_model_bindings,
                         debug_model_binding_path(path),
                         {"main": args.model_binding},
@@ -1023,7 +1019,7 @@ async def _drive_interaction_body(
                             config,
                         )
                         if previous_model is not model:
-                            await asyncio.to_thread(close_model, previous_model)
+                            await _on_context_thread(state, close_model, previous_model)
                         state.active_model = model
                         state.set_phase("auth needed" if state.auth_required else "idle")
                         continue
@@ -1038,22 +1034,7 @@ async def _drive_interaction_body(
                 return
             if query is not None:
                 try:
-                    message = parse_user_prompt(
-                        query,
-                        cwd=attachment_cwd,
-                        enabled=args.enable_experimental_media,
-                        enable_workspace=args.enable_workspace,
-                    )
-                    if message.has_media and args.model_api not in {
-                        "codex",
-                        "responses",
-                        "chat-completions",
-                    }:
-                        raise AttachmentError(
-                            f"--endpoint-api {args.model_api} does not support "
-                            "media prompts; use codex, responses, or "
-                            "chat-completions"
-                        )
+                    message = _query_message(query, args, attachment_cwd)
                 except AttachmentError as exc:
                     state.notice(str(exc))
                     if state.headless:
@@ -1075,6 +1056,7 @@ async def _drive_interaction_body(
                     state,
                     path,
                     config,
+                    steer=functools.partial(_query_message, args=args, cwd=attachment_cwd),
                 )
             state.set_phase("auth needed" if state.auth_required else "idle")
             if state.headless:
@@ -1089,7 +1071,7 @@ async def _drive_interaction_body(
                     state.bound_account_id = getattr(
                         getattr(model, "endpoint", None), "account_id", None
                     )
-                await asyncio.to_thread(close_model, model)
+                await _on_context_thread(state, close_model, model)
                 model = None
                 state.active_model = None
                 _mark_auth_required(state, exc)
@@ -1267,8 +1249,11 @@ async def _run(
                 )
                 if busy:
                     status += f" {int(time.monotonic() - state.phase_started)}s"
-                if state.pending:
-                    status += f" | queued={len(state.pending)}"
+                steers = _steer_count(state)
+                if steers:
+                    status += f" | steers={steers}"
+                if len(state.pending) > steers:
+                    status += f" | queued={len(state.pending) - steers}"
                 prompt = (
                     f"{_SPINNER[(frame // 16) % len(_SPINNER)]}> "
                     if busy else ":> "

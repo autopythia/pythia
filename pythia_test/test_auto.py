@@ -25,6 +25,7 @@ from pythia.interaction import CompactionContextWindowError, CompactionResult, C
 from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingToCompact
 from pythia.interaction import load_interaction_save
 from pythia.interaction import auto
+from pythia.interaction.loop import kernel
 from pythia.interaction import SampleParams
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction._auto_board import BoardError
@@ -41,7 +42,12 @@ def answer(text="done"):
 
 def resume(content, call_id="resume"):
     """A watcher sample that resumes main with content."""
-    return ModelSample((ToolCall("resume_main", call_id, json.dumps({"content": content})),))
+    return ModelSample((ToolCall("resume", call_id, json.dumps({"content": content})),))
+
+
+def yield_call(content, call_id="yield"):
+    """A main sample that hands off to the watcher with content."""
+    return ModelSample((ToolCall("yield", call_id, json.dumps({"content": content})),))
 
 
 def wait_for(predicate, timeout=5):
@@ -820,7 +826,9 @@ class RuntimeTests(unittest.TestCase):
             def execute_tool_calls(self, calls):
                 test.threads[self.index].append(threading.get_ident())
                 saved = load_interaction_save(test.path / "contexts" / f"{self.index}.jsonl")
-                test.assertEqual(saved.pending_tool_calls(), tuple(calls))
+                pending = saved.pending_tool_calls()
+                test.assertEqual(len(calls), 1)  # one call at a time
+                test.assertEqual(pending[:1], tuple(calls))
                 return super().execute_tool_calls(calls)
             def close(self):
                 test.threads[self.index].append(threading.get_ident())
@@ -965,6 +973,306 @@ class RuntimeTests(unittest.TestCase):
             session.close()
         self.assertFalse(runner.is_alive())
         self.assertFalse(any(thread.is_alive() for thread in session._threads.values()))
+
+    def test_stop_during_a_sample_records_a_stopped_task_not_a_failure(self):
+        # Quitting retires a model that is waiting inside sample(); the failure
+        # that causes is the stop's doing, so the task is stopped, not failed.
+        from pythia.interaction.model import ModelTransportError
+        holder = {}
+
+        def retired_by_stop(context):
+            holder["session"].request_stop()
+            raise ModelTransportError("Claude Relay continuation was retired during sampling")
+        session = self.session({1: [retired_by_stop]}, worker_board=False)
+        holder["session"] = session
+        submitted = session.submit("long task")
+        self.assertFalse(self.settled(session, submitted))
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertTrue(any("Stopped before further effects" in text for text in texts), texts)
+        self.assertFalse(any("Task failed" in text for text in texts), texts)
+        self.assertFalse(session.has_errors and session._fatal)
+        session.close()
+
+    def test_exit_mid_batch_leaves_unstarted_calls_unanswered_like_the_cli(self):
+        # Calls run one at a time: quitting during the first call lets it finish
+        # and be saved, and the second never starts (a restart closes it).
+        holder, ran = {}, []
+
+        def probe(args, **kwargs):
+            ran.append(len(ran) + 1)
+            holder["session"].request_stop()
+            return ToolOutcome("first done")
+        batch = ModelSample((ToolCall(name="probe", call_id="one", arguments_json="{}"),
+                             ToolCall(name="probe", call_id="two", arguments_json="{}")))
+        session = self.session({1: [batch]}, worker_board=False,
+                               extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        holder["session"] = session
+        submitted = session.submit("two calls")
+        self.assertFalse(self.settled(session, submitted))
+        session.close()
+        self.assertEqual(ran, [1])
+        saved = load_interaction_save(self.path / "contexts" / "1.jsonl")
+        self.assertEqual([call.call_id for call in saved.pending_tool_calls()], ["two"])
+        self.assertEqual([item.call_id for item in saved.items if isinstance(item, ToolResult)],
+                         ["one"])
+        # A restart closes the unstarted call as unavailable and never runs it.
+        restarted = self.session({}, worker_board=False, resume=True,
+                                 extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        restarted.close()
+        self.assertEqual(ran, [1])
+        saved = load_interaction_save(self.path / "contexts" / "1.jsonl")
+        self.assertEqual(saved.pending_tool_calls(), ())
+        closing = next(item for item in saved.items
+                       if isinstance(item, ToolResult) and item.call_id == "two")
+        self.assertFalse(closing.success)
+        self.assertIn("Result unavailable after restart", closing.output)
+
+    def test_yield_hands_off_and_a_resume_continues_the_same_task(self):
+        session = self.session({
+            1: [yield_call("I traced the path; please check the ordering."), answer("done")],
+            -1: [resume("Ordering confirmed; continue.", "r1"), answer("Resuming."),
+                 answer("Complete.")],
+        }, worker_board=False)
+        self.assertTrue(self.settled(session, session.submit("trace it")))
+        self.assertEqual(len(self.calls[1]), 2)  # no main sample while it waited
+        report = self.last_user(self.calls[-1][0]).content
+        self.assertTrue(report.startswith("Main (#1) handed off task 1 (watcher resumes so far: 0)."))
+        self.assertIn("User request:\ntrace it", report)
+        self.assertIn("Outcome: yielded", report)
+        self.assertIn("Main's handoff note:\nI traced the path; please check the ordering.", report)
+        self.assertNotIn("final answer", report)
+        self.assertIn("Ordering confirmed; continue.", self.last_user(self.calls[1][1]).content)
+        self.assertEqual(self.calls[1][1].pending_tool_calls(), ())
+        second = self.last_user(self.calls[-1][2]).content
+        self.assertIn("Outcome: ended", second)
+        self.assertIn("(watcher resumes so far: 1)", second)
+        self.assertIn("[debug] main called yield: #1 source=1", self.debug_texts(session))
+        self.assertFalse(session.has_errors)
+
+    def test_release_after_a_yield_is_incomplete_but_not_an_error(self):
+        session = self.session({
+            1: [yield_call("Blocked; please advise."), answer("second done")],
+            -1: [answer("Noted."), answer("Complete.")],
+        }, worker_board=False)
+        first = session.submit("one")
+        second = session.submit("two")
+        self.assertFalse(self.settled(session, first))
+        self.assertTrue(self.settled(session, second))  # the session goes on
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertTrue(any(text.startswith("Task incomplete") for text in texts), texts)
+        self.assertFalse(any("Task failed" in text for text in texts), texts)
+        self.assertFalse(session.has_errors)
+
+    def test_invalid_and_duplicate_yields_get_failed_results(self):
+        bad = ModelSample((ToolCall("yield", "blank", json.dumps({"content": "  "})),
+                           ToolCall("yield", "extra", json.dumps({"content": "x", "more": 1}))))
+        pair = ModelSample((ToolCall("yield", "first", json.dumps({"content": "one"})),
+                            ToolCall("yield", "second", json.dumps({"content": "two"}))))
+        session = self.session({1: [bad, pair], -1: [answer("Noted.")]}, worker_board=False)
+        self.assertFalse(self.settled(session, session.submit("task")))
+        saved = load_interaction_save(self.path / "contexts" / "1.jsonl")
+        results = {item.call_id: item for item in saved.items if isinstance(item, ToolResult)}
+        self.assertFalse(results["blank"].success)
+        self.assertFalse(results["extra"].success)
+        self.assertTrue(results["first"].success)
+        self.assertFalse(results["second"].success)
+        self.assertEqual(len(self.calls[1]), 2)  # an invalid yield does not end the turn
+        self.assertEqual(len(self.calls[-1]), 1)  # one report, with the first note
+        self.assertIn("Main's handoff note:\none", self.last_user(self.calls[-1][0]).content)
+
+    def test_a_yield_on_the_last_allowed_sample_is_a_yield(self):
+        session = self.session({1: [yield_call("Out of samples; review.")],
+                                -1: [answer("Noted.")]},
+                               worker_board=False, settings_updates={1: {"max_samples": 1}})
+        self.assertFalse(self.settled(session, session.submit("task")))
+        self.assertIn("Outcome: yielded", self.last_user(self.calls[-1][0]).content)
+
+    def test_only_supervised_main_gets_the_yield_tool(self):
+        session = self.session({}, worker_board=False, watcher_observe_only=True)
+        session.close()
+        self.assertEqual(self.tool_names[1], [])
+
+    def test_a_submission_during_the_open_task_steers_its_next_sample(self):
+        holder = {}
+
+        def probe(args, **kwargs):
+            holder["posted"] = holder["session"].submit("Also cover the CLI.")
+            holder["status"] = holder["session"].status(1)
+            return ToolOutcome("probed")
+        session = self.session({
+            1: [ModelSample((ToolCall("probe", "p1", "{}"),)), answer("done")],
+            -1: [answer("Complete.")],
+        }, worker_board=False, extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("review it")))
+        self.assertEqual(holder["posted"], {"record_id": "1", "steer": True})
+        self.assertIn("| Enter steers task 1", holder["status"])
+        self.assertNotIn("Enter steers", session.status(1))
+        self.assertEqual(auto._posted_notice(session, holder["posted"]),
+                         "Steer for task 1 of #1 (main), delivered before its next sample.")
+        self.assertEqual(self.last_user(self.calls[1][1]).content, "Also cover the CLI.")
+        report = self.last_user(self.calls[-1][0]).content
+        self.assertIn("User request:\nreview it\n\nUser steers during this task:\n"
+                      "1. Also cover the CLI.\n", report)
+
+    def test_a_late_steer_reaches_the_resumed_turn_after_the_follow_up(self):
+        holder = {}
+
+        def deciding(context):
+            holder["session"].submit("Mention the tests too.")
+            return resume("Add a summary.")
+        session = self.session({
+            1: [answer("draft"), answer("final")],
+            -1: [deciding, answer("Resuming."), answer("Complete.")],
+        }, worker_board=False)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("write it")))
+        users = [item.content for item in self.calls[1][1].items
+                 if isinstance(item, Message) and item.role == "user"]
+        self.assertEqual(users[-2:], [auto._FOLLOW_UP_HEADER + "Add a summary.",
+                                      "Mention the tests too."])
+        self.assertIn("1. Mention the tests too.\n", self.last_user(self.calls[-1][2]).content)
+
+    def test_a_late_steer_after_a_release_becomes_a_new_task(self):
+        holder = {}
+
+        def deciding(context):
+            holder["session"].submit("One more thing.")
+            return answer("Complete.")
+        session = self.session({
+            1: [answer("done"), answer("one more done")],
+            -1: [deciding, answer("Complete.")],
+        }, worker_board=False)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertTrue(self.settled(session, {"record_id": "2"}))
+        self.assertEqual(self.last_user(self.calls[1][1]).content, "One more thing.")
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertIn("Queued 1 steer that task 1 never received as new tasks.", texts)
+
+    def test_interactive_enter_steers_the_open_task_and_slash_task_queues_one(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def first_sample(context):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return ModelSample((ToolCall("probe", "p1", "{}"),))
+        session = self.session({
+            1: [first_sample, answer("first done"), answer("second done")],
+            -1: [answer("Complete."), answer("Complete.")],
+        }, worker_board=False,
+            extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), lambda args, **kw: ToolOutcome("ok")),))
+        test = self
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys, self.seen, self.stage, self.statuses = deque(), [], 0, []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def submit(self, text):
+                self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                    ("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")))
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                self.seen.extend(item.text for item in items)
+                self.statuses.append(status)
+                if self.stage == 0:
+                    self.submit("first task")
+                    self.stage = 1
+                elif self.stage == 1 and entered.is_set() and "| Enter steers task 1" in status:
+                    self.submit("Also cover the CLI.")
+                    self.stage = 2
+                elif self.stage == 2 and STEER in self.seen:
+                    self.submit("/task")
+                    self.stage = 3
+                elif self.stage == 3 and any(text.startswith("Usage: /task") for text in self.seen):
+                    self.submit("/task second task")
+                    self.stage = 4
+                elif self.stage == 4 and "Queued user task 2 for #1 (main)." in self.seen:
+                    release.set()
+                    self.stage = 5
+                elif (self.stage == 5 and session.task_result({"record_id": "2"}) is not None
+                      and status.startswith("#1 (main) - quiescent")):
+                    test.assertEqual(status, "#1 (main) - quiescent")  # no steer hint when idle
+                    self.submit("/quit")
+                    self.stage = 6
+
+        STEER = "Steer for task 1 of #1 (main), delivered before its next sample."
+        terminal = Terminal()
+        try:
+            self.assertEqual(asyncio.run(asyncio.wait_for(
+                auto._interactive(session, terminal), timeout=8)), 0)
+        finally:
+            release.set()
+            session.close()
+        self.assertEqual(terminal.stage, 6)
+        self.assertIn("Queued user task 1 for #1 (main).", terminal.seen)
+        self.assertTrue(session.task_result({"record_id": "1"}))
+        self.assertTrue(session.task_result({"record_id": "2"}))
+        self.assertEqual(self.last_user(self.calls[1][1]).content, "Also cover the CLI.")
+        self.assertEqual(self.last_user(self.calls[1][2]).content, "second task")
+        self.assertIn("1. Also cover the CLI.\n", self.last_user(self.calls[-1][0]).content)
+
+    def test_pre_rename_watcher_history_restores_without_reruns(self):
+        import dataclasses
+        from pythia.interaction import chat_completions, messages, responses
+        old_names = {"resume": "resume_main", "read_context": "read_main_context"}
+        session = self.session({
+            1: [answer("draft"), answer("final")],
+            -1: [ModelSample((ToolCall("read_context", "r1", '{"limit": 5}'),)),
+                 resume("Polish it.", "m1"), answer("Resuming."), answer("Complete.")],
+        }, worker_board=False)
+        self.assertTrue(self.settled(session, session.submit("write it")))
+        session.close()
+        # Rewrite the watcher log as the pre-rename code saved it.
+        path = self.path / "contexts" / "-1.jsonl"
+        old = []
+        for item in load_interaction_save(path).items:
+            if isinstance(item, ToolCall) and item.name in old_names:
+                item = dataclasses.replace(item, name=old_names[item.name])
+            elif isinstance(item, Tools):
+                item = Tools(tuple(ToolSpec(old_names[spec.name], spec.description, spec.parameters)
+                                   for spec in item.specs))
+            elif isinstance(item, auto.Instructions):
+                item = auto.Instructions(item.text.replace("read_context", "read_main_context")
+                                         .replace("call resume once", "call resume_main once"))
+            old.append(item)
+        auto.save_interaction_save(path, auto.InteractionContext(old))
+
+        restored_session = self.session({1: [answer("next done")], -1: [answer("Complete.")]},
+                                        worker_board=False, resume=True)
+        self.assertTrue(self.settled(restored_session, restored_session.submit("next task")))
+        restored_session.close()
+        restored = load_interaction_save(path)
+        self.assertEqual(restored.items[:len(old)], tuple(old))  # history kept verbatim
+        self.assertEqual(restored.pending_tool_calls(), ())
+        results = [item.call_id for item in restored.items if isinstance(item, ToolResult)]
+        self.assertEqual((results.count("r1"), results.count("m1")), (1, 1))  # nothing re-run
+        self.assertEqual([spec.name for spec in restored.latest_tools().specs],
+                         ["resume", "read_context"])
+        self.assertIsInstance(restored.items[len(old)], Tools)  # a new tool list on restart
+        sampled = self.calls[-1][-1].items
+        self.assertTrue(any(isinstance(item, ToolCall) and item.name == "read_main_context"
+                            for item in sampled))
+        self.assertIn("Outcome: ended", self.last_user(self.calls[-1][-1]).content)
+        for encoded in (chat_completions._encode_context_messages(restored.model_items()),
+                        messages._encode_context(restored.model_items()),
+                        responses._encode_context_items(restored.model_items())):
+            payload = json.dumps(encoded)
+            self.assertIn("read_main_context", payload)
+            self.assertIn("resume_main", payload)
 
     def test_quiet_one_prompt_success_has_no_context_display(self):
         session = self.session({1: [answer("quiet answer")]})
@@ -1187,7 +1495,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_threshold_compaction_uses_the_turn_params_and_settings(self):
         compactor = self.compactor()
-        with mock.patch.object(auto, "create_default_compactor", return_value=compactor) as create:
+        with mock.patch.object(kernel, "create_default_compactor", return_value=compactor) as create:
             session = self.session({1: [answer()]}, settings_overrides={
                 "auto_compact_tokens": 1, "compaction_keep_recent_tokens": 0,
                 "compaction_max_output_tokens": 64,
@@ -1203,7 +1511,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_threshold_nothing_to_compact_samples_normally(self):
         compactor = self.compactor(side_effect=NothingToCompact("nothing precedes the recent tail"))
-        with mock.patch.object(auto, "create_default_compactor", return_value=compactor):
+        with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
             session = self.session({1: [answer()]}, settings_overrides={"auto_compact_tokens": 1})
             source = session.submit("nothing to compact")
             self.assertTrue(self.finished(session, source["thread_id"]))
@@ -1214,7 +1522,7 @@ class RuntimeTests(unittest.TestCase):
         compactor = self.compactor()
         overflow = ModelContextWindowError("prompt is too long", failure=ModelFailure(
             "context_window", "Messages HTTP 400: context window exceeded"))
-        with mock.patch.object(auto, "create_default_compactor", return_value=compactor):
+        with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
             session = self.session({1: [overflow, answer("recovered")]},
                                    settings_overrides={"max_samples": 1})
             source = session.submit("too long")
@@ -1231,7 +1539,7 @@ class RuntimeTests(unittest.TestCase):
         compactor = self.compactor(side_effect=CompactionContextWindowError(
             "summary request for the history (3 items, ~9 estimated tokens) exceeded"))
         overflow = ModelContextWindowError("prompt is too long")
-        with mock.patch.object(auto, "create_default_compactor", return_value=compactor):
+        with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
             session = self.session({1: [overflow]})
             source = session.submit("too long")
             self.assertFalse(self.finished(session, source["thread_id"]))
@@ -1797,9 +2105,11 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse((self.path / name).exists(), name)
         # No worker model/environment and no board tools; the watcher supervises.
         self.assertEqual(self.threads[2], [])
-        self.assertEqual(self.tool_names, {1: [], -1: ["resume_main", "read_main_context"]})
+        self.assertEqual(self.tool_names, {1: ["yield"], -1: ["resume", "read_context"]})
         self.assertCountEqual(self.models_built, (1, -1))
-        self.assertEqual(len(load_interaction_save(self.path / "contexts" / "1.jsonl")), 2)
+        main = load_interaction_save(self.path / "contexts" / "1.jsonl")
+        self.assertEqual(len(main), 3)
+        self.assertEqual(main[1], auto.Instructions(auto._SUPERVISED_MAIN_INSTRUCTIONS))
         watcher = load_interaction_save(self.path / "contexts" / "-1.jsonl")
         self.assertEqual(watcher[1], auto.Instructions(auto._SUPERVISOR_INSTRUCTIONS))
         self.assertEqual(set(json.loads((self.path / "config.json").read_text())),
@@ -1817,7 +2127,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([item for item in self.calls[1][0] if isinstance(item, Message)],
                          [Message("user", "plain task")])
         report = [item for item in self.calls[-1][0] if isinstance(item, Message)][-1].content
-        for expected in ("yielded on task 1 (watcher resumes so far: 0)", "User request:\nplain task",
+        for expected in ("handed off task 1 (watcher resumes so far: 0)", "User request:\nplain task",
                          "Outcome: ended", "Main's final answer:\nmain done"):
             self.assertIn(expected, report)
         debug = [event for event in session.drain_events() if event.kind == "debug"]
@@ -1844,7 +2154,7 @@ class RuntimeTests(unittest.TestCase):
         failure = ModelTransportError("SECRET", failure=ModelFailure("transport", "safe"))
         # Observe-only: the watcher sees every yield but builds no model.
         session = self.session({1: [first, failure, answer("third done")]}, worker_board=False,
-                               watcher_max_resumes=0)
+                               watcher_observe_only=True)
         self.assertEqual(self.models_built, [1])
         self.assertEqual(self.tool_names[-1], [])
         self.assertEqual(load_interaction_save(self.path / "contexts" / "-1.jsonl")[1],
@@ -1852,7 +2162,8 @@ class RuntimeTests(unittest.TestCase):
         try:
             handles = [session.submit("first")]
             self.assertTrue(reached.wait(3))
-            handles += [session.submit("second"), session.submit("third")]
+            handles += [session.submit("second", new_task=True),
+                        session.submit("third", new_task=True)]
             self.assertEqual([handle["record_id"] for handle in handles], ["1", "2", "3"])
             self.assertEqual([session.task_result(handle) for handle in handles], [None] * 3)
             release.set()
@@ -1892,9 +2203,9 @@ class RuntimeTests(unittest.TestCase):
             session.submit("running")
             self.assertTrue(reached.wait(3))
             for n in range(auto._MAX_PENDING_TASKS - 1):
-                session.submit(f"queued {n}")
+                session.submit(f"queued {n}", new_task=True)
             with self.assertRaisesRegex(BoardError, "Pending work limit"):
-                session.submit("one too many")
+                session.submit("one too many", new_task=True)
             closer.start()
             wait_for(session._stop.is_set)
             with self.assertRaisesRegex(BoardError, "not accepting"):
@@ -1933,7 +2244,8 @@ class RuntimeTests(unittest.TestCase):
                     for index in (1, -1)}
         for index, context in restored.items():
             self.assertEqual(context.items[:len(old[index])], old[index])
-        self.assertEqual(restored[1][-1], auto.Instructions(auto._RESTART_NOTICE))
+        self.assertEqual(restored[1][-1], auto.Instructions(
+            auto._SUPERVISED_MAIN_INSTRUCTIONS + "\n\n" + auto._RESTART_NOTICE))
         self.assertEqual(restored[-1][-1], auto.Instructions(
             auto._SUPERVISOR_INSTRUCTIONS + "\n\n" + auto._RESTART_NOTICE))
         # The watcher's own history (report, decision) was restored, not replayed.
@@ -1991,7 +2303,7 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("[#1 (main) - assistant] shown answer", text)
                 self.assertIn("[#-1 (watcher) - debug] main end-of-turn condition fired: "
                               "#1 source=1", text)
-                self.assertIn("[#-1 (watcher) - user] Main (#1) yielded on task 1", text)
+                self.assertIn("[#-1 (watcher) - user] Main (#1) handed off task 1", text)
                 self.assertIn("[#-1 (watcher) - assistant] Complete.", text)
                 self.assertIn("[#-1 (watcher) - debug] watcher released main: #1 source=1", text)
                 self.assertNotIn("decision failed", text)
@@ -2112,14 +2424,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls[1]), 2)  # The resumed turn gets a fresh limit.
         self.assertFalse(session.has_errors)
 
-    def test_resume_budget_bounds_watcher_resumes(self):
+    def test_watcher_resumes_are_not_capped(self):
         session = self.session({
             1: [answer("draft 1"), answer("draft 2"), answer("draft 3")],
-            -1: [resume("More.", "r1"), answer("Again."), resume("More.", "r2"), answer("Again.")],
-        }, worker_board=False, watcher_max_resumes=2)
+            -1: [resume("More.", "r1"), answer("Again."), resume("More.", "r2"), answer("Again."),
+                 answer("Complete.")],
+        }, worker_board=False)
         self.assertTrue(self.settled(session, session.submit("polish")))
         self.assertEqual(len(self.calls[1]), 3)
-        self.assertEqual(len(self.calls[-1]), 4)  # The over-budget yield costs no sample.
+        self.assertEqual(len(self.calls[-1]), 5)  # Every handoff gets a decision.
         self.assertEqual([text for text in self.debug_texts(session) if "watcher" in text], [
             "[debug] watcher resumed main: #1 source=1",
             "[debug] watcher resumed main: #1 source=1",
@@ -2208,7 +2521,7 @@ class RuntimeTests(unittest.TestCase):
         try:
             a = session.submit("task A")
             self.assertTrue(reached.wait(3))
-            b = session.submit("task B")
+            b = session.submit("task B", new_task=True)
             release.set()
             self.assertTrue(self.settled(session, a))
             self.assertTrue(self.settled(session, b))
@@ -2217,12 +2530,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([self.last_user(call).content for call in self.calls[1]],
                          ["task A", auto._FOLLOW_UP_HEADER + "Follow up on A.", "task B"])
 
-    def test_read_main_context_addresses_main_log_as_of_the_yield(self):
+    def test_read_context_addresses_main_log_as_of_the_yield(self):
         session = self.session({
             1: [answer("visible answer")],
-            -1: [ModelSample((ToolCall("read_main_context", "tail", "{}"),
-                              ToolCall("read_main_context", "head", '{"start": 0, "limit": 1}'),
-                              ToolCall("read_main_context", "bad", '{"limit": 0}'))),
+            -1: [ModelSample((ToolCall("read_context", "tail", "{}"),
+                              ToolCall("read_context", "head", '{"start": 0, "limit": 1}'),
+                              ToolCall("read_context", "bad", '{"limit": 0}'))),
                  answer("Complete.")],
         }, worker_board=False)
         self.assertTrue(self.settled(session, session.submit("inspect me")))
@@ -2243,12 +2556,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(results["bad"].success)
         self.assertIn("limit must be an integer", results["bad"].output)
 
-    def test_invalid_watcher_budget_creates_no_save(self):
+    def test_invalid_observe_only_creates_no_save(self):
         settings = resolve_config(overrides={"cwd": self.temp.name})
-        for kwargs in ({"watcher_max_resumes": -1}, {"watcher_max_resumes": True},
-                       {"watcher_max_resumes": 1.5},
-                       {"watcher_max_resumes": 1, "enable_experimental_worker_board": True}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+        for kwargs in ({"watcher_observe_only": 0}, {"watcher_observe_only": None},
+                       {"watcher_observe_only": "True"},
+                       {"watcher_observe_only": True, "enable_experimental_worker_board": True}):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
                 auto._Session(self.path, settings, **kwargs)
             self.assertFalse(self.path.exists())
 
@@ -2290,10 +2603,10 @@ class EntryPointTests(unittest.TestCase):
                 return ()
 
         # Explicitly supplied default board options are harmless.
-        for argv, budget in (([], None), (["--board-port", "0", "--enable-board-auth", "True"], None),
-                             (["--enable-experimental-worker-board", "False"], None),
-                             (["--watcher-max-resumes", "0"], 0),
-                             (["--watcher-max-resumes", "3"], 3)):
+        for argv, observe in (([], False), (["--board-port", "0", "--enable-board-auth", "True"], False),
+                              (["--enable-experimental-worker-board", "False"], False),
+                              (["--watcher-observe-only"], True),
+                              (["--watcher-observe-only", "False"], False)):
             with self.subTest(argv=argv):
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with (mock.patch.object(auto, "_Session", Session),
@@ -2303,14 +2616,13 @@ class EntryPointTests(unittest.TestCase):
                                                 "--save", "unused"]), 0)
                 run.assert_called_once()
                 self.assertIs(created[-1]["enable_experimental_worker_board"], False)
-                self.assertEqual(created[-1]["watcher_max_resumes"], budget)
+                self.assertIs(created[-1]["watcher_observe_only"], observe)
                 self.assertEqual(stdout.getvalue(), "")
                 self.assertEqual(stderr.getvalue(), "")
 
-    def test_watcher_budget_is_validated_before_any_session(self):
-        for argv, message in ((["--watcher-max-resumes", "-1"], "nonnegative"),
-                              (["--enable-experimental-worker-board", "--watcher-max-resumes", "2"],
-                               "does not apply")):
+    def test_observe_only_is_validated_before_any_session(self):
+        for argv, message in ((["--enable-experimental-worker-board", "--watcher-observe-only"],
+                               "does not apply"),):
             with self.subTest(argv=argv):
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with (mock.patch.object(auto, "_Session") as session,
@@ -2369,7 +2681,7 @@ class EntryPointTests(unittest.TestCase):
                 (["--watcher-model", "codex-gpt-6-sol"], ("codex-gpt-6-astra-max", "codex-gpt-6-sol"),
                  ("catalog default", "command line")),
                 # A watcher that runs no model takes no default.
-                (["--watcher-max-resumes", "0"], ("codex-gpt-6-astra-max", "codex-gpt-6-astra-max"),
+                (["--watcher-observe-only"], ("codex-gpt-6-astra-max", "codex-gpt-6-astra-max"),
                  ("catalog default", FOLLOWS_MAIN)),
             ):
                 with self.subTest(argv=argv):
@@ -2390,7 +2702,7 @@ class EntryPointTests(unittest.TestCase):
         for argv, message in (
             (["--worker-model", "x"], "--worker-model requires --enable-experimental-worker-board"),
             (["--enable-experimental-worker-board", "--watcher-model", "x"], "has no effect"),
-            (["--watcher-max-resumes", "0", "--watcher-model", "x"], "has no effect"),
+            (["--watcher-observe-only", "--watcher-model", "x"], "has no effect"),
         ):
             with self.subTest(argv=argv):
                 code, _, stderr, settings = self.stub_main(["--no-user-model-catalog", *argv])
@@ -2457,7 +2769,7 @@ class EntryPointTests(unittest.TestCase):
             code, _, stderr, _ = self.stub_main(
                 ["--no-user-model-catalog", "--main-model", "codex-gpt-6-luna",
                  "--endpoint-auth-file", str(auth), "--model", "claude-sonnet-5.5",
-                 "--watcher-max-resumes", "0"], environ={"ANTHROPIC_API_KEY": ""})
+                 "--watcher-observe-only"], environ={"ANTHROPIC_API_KEY": ""})
             self.assertEqual(code, 0, stderr)
             code, _, stderr, _ = self.stub_main(
                 ["--no-user-model-catalog", "--model", "claude-sonnet-5.5"],
@@ -2564,7 +2876,7 @@ class EntryPointTests(unittest.TestCase):
                      call("exec_command", "work-2",
                           {"cmd": "printf done > done.txt", "yield_time_ms": 1000}),
                      text("all done")],
-            "watcher": [call("resume_main", "resume-1", {"content": "Also write done.txt."}),
+            "watcher": [call("resume", "resume-1", {"content": "Also write done.txt."}),
                         text("Resumed main."), text("Complete.")],
         }
 
@@ -2575,7 +2887,7 @@ class EntryPointTests(unittest.TestCase):
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 seen.append(request)
-                message = script["watcher" if "resume_main" in tools(request) else "main"].pop(0)
+                message = script["watcher" if "resume" in tools(request) else "main"].pop(0)
                 data = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}],
                                    "usage": {"prompt_tokens": 5, "completion_tokens": 2,
                                              "total_tokens": 7}}).encode()
@@ -2619,20 +2931,24 @@ class EntryPointTests(unittest.TestCase):
                 for name in ("index.jsonl", "index.md", "index.html", "contexts/2.jsonl"):
                     self.assertFalse((run / name).exists(), name)
                 self.assertEqual(script, {"main": [], "watcher": []})
-                main = [request for request in seen if "resume_main" not in tools(request)]
-                watcher = [request for request in seen if "resume_main" in tools(request)]
+                main = [request for request in seen if "resume" not in tools(request)]
+                watcher = [request for request in seen if "resume" in tools(request)]
                 self.assertEqual((len(main), len(watcher)), (4, 3))
                 for request in main:
                     self.assertIn("exec_command", tools(request))
                     self.assertFalse(any(name.startswith("board_") for name in tools(request)))
-                    self.assertFalse(any(message["role"] in {"system", "developer"}
-                                         for message in request["messages"]))
-                self.assertEqual(main[0]["messages"][0]["role"], "user")
-                self.assertIn("Do the task", json.dumps(main[0]["messages"][0]))
+                    self.assertIn("yield", tools(request))
+                    # Supervised main's only instructions are the default handoff guidance.
+                    system = [message for message in request["messages"]
+                              if message["role"] in {"system", "developer"}]
+                    self.assertEqual(len(system), 1)
+                    self.assertIn("yield tool", str(system[0]["content"]))
+                self.assertEqual([m["role"] for m in main[0]["messages"]][-1], "user")
+                self.assertIn("Do the task", json.dumps(main[0]["messages"][-1]))
                 self.assertIn(json.dumps("Automated follow-up from the watcher (#-1):\n\n"
                                          "Also write done.txt.")[1:-1], json.dumps(main[2]["messages"]))
                 for request in watcher:
-                    self.assertEqual(tools(request), {"resume_main", "read_main_context"})
+                    self.assertEqual(tools(request), {"resume", "read_context"})
                     self.assertIn(request["messages"][0]["role"], {"system", "developer"})
                     self.assertIn("the supervisor of main (#1)", json.dumps(request["messages"][0]))
                     self.assertIn(json.dumps("User request:\nDo the task")[1:-1],
@@ -2689,7 +3005,7 @@ class EntryPointTests(unittest.TestCase):
                 self.assertNotIn(b"#2", output)
                 self.assertFalse((path / "index.jsonl").exists())
                 self.assertFalse((path / "contexts" / "2.jsonl").exists())
-                self.assertEqual(len(load_interaction_save(path / "contexts" / "1.jsonl")), 2)
+                self.assertEqual(len(load_interaction_save(path / "contexts" / "1.jsonl")), 3)
                 self.assertEqual(len(load_interaction_save(path / "contexts" / "-1.jsonl")), 3)
             finally:
                 if process.poll() is None:

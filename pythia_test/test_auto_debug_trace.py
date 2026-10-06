@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from pythia.interaction import auto
+from pythia.interaction.loop import kernel
 from pythia.interaction._auto_config import build_parser, resolve_config
 from pythia.interaction._debug_trace import DebugTrace
 from pythia.interaction._debug_trace import capture_trace_scope
@@ -39,7 +40,7 @@ class AutoTraceTests(unittest.TestCase):
         class Model:
             def sample(self, *args, **kwargs):
                 return ModelSample((Message('assistant', 'done'),))
-        session = auto._Session(self.root / 'run', self.settings, watcher_max_resumes=0,
+        session = auto._Session(self.root / 'run', self.settings, watcher_observe_only=True,
                                 debug_trace=trace, resume=resume, model_factory=lambda *_: Model())
         self.addCleanup(session.close)
         with redirect_stderr(self.stderr):
@@ -77,7 +78,7 @@ class AutoTraceTests(unittest.TestCase):
         bad = self.root / 'run/contexts/1.trace.events.jsonl'
         bad.mkdir()
         factory = mock.Mock()
-        session = auto._Session(self.root / 'run', self.settings, watcher_max_resumes=0,
+        session = auto._Session(self.root / 'run', self.settings, watcher_observe_only=True,
                                 resume=True, debug_trace=True, model_factory=factory)
         with self.assertRaises(ValueError):
             session.start()
@@ -111,8 +112,9 @@ class AutoTraceTests(unittest.TestCase):
                 return ModelSample((Message('assistant', 'summary'),))
         context = InteractionContext((Message('user', 'older material ' * 100), Message('assistant', 'old'),
                                       ModelSampleBoundary(), Message('user', 'recent')))
-        with mock.patch.object(auto, 'create_default_compactor', return_value=PiCompactor(Summary(), keep_recent_tokens=0)):
-            self.assertTrue(auto._compact(session, 1, Summary(), Environment(), InteractionConfigSnapshot(), context, None))
+        with mock.patch.object(kernel, 'create_default_compactor', return_value=PiCompactor(Summary(), keep_recent_tokens=0)):
+            self.assertTrue(kernel.compact(context, Summary(), Environment(), InteractionConfigSnapshot(),
+                                                auto._AutoHost(session, 1), None))
         self.assertTrue(scopes)
         self.assertTrue(all(scope['op'] == 'compact' for scope in scopes))
         session._trace_to_events = True

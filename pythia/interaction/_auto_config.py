@@ -461,11 +461,11 @@ def build_parser():
               "and no TTY is required (default: %(default)s)"),
     )
     parser.add_argument(
-        "--watcher-max-resumes", type=int, default=None, metavar="N",
-        help=("follow-up messages the watcher may resume main with per task, from its "
-              "own model turn after each main yield; 0 makes it observe-only, with no "
-              "watcher model; not with the experimental worker/board "
-              "(default: unlimited)"),
+        "--watcher-observe-only", nargs="?", const=True, default=False,
+        type=_boolean_argument, metavar="{False,True}",
+        help=("run the watcher without a model: it observes main's handoffs and "
+              "releases every one; not with the experimental worker/board; a bare "
+              "flag means True (default: %(default)s)"),
     )
     parser.add_argument(
         "--enable-experimental-worker-board", nargs="?", const=True, default=False,
@@ -496,7 +496,7 @@ def build_parser():
     parser.add_argument("--watcher-model", metavar="NAME",
                         help=("the watcher's model (default: the catalog [auto] default, "
                               "else main's); not with the experimental worker/board or "
-                              "--watcher-max-resumes 0, where the watcher runs no model"))
+                              "--watcher-observe-only, where the watcher runs no model"))
     parser.add_argument("--worker-model", metavar="NAME",
                         help=("the worker's model (default: the catalog [auto] default, "
                               "else main's); requires the experimental worker/board"))

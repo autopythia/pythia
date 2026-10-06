@@ -73,6 +73,22 @@ from .local_tools import create_apply_patch_tool
 from .local_tools import create_exec_command_tool
 from .local_tools import create_update_plan_tool
 from .local_tools import create_write_stdin_tool
+from .loop import Fault
+from .loop import Interrupt
+from .loop import MissingFinalText
+from .loop import SampleLimitExceeded
+from .loop import SupervisedHandle
+from .loop import TurnHost
+from .loop import TurnResult
+from .loop import Yield
+from .loop import YieldTool
+from .loop import YieldChannel
+from .loop import run_turn
+from .loop import supervise
+from .loop import Steer
+from .loop import YIELD_KINDS
+from .loop import run_supervised_task
+from .loop import supervised_turn
 from .messages import DEFAULT_ANTHROPIC_VERSION
 from .messages import MESSAGES_COMPACTION_BETA
 from .messages import MessagesEndpoint
@@ -136,6 +152,22 @@ __all__ = [
     "CODEX_RESPONSES_API_URL",
     "CodexResponsesModel",
     "CommandRuntime",
+    "Fault",
+    "Interrupt",
+    "MissingFinalText",
+    "SampleLimitExceeded",
+    "SupervisedHandle",
+    "TurnHost",
+    "TurnResult",
+    "Yield",
+    "YieldChannel",
+    "YieldTool",
+    "run_turn",
+    "supervise",
+    "Steer",
+    "YIELD_KINDS",
+    "run_supervised_task",
+    "supervised_turn",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
     "CompactionContextWindowError",

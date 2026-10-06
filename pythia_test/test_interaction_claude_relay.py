@@ -96,7 +96,7 @@ endpoint.model=fixture-relay
                 try:
                     session.start()
                     self.assertEqual(session.bindings[1].api, 'claude-relay' if main == 'fixture-relay' else 'chat-completions')
-                    for role, expected in ((1, DEFAULT_TOOLS), (-1, {'resume_main', 'read_main_context'})):
+                    for role, expected in ((1, {*DEFAULT_TOOLS, 'yield'}), (-1, {'resume', 'read_context'})):
                         context = load_interaction_save(path / 'contexts' / f'{role}.jsonl')
                         tools = next(item for item in context if isinstance(item, Tools))
                         self.assertEqual({tool.name for tool in tools.specs}, expected)
@@ -529,7 +529,7 @@ class ModelTests(unittest.TestCase):
         self.assertNotIn('exec_command runs without a sandbox', result.stderr)
         path = self.root / 'auto'
         result = subprocess.run(['/usr/bin/python3', '-m', 'pythia.interaction.auto', *self.launch_options(),
-                                 '--headless', '--prompt', 'text-only', '--watcher-max-resumes', '0',
+                                 '--headless', '--prompt', 'text-only', '--watcher-observe-only',
                                  '--save', str(path), '--cwd', str(self.root)],
                                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -542,7 +542,7 @@ class ModelTests(unittest.TestCase):
     def test_cli_and_auto_execute_host_command_sessions_through_mcp(self):
         for frontend in ('cli', 'auto'):
             path = self.root / ('commands.jsonl' if frontend == 'cli' else 'auto-commands')
-            options = ['--resume', 'False'] if frontend == 'cli' else ['--watcher-max-resumes', '0']
+            options = ['--resume', 'False'] if frontend == 'cli' else ['--watcher-observe-only']
             result = subprocess.run([
                 '/usr/bin/python3', '-I', '-S', '-c',
                 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); '

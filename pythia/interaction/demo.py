@@ -8,11 +8,6 @@ from typing import Optional
 from typing import Sequence
 from typing import Union
 
-from .compaction import CompactionResult
-from .compaction import NothingToCompact
-from .compaction import auto_compaction_due
-from .compaction import create_default_compactor
-from .compaction import uses_host_auto_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
@@ -25,16 +20,13 @@ from .items import Message
 from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import SampleMetadata
-from .items import ToolCall
-from .items import ToolResult
 from .items import Tools
 from .items import TurnSummary
 from .items import UserInteractionBoundary
-from .items import summarize_turn_usage
+from .loop import TurnHost
+from .loop import run_turn
 from .media import parse_user_prompt
 from .model import Model
-from .model import ModelContextWindowError
-from .model import ModelError
 from .model import SampleParams
 from .model_config import DEFAULT_SAVE_PATH as DEFAULT_SAVE_PATH
 from .model_config import build_model
@@ -70,6 +62,21 @@ EXPERIMENTAL_USER_MESSAGE_PROMPT = (
     "reply with exactly `received: ` followed by that message's text, then stop. "
     "Do not call the tool again."
 )
+
+
+class _DemoHost(TurnHost):
+    """The demo's side of the shared loop: save after each change, print items."""
+
+    def __init__(self, persist):
+        self._persist = persist
+
+    def append(self, context, items):
+        context.extend(items)
+        self._persist()
+
+    def show(self, items):
+        for item in items:
+            print(item)
 
 
 def run(
@@ -272,124 +279,9 @@ def run(
         for display_item in user_interaction.display_items():
             print(display_item)
 
-    def _compact() -> bool:
-        """Install one automatic compaction; False when there is nothing to compact."""
-        compactor = create_default_compactor(model, turn_config.compaction_settings())
-        try:
-            compaction = compactor.compact(
-                context.copy(),
-                tools=environment.tool_specs,
-                sample_params=sample_params,
-            )
-        except NothingToCompact:
-            return False
-        if not isinstance(compaction, CompactionResult):
-            raise TypeError(
-                "compactor must return CompactionResult, got "
-                f"{type(compaction).__name__}"
-            )
-        context.extend(compaction.context_items())
-        _persist()
-        for display_item in compaction.display_items():
-            print(display_item)
-        return True
-
-    turn_started = perf_counter()
-    sample_count = 0
-    # Pi's overflow recovery: one compact-and-retry per turn.
-    overflow_recovered = False
-    while turn_config.max_samples is None or sample_count < turn_config.max_samples:
-        if auto_compaction_due(model, context, turn_config):
-            _compact()
-        try:
-            sample = model.sample(
-                context,
-                tools=environment.tool_specs,
-                sample_params=sample_params,
-            )
-        except ModelError as exc:
-            contribution = (
-                *exc.completed_items,
-                *((exc.failure,) if exc.failure is not None else ()),
-            )
-            if contribution:
-                context.extend((*contribution, ModelSampleBoundary()))
-                _persist()
-                for display_item in render_interaction_items(contribution):
-                    print(display_item)
-                recovered_calls = tuple(
-                    item for item in exc.completed_items
-                    if isinstance(item, ToolCall)
-                )
-                if recovered_calls:
-                    results = tuple(
-                        ToolResult(
-                            call_id=call.call_id,
-                            output=(
-                                "Not executed because the model response did "
-                                "not complete."
-                            ),
-                            success=False,
-                        )
-                        for call in recovered_calls
-                    )
-                    context.extend(results)
-                    _persist()
-                    for display_item in render_interaction_items(
-                        results,
-                        source_calls=recovered_calls,
-                    ):
-                        print(display_item)
-            if (
-                isinstance(exc, ModelContextWindowError)
-                and not overflow_recovered
-                and turn_config.enable_auto_compaction
-                and uses_host_auto_compaction(model)
-            ):
-                overflow_recovered = True
-                # A failed compaction fails the run; nothing to compact
-                # leaves the sampling error.
-                if _compact():
-                    continue
-            raise
-        # The failed attempt before an overflow retry does not count.
-        sample_count += 1
-        context.extend(sample.context_items())
-        _persist()
-        for display_item in sample.display_items():
-            print(display_item)
-        if sample.stop_reason == "compaction":
-            # A paused Messages server compaction contains a durable
-            # compaction block but no final assistant text. Replay it
-            # immediately so the provider can continue the turn.
-            continue
-        if not sample.tool_calls:
-            final_text = sample.last_assistant_text
-            if final_text is None or not final_text.strip():
-                raise RuntimeError("model returned no final assistant text")
-            # Derive the cumulative end-of-turn usage and make it visible.
-            # ``summarize_turn_usage`` skips existing ``TurnSummary`` items
-            # so re-entering this path never double-counts, and
-            # ``TurnSummary`` is encoder-transparent and durable.
-            turn_summary = summarize_turn_usage(
-                context.items,
-                elapsed_seconds=perf_counter() - turn_started,
-            )
-            context.extend((turn_summary,))
-            _persist()
-            for display_item in render_interaction_items((turn_summary,)):
-                print(display_item)
-            return final_text
-
-        result = environment.execute_tool_calls(sample.tool_calls)
-        context.extend(result.context_items())
-        _persist()
-        for display_item in result.display_items(source_calls=sample.tool_calls):
-            print(display_item)
-
-    raise RuntimeError(
-        f"model did not produce a final answer within {turn_config.max_samples} samples"
-    )
+    result = run_turn(context, model, environment, turn_config, _DemoHost(_persist),
+                      sample_params=sample_params)
+    return result.final_text
 
 
 # Preserve the original public demo helper name for existing callers.

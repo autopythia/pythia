@@ -247,6 +247,31 @@ class CommandToolTests(unittest.TestCase):
             self.assertTrue(result.output.endswith("hello"))
             runtime.close()
 
+    def test_finished_commands_report_their_exit_code(self):
+        # Stdout EOF can arrive before the shell is reaped; a finished command
+        # must not be reported as a live session (it was, ~15% of the time).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with CommandRuntime(tmpdir) as runtime:
+                environment = Environment((
+                    create_exec_command_tool(runtime),
+                    create_write_stdin_tool(runtime),
+                ))
+                for index in range(30):
+                    result = _execute(environment, "exec_command", f"exec-{index}",
+                                      {"cmd": "printf done", "yield_time_ms": 5_000})
+                    self.assertIn("Process exited with code 0", result.output)
+                    self.assertNotIn("Process running", result.output)
+                for index in range(10):
+                    started = _execute(environment, "exec_command", f"head-{index}",
+                                       {"cmd": "head -n1", "yield_time_ms": 0})
+                    session_id = int(re.search(r"session ID (\d+)", started.output).group(1))
+                    result = _execute(environment, "write_stdin", f"stdin-{index}",
+                                      {"session_id": session_id, "chars": "line\n",
+                                       "yield_time_ms": 5_000})
+                    self.assertIn("Process exited with code 0", result.output)
+                    self.assertNotIn("Process running", result.output)
+                self.assertEqual(runtime.active_session_ids, ())
+
     def test_nonzero_exit_is_successful_tool_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = CommandRuntime(tmpdir)
@@ -1242,7 +1267,7 @@ class DemoTests(unittest.TestCase):
             with mock.patch("builtins.print") as print_mock:
                 with DefaultEnvironment(cwd=root) as environment:
                     with mock.patch(
-                        "pythia.interaction.demo.perf_counter",
+                        "pythia.interaction.loop.kernel.perf_counter",
                         side_effect=(20.0, 23.0),
                     ):
                         summary = run_repository_summary(
