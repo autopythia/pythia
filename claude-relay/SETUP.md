@@ -259,7 +259,8 @@ tested `max` and `high` effort levels:
 
 `CLAUDE_RELAY_TEST_MODEL` selects only this test's explicit binding; it is not a
 backend model fallback. Without the opt-in flag, ordinary test discovery skips
-all four live tests. These short tests do not exercise native context ceilings
+all live tests. The heartbeat check deliberately withholds a harmless result
+past the native heartbeat interval. These tests do not exercise native context ceilings
 or prove auto-compaction suppression near them; see [SAMPLING.md](SAMPLING.md).
 
 ### Launch options
@@ -271,7 +272,7 @@ or prove auto-compaction suppression near them; see [SAMPLING.md](SAMPLING.md).
 | `--claude-relay-server-uid` | `CLAUDE_RELAY_SERVER_UID`; non-root numeric UID required |
 | `--claude-relay-cli-version` | `CLAUDE_RELAY_CLI_VERSION`; explicit native version pin required |
 | `--claude-relay-tool-id-pointer` | `/params/_meta/claudecode~1toolUseId` |
-| `--claude-relay-generation-timeout` | 300 seconds per generation wait |
+| `--claude-relay-generation-timeout` | 1200 seconds per generation wait for new endpoints |
 | `--claude-relay-parked-timeout` | 1800 seconds waiting for a host tool result |
 | `--claude-relay-startup-timeout` | 30 seconds for startup/version/input work |
 | `--claude-relay-stop-timeout` | 5 seconds per process-stop wait |
@@ -412,6 +413,13 @@ This observes A's relay pipes and MCP endpoint, not Claude's upstream HTTPS.
 The library's bounded `model.stderr_tail` remains private; do not print it
 automatically. See the [diagnostics/tracing design](../doc/interaction-diagnostics-tracing-plan.md)
 for event correlation, lifecycle and verification details.
+
+The traced heartbeat/subagent false positive is addressed by ignoring exact
+`tool_progress` / boolean `heartbeat=true` records as telemetry. Parent/name/ID/
+elapsed validation remains a TODO; this does not authorize tool execution or
+result delivery. Ordinary progress, genuine subagent, native-error and terminal
+guards remain in place. See the [compatibility notes](../doc/claude-relay-heartbeat-plan.md).
+Relaunch the A-side frontend to load this fix; no broker restart is required.
 
 Ctrl-C/termination of a client retires its invocation; loss of A's driver or B's
 broker also triggers child cleanup. To shut down the service, stop B's broker

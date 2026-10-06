@@ -19,6 +19,8 @@ def event_identity(record):
     kind = identifier(record.get('type'))
     parts = [kind]
     error = record.get('error')
+    if kind == 'tool_progress' and record.get('heartbeat') is True:
+        parts.append('heartbeat')  # classification, not parent/payload validation
     if kind == 'system':
         parts.append(identifier(record.get('subtype')))
         if record.get('subtype') == 'status':

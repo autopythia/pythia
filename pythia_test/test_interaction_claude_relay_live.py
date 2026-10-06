@@ -128,6 +128,26 @@ class LiveRelayTests(unittest.TestCase):
         self.assertTrue(old.mailbox.all_returned())
         self.assertTrue(old.closed.is_set())
 
+    def test_native_heartbeat_while_real_result_is_withheld(self):
+        context, old = self.parked()
+        # The host receipt is already computed/checkpointed, but its MCP reply
+        # deliberately waits past the native ~30-second heartbeat interval.
+        deadline = time.monotonic() + 45
+        while ('tool_progress/heartbeat' not in old.event_types and old.error is None
+               and time.monotonic() < deadline):
+            time.sleep(.05)
+        self.assertIsNone(old.error)
+        self.assertIn('tool_progress/heartbeat', old.event_types)
+        self.assertIsNone(old.proc.returncode)
+        self.assertIsNone(old.final_message)
+        self.assertTrue(old.events.empty())
+        self.assertTrue(all(slot['result'] is None for slot in old.mailbox.slots.values()))
+        self.assertFalse(old.mailbox.all_returned())
+        with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=Runtime) as starts:
+            self.final(context)
+            starts.assert_not_called()
+        self.assertTrue(old.mailbox.all_returned())
+
     def test_effort_change_retires_before_release_without_effect_replay(self):
         context, old = self.parked()
         with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=Runtime) as starts:

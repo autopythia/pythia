@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import sys
+import threading
 import time
 import urllib.request
 
@@ -18,8 +19,19 @@ if args == ['--version']:
     raise SystemExit(0)
 
 
+emit_lock = threading.Lock()
+
+
 def emit(value):
-    print(json.dumps(value, ensure_ascii=False), flush=True)
+    with emit_lock:
+        print(json.dumps(value, ensure_ascii=False), flush=True)
+
+
+def heartbeat(block, counter):
+    emit({'type': 'tool_progress', 'heartbeat': True,
+          'tool_use_id': block['id'] + '-heartbeat-' + str(counter),
+          'parent_tool_use_id': block['id'], 'tool_name': block['name'],
+          'elapsed_time_seconds': 30 * (counter + 1)})
 
 
 def option(name):
@@ -160,9 +172,25 @@ elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row i
     if text == 'autonomous':
         emit({'type': 'result', 'subtype': 'success', 'is_error': False})
         time.sleep(2)
+    done = threading.Event()
+    pulse = None
+    if text == 'heartbeat-batch':
+        def progress():
+            counter = 0
+            while not done.wait(.02):
+                heartbeat(blocks[0], counter)
+                counter += 1
+        pulse = threading.Thread(target=progress, daemon=True)
+        pulse.start()
     outputs = []
-    for block in blocks:
-        outputs.append(tool_result(block))
+    try:
+        for block in blocks:
+            outputs.append(tool_result(block))
+    finally:
+        done.set()
+        if pulse is not None:
+            pulse.join(2)
+            heartbeat(blocks[0], 0)  # repeated/late telemetry after actual results
     answer = '|'.join(outputs)
 else:
     answer = 'fixture summary' if summary else 'cold:' + text

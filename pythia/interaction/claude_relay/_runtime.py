@@ -320,9 +320,10 @@ class Runtime:
                     raise
                 label = self.diagnostics.record(value)
                 self.trace.emit('native_record', event_type=label)
-                if value.get('parent_tool_use_id') is not None:
-                    raise ModelResponseError('Native subagent output is unsupported')
                 kind = value['type']
+                heartbeat = kind == 'tool_progress' and value.get('heartbeat') is True
+                if value.get('parent_tool_use_id') is not None and not heartbeat:
+                    raise ModelResponseError('Native subagent output is unsupported')
                 if self.result_seen:
                     raise ModelResponseError('Native records after terminal result')
                 error_code = value.get('error')
@@ -334,6 +335,21 @@ class Runtime:
                     if error_code in ('context_length_exceeded', 'prompt_too_long'):
                         raise ModelContextWindowError('Native context window exceeded')
                     raise ModelResponseError('Native CLI reported a model error')
+                if heartbeat:
+                    if not self.initialized:
+                        raise ModelResponseError('Native tool heartbeat before verified initialization')
+                    # CLI 2.1.289 emits synthetic <parent>-heartbeat-N IDs while
+                    # waiting for MCP results. These are telemetry, not subagents
+                    # or executable tool IDs. Do not alter mailbox/message state
+                    # or extend deadlines in response to them.
+                    # TODO(heartbeat-validation): validate the registered parent,
+                    # MCP tool name, synthetic ID shape and finite elapsed value.
+                    # For now correlation is best-effort tracing only; even an
+                    # unknown/malformed parent grants no execution/result authority.
+                    self.trace.emit('tool_heartbeat',
+                                    scope=self.trace.scope(value.get('parent_tool_use_id')),
+                                    validation='deferred')
+                    continue
                 if kind == 'system':
                     self._system(value)
                     if value.get('subtype') in ('init', 'status'):
