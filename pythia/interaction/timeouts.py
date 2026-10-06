@@ -8,7 +8,7 @@ are independent and intentionally do not use these defaults.
 """
 
 
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 1200.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 120.0
 
 

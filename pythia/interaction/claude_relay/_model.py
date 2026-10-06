@@ -34,7 +34,7 @@ class ClaudeRelayEndpoint:
     server_uid: int
     expected_version: str
     tool_id_pointer: str = '/params/_meta/claudecode~1toolUseId'
-    generation_timeout_seconds: float = 300
+    generation_timeout_seconds: float = 1200
     parked_timeout_seconds: float = 1800
     startup_timeout_seconds: float = 30
     stop_timeout_seconds: float = 5

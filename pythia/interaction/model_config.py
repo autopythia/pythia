@@ -63,7 +63,7 @@ def relay_endpoint(args, binding):
         socket_path=value("socket", "CLAUDE_RELAY_SOCKET"), server_uid=uid,
         expected_version=value("cli_version", "CLAUDE_RELAY_CLI_VERSION"),
         tool_id_pointer=value("tool_id_pointer", default="/params/_meta/claudecode~1toolUseId"),
-        generation_timeout_seconds=value("generation_timeout", default=300),
+        generation_timeout_seconds=value("generation_timeout", default=1200),
         parked_timeout_seconds=value("parked_timeout", default=1800),
         startup_timeout_seconds=value("startup_timeout", default=30),
         stop_timeout_seconds=value("stop_timeout", default=5), binding=binding,
