@@ -477,8 +477,9 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
         type=_boolean_argument,
         metavar="{False,True}",
         help=(
-            "experimental: convert leading @path-or-uri tokens in user "
-            "prompts into media message content; launch-only "
+            "experimental: expand leading @path-or-uri tokens in user "
+            "prompts; images become media message content and local "
+            ".txt/.md files are pasted as text; launch-only "
             "(default: %(default)s)"
         ),
     )
