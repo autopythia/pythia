@@ -67,7 +67,7 @@ class RelayTraceTests(unittest.TestCase):
         self.assertTrue(all(r['context_id'] == 1 for r in events))
 
     def test_without_trace_failure_metadata_is_still_useful(self):
-        for text, expected in (('trace-ping', 'stream_event/ping'), ('trace-missing', 'stream_event/<missing>'),
+        for text, expected in (('trace-unknown', 'stream_event/fixture_unknown'), ('trace-missing', 'stream_event/<missing>'),
                                ('trace-malformed', 'invalid_record')):
             with self.subTest(text=text), self.assertRaises(ModelError) as raised:
                 self.model.sample(InteractionContext((Message('user', text),)))
@@ -75,16 +75,18 @@ class RelayTraceTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob('*.trace.*')))
 
     def test_timeout_reports_partial_byte_activity_without_extending_deadline(self):
-        trace = self.traced(timeout=.15)
+        # Leave enough time for the disposable Python relay/fixture to start;
+        # the fixture streams partial bytes for two seconds without completing.
+        trace = self.traced(timeout=1)
         with trace.operation('sample'), self.assertRaises(ModelTimeoutError) as raised:
             self.model.sample(InteractionContext((Message('user', 'trace-progress'),)))
         failure = raised.exception.failure
-        self.assertIn('budget=0.15s', failure.message)
+        self.assertIn('budget=1s', failure.message)
         self.assertNotIn('last_stdout_byte_age=none', failure.message)
         self.model.close(); trace.close()
         events = rows(trace.event_path)
         timeout = next(r for r in events if r['type'] == 'generation_timeout')
-        self.assertLess(timeout['last_byte_age'], .15)
+        self.assertLess(timeout['last_byte_age'], 1)
         self.assertTrue(any(r['type'] == 'claude_stdout' and payload(r).startswith(b'{') for r in events))
 
     def test_warm_mcp_attribution_and_no_deliberate_bearer_dump(self):
@@ -170,8 +172,8 @@ class RelayTraceTests(unittest.TestCase):
             real_close(runtime)
             raise RuntimeError('PRIVATE_CLEANUP_BODY')
         with mock.patch.object(Runtime, 'close', close_then_fail), self.assertRaises(ModelError) as raised:
-            self.model.sample(InteractionContext((Message('user', 'trace-ping'),)))
-        self.assertEqual(raised.exception.failure.last_event_type, 'stream_event/ping')
+            self.model.sample(InteractionContext((Message('user', 'trace-unknown'),)))
+        self.assertEqual(raised.exception.failure.last_event_type, 'stream_event/fixture_unknown')
         self.assertIn('cleanup failed (RuntimeError)', raised.exception.failure.message)
         self.assertNotIn('PRIVATE_CLEANUP_BODY', raised.exception.failure.message)
         trace.close()

@@ -31,7 +31,8 @@ class Runtime:
         self.names = {'mcp__pythia__' + t.name: t.name for t in tools}
         if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', t.name) for t in tools):
             raise ModelResponseError('MCP tool names must be simple identifiers')
-        self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds, trace=self.trace)
+        self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds,
+                               registration_seconds=endpoint.generation_timeout_seconds, trace=self.trace)
         self.mcp = MCPServer(self.mailbox, tool_id_pointer=endpoint.tool_id_pointer) if tools else None
         self.events = queue.Queue(maxsize=32)
         self.loop = asyncio.new_event_loop()

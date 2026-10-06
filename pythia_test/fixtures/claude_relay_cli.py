@@ -41,11 +41,17 @@ def option(name):
 def stream_message(ident, blocks, usage, reason):
     """Observed 2.1.289 ordering with wholly synthetic contents."""
     emit({'type': 'system', 'subtype': 'status', 'status': 'requesting'})
+    def ping():
+        if text == 'stream-ping':
+            emit({'type': 'stream_event', 'event': {'type': 'ping'}})
+    ping()
     provisional = {**usage, 'output_tokens': 1}
     emit({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {'id': ident, 'usage': provisional}}})
+    ping()
     for i, block in enumerate(blocks):
         start = {**block, 'input': {}} if block['type'] == 'tool_use' else block
         emit({'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': i, 'content_block': start}})
+        ping()
         if block['type'] == 'tool_use':
             emit({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': i,
                   'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}}})
@@ -53,8 +59,10 @@ def stream_message(ident, blocks, usage, reason):
             emit({'type': 'system', 'subtype': 'thinking_tokens', 'estimated_tokens': 50, 'estimated_tokens_delta': 50})
         emit({'type': 'assistant', 'message': {'id': ident, 'content': [block], 'stop_reason': None, 'usage': provisional}})
         emit({'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': i}})
+        ping()
     emit({'type': 'stream_event', 'event': {'type': 'message_delta', 'delta': {'stop_reason': reason}, 'usage': usage}})
     emit({'type': 'stream_event', 'event': {'type': 'message_stop'}})
+    ping()
 
 
 initial = json.loads(sys.stdin.readline())
@@ -115,7 +123,7 @@ def tool_result(block):
 
 
 emit({'type': 'system', 'subtype': 'init', 'tools': names + (['Bash'] if text == 'inventory-bad' else []), 'mcp_servers': servers})
-if text in ('trace-ping', 'trace-error', 'trace-missing', 'trace-malformed'):
+if text in ('trace-unknown', 'trace-error', 'trace-missing', 'trace-malformed'):
     os.write(2, b'private-native-stderr\xff\n')
     emit({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {'id': 'failing'}}})
     for _ in range(90):
@@ -124,7 +132,7 @@ if text in ('trace-ping', 'trace-error', 'trace-missing', 'trace-malformed'):
         os.write(1, b'{private-invalid-json\xff}\n')
     else:
         event = ({'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'PRIVATE_UPSTREAM_BODY'}}
-                 if text == 'trace-error' else {'type': 'ping'} if text == 'trace-ping' else {})
+                 if text == 'trace-error' else {'type': 'fixture_unknown'} if text == 'trace-unknown' else {})
         emit({'type': 'stream_event', 'event': event})
     sys.stdin.read()
     raise SystemExit(0)
@@ -133,6 +141,12 @@ if text == 'trace-progress':
     for _ in range(200):
         os.write(1, b' ')
         time.sleep(.01)  # receive activity, but never a complete model message
+    sys.stdin.read()
+    raise SystemExit(0)
+if text == 'ping-only':
+    for _ in range(200):
+        emit({'type': 'stream_event', 'event': {'type': 'ping'}})
+        time.sleep(.01)
     sys.stdin.read()
     raise SystemExit(0)
 if text in ('system-compacting', 'system-compact-boundary', 'system-hook'):
@@ -144,7 +158,39 @@ if text in ('system-compacting', 'system-compact-boundary', 'system-hook'):
     raise SystemExit(0)
 if text == 'park':
     time.sleep(60)
-if text == 'host-command-tools':
+if text in ('early-callback', 'early-callback-invalid'):
+    def event(kind, **fields):
+        emit({'type': 'stream_event', 'event': {'type': kind, **fields}})
+    blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': {'value': i + 1}}
+              for i, ident in enumerate(('toolu_a', 'toolu_b'))]
+    event('message_start', message={'id': 'm-early', 'usage': {'input_tokens': 10}})
+    event('content_block_start', index=0, content_block=blocks[0])
+    emit({'type': 'assistant', 'message': {'id': 'm-early', 'content': [blocks[0]], 'stop_reason': None}})
+    event('content_block_stop', index=0)
+    first_result = []
+    def early_call():
+        try:
+            first_result.append(tool_result(blocks[0]))
+        except (KeyError, OSError):
+            pass  # expected revocation in the invalid/stalled-stream tests
+    early = threading.Thread(target=early_call, daemon=True)
+    early.start()
+    event('content_block_start', index=1, content_block={**blocks[1], 'input': {}})
+    event('content_block_delta', index=1, delta={'type': 'input_json_delta', 'partial_json': '{"value":'})
+    # Synthetic-only gate: keep a later block incomplete while MCP is waiting.
+    assert sys.stdin.readline().strip() == 'fixture-finish'
+    event('content_block_delta', index=1, delta={'type': 'input_json_delta', 'partial_json': '2}'})
+    emit({'type': 'assistant', 'message': {'id': 'm-early', 'content': [blocks[1]], 'stop_reason': None}})
+    event('content_block_stop', index=1)
+    event('message_delta', delta={'stop_reason': 'max_tokens' if text.endswith('-invalid') else 'tool_use'},
+          usage={'output_tokens': 2})
+    event('message_stop')
+    early.join(15)
+    if not first_result:
+        sys.stdin.read()
+        raise SystemExit(0)
+    answer = first_result[0] + '|' + tool_result(blocks[1])
+elif text == 'host-command-tools':
     assert set(names) == {'mcp__pythia__' + name for name in ('exec_command', 'write_stdin', 'apply_patch', 'update_plan')}
     assert option('--tools') == ''  # Claude's own built-ins are still disabled
     assert set(option('--allowedTools').split(',')) == set(names)

@@ -439,6 +439,14 @@ Direct library callers not using `run_turn` receive `ModelContinuationExpired`
 with the same authoritative history. Relaunch the A-side frontend to load the
 change; the broker needs no restart.
 
+The v5 profile ignores native `stream_event/ping` keepalives and replaces the old
+ten-second callback-registration grace with the configured generation timeout.
+A callback may therefore wait for later tool blocks to finish, but no tool is
+authorized until the complete model message validates. The existing model wait
+and cancellation/retirement paths still apply; pings do not reset deadlines.
+No new strict generation-window checks or shared-deadline arming were introduced.
+See the [stream-liveness notes](../doc/claude-relay-stream-liveness-plan.md).
+
 Ctrl-C/termination of a client retires its invocation; loss of A's driver or B's
 broker also triggers child cleanup. To shut down the service, stop B's broker
 normally (e.g. Ctrl-C in its session). This terminates active invocations but does

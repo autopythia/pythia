@@ -15,7 +15,7 @@ from ..model import ModelResponseError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
-PROFILE = 'claude-stream-json-v4'  # stream authority, heartbeat telemetry, native MCP expiry
+PROFILE = 'claude-stream-json-v5'  # stream authority, keepalives, generation-sized registration wait
 MAX_RECORD = 8 * 1024 * 1024
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))
@@ -176,6 +176,11 @@ class Assembler:
         if not isinstance(event, dict):
             raise ModelResponseError('Invalid stream event')
         kind = event.get('type')
+        if kind == 'ping':
+            # Native stream keepalive, not a message boundary or model progress.
+            # Leave every assembler field untouched; runtime guards/deadlines
+            # still apply, and other unknown/error event types still fail.
+            return None
         if kind == 'message_start':
             if self.current is not None:
                 raise ModelResponseError('Overlapping native messages')

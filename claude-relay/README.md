@@ -39,10 +39,16 @@ by these short tests.
   parent PID, and the client installs a death guard before connecting. B's child
   guard independently covers broker death before the wrapper execs Bubblewrap.
 - An **explicit expected native CLI version** is required. The experimental
-  `claude-stream-json-v4` profile uses print/stream-json input/output, partial
+  `claude-stream-json-v5` profile uses print/stream-json input/output, partial
   events, strict MCP configuration, empty built-in tools/settings sources,
   `dontAsk` permissions, and no native session persistence. Unexpected control
   operations, built-in tools, compaction, or inventory differences fail closed.
+- Native `stream_event/ping` keepalives are no-ops. Early MCP callbacks get a
+  registration grace derived from the existing generation timeout instead of a
+  separate ten-second cap; full-message validation still precedes tool execution.
+  Deadline arming and existing checks are unchanged. Stricter generation-window
+  validation/shared deadlines remain TODOs; see the
+  [stream-liveness notes](../doc/claude-relay-stream-liveness-plan.md).
 - `tool_progress` with boolean `heartbeat=true` is ignored as telemetry, not
   mistaken for subagent output or an executable synthetic tool ID. It changes no
   mailbox/message state, usage or deadlines. Strict parent/name/ID/elapsed

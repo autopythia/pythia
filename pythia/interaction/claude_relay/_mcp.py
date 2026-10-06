@@ -36,12 +36,15 @@ def pointer(document, path):
 
 
 class Mailbox:
-    def __init__(self, tools, *, wait_seconds=1800, trace=None):
+    def __init__(self, tools, *, wait_seconds=1800, registration_seconds=None, trace=None):
         self.trace = trace
         self.tools = {t.name: t for t in tools}
         if len(self.tools) != len(tools):
             raise ValueError('duplicate tool names')
         self.wait_seconds = wait_seconds
+        # Runtime supplies its configured generation budget, independently of
+        # the parked-result wait. Standalone mailboxes retain a finite fallback.
+        self.registration_seconds = wait_seconds if registration_seconds is None else registration_seconds
         self.condition = threading.Condition()
         self.slots = {}
         self.closed = False
@@ -114,7 +117,13 @@ class Mailbox:
             if ident in self.early:
                 raise self.fail('Duplicate MCP callback')
             self.early.add(ident)
-            registration_deadline = time.monotonic() + min(10, self.wait_seconds)
+            # A callback for a closed tool block may arrive while later blocks
+            # are still streaming. Do not impose a separate ten-second cap.
+            # The existing model deadline/retirement also closes this mailbox.
+            # TODO(registration-lifecycle): consider generation-scoped windows
+            # and shared absolute deadlines separately; do not add new rejection
+            # rules or change deadline arming as part of this compatibility fix.
+            registration_deadline = time.monotonic() + self.registration_seconds
             while ident not in self.slots and not self.closed:
                 remaining = registration_deadline - time.monotonic()
                 if remaining <= 0:
