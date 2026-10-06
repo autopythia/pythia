@@ -129,7 +129,11 @@ _SUPERVISOR_INSTRUCTIONS = (
     "so respond to the note. Your purpose is to recover main from errors and to "
     "continue tasks main left unfinished. If the report lists user steers (messages "
     "the user sent during the task), judge main's work against the request as the "
-    "steers changed it; resuming main delivers any steers it has not received yet.\n\n"
+    "steers changed it; resuming main delivers any steers it has not received yet. "
+    "When they differ from the request, the report also quotes the user's first "
+    "message of the session and, for a request queued from a steer main never "
+    "received, the earlier request that steer was sent to. Use these to interpret "
+    "the request, not as further requirements.\n\n"
     "Use read_context to inspect main's log when the report is not enough. If "
     "main's work completes the request, or the task is blocked on the user, end your "
     "turn without resuming main. Otherwise call resume once with a concise "
@@ -192,6 +196,9 @@ class _Task:
     sequence: int
     record_id: str
     content: str
+    # For a task queued from a steer main never received: the content of the
+    # task that steer was sent to.
+    steer_target: Optional[str] = None
 
 
 class _Stopping(RuntimeError):
@@ -863,6 +870,10 @@ class _Session:
             with self._changed:
                 self._accepting = False  # A faulted main admits no new tasks.
 
+        # The chronologically first user message: the raw log keeps it across
+        # compaction and restarts; before main's first task, it is this one.
+        first = next((item.content_text for item in context
+                      if isinstance(item, Message) and item.role == "user"), source.content)
         run_supervised_task(
             source.content, context, model, environment, config, _AutoHost(self, 1),
             self._channel, job_id=source.record_id, context_id=1,
@@ -870,7 +881,8 @@ class _Session:
             follow_up=lambda text: _FOLLOW_UP_HEADER + text,
             steers=self._steer_snapshot, stopping=self._stop.is_set, on_fault=on_fault,
             settle=lambda yield_: self._settle(source, yield_, context),
-            waiting_phase="awaiting watcher")
+            waiting_phase="awaiting watcher",
+            first_user_text=first, steer_target_text=source.steer_target)
 
     def _settle(self, source, yield_, context):
         """Record a task's outcome from main's last yield; recovery counts as success."""
@@ -898,7 +910,7 @@ class _Session:
             requeued = self._accepting and not self._stop.is_set()
             for text in undelivered if requeued else ():
                 sequence = len(self._tasks) + 1
-                self._tasks.append(_Task(sequence, str(sequence), text))
+                self._tasks.append(_Task(sequence, str(sequence), text, source.content))
             self._changed.notify_all()
         if undelivered:
             count = f"{len(undelivered)} steer{'s' if len(undelivered) > 1 else ''}"

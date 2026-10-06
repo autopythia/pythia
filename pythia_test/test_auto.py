@@ -1150,6 +1150,64 @@ class RuntimeTests(unittest.TestCase):
         texts = [item.text for event in session.drain_events() for item in event.items]
         self.assertIn("Queued 1 steer that task 1 never received as new tasks.", texts)
 
+    def test_reports_quote_the_first_user_message_across_tasks_and_restarts(self):
+        session = self.session({1: [answer("A done"), answer("B done")],
+                                -1: [answer("Complete."), answer("Complete.")]},
+                               worker_board=False)
+        self.assertTrue(self.settled(session, session.submit("first request")))
+        self.assertTrue(self.settled(session, session.submit("second request")))
+        session.close()
+        first, second = (self.last_user(call).content for call in self.calls[-1])
+        self.assertNotIn("First user message", first)  # It is this report's request.
+        self.assertIn("(watcher resumes so far: 0).\n\n"
+                      "First user message of the session (for context):\nfirst request\n\n"
+                      "User request:\nsecond request\n", second)
+        self.assertNotIn("to steer", second)
+        # Task numbers restart after --resume, but main's saved log still holds
+        # the session's first user message.
+        resumed = self.session({1: [answer("C done")], -1: [answer("Complete.")]},
+                               worker_board=False, resume=True)
+        self.assertTrue(self.settled(resumed, resumed.submit("third request")))
+        third = self.last_user(self.calls[-1][-1]).content
+        self.assertIn("handed off task 1 ", third)
+        self.assertIn("First user message of the session (for context):\nfirst request\n\n"
+                      "User request:\nthird request\n", third)
+
+    def test_a_requeued_steer_report_quotes_the_request_it_was_sent_to(self):
+        holder = {}
+
+        def steering(text):
+            def deciding(_context):
+                holder["session"].submit(text)  # Main's task is still open: a steer.
+                return answer("Complete.")
+            return deciding
+        session = self.session({
+            1: [answer("A done"), answer("X done"), answer("B done"), answer("Y done")],
+            -1: [steering("steer for A"), answer("Complete."), steering("steer for B"),
+                 answer("Complete.")],
+        }, worker_board=False)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("request A")))
+        self.assertTrue(self.settled(session, {"record_id": "2"}))
+        b = session.submit("request B")
+        self.assertEqual(b, {"record_id": "3"})
+        self.assertTrue(self.settled(session, b))
+        self.assertTrue(self.settled(session, {"record_id": "4"}))
+        reports = [self.last_user(call).content for call in self.calls[-1]]
+        self.assertEqual(len(reports), 4)
+        why = "Main never received that steer, so it was queued as a separate request"
+        # Sent to the first request: noted, not quoted twice.
+        self.assertIn("First user message of the session (for context):\nrequest A\n\n"
+                      f"The user sent the request below to steer the message above; {why}.\n\n"
+                      "User request:\nsteer for A\n", reports[1])
+        self.assertEqual(reports[1].count("request A"), 1)
+        self.assertNotIn("to steer", reports[2])
+        self.assertIn("First user message of the session (for context):\nrequest A\n\n"
+                      f"Earlier request (the user sent the request below to steer it; {why}):\n"
+                      "request B\n\nUser request:\nsteer for B\n", reports[3])
+        # Main itself still receives only the steer's text.
+        self.assertEqual(self.last_user(self.calls[1][3]).content, "steer for B")
+
     def test_interactive_enter_steers_the_open_task_and_slash_task_queues_one(self):
         entered, release = threading.Event(), threading.Event()
 

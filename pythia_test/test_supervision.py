@@ -220,6 +220,30 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("final answer", text)
         self.assertTrue(text.endswith("Main's log has 74 items (read_context indices 0..73)."))
 
+    def test_report_text_quotes_the_first_message_and_steer_target_only_when_distinct(self):
+        plain = report_text(self._yield())
+        self.assertNotIn("First user message", plain)
+        for text in ("Trace it.", " "):  # equal to the request, or blank: nothing added
+            self.assertEqual(report_text(self._yield(first_user_text=text,
+                                                     steer_target_text=text)), plain)
+        why = "Main never received that steer, so it was queued as a separate request"
+        both = report_text(self._yield(first_user_text="Build it.", steer_target_text="Test it."))
+        self.assertIn("(watcher resumes so far: 0).\n\n"
+                      "First user message of the session (for context):\nBuild it.\n\n"
+                      f"Earlier request (the user sent the request below to steer it; {why}):\n"
+                      "Test it.\n\nUser request:\nTrace it.\n\nOutcome: yielded", both)
+        # A steer target equal to the quoted first message is noted, not repeated.
+        noted = report_text(self._yield(first_user_text="Build it.", steer_target_text="Build it."))
+        self.assertEqual(noted.count("Build it."), 1)
+        self.assertIn("Build it.\n\nThe user sent the request below to steer the message "
+                      f"above; {why}.\n\nUser request:\nTrace it.\n", noted)
+        target_only = report_text(self._yield(steer_target_text="Test it."))
+        self.assertNotIn("First user message", target_only)
+        self.assertIn(f"steer it; {why}):\nTest it.\n\nUser request:\nTrace it.", target_only)
+        for fields in ({"first_user_text": 1}, {"steer_target_text": b"Test it."}):
+            with self.subTest(fields=fields), self.assertRaises(TypeError):
+                self._yield(**fields)
+
     def test_yield_tool_records_one_valid_note_per_turn(self):
         binding = YieldTool()
         (tool,) = binding.tools()
@@ -328,6 +352,19 @@ class SupervisedTaskLoopTests(unittest.TestCase):
         self.assertEqual(result.kind, "ended")
         self.assertEqual(len(channel.yields), 1)
         self.assertEqual(settled, [result])
+
+    def test_every_yield_of_the_task_carries_the_context_texts(self):
+        texts = {"first_user_text": "Build it.", "steer_target_text": "Plan it."}
+        model = self.Model(ModelSample((Message("assistant", "draft"),)),
+                           ModelSample((Message("assistant", "done"),)))
+        channel = self.Channel("More.", None)
+        self._run(model, channel, **texts)
+        self.assertEqual([(y.first_user_text, y.steer_target_text) for y in channel.yields],
+                         [("Build it.", "Plan it.")] * 2)
+        failed, _, _ = self._run(self.Model(ModelSample((Message("assistant", "x"),))),
+                                 self.Channel("ignored"), self.Host(fail_on_append=2), **texts)
+        self.assertEqual((failed.kind, failed.first_user_text, failed.steer_target_text),
+                         ("failed", "Build it.", "Plan it."))
 
     def test_settle_runs_even_if_the_channel_raises(self):
         class Broken:

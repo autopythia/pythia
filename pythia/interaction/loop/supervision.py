@@ -53,6 +53,12 @@ class Yield:
     yield_text: Optional[str] = None
     # User steers during the task, in order: (text, delivered to main yet).
     steers: Tuple[Tuple[str, bool], ...] = ()
+    # Context for the report, shown only when distinct from job_text: the
+    # supervised log's chronologically first user message, and, for a job
+    # queued from a steer the supervised context never received, the job text
+    # that steer was sent to.
+    first_user_text: Optional[str] = None
+    steer_target_text: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.kind not in YIELD_KINDS:
@@ -63,6 +69,9 @@ class Yield:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer.")
+        for name in ("first_user_text", "steer_target_text"):
+            if not isinstance(getattr(self, name), (str, type(None))):
+                raise TypeError(f"{name} must be a string or None.")
         if self.failure is not None and not isinstance(self.failure, ModelFailure):
             raise TypeError("failure must be ModelFailure or None.")
         if self.kind == "yielded":
@@ -335,11 +344,27 @@ class SupervisorTools:
 
 
 def report_text(yield_: Yield, *, supervised: str = "Main") -> str:
-    """The supervisor's user message for one handoff (no log contents)."""
+    """The supervisor's user message for one handoff (no log contents).
+
+    The first user message and the steer target appear only when they differ
+    from the job text; a steer target equal to the quoted first user message
+    is noted rather than quoted twice.
+    """
     outcome = yield_.kind if yield_.reason is None else f"{yield_.kind} ({yield_.reason})"
+    first, target = (text if text is not None and text.strip() and text != yield_.job_text
+                     else None for text in (yield_.first_user_text, yield_.steer_target_text))
     lines = [f"{supervised} (#{yield_.context}) handed off task {yield_.job_id} "
-             f"(watcher resumes so far: {yield_.resumes}).",
-             "", "User request:", yield_.job_text]
+             f"(watcher resumes so far: {yield_.resumes}).", ""]
+    if first is not None:
+        lines += ["First user message of the session (for context):", first, ""]
+    if target is not None:
+        why = f"; {supervised} never received that steer, so it was queued as a separate request"
+        if target == first:
+            lines += [f"The user sent the request below to steer the message above{why}.", ""]
+        else:
+            lines += [f"Earlier request (the user sent the request below to steer it{why}):",
+                      target, ""]
+    lines += ["User request:", yield_.job_text]
     if yield_.steers:
         lines += ["", "User steers during this task:"]
         lines += [f"{number}. {'' if delivered else '(not yet delivered) '}{text}"
@@ -448,18 +473,22 @@ def supervised_turn(text: str, resumes: int, context, model, environment, config
                     job_text: str, job_id: Optional[str] = None, context_id: int = 1,
                     control: Optional[YieldTool] = None,
                     follow_up: Optional[Callable[[str], str]] = None,
-                    steers: Optional[Callable[[], Sequence[Tuple[str, bool]]]] = None) -> Yield:
+                    steers: Optional[Callable[[], Sequence[Tuple[str, bool]]]] = None,
+                    first_user_text: Optional[str] = None,
+                    steer_target_text: Optional[str] = None) -> Yield:
     """Run one supervised turn on ``text`` and describe how its loop stopped.
 
     The first turn of a task (``resumes == 0``) gets ``text`` verbatim; a
     resumed turn gets ``follow_up(text)``. ``control`` (the context's
     :class:`YieldTool`) is opened for this turn only. ``steers`` returns the
-    task's steers as (text, delivered) pairs once the turn has stopped. Any
-    failure becomes a ``failed`` Yield, resumable unless the log is unsafe to
-    continue (unsaved state or unanswered tool calls).
+    task's steers as (text, delivered) pairs once the turn has stopped.
+    ``first_user_text`` and ``steer_target_text`` are copied into the Yield for
+    the report. Any failure becomes a ``failed`` Yield, resumable unless the log
+    is unsafe to continue (unsaved state or unanswered tool calls).
     """
     fields = {"context": context_id, "job_id": job_id, "job_text": job_text,
-              "resumes": resumes}
+              "resumes": resumes, "first_user_text": first_user_text,
+              "steer_target_text": steer_target_text}
     try:
         content = text if resumes == 0 or follow_up is None else follow_up(text)
         user = UserInteraction((Message("user", content),))
@@ -496,7 +525,9 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
                         stopping: Optional[Callable[[], bool]] = None,
                         on_fault: Optional[Callable[[Yield], None]] = None,
                         settle: Optional[Callable[[Optional[Yield]], None]] = None,
-                        waiting_phase: str = "awaiting supervisor") -> Optional[Yield]:
+                        waiting_phase: str = "awaiting supervisor",
+                        first_user_text: Optional[str] = None,
+                        steer_target_text: Optional[str] = None) -> Optional[Yield]:
     """Run one task's turns until the supervisor releases it; return the last Yield.
 
     Runs on the supervised context's thread. Each turn ends in a handoff: its
@@ -514,7 +545,8 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
             yield_ = supervised_turn(
                 text, resumes, context, model, environment, config, host,
                 job_text=job_text, job_id=job_id, context_id=context_id,
-                control=control, follow_up=follow_up, steers=steers)
+                control=control, follow_up=follow_up, steers=steers,
+                first_user_text=first_user_text, steer_target_text=steer_target_text)
             if not yield_.resumable and on_fault is not None:
                 on_fault(yield_)
             host.phase(waiting_phase)
