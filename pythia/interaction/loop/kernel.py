@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Iterable, Optional, Sequence, Tuple
 
@@ -32,6 +32,7 @@ from ..items import ToolCall
 from ..items import ToolResult
 from ..items import summarize_turn_usage
 from ..model import ModelContextWindowError
+from ..model import ModelContinuationExpired
 from ..model import ModelError
 from ..model import ModelSample
 from ..model import retire_model
@@ -39,6 +40,8 @@ from ..model import retire_model
 
 NOT_EXECUTED_OUTPUT = "Not executed: the model response did not complete."
 OVERFLOW_NOTICE = "Model context window exceeded; compacting before one retry."
+CONTINUATION_NOTICE = "Model continuation expired; restarting from saved tool results (1/1)."
+CONTINUATION_RECOVERY = "continuation_expired_cold_restart"
 
 
 class SampleLimitExceeded(RuntimeError):
@@ -180,6 +183,8 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
     samples = 0
     # Pi's overflow recovery: one compact-and-retry per turn.
     overflow_recovered = False
+    continuation_recovered = False
+    recovery_pending = False
     while config.max_samples is None or samples < config.max_samples:
         if host.should_stop():
             return STOPPED
@@ -203,6 +208,24 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             if host.should_stop():
                 # The stop caused the failure (e.g. it retired the model).
                 return STOPPED
+            if isinstance(exc, ModelContinuationExpired):
+                ready = exc.failure is not None and not exc.completed_items
+                try:
+                    context.assert_model_ready()
+                except ValueError:
+                    ready = False
+                allowed = ready and not continuation_recovered
+                with host.trace("continuation_recovery", context_revision=len(context),
+                                allowed=allowed, error_code=exc.failure.error_code if exc.failure else None):
+                    if allowed:
+                        continuation_recovered = True
+                        recovery_pending = True
+                        host.notice(CONTINUATION_NOTICE)
+                if allowed:
+                    # The provider already revoked the old continuation. Repeat
+                    # only sampling, through the normal stop/steering boundary;
+                    # never re-enter the previous host tool batch.
+                    continue
             if (isinstance(exc, ModelContextWindowError) and not overflow_recovered
                     and config.enable_auto_compaction and uses_host_auto_compaction(model)):
                 overflow_recovered = True
@@ -227,6 +250,9 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
         samples += 1
         if not isinstance(sample, ModelSample):
             raise TypeError("Expected ModelSample.")
+        if recovery_pending:
+            sample = replace(sample, recovery=(*sample.recovery, CONTINUATION_RECOVERY))
+            recovery_pending = False
         host.after_sample(model, sample)
         host.append(context, sample.context_items())
         host.show(sample.display_items())

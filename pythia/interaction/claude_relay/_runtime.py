@@ -18,6 +18,7 @@ from ._mcp import Mailbox, MCPServer
 from ._sampling import ResolvedSampling
 from ._diagnostics import Diagnostics
 from ._trace import RelayTrace
+from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
 
 
 class Runtime:
@@ -38,6 +39,7 @@ class Runtime:
         self.proc = None
         self.tasks = []
         self.closed = threading.Event()
+        self.retirement_complete = False
         self.error = None
         self.initialized = False
         self.result_seen = False
@@ -237,6 +239,8 @@ class Runtime:
         with self.diagnostics.lock:
             if self.error is not None or self.closed.is_set():
                 return
+            if isinstance(error, NativeMCPTimeout):
+                self.diagnostics.error_code = NATIVE_MCP_TIMEOUT
             diagnostic = self.diagnostics.snapshot(freeze=True)
             self.error = error
             scope = self.trace.scope()
@@ -244,6 +248,10 @@ class Runtime:
                         last_event_type=diagnostic.last_event_type,
                         error_code=diagnostic.error_code, event_count=diagnostic.event_count,
                         invocation_event_count=diagnostic.invocation_event_count)
+        if isinstance(error, NativeMCPTimeout):
+            self.trace.emit('native_mcp_timeout', scope=self.trace.scope(error.call.native_id),
+                            native_tool_use_id=error.call.native_id, released=error.call.released,
+                            returned=error.call.returned)
         self.mailbox.close()
         with contextlib.suppress(queue.Empty):
             while True:
@@ -377,12 +385,7 @@ class Runtime:
                             self.final_message = (message, items, calls)
                 elif kind == 'user':
                     content = value.get('message', {}).get('content')
-                    if not isinstance(content, list) or not content:
-                        raise ModelResponseError('Unexpected native user record')
-                    for block in content:
-                        if not isinstance(block, dict) or block.get('type') != 'tool_result':
-                            raise ModelResponseError('Unexpected native user content')
-                        self.mailbox.validate_native_result(block.get('tool_use_id'))
+                    self.mailbox.validate_native_results(content)
                 elif kind == 'result':
                     if value.get('is_error') is not False or value.get('subtype') != 'success':
                         raise ModelResponseError('Native run failed; inspect explicit private diagnostics for details')
@@ -479,3 +482,11 @@ class Runtime:
         finally:
             if self.mcp:
                 self.mcp.close()
+        mcp_retired = True
+        if self.mcp:
+            with self.mcp.connection_lock:
+                mcp_retired = (self.mcp.closed and not self.mcp.thread.is_alive()
+                               and not self.mcp.workers and not self.mcp.connections)
+        self.retirement_complete = (
+            not self.thread.is_alive() and (self.proc is None or self.proc.returncode is not None)
+            and mcp_retired)

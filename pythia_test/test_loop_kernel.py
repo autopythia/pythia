@@ -9,11 +9,11 @@ from unittest import mock
 
 from pythia.interaction import Environment, Init, InteractionContext, Message
 from pythia.interaction import ModelSample, Tool, ToolCall, ToolOutcome, ToolResult, ToolSpec
-from pythia.interaction.items import ModelSampleBoundary, TurnSummary
+from pythia.interaction.items import ModelFailure, ModelSampleBoundary, SampleMetadata, TurnSummary
 from pythia.interaction.loop import Interrupt, MissingFinalText, SampleLimitExceeded, Steer
 from pythia.interaction.loop import TurnHost, TurnResult, run_turn
 from pythia.interaction.loop import kernel
-from pythia.interaction.model import ModelContextWindowError, ModelTransportError
+from pythia.interaction.model import ModelContinuationExpired, ModelContextWindowError, ModelTransportError
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 
 
@@ -27,6 +27,12 @@ def _answer(text):
 
 def _calls(*calls):
     return ModelSample(tuple(calls))
+
+
+def _expired():
+    return ModelContinuationExpired('expired', failure=ModelFailure(
+        'ModelContinuationExpired', 'Native MCP operation expired', provider='claude-relay',
+        error_code='native_mcp_timeout'))
 
 
 class _Model:
@@ -111,6 +117,92 @@ def _config(**values):
 
 
 class RunTurnTests(unittest.TestCase):
+    def test_continuation_recovery_retries_sampling_not_tools(self):
+        host, context = _Host(), _context()
+        model = _Model(host, _calls(_call('a')), _expired(), _answer('recovered'))
+        result = run_turn(context, model, _environment(host), _config(max_samples=2), host)
+        self.assertEqual(result.final_text, 'recovered')
+        self.assertEqual(host.calls_run, 1)
+        self.assertEqual(host.notices, [kernel.CONTINUATION_NOTICE])
+        self.assertEqual(host.retryable, 0)
+        metadata = [i for i in context if isinstance(i, SampleMetadata)]
+        self.assertEqual(metadata[-1].recovery, (kernel.CONTINUATION_RECOVERY,))
+        self.assertEqual(metadata[-1].request_attempts, 1)
+        order = [e for e in host.events if e[0] in ('append', 'sample', 'tool')]
+        failure = next(n for n,e in enumerate(order) if e[0] == 'append' and 'ModelFailure' in e[1])
+        self.assertEqual(order[failure + 1][0], 'sample')
+
+    def test_recovery_budget_spans_later_tool_batches_and_compaction(self):
+        host, context = _Host(), _context()
+        model = _Model(host, _expired(), _calls(_call('a')), _expired(), _answer('never'))
+        with _fake_compaction(host, due=False), mock.patch.object(
+                kernel, 'auto_compaction_due', side_effect=[False, True, False]):
+            with self.assertRaises(ModelContinuationExpired):
+                run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(host.calls_run, 1)
+        self.assertEqual(host.notices, [kernel.CONTINUATION_NOTICE])
+        self.assertEqual(host.retryable, 1)
+        self.assertEqual(len(model.script), 1)
+        self.assertIn(('compacted',), host.events)
+
+    def test_failed_failure_checkpoint_prevents_relaunch(self):
+        class CannotSave(_Host):
+            def append(self, context, items):
+                if any(isinstance(i, ModelFailure) for i in items):
+                    raise OSError('save failed')
+                super().append(context, items)
+        host = CannotSave()
+        model = _Model(host, _expired(), _answer('never'))
+        with self.assertRaisesRegex(OSError, 'save failed'):
+            run_turn(_context(), model, _environment(host), _config(), host)
+        self.assertEqual(len(model.script), 1)
+        self.assertEqual(host.notices, [])
+
+    def test_stop_or_steering_rechecked_before_cold_retry(self):
+        class StopAfterNotice(_Host):
+            def notice(self, text):
+                super().notice(text)
+                self.stop = True
+        host = StopAfterNotice()
+        model = _Model(host, _expired(), _answer('never'))
+        self.assertEqual(run_turn(_context(), model, _environment(host), _config(), host).kind, 'stopped')
+        self.assertEqual(len(model.script), 1)
+        class SteerAfterNotice(_Host):
+            def interrupt(self):
+                return Steer((Message('user', 'steer recovery'),)) if self.notices else Interrupt.CONTINUE
+        host, context = SteerAfterNotice(), _context()
+        model = _Model(host, _expired(), _answer('done'))
+        run_turn(context, model, _environment(host), _config(), host)
+        self.assertIn(Message('user', 'steer recovery'), context.items)
+
+    def test_generic_transport_error_and_unresolved_context_do_not_auto_retry(self):
+        for unresolved in (False, True):
+            host, context = _Host(), _context()
+            if unresolved:
+                context.append(_call('unresolved'))
+            error = _expired() if unresolved else ModelTransportError('other transport error')
+            model = _Model(host, error, _answer('never'))
+            with self.subTest(unresolved=unresolved), self.assertRaises(ModelTransportError):
+                run_turn(context, model, _environment(host), _config(), host)
+            self.assertEqual(host.calls_run, 0)
+            self.assertEqual(host.notices, [])
+            self.assertEqual(len(model.script), 1)
+
+    def test_marker_contract_and_loop_defenses_require_metadata_and_no_partial_output(self):
+        with self.assertRaises(TypeError):
+            ModelContinuationExpired('no metadata')
+        with self.assertRaises(ValueError):
+            ModelContinuationExpired('partial', failure=_expired().failure, completed_items=(_call('a'),))
+        for field, value in (('failure', None), ('completed_items', (_call('a'),))):
+            error = _expired()
+            setattr(error, field, value)  # a provider violating the marker contract
+            host, context = _Host(), _context()
+            model = _Model(host, error, _answer('never'))
+            with self.subTest(field=field), self.assertRaises(ModelContinuationExpired):
+                run_turn(context, model, _environment(host), _config(), host)
+            self.assertEqual(host.notices, [])
+            self.assertEqual(host.calls_run, 0)
+
     def test_saves_each_result_before_the_next_call_and_ends(self):
         host, context = _Host(), _context()
         model = _Model(host, _calls(_call("a"), _call("b")), _answer("done"))

@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 
-from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelSample, _timed_sample
+from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelContinuationExpired, ModelSample, _timed_sample
 from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
@@ -22,6 +22,7 @@ from ._context import Snapshot, record, handoff
 from ._cli_protocol import PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
+from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
 from .._debug_trace import DebugTrace, capture_trace_scope
 from ..timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
 from ..timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
@@ -124,6 +125,7 @@ class ClaudeRelayModel:
                 previous_signature, acknowledged, pending = self._signature, self._acknowledged, self._pending
             scope = {**capture_trace_scope(), 'sample_id': secrets.token_hex(16)}
             executing = None
+            results = snapshot = None
             try:
                 try:
                     revision = len(context)
@@ -146,6 +148,9 @@ class ClaudeRelayModel:
                 if runtime is not None and signature == previous_signature:
                     results = handoff(snapshot, acknowledged, pending)
                 if results is None:
+                    if runtime is not None and isinstance(runtime.error, NativeMCPTimeout):
+                        runtime.trace.emit('continuation_abandoned', reason=NATIVE_MCP_TIMEOUT,
+                                           replacement='context_or_policy_change')
                     epoch = self._retire(expected_epoch=epoch)
                     snapshot.prompt()  # reject unresolved/unsupported cold history before launch
                     # Don't let caller-owned nested schema containers change the
@@ -203,27 +208,48 @@ class ClaudeRelayModel:
                         event_types=diagnostic.event_types if diagnostic else (),
                         event_count=diagnostic.event_count if diagnostic else 0,
                         last_event_type=diagnostic.last_event_type if diagnostic else None,
-                        error_code=diagnostic.error_code if diagnostic else None,
+                        error_code=(NATIVE_MCP_TIMEOUT if isinstance(error, NativeMCPTimeout)
+                                    else diagnostic.error_code if diagnostic else None),
                         elapsed_seconds=diagnostic.elapsed_seconds if diagnostic else time.monotonic() - started,
                     )
+                eligible = (isinstance(error, NativeMCPTimeout) and executing is runtime
+                            and runtime is not None and bool(pending) and results is not None
+                            and error.call.native_id in pending.values() and not error.completed_items)
+                if eligible:
+                    try:
+                        context.assert_model_ready()
+                        snapshot.prompt()  # no guessed/missing outcomes in the cold input
+                    except (AttributeError, TypeError, ValueError, ModelError):
+                        eligible = False
+                retired_epoch = self._retire_after_failure(error, expected_epoch=epoch if eligible else None)
+                with self._state_lock:
+                    recoverable = (eligible and retired_epoch is not None and not self._closed
+                                   and self._epoch == retired_epoch and runtime.retirement_complete)
+                if recoverable:
+                    error = ModelContinuationExpired(str(error), failure=replace(
+                        error.failure, category='ModelContinuationExpired'))
                 if self.trace:
+                    if isinstance(error, (NativeMCPTimeout, ModelContinuationExpired)):
+                        self.trace.event('continuation_recovery_eligibility', scope=scope,
+                                         runtime_id=runtime.generation if runtime else None,
+                                         eligible=recoverable, cleanup_confirmed=(
+                                             runtime.retirement_complete if runtime else False))
                     self.trace.event('sample_end', scope=scope,
                                      runtime_id=runtime.generation if runtime else None,
                                      exception_type=type(error).__name__,
                                      last_event_type=error.failure.last_event_type,
                                      elapsed_seconds=error.failure.elapsed_seconds,
                                      event_count=error.failure.event_count, error_code=error.failure.error_code)
-                self._retire_after_failure(error)
-                raise
+                raise error
             except BaseException as error:
                 if self.trace:
                     self.trace.event('sample_end', scope=scope, exception_type=type(error).__name__)
                 self._retire_after_failure(error)
                 raise
 
-    def _retire_after_failure(self, error):
+    def _retire_after_failure(self, error, *, expected_epoch=None):
         try:
-            self.retire()
+            return self._retire(expected_epoch=expected_epoch)
         except Exception as cleanup:
             # Keep the causal error, but never claim that teardown succeeded.
             if isinstance(error, ModelError) and error.failure is not None:
@@ -231,6 +257,7 @@ class ClaudeRelayModel:
                                         + f'; cleanup failed ({type(cleanup).__name__[:64]})')
             if self.trace:
                 self.trace.event('cleanup_failure', exception_type=type(cleanup).__name__)
+            return None
 
     def retire(self):
         """Cancel a live continuation without waiting for the sampling lock."""

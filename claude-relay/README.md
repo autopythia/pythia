@@ -39,7 +39,7 @@ by these short tests.
   parent PID, and the client installs a death guard before connecting. B's child
   guard independently covers broker death before the wrapper execs Bubblewrap.
 - An **explicit expected native CLI version** is required. The experimental
-  `claude-stream-json-v3` profile uses print/stream-json input/output, partial
+  `claude-stream-json-v4` profile uses print/stream-json input/output, partial
   events, strict MCP configuration, empty built-in tools/settings sources,
   `dontAsk` permissions, and no native session persistence. Unexpected control
   operations, built-in tools, compaction, or inventory differences fail closed.
@@ -49,6 +49,12 @@ by these short tests.
   validation is deliberately deferred with a code TODO; trace attribution is
   best-effort and marked `validation=deferred`. See the
   [heartbeat compatibility notes](../doc/claude-relay-heartbeat-plan.md).
+- A specifically recognized native MCP timeout invalidates the old continuation;
+  its synthetic result and later proposals are not accepted. Once real host
+  outcomes are saved and cleanup is confirmed, the shared turn loop allows one
+  cold inference recovery, without rerunning tool handlers. Generic transport,
+  snapshot/parser and generation-timeout failures remain non-automatic. See the
+  [recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
 - The MCP endpoint implements stateless JSON-response Streamable HTTP with
   initialization, tools/list, tools/call and ping, using the explicitly supported
   protocol dates 2025-03-26, 2025-06-18 and 2025-11-25. GET/SSE and DELETE return

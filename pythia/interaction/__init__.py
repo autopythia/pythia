@@ -104,6 +104,7 @@ from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
+from .model import ModelContinuationExpired
 from .model import SampleParams
 from .model import TokenUsage
 from .model_catalog import ModelLimits
@@ -220,6 +221,7 @@ __all__ = [
     "ModelTimeoutError",
     "ModelTimeouts",
     "ModelTransportError",
+    "ModelContinuationExpired",
     "NothingToCompact",
     "OpaqueCompaction",
     "MAX_TIMEOUT_SECONDS",

@@ -421,6 +421,24 @@ result delivery. Ordinary progress, genuine subagent, native-error and terminal
 guards remain in place. See the [compatibility notes](../doc/claude-relay-heartbeat-plan.md).
 Relaunch the A-side frontend to load this fix; no broker restart is required.
 
+If a native `tool_result` reports a timeout before Pythia releases its real reply,
+the adapter invalidates that continuation instead of accepting the synthetic
+outcome. For the recognized native timeout form, once Pythia has saved every real
+host outcome and confirmed cleanup, the shared loop records the incident and
+allows **one cold inference recovery per turn**. It does not rerun tool handlers
+or discard A-side command-session handles. A genuine host tool timeout remains
+its ordinary tool result. Unknown/ambiguous cases, missing outcomes, cleanup
+failure, cancellation and repeated expiry are not given automatic retry permission.
+
+This native MCP/tool deadline is separate from generation/parked deadlines;
+raising the generation timeout does not necessarily address it. Native timeout
+configuration is still unverified and unchanged. See the
+[continuation recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
+Direct library callers not using `run_turn` receive `ModelContinuationExpired`
+(a `ModelTransportError` subclass) and decide whether to call `sample()` again
+with the same authoritative history. Relaunch the A-side frontend to load the
+change; the broker needs no restart.
+
 Ctrl-C/termination of a client retires its invocation; loss of A's driver or B's
 broker also triggers child cleanup. To shut down the service, stop B's broker
 normally (e.g. Ctrl-C in its session). This terminates active invocations but does

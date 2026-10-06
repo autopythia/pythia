@@ -66,6 +66,22 @@ class ModelTransportError(ModelError):
     pass
 
 
+class ModelContinuationExpired(ModelTransportError):
+    """A retired continuation can be replaced from checkpointed host history.
+
+    Providers may raise this only after confirming cleanup and complete actual
+    host outcomes. It grants no tool replay or generic transport-retry authority.
+    The shared turn loop permits at most one cold recovery per turn.
+    """
+
+    def __init__(self, *args, failure=None, completed_items=()):
+        if not isinstance(failure, ModelFailure):
+            raise TypeError("Continuation recovery requires a safe ModelFailure")
+        if tuple(completed_items):
+            raise ValueError("Continuation recovery cannot carry completed output")
+        super().__init__(*args, failure=failure)
+
+
 class ModelAuthenticationError(ModelTransportError):
     pass
 
@@ -382,6 +398,7 @@ __all__ = [
     "ModelAuthenticationError",
     "ModelConfigurationError",
     "ModelContextWindowError",
+    "ModelContinuationExpired",
     "ModelError",
     "ModelResponseError",
     "ModelSample",

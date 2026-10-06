@@ -10,9 +10,10 @@ import threading
 import time
 import uuid
 
-from ..model import ModelResponseError
+from ..model import ModelError, ModelResponseError
 from ..model_catalog import parse_json_value, thaw_json
 from ._context import canonical
+from ._recovery import ExpiredCall, NativeMCPTimeout, is_native_timeout, is_host_timeout_echo
 
 PROTOCOLS = ('2025-03-26', '2025-06-18', '2025-11-25')
 MAX_BODY = 4 * 1024 * 1024
@@ -49,14 +50,17 @@ class Mailbox:
         self.early = set()
 
     def fail(self, message, rpc_code=-32602):
-        error = MCPError(message, rpc_code)
+        return self._fail_error(MCPError(message, rpc_code))
+
+    def _fail_error(self, error):
         with self.condition:
             if self.failure is None:
                 self.failure = error
             self.closed = True
             self.condition.notify_all()
-        self.on_failure(error)
-        return error
+            first = self.failure
+        self.on_failure(first)
+        return first
 
     def register(self, calls):
         with self.condition:
@@ -145,10 +149,37 @@ class Mailbox:
         with self.condition:
             return all(v['returned'] for v in self.slots.values())
 
-    def validate_native_result(self, ident):
+    def validate_native_results(self, blocks):
+        """Validate the whole envelope before granting any result authority.
+
+        A returned slot means the HTTP callback obtained the host reply, not
+        that the native client consumed it. Inspect timeout-shaped echoes even
+        after return so a delivery race cannot substitute a native error.
+        """
         with self.condition:
-            if ident not in self.slots or not self.slots[ident]['returned']:
-                raise self.fail('Native tool result appeared before the host released it')
+            if self.closed:
+                raise self.failure or ModelResponseError('Mailbox retired')
+            if not isinstance(blocks, list) or not blocks:
+                raise self.fail('Unexpected native user content')
+            seen, expired = set(), None
+            for block in blocks:
+                if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                    raise self.fail('Unexpected native user content')
+                ident = block.get('tool_use_id')
+                if not isinstance(ident, str) or ident not in self.slots or ident in seen:
+                    raise self.fail('Native tool result has an unknown or duplicate call ID')
+                seen.add(ident)
+                slot = self.slots[ident]
+                if is_native_timeout(block) and not (slot['returned'] and is_host_timeout_echo(slot['result'])):
+                    if not slot['claimed']:
+                        raise self.fail('Unclaimed native tool result appeared before a host reply')
+                    expired = ExpiredCall(ident, slot['result'] is not None, slot['returned'])
+                elif not slot['returned']:
+                    raise self.fail('Native tool result appeared before the host released it')
+            if expired is not None:
+                if len(blocks) != 1:
+                    raise self.fail('Ambiguous native tool-result envelope at MCP expiry')
+                raise self._fail_error(NativeMCPTimeout(expired))
 
     def close(self):
         with self.condition:
@@ -294,7 +325,7 @@ class MCPServer:
                            protocol_version=self.headers.get('MCP-Protocol-Version'))
                 try:
                     result = owner.dispatch(message, self.headers.get('MCP-Protocol-Version'))
-                except (ValueError, ModelResponseError) as error:
+                except (ValueError, ModelError) as error:
                     if 'id' in message:
                         self.respond(200, {'jsonrpc': '2.0', 'id': ident,
                                           'error': {'code': getattr(error, 'rpc_code', -32602), 'message': 'MCP request rejected'}})

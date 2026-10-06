@@ -169,6 +169,24 @@ elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row i
     batch_reason = 'max_tokens' if text == 'limited-tools' else 'tool_use'
     stream_message('m1', blocks, {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}, batch_reason)
     emit({'type': 'assistant', 'message': {'id': 'm1', 'content': blocks, 'usage': {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}, 'stop_reason': batch_reason}})
+    if text == 'native-timeout':
+        # Synthetic-only gate: the test waits for callback claim / actual host
+        # effects, then requests the native error. No wall-clock timeout sleeps.
+        def pending_request():
+            try:
+                rpc('tools/call', {'name': tools[0]['name'], 'arguments': {'value': 1},
+                                  '_meta': {'claudecode/toolUseId': blocks[0]['id']}})
+            except (KeyError, OSError):
+                pass  # mailbox revocation is expected; never echo a fake result
+        threading.Thread(target=pending_request, daemon=True).start()
+        assert sys.stdin.readline().strip() == 'fixture-expire'
+        emit({'type': 'user', 'message': {'content': [{'type': 'tool_result',
+              'tool_use_id': blocks[0]['id'], 'is_error': True, 'content': 'The operation timed out.'}]}})
+        stream_message('speculative', [{'type': 'tool_use', 'id': 'must_not_execute',
+                       'name': names[0], 'input': {'value': 999}}],
+                       {'input_tokens': 3, 'output_tokens': 2}, 'tool_use')
+        sys.stdin.read()
+        raise SystemExit(0)
     if text == 'autonomous':
         emit({'type': 'result', 'subtype': 'success', 'is_error': False})
         time.sleep(2)
@@ -193,7 +211,8 @@ elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row i
             heartbeat(blocks[0], 0)  # repeated/late telemetry after actual results
     answer = '|'.join(outputs)
 else:
-    answer = 'fixture summary' if summary else 'cold:' + text
+    answer = ('recovered:' + '|'.join(row['output'] for row in history if row['kind'] == 'result')
+              if text == 'native-timeout' else 'fixture summary' if summary else 'cold:' + text)
 reason = text.removeprefix('limited:') if text.startswith('limited:') else 'end_turn'
 if summary and 'limit-summary' in text:
     reason = 'max_tokens'

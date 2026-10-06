@@ -15,7 +15,7 @@ from ..model import ModelResponseError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
-PROFILE = 'claude-stream-json-v3'  # stream authority, block shadows, MCP heartbeat telemetry
+PROFILE = 'claude-stream-json-v4'  # stream authority, heartbeat telemetry, native MCP expiry
 MAX_RECORD = 8 * 1024 * 1024
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))
