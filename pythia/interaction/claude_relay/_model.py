@@ -7,7 +7,6 @@ correlation or permissions fail closed, never by matching tool names/arguments.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
-import math
 import json
 from pathlib import Path
 import re
@@ -24,20 +23,33 @@ from ._cli_protocol import PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
 from .._debug_trace import DebugTrace, capture_trace_scope
+from ..timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
+from ..timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
+from ..timeouts import DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
+from ..timeouts import DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
+from ..timeouts import validate_timeout_seconds
 
 
 @dataclass(frozen=True)
 class ClaudeRelayEndpoint:
+    """One relay continuation's launch settings.
+
+    ``generation_timeout_seconds`` bounds each wait for the next completed
+    native message (streamed chunks and tool heartbeats do not extend it);
+    ``parked_timeout_seconds`` bounds a parked continuation's wait for tool
+    results; ``startup``/``stop`` bound the native process lifecycle.
+    """
+
     model: str
     launcher: str
     socket_path: str
     server_uid: int
     expected_version: str
     tool_id_pointer: str = '/params/_meta/claudecode~1toolUseId'
-    generation_timeout_seconds: float = 1200
-    parked_timeout_seconds: float = 1800
-    startup_timeout_seconds: float = 30
-    stop_timeout_seconds: float = 5
+    generation_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
+    parked_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
+    startup_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
+    stop_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
     binding: ModelBinding | None = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -62,9 +74,10 @@ class ClaudeRelayEndpoint:
                 or re.search(r'~(?![01])', self.tool_id_pointer)):
             raise ModelConfigurationError('Native tool ID pointer must select request params._meta')
         for name in ('generation_timeout_seconds', 'parked_timeout_seconds', 'startup_timeout_seconds', 'stop_timeout_seconds'):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                raise ModelConfigurationError(f'{name} must be positive and finite')
+            try:
+                validate_timeout_seconds(getattr(self, name), name)
+            except ValueError as error:
+                raise ModelConfigurationError(str(error)) from None
         if self.binding is None:
             object.__setattr__(self, 'binding', ModelBinding(self.model, EndpointSpec('claude-relay', None, self.model, 'runtime')))
         if self.binding.api != 'claude-relay' or self.binding.endpoint.model != self.model:

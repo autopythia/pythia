@@ -27,6 +27,7 @@ from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
 from .model_catalog import freeze_extra_sample_params
 from .model_catalog import thaw_json
+from .timeouts import validate_timeout_seconds
 
 if TYPE_CHECKING:
     from .display import DisplayItem
@@ -107,6 +108,10 @@ class SampleParams:
     ``extra`` holds request-body extensions for this call. A mapping replaces
     the binding's ``extra_sample_params`` (``{}`` sends none); ``None``
     inherits them.
+
+    ``request_timeout_seconds`` is host transport policy, never a wire field:
+    the HTTP blocking-I/O timeout of each operation of this call's requests.
+    ``None`` uses the adapter endpoint's timeout.
     """
 
     max_output_tokens: Optional[int] = None
@@ -119,6 +124,7 @@ class SampleParams:
     # Host context-management threshold override, never a sampling wire field.
     auto_compact_tokens: Optional[int] = None
     extra: Optional[Mapping] = None
+    request_timeout_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.max_output_tokens is not None:
@@ -171,6 +177,23 @@ class SampleParams:
             )
         if self.extra is not None:
             object.__setattr__(self, "extra", freeze_extra_sample_params(self.extra))
+        if self.request_timeout_seconds is not None:
+            object.__setattr__(self, "request_timeout_seconds", validate_timeout_seconds(
+                self.request_timeout_seconds, "request_timeout_seconds",
+            ))
+
+
+def _request_timeout_seconds(endpoint, sample_params: Optional[SampleParams]) -> float:
+    """One call's HTTP timeout: the per-call value, else the endpoint's."""
+    timeout = None if sample_params is None else sample_params.request_timeout_seconds
+    return endpoint.request_timeout_seconds if timeout is None else timeout
+
+
+def _timeout_message(message: str, timeout_seconds: Optional[float]) -> str:
+    """Name the budget a timed-out request used; the value is not a secret."""
+    if timeout_seconds is None:
+        return message
+    return f"{message} (request_timeout_seconds={timeout_seconds:g})"
 
 
 def _apply_extra_sample_params(

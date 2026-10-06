@@ -5,8 +5,9 @@ Maximum/output limits are metadata rather than request budgets;
 ``auto_compact_context_tokens`` is caller policy consumed by interaction
 frontends and server-compaction configuration. Endpoints contain non-secret
 delivery policy, not resolved credential values or permission to use account
-services. Unknown names remain valid pass-through candidates for the owning
-adapter.
+services. Timeouts are per-model wait budgets that launch options and per-call
+params override. Unknown names remain valid pass-through candidates for the
+owning adapter.
 """
 
 from __future__ import annotations
@@ -61,6 +62,13 @@ _PROFILE_RESERVED_EXTRA_SAMPLE_PARAMS = MappingProxyType({
     "claude-relay": _RESERVED_EXTRA_SAMPLE_PARAMS,
 })
 MAX_EXTRA_SAMPLE_PARAMS_BYTES = 65_536
+# Every configurable timeout is at most this long, so an accepted value is
+# always a valid socket, queue, and event-loop timeout. Defined here so this
+# module stays dependency-free; ``timeouts`` re-exports it with the defaults.
+MAX_TIMEOUT_SECONDS = 86_400.0
+# ModelTimeouts fields; all but request_seconds are Claude Relay deadlines.
+_RELAY_TIMEOUT_FIELDS = ("generation_seconds", "parked_seconds", "startup_seconds", "stop_seconds")
+MODEL_TIMEOUT_FIELDS = ("request_seconds", *_RELAY_TIMEOUT_FIELDS)
 
 
 def parse_json_value(text: str):
@@ -102,6 +110,22 @@ def _freeze_json(value, depth=0):
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(item, depth + 1) for item in value)
     raise ValueError("Extra sample params must contain only finite JSON values.")
+
+
+def validate_timeout_seconds(value, name):
+    """Return ``value`` as float seconds, or raise ``ValueError`` naming ``name``.
+
+    The one validator for every configurable timeout: a number (not a bool)
+    greater than 0 and at most ``MAX_TIMEOUT_SECONDS``; NaN and infinities fail
+    the range check. The message never echoes the value.
+    """
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not 0 < value <= MAX_TIMEOUT_SECONDS):
+        raise ValueError(
+            f"{name} must be positive and finite, at most "
+            f"{MAX_TIMEOUT_SECONDS:g} seconds"
+        )
+    return float(value)
 
 
 def thaw_json(value):
@@ -241,6 +265,29 @@ class ModelLimits:
             )
 
 
+@dataclass(frozen=True)
+class ModelTimeouts:
+    """Per-model wait budgets in seconds; ``None`` keeps the built-in default.
+
+    ``request_seconds`` is the HTTP blocking-I/O timeout of an HTTP API's model
+    requests, per operation and per attempt. The others are Claude Relay's
+    generation, parked, startup, and stop deadlines. Launch options, ``/config``,
+    and per-call params take precedence; account commands never use these.
+    """
+
+    request_seconds: Optional[float] = None
+    generation_seconds: Optional[float] = None
+    parked_seconds: Optional[float] = None
+    startup_seconds: Optional[float] = None
+    stop_seconds: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        for name in MODEL_TIMEOUT_FIELDS:
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, validate_timeout_seconds(value, name))
+
+
 # TODO: Fold these typed presets into extra_sample_params (Responses ``reasoning``
 # and ``text``), as catalog v3 did for Messages effort; Responses would then
 # no longer reserve those fields.
@@ -270,6 +317,7 @@ class ModelSpec:
     aliases: Tuple[str, ...] = ()
     source: Optional[str] = None
     extra_sample_params: Mapping = field(default_factory=dict)
+    timeouts: ModelTimeouts = field(default_factory=ModelTimeouts)
 
     def __post_init__(self) -> None:
         _require_identifier(self.name, "name")
@@ -281,6 +329,13 @@ class ModelSpec:
         if (self.endpoint.api == "messages" and self.limits.auto_compact_context_tokens is not None
                 and self.limits.auto_compact_context_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS):
             raise ValueError("Messages compaction threshold must be at least 50000.")
+        if not isinstance(self.timeouts, ModelTimeouts):
+            raise TypeError("timeouts must be ModelTimeouts")
+        if self.endpoint.api == "claude-relay":
+            if self.timeouts.request_seconds is not None:
+                raise ValueError("Claude Relay sends no HTTP model requests; use its relay timeouts")
+        elif any(getattr(self.timeouts, name) is not None for name in _RELAY_TIMEOUT_FIELDS):
+            raise ValueError("Generation, parked, startup, and stop timeouts require Claude Relay")
         if self.responses is not None:
             if not isinstance(self.responses, ResponsesDefaults):
                 raise TypeError("responses must be ResponsesDefaults or None")
@@ -538,6 +593,10 @@ class ModelBinding:
         return ModelLimits() if self.spec is None else self.spec.limits
 
     @property
+    def timeouts(self):
+        return ModelTimeouts() if self.spec is None else self.spec.timeouts
+
+    @property
     def supports_account_services(self):
         return self.endpoint.is_official_codex and self.endpoint.auth == "codex-login"
 
@@ -717,6 +776,7 @@ __all__ = [
     "ModelLimits",
     "ModelCatalog",
     "ModelBinding",
+    "ModelTimeouts",
     "BUILTIN_MODEL_CATALOG",
     "EndpointSpec",
     "ModelSpec",

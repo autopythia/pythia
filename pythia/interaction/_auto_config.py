@@ -5,12 +5,14 @@ except for what it sets itself: its own model (a per-role option, a config-file
 entry, a save, or a catalog [auto] default) and its other per-role settings. A
 role on a different model inherits none of main's model-specific settings, and
 main's connection settings only when it uses the same connection.
+
+An unset request_timeout_seconds resolves per role from its model's catalog
+timeouts.request_seconds, then the default; Claude Relay roles ignore it.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -23,6 +25,7 @@ from .model_config import add_catalog_arguments, add_endpoint_arguments, prepare
 from .model_catalog import BUILTIN_MODEL_CATALOG, freeze_extra_sample_params, thaw_json
 from .runtime_config import InteractionConfig
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import validate_timeout_seconds
 
 
 NAMES = {1: "main", 2: "worker", -1: "watcher"}
@@ -33,7 +36,9 @@ DEFAULTS = {
     "endpoint_url": None, "endpoint_model": None, "endpoint_auth": None,
     "codex_home": None, "codex_auth_file": None,
     "cwd": ".", "max_samples": None, "max_output_tokens": None,
-    "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    # None resolves per role at runtime (catalog, then default); saves created
+    # before this keep an explicit value.
+    "request_timeout_seconds": None,
     "enable_workspace": True, "enable_auto_compaction": True,
     "auto_compact_tokens": None, "max_context_tokens": None,
     "compaction_mode": None, "compaction_keep_recent_tokens": None,
@@ -386,9 +391,8 @@ def _validate(settings, catalog):
     if instructions is not None and not isinstance(instructions, str):
         raise ValueError("instructions must be text or null.")
     timeout = settings["request_timeout_seconds"]
-    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
-            not math.isfinite(timeout) or timeout <= 0):
-        raise ValueError("request_timeout_seconds must be positive and finite.")
+    if timeout is not None:
+        validate_timeout_seconds(timeout, "request_timeout_seconds")
     samples = settings["max_samples"]
     if samples is not None and (type(samples) is not int or samples <= 0):
         raise ValueError("max_samples must be a positive integer or null.")
@@ -416,7 +420,12 @@ def namespace(settings, catalog=BUILTIN_MODEL_CATALOG, *, binding=None):
     args = argparse.Namespace(**settings, api_key=None)
     if binding is not None:
         args.model_binding = binding
-    return prepare_namespace(args, catalog)
+    args = prepare_namespace(args, catalog)
+    if args.model_binding.api == "claude-relay":
+        # Relay sends no HTTP model requests: a shared or inherited request
+        # timeout configures only the HTTP roles.
+        args.request_timeout_seconds = None
+    return args
 
 
 def build_parser():
@@ -526,5 +535,9 @@ def build_parser():
                         help="Common pi summary output budget; defaults to each turn's budget.")
     parser.add_argument("--max-context-tokens", type=int, default=argparse.SUPPRESS,
                         help="Common informational context ceiling; defaults to each context's catalog.")
-    parser.add_argument("--request-timeout-seconds", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--request-timeout-seconds", type=float, default=argparse.SUPPRESS,
+                        help=("Common HTTP blocking-I/O timeout of model requests; defaults to "
+                              "each context's catalog timeouts.request_seconds, else "
+                              f"{DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds. Claude Relay roles "
+                              "ignore it."))
     return parser

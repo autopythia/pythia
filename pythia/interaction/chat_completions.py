@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import math
 import re
 import socket
 import time
@@ -51,10 +50,13 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SampleParams
 from .model import _apply_extra_sample_params
+from .model import _request_timeout_seconds
+from .model import _timeout_message
 from .model_catalog import ModelBinding
 from .model import TokenUsage
 from .model import _timed_sample
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import validate_timeout_seconds
 
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -87,17 +89,13 @@ class ChatCompletionsEndpoint:
                 )
             object.__setattr__(self, "api_key", api_key)
 
-        timeout = self.request_timeout_seconds
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(float(timeout))
-            or float(timeout) <= 0
-        ):
-            raise ModelConfigurationError(
-                "request_timeout_seconds must be positive and finite"
+        try:
+            timeout = validate_timeout_seconds(
+                self.request_timeout_seconds, "request_timeout_seconds",
             )
-        object.__setattr__(self, "request_timeout_seconds", float(timeout))
+        except ValueError as exc:
+            raise ModelConfigurationError(str(exc)) from None
+        object.__setattr__(self, "request_timeout_seconds", timeout)
         if ((self.binding.endpoint.auth == "none") != (self.api_key is None)):
             raise ModelConfigurationError("Credentials do not match the resolved endpoint auth policy")
 
@@ -567,9 +565,10 @@ def _chat_transport_failure(
     model: Optional[str],
     attempt_count: int,
     recovery: Tuple[str, ...],
+    timeout_seconds: Optional[float] = None,
 ) -> ModelTransportError:
     message = (
-        "Chat Completions request timed out"
+        _timeout_message("Chat Completions request timed out", timeout_seconds)
         if timeout
         else "Chat Completions request failed before a response was completed"
     )
@@ -662,6 +661,7 @@ class ChatCompletionsModel:
         }
         if self.endpoint.api_key is not None:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
+        timeout_seconds = _request_timeout_seconds(self.endpoint, sample_params)
         attempts = 0
         retries = 0
         recovery: List[str] = []
@@ -678,7 +678,7 @@ class ChatCompletionsModel:
                 try:
                     response = self._opener(
                         request,
-                        timeout=self.endpoint.request_timeout_seconds,
+                        timeout=timeout_seconds,
                     )
                 except urllib.error.HTTPError as exc:
                     body = _read_http_error_body(exc)
@@ -775,6 +775,7 @@ class ChatCompletionsModel:
                     model=self.endpoint.model,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             except (TimeoutError, socket.timeout) as exc:
                 if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
@@ -789,6 +790,7 @@ class ChatCompletionsModel:
                     model=self.endpoint.model,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             except (OSError, http.client.HTTPException) as exc:
                 if retries < DEFAULT_MAX_TRANSIENT_RETRIES:

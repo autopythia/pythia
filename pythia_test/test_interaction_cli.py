@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from pythia.interaction import DefaultEnvironment
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction import CompactionMetadata
 from pythia.interaction import CompactionContextWindowError
 from pythia.interaction import CompactionResult
@@ -756,7 +757,8 @@ class CLIControllerTests(_ControllerTestCase):
         )
         self.assertEqual(
             [call[2] for call in model.calls],
-            [SampleParams(max_output_tokens=77, enable_auto_compaction=True)] * 2,
+            [SampleParams(max_output_tokens=77, enable_auto_compaction=True,
+                          request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)] * 2,
         )
         texts = [item.text for item in terminal.items]
         self.assertEqual(texts.count("[assistant] first"), 1)
@@ -1031,6 +1033,7 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(compacted[0][2], model.calls[0][2])
         self.assertEqual(compacted[0][2], SampleParams(
             enable_auto_compaction=True, auto_compact_tokens=100,
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ))
         self.assertIsNone(compacted[0][3])
         self.assertEqual(len(model.calls), 1)
@@ -1096,7 +1099,8 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(
             model.calls[0][2],
-            SampleParams(enable_auto_compaction=False, auto_compact_tokens=100),
+            SampleParams(enable_auto_compaction=False, auto_compact_tokens=100,
+                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
         )
         self.assertIn(
             Message("assistant", "uncompacted answer"),

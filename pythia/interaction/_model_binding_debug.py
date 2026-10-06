@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .model_catalog import ModelBinding, thaw_json
+from .model_catalog import MODEL_TIMEOUT_FIELDS, ModelBinding, thaw_json
 
 
 MAX_DEBUG_MODEL_BINDING_BYTES = 262_144
@@ -39,6 +39,10 @@ def _debug_entry(binding):
                 "max_context_tokens",
                 "max_output_tokens",
             )
+        },
+        # The catalog's per-model values; None means the built-in default.
+        "timeouts": {
+            name: getattr(binding.timeouts, name) for name in MODEL_TIMEOUT_FIELDS
         },
         "extra_sample_params": thaw_json(binding.extra_sample_params),
         "responses": (

@@ -72,6 +72,7 @@ from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelContextWindowError
 from .model import ModelError
+from .model import ModelTimeoutError
 from .model import SampleParams
 from .model import close_model, retire_model
 from .model_config import DEFAULT_SAVE_PATH
@@ -1122,6 +1123,14 @@ async def _drive_interaction_body(
                     state.auth_notice if isinstance(exc, ModelAuthenticationError)
                     else "Sampling failed. Use /retry to try again."
                 )
+                timeout = config.get("request_timeout_seconds")
+                if isinstance(exc, ModelTimeoutError) and timeout is not None:
+                    # Claude Relay has no HTTP request timeout (None), and its
+                    # deadlines are launch-only, so it gets no /config advice.
+                    state.notice(
+                        f"The request timeout is {timeout:g} seconds; to wait "
+                        "longer, use /config request_timeout_seconds N before /retry."
+                    )
 
 
 def _runtime_config(environment, args):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import math
 import socket
 import time
 import urllib.error
@@ -50,10 +49,13 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SampleParams
 from .model import _apply_extra_sample_params
+from .model import _request_timeout_seconds
 from .model import _timed_sample
+from .model import _timeout_message
 from .model_catalog import ModelBinding
 from .model_catalog import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import validate_timeout_seconds
 from .usage import TokenUsage
 
 
@@ -222,17 +224,13 @@ class MessagesEndpoint:
             ),
         )
 
-        timeout = self.request_timeout_seconds
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(float(timeout))
-            or float(timeout) <= 0
-        ):
-            raise ModelConfigurationError(
-                "request_timeout_seconds must be positive and finite"
+        try:
+            timeout = validate_timeout_seconds(
+                self.request_timeout_seconds, "request_timeout_seconds",
             )
-        object.__setattr__(self, "request_timeout_seconds", float(timeout))
+        except ValueError as exc:
+            raise ModelConfigurationError(str(exc)) from None
+        object.__setattr__(self, "request_timeout_seconds", timeout)
 
         if self.server_compaction is not None and not isinstance(
             self.server_compaction,
@@ -813,9 +811,10 @@ def _messages_transport_failure(
     model: str,
     attempt_count: int,
     recovery: Tuple[str, ...],
+    timeout_seconds: Optional[float] = None,
 ) -> ModelTransportError:
     message = (
-        "Messages request timed out"
+        _timeout_message("Messages request timed out", timeout_seconds)
         if timeout
         else "Messages request failed before a response was completed"
     )
@@ -988,6 +987,7 @@ class MessagesModel:
             headers["Anthropic-Beta"] = MESSAGES_COMPACTION_BETA
         if self.endpoint.api_key is not None:
             headers["X-API-Key"] = self.endpoint.api_key
+        timeout_seconds = _request_timeout_seconds(self.endpoint, sample_params)
         attempts = 0
         retries = 0
         recovery: List[str] = []
@@ -1004,7 +1004,7 @@ class MessagesModel:
                 try:
                     response = self._opener(
                         request,
-                        timeout=self.endpoint.request_timeout_seconds,
+                        timeout=timeout_seconds,
                     )
                 except urllib.error.HTTPError as exc:
                     detail = _read_http_error_body(exc) or str(exc)
@@ -1099,6 +1099,7 @@ class MessagesModel:
                     model=self.endpoint.model,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             except (TimeoutError, socket.timeout) as exc:
                 if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
@@ -1113,6 +1114,7 @@ class MessagesModel:
                     model=self.endpoint.model,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             except (OSError, http.client.HTTPException) as exc:
                 if retries < DEFAULT_MAX_TRANSIENT_RETRIES:

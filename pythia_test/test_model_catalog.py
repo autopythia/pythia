@@ -18,14 +18,18 @@ from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import CodexAuth
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import EndpointSpec
 from pythia.interaction import Init
+from pythia.interaction import MAX_TIMEOUT_SECONDS
 from pythia.interaction import Message
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import MessagesModel
+from pythia.interaction import ModelCatalog
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelLimits
 from pythia.interaction import ModelSpec
+from pythia.interaction import ModelTimeouts
 from pythia.interaction import ResponsesDefaults
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import cli
@@ -304,6 +308,33 @@ class ModelCatalogTests(unittest.TestCase):
                 "env:META_API_KEY",
             )
             self.assertIsNone(module.get_model_spec("responses", "codex-gpt-6-astra"))
+
+    def test_model_timeouts_validate_and_apply_only_to_their_api(self):
+        self.assertEqual(ModelTimeouts(), ModelTimeouts(*(None,) * 5))
+        self.assertIsInstance(ModelTimeouts(request_seconds=600).request_seconds, float)
+        self.assertEqual(ModelTimeouts(stop_seconds=MAX_TIMEOUT_SECONDS).stop_seconds, MAX_TIMEOUT_SECONDS)
+        for value in (0, -1, True, float("inf"), float("nan"), "600", MAX_TIMEOUT_SECONDS + 1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ModelTimeouts(request_seconds=value)
+        with self.assertRaises(FrozenInstanceError):
+            ModelTimeouts().request_seconds = 1
+        fable = get_model_spec("messages", "claude-fable-5.1")
+        self.assertTrue(all(spec.timeouts == ModelTimeouts() for spec in list_model_specs()))
+        with self.assertRaises(TypeError):
+            replace(fable, timeouts={"request_seconds": 600})
+        with self.assertRaisesRegex(ValueError, "require Claude Relay"):
+            replace(fable, timeouts=ModelTimeouts(generation_seconds=600))
+        relay = ModelSpec(
+            name="relay", endpoint=EndpointSpec("claude-relay", None, "claude-opus-5-5", "runtime"),
+            timeouts=ModelTimeouts(generation_seconds=2400),
+        )
+        with self.assertRaisesRegex(ValueError, "no HTTP model requests"):
+            replace(relay, timeouts=ModelTimeouts(request_seconds=600))
+        registry = ModelCatalog((replace(fable, timeouts=ModelTimeouts(request_seconds=1800)), relay))
+        self.assertEqual(registry.bind("messages", "claude-fable-5.1").timeouts.request_seconds, 1800.0)
+        self.assertEqual(registry.bind("claude-relay", "relay").timeouts.generation_seconds, 2400.0)
+        # Pass-through models use the built-in defaults.
+        self.assertEqual(registry.bind("messages", "unlisted").timeouts, ModelTimeouts())
 
     def test_cli_and_demo_help_list_catalog_presets_and_aliases(self):
         for frontend in (cli, demo):

@@ -95,6 +95,9 @@ def create_user_environment(
     """Create invocation-scoped adapters with a safe error boundary and notice sink.
 
     ``opener`` replaces the account-request opener for login and quota.
+    Both keep the fixed ``DEFAULT_LOGIN_TIMEOUT_SECONDS``: the login flow budget,
+    which also caps the token exchange, and each quota request's timeout. Model
+    request timeouts (catalog, launch option, ``/config``) never apply to them.
     """
     supported = supports_account_services(args)
     if config is None:
@@ -135,7 +138,7 @@ def create_user_environment(
                                   auth_file=endpoint.auth_file or args.codex_auth_file).resolve()
         login(path, notify=notify, cancel=cancel, workspace_id=workspace,
               expected_account=expected_account, timeout_seconds=timeout_seconds,
-              request_timeout_seconds=args.request_timeout_seconds,
+              request_timeout_seconds=timeout_seconds,
               **account_options)
         return ToolOutcome("Codex credentials saved. Model activation is handled separately.")
 
@@ -195,5 +198,5 @@ def create_user_environment(
         }), guard(sign_in), timeout_seconds=DEFAULT_LOGIN_TIMEOUT_SECONDS),
         Tool(ToolSpec("quota", "Query a historical Codex account quota snapshot.", {
             "type": "object", "properties": {}, "additionalProperties": False,
-        }), guard(quota), timeout_seconds=args.request_timeout_seconds),
+        }), guard(quota), timeout_seconds=DEFAULT_LOGIN_TIMEOUT_SECONDS),
     ))

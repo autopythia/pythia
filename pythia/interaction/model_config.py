@@ -22,15 +22,26 @@ from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
 from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
+from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
 from .model_catalog_config import load_model_catalog
 from .responses import CodexResponsesModel
 from .responses import ResponsesModel
+from .timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 DEFAULT_SAVE_PATH = Path("interaction.jsonl")
+_CLAUDE_RELAY_TIMEOUT_DEFAULTS = {
+    "generation": DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS,
+    "parked": DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
+    "startup": DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS,
+    "stop": DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS,
+}
 
 # Invocation-only, never restored from conversation/auto config snapshots.
 CLAUDE_RELAY_FIELDS = (
@@ -55,18 +66,26 @@ def relay_endpoint(args, binding):
         # TODO(claude-relay output-budgets): remove this guard only alongside the
         # verified _sampling/runtime mapping and relay/wrapper capability checks.
         raise ValueError("Claude Relay does not yet support explicit output-token budgets")
-    if getattr(args, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS) != DEFAULT_REQUEST_TIMEOUT_SECONDS:
-        raise ValueError("Use --claude-relay-generation-timeout; HTTP request timeouts do not apply")
+    if getattr(args, "request_timeout_seconds", None) is not None:
+        raise ValueError("Use --claude-relay-generation-timeout or the model catalog's "
+                         "timeouts.generation_seconds; HTTP request timeouts do not apply")
+
+    def deadline(name):
+        # Launch option, then the bound model's catalog value, then the default.
+        configured = getattr(binding.timeouts, f"{name}_seconds")
+        return value(f"{name}_timeout", default=(
+            _CLAUDE_RELAY_TIMEOUT_DEFAULTS[name] if configured is None else configured))
+
     return ClaudeRelayEndpoint(
         model=binding.endpoint.model,
         launcher=value("launcher", "CLAUDE_RELAY_LAUNCHER"),
         socket_path=value("socket", "CLAUDE_RELAY_SOCKET"), server_uid=uid,
         expected_version=value("cli_version", "CLAUDE_RELAY_CLI_VERSION"),
         tool_id_pointer=value("tool_id_pointer", default="/params/_meta/claudecode~1toolUseId"),
-        generation_timeout_seconds=value("generation_timeout", default=1200),
-        parked_timeout_seconds=value("parked_timeout", default=1800),
-        startup_timeout_seconds=value("startup_timeout", default=30),
-        stop_timeout_seconds=value("stop_timeout", default=5), binding=binding,
+        generation_timeout_seconds=deadline("generation"),
+        parked_timeout_seconds=deadline("parked"),
+        startup_timeout_seconds=deadline("startup"),
+        stop_timeout_seconds=deadline("stop"), binding=binding,
     )
 
 
@@ -157,7 +176,8 @@ def render_model_catalog(catalog):
     for spec in catalog.specs:
         aliases = f" (aliases: {', '.join(spec.aliases)})" if spec.aliases else ""
         origin = catalog.origins[(spec.endpoint.api, spec.name)]
-        settings = "".join(f", {setting}" for setting in _request_settings(spec))
+        settings = "".join(f", {setting}" for setting in (
+            *_request_settings(spec), *_timeout_settings(spec)))
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
                      f"url={spec.endpoint.url}, auth={spec.endpoint.auth}, source={origin}{settings}")
     if catalog.auto_models:
@@ -208,9 +228,10 @@ def add_endpoint_arguments(parser, *, auto=False):
     parser.add_argument("--claude-relay-cli-version", default=argparse.SUPPRESS, help="required pinned native version (not live-verified by Pythia)")
     parser.add_argument("--claude-relay-tool-id-pointer", default=argparse.SUPPRESS,
                         help="JSON pointer into MCP params._meta; default /params/_meta/claudecode~1toolUseId")
-    for name in ("generation", "parked", "startup", "stop"):
+    for name, fallback in _CLAUDE_RELAY_TIMEOUT_DEFAULTS.items():
         parser.add_argument(f"--claude-relay-{name}-timeout", type=float, default=argparse.SUPPRESS,
-                            help=f"Claude Relay {name} deadline in seconds; launch-only")
+                            help=(f"Claude Relay {name} deadline in seconds (default: the model "
+                                  f"catalog's timeouts.{name}_seconds, else {fallback:g}); launch-only"))
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")
@@ -252,6 +273,7 @@ def build_model(
     binding = args.model_binding
     from .runtime_config import InteractionConfig
     from .runtime_config import resolve_compaction_mode
+    from .runtime_config import resolve_request_timeout_seconds
 
     mode = resolve_compaction_mode(binding, getattr(args, "compaction_mode", None))
     for name in ("auto_compact_tokens", "max_context_tokens"):
@@ -283,6 +305,11 @@ def build_model(
             raise ValueError("Claude Relay does not use model HTTP openers")
         return ClaudeRelayModel(relay_endpoint(args, binding), trace=trace)
 
+    # The adapter's default for calls without a per-call timeout: the launch
+    # option, then the catalog's timeouts.request_seconds, then the default.
+    request_timeout_seconds = resolve_request_timeout_seconds(
+        binding, getattr(args, "request_timeout_seconds", None),
+    )
     if trace is not None:
         from ._account_http import default_account_opener
         opener = trace.opener(opener if opener is not None else urllib.request.urlopen)
@@ -296,7 +323,7 @@ def build_model(
             )
         endpoint = ChatCompletionsEndpoint(
             binding=binding,
-            request_timeout_seconds=args.request_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
             api_key=_endpoint_api_key(args, binding),
         )
         return ChatCompletionsModel(endpoint, opener=opener)
@@ -330,7 +357,7 @@ def build_model(
         endpoint = MessagesEndpoint(
             binding=binding,
             max_output_tokens=output_budget,
-            request_timeout_seconds=args.request_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
             api_key=_endpoint_api_key(args, binding),
             server_compaction=compaction_options,
             prompt_caching=MessagesPromptCaching(),
@@ -343,7 +370,7 @@ def build_model(
                 "--model is required with --endpoint-api codex"
             )
         return CodexResponsesModel(
-            request_timeout_seconds=args.request_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
             binding=binding,
             auth=(CodexAuth(_endpoint_api_key(args, binding))
                   if binding.endpoint.auth == "supplied" else None),
@@ -366,7 +393,7 @@ def build_model(
             binding=binding,
             api_key=(_endpoint_api_key(args, binding)
                      if binding.endpoint.auth == "supplied" else None),
-            request_timeout_seconds=args.request_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
             opener=opener,
         )
 
@@ -388,6 +415,12 @@ def _request_settings(spec) -> list:
     for key, value in spec.extra_sample_params.items():
         settings.append(f"{key}={json.dumps(thaw_json(value), ensure_ascii=False, separators=(',', ':'))}")
     return settings
+
+
+def _timeout_settings(spec) -> list:
+    """A catalog entry's configured timeouts, in the catalog's key syntax."""
+    return [f"timeouts.{name}={getattr(spec.timeouts, name):g}"
+            for name in MODEL_TIMEOUT_FIELDS if getattr(spec.timeouts, name) is not None]
 
 
 def _model_argument_help() -> str:
@@ -516,10 +549,13 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
     parser.add_argument(
         "--request-timeout-seconds",
         type=float,
-        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        default=None,
         help=(
-            "HTTP blocking-I/O timeout for model and account requests "
-            "(default: %(default)s seconds; not an overall deadline)"
+            "HTTP blocking-I/O timeout for model requests (default: "
+            f"{DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds unless the model catalog "
+            "sets timeouts.request_seconds; not an overall deadline); tunable "
+            "with /config request_timeout_seconds. /login and /quota keep "
+            "their fixed timeout"
         ),
     )
     add_prompt_arguments(parser, allow_file=allow_prompt_file)

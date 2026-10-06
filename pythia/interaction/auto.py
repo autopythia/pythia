@@ -55,6 +55,8 @@ from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .runtime_config import InteractionConfig
 from .save import SaveError, load_interaction_save, save_interaction_save
+from .timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .user import UserInteraction
 
 
@@ -199,6 +201,28 @@ def _role_summary(index, settings, binding, source, runs_model):
         text += (" via Claude Relay" if binding.api == "claude-relay"
                  else f" at {urlsplit(binding.endpoint.url).netloc}")
     return text if source is None else f"{text} ({source})"
+
+
+def _timeout_summary(settings, binding, relay_options):
+    """The role's effective model wait budget, and where it came from.
+
+    A configured request timeout may come from the command line, a config
+    file, or a save (saves made before catalog timeouts keep their value).
+    """
+    if binding.api == "claude-relay":
+        label, configured, source = (
+            "generation timeout", relay_options.get("claude_relay_generation_timeout"),
+            "command line")
+        catalog, default = (binding.timeouts.generation_seconds,
+                            DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS)
+    else:
+        label, configured, source = (
+            "request timeout", settings["request_timeout_seconds"], "configured")
+        catalog, default = binding.timeouts.request_seconds, DEFAULT_REQUEST_TIMEOUT_SECONDS
+    if configured is None:
+        configured, source = ((default, "default") if catalog is None
+                              else (catalog, "model catalog"))
+    return f"{label} {configured:g}s ({source})"
 
 
 def _check_credentials(settings, indices, catalog):
@@ -1427,9 +1451,13 @@ def main(argv=None):
                                   if getattr(args, name, None) is not None}
         if args.print_config:
             for index in roles:
-                print(_role_summary(index, settings[index],
-                                    namespace(settings[index], catalog).model_binding,
-                                    settings.sources.get(index), index in sampling))
+                binding = namespace(settings[index], catalog).model_binding
+                line = _role_summary(index, settings[index], binding,
+                                     settings.sources.get(index), index in sampling)
+                if index in sampling:
+                    line += "; " + _timeout_summary(settings[index], binding,
+                                                    settings.relay_options)
+                print(line)
             print(json.dumps(saved_document({i: settings[i] for i in roles}, settings.sources),
                              indent=2, ensure_ascii=False))
             return 0

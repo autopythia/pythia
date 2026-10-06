@@ -54,5 +54,9 @@ def resolve_sampling(binding, params: SampleParams | None) -> ResolvedSampling:
         raise ModelConfigurationError('Claude Relay explicit output budgets await verified native enforcement')
     if any(getattr(params, key) is not None for key in ('temperature', 'top_p', 'seed')) or params.stop:
         raise ModelConfigurationError('Claude Relay does not support temperature, top_p, seed, or stop overrides')
+    if params.request_timeout_seconds is not None:
+        # Relay sends no HTTP model request; its own deadlines are endpoint settings.
+        raise ModelConfigurationError('Claude Relay does not use request_timeout_seconds; '
+                                      'configure timeouts.generation_seconds or --claude-relay-generation-timeout')
     extra = binding.extra_sample_params if params.extra is None else params.extra
     return resolve_extra(extra)

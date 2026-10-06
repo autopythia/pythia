@@ -9,7 +9,8 @@ from unittest import mock
 
 from pythia.interaction import (
     CompactionContextWindowError, CompactionMetadata, CompactionResult,
-    CompactionSettings, ContextPrefix, Environment, Init, InteractionContext,
+    CompactionSettings, ContextPrefix, DEFAULT_REQUEST_TIMEOUT_SECONDS, Environment, Init,
+    InteractionContext,
     Message, ModelAuthenticationError, ModelContextWindowError, ModelFailure,
     ModelResponseError, NothingToCompact,
     ModelSample, ModelSampleBoundary, ModelTimeoutError, OpaqueCompaction,
@@ -24,6 +25,8 @@ from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Termi
 
 HINT = "[cli] Sampling failed. Use /retry to try again."
 AUTH_HINT = "[cli] Model authentication needed; use /login."
+TIMEOUT_HINT = ("[cli] The request timeout is {:g} seconds; to wait longer, "
+                "use /config request_timeout_seconds N before /retry.")
 
 
 def submit(state, text="/retry"):
@@ -116,6 +119,36 @@ class RetryControllerTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 3)
         self.assertEqual(sum(item.text == HINT for item in terminal.items), 2)
 
+    async def test_timeout_hint_names_the_live_timeout_and_retry_uses_a_new_one(self):
+        model = _Model(self.path, ModelTimeoutError("timed out"), _answer("recovered"))
+        commands = deque(("/config request_timeout_seconds 2400", "/retry", "/quit"))
+        terminal = _Terminal(lambda t, e, s: t.submit(commands.popleft())
+                             if s in {"failed", "idle"} and commands else None)
+        self.assertEqual(await self._run(model, terminal, [
+            "--prompt", "hello", "--enable-default-tools=False",
+        ]), 1)
+        shown = [item.text for item in terminal.items]
+        hint = TIMEOUT_HINT.format(DEFAULT_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(shown.count(hint), 1)
+        self.assertLess(shown.index("[cli] ModelTimeoutError: timed out"), shown.index(HINT))
+        self.assertLess(shown.index(HINT), shown.index(hint))
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(model.calls[0][2].request_timeout_seconds, DEFAULT_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(model.calls[1][2].request_timeout_seconds, 2400.0)
+        self.assertIn("[assistant] recovered", shown)
+
+    async def test_claude_relay_timeouts_get_no_request_timeout_hint(self):
+        model = _Model(self.path, ModelTimeoutError("generation wait exceeded"))
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "failed" else None)
+        self.assertEqual(await self._run(model, terminal, [
+            "--prompt", "hello", "--enable-default-tools=False",
+            "--endpoint-api", "claude-relay", "--model", "native-model",
+        ]), 1)
+        shown = [item.text for item in terminal.items]
+        self.assertEqual(shown.count(HINT), 1)
+        self.assertFalse(any("request_timeout_seconds" in text for text in shown))
+        self.assertIsNone(model.calls[0][2].request_timeout_seconds)
+
     async def test_retry_uses_a_fresh_budget_but_does_not_bypass_its_limit(self):
         model = _Model(self.path, ModelTimeoutError("first"),
                        ModelSample((ToolCall("noop", "new", "{}"),)))
@@ -179,7 +212,10 @@ class RetryControllerTests(_ControllerTestCase):
         login.assert_called_once()
         build.assert_called_once()  # /login activation only; retry reuses it.
         self.assertEqual(len(model.calls), 2)
-        self.assertEqual(model.calls[1][2], SampleParams(max_output_tokens=17, enable_auto_compaction=True))
+        self.assertEqual(model.calls[1][2], SampleParams(
+            max_output_tokens=17, enable_auto_compaction=True,
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ))
         self.assertEqual(model.calls[1][1], ())
         self.assertIn(Message("user", "summary"), model.calls[1][0].model_items())
         self.assertEqual([i.call.name for i in load_interaction_save(self.path) if isinstance(i, UserToolCall)],

@@ -92,6 +92,7 @@ from .model import SampleParams
 from .model import TokenUsage
 from .model_catalog import ModelLimits
 from .model_catalog import ModelSpec
+from .model_catalog import ModelTimeouts
 from .model_catalog import ModelCatalog, ModelBinding, BUILTIN_MODEL_CATALOG
 from .model_catalog import EndpointSpec
 from .model_catalog import ANTHROPIC_MESSAGES_API_URL
@@ -120,6 +121,7 @@ from .save import load_interaction_save
 from .save import save_interaction_save
 from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import MAX_TIMEOUT_SECONDS
 from .user import UserInteraction
 
 __all__ = [
@@ -184,9 +186,11 @@ __all__ = [
     "ModelSampleBoundary",
     "ModelSpec",
     "ModelTimeoutError",
+    "ModelTimeouts",
     "ModelTransportError",
     "NothingToCompact",
     "OpaqueCompaction",
+    "MAX_TIMEOUT_SECONDS",
     "OPENAI_RESPONSES_API_URL",
     "PiCompactor",
     "PlanState",

@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import http.client
 import json
-import math
 import os
 import socket
 import time
@@ -69,10 +68,13 @@ from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SampleParams
 from .model import _apply_extra_sample_params
+from .model import _request_timeout_seconds
 from .model import _timed_sample
+from .model import _timeout_message
 from .model_catalog import ModelSpec
 from .model_catalog import ModelBinding
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import validate_timeout_seconds
 from .usage import TokenUsage
 
 
@@ -120,13 +122,13 @@ class StreamingResponsesEndpoint:
                 )
             object.__setattr__(self, "bearer_token", bearer_token)
 
-        timeout = self.request_timeout_seconds
-        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                or not math.isfinite(float(timeout)) or float(timeout) <= 0):
-            raise ModelConfigurationError(
-                "request_timeout_seconds must be positive and finite"
+        try:
+            timeout = validate_timeout_seconds(
+                self.request_timeout_seconds, "request_timeout_seconds",
             )
-        object.__setattr__(self, "request_timeout_seconds", float(timeout))
+        except ValueError as exc:
+            raise ModelConfigurationError(str(exc)) from None
+        object.__setattr__(self, "request_timeout_seconds", timeout)
 
         if self.account_id is not None:
             if not isinstance(self.account_id, str):
@@ -1117,6 +1119,7 @@ def _collect_sample(
     recovery: Tuple[str, ...] = (),
     response_headers: Any = None,
     forbidden_values: Tuple[str, ...] = (),
+    timeout_seconds: Optional[float] = None,
 ) -> ModelSample:
     output_items: List[Tuple[Optional[int], InteractionItem]] = []
     indexed_output_items: Dict[int, InteractionItem] = {}
@@ -1133,7 +1136,10 @@ def _collect_sample(
             break
         except (TimeoutError, socket.timeout) as exc:
             partial = _stream_failure(
-                "Responses stream timed out before response.completed",
+                _timeout_message(
+                    "Responses stream timed out before response.completed",
+                    timeout_seconds,
+                ),
                 category="stream_timeout",
                 trace=trace,
                 output_items=output_items,
@@ -1332,6 +1338,7 @@ def _collect_remote_compaction_v2(
     recovery: Tuple[str, ...] = (),
     response_headers: Any = None,
     forbidden_values: Tuple[str, ...] = (),
+    timeout_seconds: Optional[float] = None,
 ) -> _RemoteCompactionResponse:
     """Collect one opaque V2 checkpoint without treating output as a sample.
 
@@ -1374,7 +1381,10 @@ def _collect_remote_compaction_v2(
             break
         except (TimeoutError, socket.timeout) as exc:
             partial = failure(
-                "Remote Responses compaction timed out before response.completed",
+                _timeout_message(
+                    "Remote Responses compaction timed out before response.completed",
+                    timeout_seconds,
+                ),
                 category="stream_timeout",
             )
             raise ModelTimeoutError(
@@ -1609,11 +1619,12 @@ def _request_transport_failure(
     auth_source: str,
     attempt_count: int,
     recovery: Tuple[str, ...],
+    timeout_seconds: Optional[float] = None,
 ) -> ModelTransportError:
     label = "Codex Responses" if api_provider == "codex" else "Responses"
     category = "request_timeout" if timeout else "request_transport"
     message = (
-        f"{label} request timed out"
+        _timeout_message(f"{label} request timed out", timeout_seconds)
         if timeout
         else f"{label} request failed before a response was completed"
     )
@@ -1725,17 +1736,14 @@ class _ResponsesModelBase:
                     auth_file=str(_resolve_auth_file(
                         codex_home=None, auth_file=None,
                     ).resolve())))
-            resolved_timeout = (DEFAULT_REQUEST_TIMEOUT_SECONDS
-                                if request_timeout_seconds is None
-                                else request_timeout_seconds)
-            if (isinstance(resolved_timeout, bool)
-                    or not isinstance(resolved_timeout, (int, float))
-                    or not math.isfinite(float(resolved_timeout))
-                    or float(resolved_timeout) <= 0):
-                raise ModelConfigurationError(
-                    "request_timeout_seconds must be positive and finite"
+            try:
+                resolved_timeout = validate_timeout_seconds(
+                    DEFAULT_REQUEST_TIMEOUT_SECONDS if request_timeout_seconds is None
+                    else request_timeout_seconds,
+                    "request_timeout_seconds",
                 )
-            resolved_timeout = float(resolved_timeout)
+            except ValueError as exc:
+                raise ModelConfigurationError(str(exc)) from None
             if auth is not None:
                 if not isinstance(auth, CodexAuth):
                     raise TypeError("auth must be CodexAuth or None")
@@ -1952,11 +1960,13 @@ class _ResponsesModelBase:
     def _refresh_after_unauthorized(
         self,
         snapshot: _CredentialSnapshot,
+        *,
+        timeout_seconds: float,
     ) -> Optional[_CredentialSnapshot]:
         try:
             refreshed = self._credential_source.refresh(
                 snapshot,
-                timeout_seconds=self.endpoint.request_timeout_seconds,
+                timeout_seconds=timeout_seconds,
                 opener=self._auth_opener,
             )
         except Exception:
@@ -2001,6 +2011,7 @@ class _ResponsesModelBase:
             payload,
             provider_state,
             collector=_collect_sample,
+            timeout_seconds=_request_timeout_seconds(self.endpoint, sample_params),
         )
 
     def _compact_responses_v2(
@@ -2021,6 +2032,7 @@ class _ResponsesModelBase:
                 provider_state,
                 collector=_collect_remote_compaction_v2,
                 beta_features=("remote_compaction_v2",),
+                timeout_seconds=_request_timeout_seconds(self.endpoint, sample_params),
             )
 
     def _execute_request_locked(
@@ -2030,7 +2042,12 @@ class _ResponsesModelBase:
         *,
         collector: Callable[..., Any],
         beta_features: Sequence[str] = (),
+        timeout_seconds: Optional[float] = None,
     ) -> Any:
+        # One blocking-I/O budget for this call's attempts, reads, and any
+        # OAuth refresh; None is the endpoint's own timeout.
+        if timeout_seconds is None:
+            timeout_seconds = self.endpoint.request_timeout_seconds
         try:
             request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         except (TypeError, ValueError) as exc:
@@ -2063,7 +2080,7 @@ class _ResponsesModelBase:
                 try:
                     response = self._opener(
                         request,
-                        timeout=self.endpoint.request_timeout_seconds,
+                        timeout=timeout_seconds,
                     )
                 except urllib.error.HTTPError as exc:
                     detail = _read_http_error_body(exc) or _bounded_text(str(exc))
@@ -2135,7 +2152,9 @@ class _ResponsesModelBase:
                             continue
                         if not refreshed and self._credential_source.kind == "codex_file":
                             refreshed = True
-                            loaded = self._refresh_after_unauthorized(snapshot)
+                            loaded = self._refresh_after_unauthorized(
+                                snapshot, timeout_seconds=timeout_seconds,
+                            )
                             if loaded is not None:
                                 snapshot = loaded
                                 recovery.append("oauth_refresh")
@@ -2195,6 +2214,7 @@ class _ResponsesModelBase:
                         recovery=tuple(recovery),
                         response_headers=headers,
                         forbidden_values=() if snapshot.auth is None else (snapshot.auth.access_token,),
+                        timeout_seconds=timeout_seconds,
                     )
                 except ModelError as exc:
                     retry_label = _stream_retry_label(exc)
@@ -2234,6 +2254,7 @@ class _ResponsesModelBase:
                         auth_source=self._credential_source.kind,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
+                        timeout_seconds=timeout_seconds,
                     ) from exc
                 except (OSError, http.client.HTTPException) as exc:
                     if transient_retries < _MAX_TRANSIENT_RETRIES:
@@ -2255,6 +2276,7 @@ class _ResponsesModelBase:
                         auth_source=self._credential_source.kind,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
+                        timeout_seconds=timeout_seconds,
                     ) from exc
             except urllib.error.URLError as exc:
                 timeout = isinstance(exc.reason, (TimeoutError, socket.timeout))
@@ -2278,6 +2300,7 @@ class _ResponsesModelBase:
                     auth_source=self._credential_source.kind,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             except (TimeoutError, socket.timeout) as exc:
                 if transient_retries < _MAX_TRANSIENT_RETRIES:
@@ -2296,6 +2319,7 @@ class _ResponsesModelBase:
                     auth_source=self._credential_source.kind,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             except (OSError, http.client.HTTPException) as exc:
                 if transient_retries < _MAX_TRANSIENT_RETRIES:
@@ -2314,6 +2338,7 @@ class _ResponsesModelBase:
                     auth_source=self._credential_source.kind,
                     attempt_count=attempts,
                     recovery=tuple(recovery),
+                    timeout_seconds=timeout_seconds,
                 ) from exc
             finally:
                 _close_response(response)
@@ -2499,13 +2524,13 @@ class ResponsesOpaqueCompactor:
             if isinstance(item, Message)
             and self._is_retained_user_message(item)
         )
-        # Only the turn's extra applies: a remote checkpoint has no output
-        # budget or sampling knobs.
-        extra = None if sample_params is None else sample_params.extra
+        # Only the turn's extra and request timeout apply: a remote checkpoint
+        # has no output budget or sampling knobs.
+        turn = sample_params or SampleParams()
         remote = self._model._compact_responses_v2(
             context,
             tools,
-            SampleParams(extra=extra),
+            SampleParams(extra=turn.extra, request_timeout_seconds=turn.request_timeout_seconds),
         )
         retained_users = _select_retained_user_messages(
             user_messages,

@@ -155,6 +155,7 @@ def run(
         enable_workspace=enable_workspace,
         max_samples=max_samples,
         max_output_tokens=base_params.max_output_tokens,
+        request_timeout_seconds=base_params.request_timeout_seconds,
         enable_auto_compaction=(
             enable_auto_compaction and base_params.enable_auto_compaction is not False
         ),

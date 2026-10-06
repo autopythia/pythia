@@ -10,8 +10,9 @@ import warnings
 
 from ._config_file import read_config_bytes
 from .model_catalog import BUILTIN_MODEL_CATALOG
-from .model_catalog import ModelCatalog, ModelLimits, ModelSpec
+from .model_catalog import ModelCatalog, ModelLimits, ModelSpec, ModelTimeouts
 from .model_catalog import EndpointSpec
+from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import ResponsesDefaults
 from .model_catalog import _normalize_profile, parse_json_value
 
@@ -20,11 +21,15 @@ MAX_CATALOG_BYTES = 1_048_576
 MAX_CATALOG_MODELS = 1024
 # Version 3 replaced messages.output_effort with request_params.output_config.
 # Version 4 renamed request_params to extra_sample_params.
+# Optional timeouts.* fields were added to version 4 without a version change.
 LATEST_MODEL_CATALOG_VERSION = 4
 _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
 _LIMIT_FIELDS = frozenset(("auto_compact_context_tokens", "max_context_tokens", "max_output_tokens"))
 _RESPONSES_FIELDS = frozenset(("reasoning_effort", "reasoning_summary", "text_verbosity"))
+_TIMEOUT_FIELDS = frozenset(MODEL_TIMEOUT_FIELDS)
 _INTEGER = re.compile(r"^[+-]?[0-9]+$")
+# Plain decimal seconds: no exponent, infinity, or NaN spellings.
+_DECIMAL = re.compile(r"^[+-]?[0-9]+(?:\.[0-9]+)?$")
 # Roles whose default models the optional [auto] section may name.
 AUTO_ROLES = ("main", "watcher", "worker")
 
@@ -76,6 +81,7 @@ def _entry(section, values, base):
     if api is not None:
         endpoint["api"] = api
     limits = {} if original is None else dict(vars(original.limits))
+    timeouts = {} if original is None else dict(vars(original.timeouts))
     responses = {} if original is None or original.responses is None else dict(vars(original.responses))
     params = {} if original is None else dict(original.extra_sample_params)
     if "extra_sample_params" in values and any(
@@ -97,6 +103,10 @@ def _entry(section, values, base):
             if value != "null" and _INTEGER.fullmatch(value) is None:
                 raise ValueError("Limits require integers or null.")
             limits[key[7:]] = None if value == "null" else int(value)
+        elif key.startswith("timeouts.") and key[9:] in _TIMEOUT_FIELDS:
+            if value != "null" and _DECIMAL.fullmatch(value) is None:
+                raise ValueError("Timeouts require decimal seconds or null.")
+            timeouts[key[9:]] = None if value == "null" else float(value)
         elif key.startswith("responses.") and key[10:] in _RESPONSES_FIELDS:
             responses[key[10:]] = _text(value)
         elif key == "extra_sample_params":
@@ -118,7 +128,8 @@ def _entry(section, values, base):
     endpoint = EndpointSpec(**endpoint)
     if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
         raise ValueError("Catalog Codex login requires the official Codex endpoint.")
-    fields.update(endpoint=endpoint, limits=ModelLimits(**limits), extra_sample_params=params)
+    fields.update(endpoint=endpoint, limits=ModelLimits(**limits),
+                  timeouts=ModelTimeouts(**timeouts), extra_sample_params=params)
     if responses:
         fields["responses"] = ResponsesDefaults(**responses)
     spec = (ModelSpec(name=name, **fields) if original is None

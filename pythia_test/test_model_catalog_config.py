@@ -16,7 +16,7 @@ from unittest import mock
 from pythia.interaction import (
     BUILTIN_MODEL_CATALOG, CodexResponsesModel, CompactionSettings, ConfigError, Environment, Init,
     Instructions, InteractionConfig, InteractionConfigSnapshot, InteractionContext, Message, ModelCatalog,
-    ModelConfigurationError, ModelSample, SampleParams,
+    ModelConfigurationError, ModelSample, ModelTimeouts, SampleParams,
     StreamingResponsesEndpoint, ToolSpec, LATEST_MODEL_CATALOG_VERSION,
     create_default_compactor, load_model_catalog, parse_model_catalog,
 )
@@ -369,6 +369,80 @@ extra_sample_params.service_tier = "priority"
                 os.mkfifo(path)
                 with self.assertRaisesRegex(ValueError, "regular file"):
                     load_model_catalog(path)
+
+    def test_timeouts_on_new_and_override_entries(self):
+        registry = catalog(LOCAL + "timeouts.request_seconds = 1800\n" + """
+[model.claude-opus-5.5-max]
+override = true
+timeouts.request_seconds = 90.5
+
+[model.relay-max]
+endpoint.api = claude-relay
+endpoint.model = claude-opus-5-5
+timeouts.generation_seconds = 2400
+timeouts.parked_seconds = 3600
+timeouts.startup_seconds = 45
+timeouts.stop_seconds = 2.5
+""")
+        self.assertEqual(registry.bind(name="local-max").timeouts, ModelTimeouts(request_seconds=1800.0))
+        self.assertEqual(registry.bind(name="local-alias").timeouts.request_seconds, 1800.0)
+        builtin = model_catalog.get_model_spec("messages", "claude-opus-5.5-max")
+        changed = registry.get_model_spec("messages", "claude-opus-5.5-max")
+        self.assertEqual(changed.timeouts.request_seconds, 90.5)
+        self.assertEqual(changed.extra_sample_params, builtin.extra_sample_params)
+        self.assertEqual(builtin.timeouts, ModelTimeouts())
+        # A preset's siblings keep their own (default) timeouts.
+        self.assertIsNone(registry.get_model_spec("messages", "claude-opus-5.5").timeouts.request_seconds)
+        relay = registry.bind(name="relay-max").timeouts
+        self.assertEqual(
+            (relay.request_seconds, relay.generation_seconds, relay.parked_seconds,
+             relay.startup_seconds, relay.stop_seconds),
+            (None, 2400.0, 3600.0, 45.0, 2.5),
+        )
+        # An override inherits timeouts it does not set; null restores the default.
+        kept = catalog("[model.local-max]\noverride = true\nlimits.max_output_tokens = 16000\n",
+                       base=registry)
+        self.assertEqual(kept.bind(name="local-max").timeouts.request_seconds, 1800.0)
+        cleared = catalog("[model.local-max]\noverride = true\ntimeouts.request_seconds = null\n",
+                          base=registry)
+        self.assertEqual(cleared.bind(name="local-max").timeouts, ModelTimeouts())
+        self.assertEqual(cleared.bind(name="local-max").limits, registry.bind(name="local-max").limits)
+
+    def test_invalid_timeouts_are_rejected_without_disclosing_values(self):
+        relay = "\n[model.relay]\nendpoint.api = claude-relay\nendpoint.model = claude-opus-5-5\n"
+        for text in (
+            LOCAL + "timeouts.request_seconds = 0\n",
+            LOCAL + "timeouts.request_seconds = -5\n",
+            LOCAL + "timeouts.request_seconds = 86401\n",
+            LOCAL + "timeouts.request_seconds = 7654321.5\n",
+            LOCAL + "timeouts.request_seconds = 1e3\n",
+            LOCAL + "timeouts.request_seconds = inf\n",
+            LOCAL + 'timeouts.request_seconds = "600"\n',
+            LOCAL + "timeouts.unknown_seconds = 600\n",
+            # Relay deadlines only on claude-relay entries, and no HTTP timeout there.
+            LOCAL + "timeouts.generation_seconds = 600\n",
+            "[model.claude-opus-5.5]\noverride = true\ntimeouts.stop_seconds = 5\n",
+            relay + "timeouts.request_seconds = 600\n",
+        ):
+            with self.subTest(text=text.strip().splitlines()[-1]):
+                with self.assertRaisesRegex(ValueError, "Invalid model catalog entry") as raised:
+                    catalog(text)
+                self.assertNotIn("7654321", str(raised.exception))
+
+    def test_listing_and_debug_snapshot_show_configured_timeouts(self):
+        registry = catalog(LOCAL + "timeouts.request_seconds = 1800\n")
+        line = next(line for line in render_model_catalog(registry).splitlines()
+                    if line.startswith("local-max"))
+        self.assertTrue(line.endswith(", timeouts.request_seconds=1800"), line)
+        self.assertNotIn("timeouts.", render_model_catalog(BUILTIN_MODEL_CATALOG))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bindings.json"
+            self.assertIsNone(save_debug_model_bindings(path, {"main": registry.bind(name="local-max")}))
+            entry = json.loads(path.read_text())["bindings"]["main"]
+        self.assertEqual(entry["timeouts"], {
+            "request_seconds": 1800.0, "generation_seconds": None, "parked_seconds": None,
+            "startup_seconds": None, "stop_seconds": None,
+        })
 
 
 class BoundRequestTests(unittest.TestCase):

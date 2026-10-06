@@ -59,7 +59,8 @@ DEMO_ARGUMENT_DEFAULTS = {
     "max_context_tokens": None,
     "max_samples": None,
     "max_output_tokens": None,
-    "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    # Unset: the model catalog's timeout, else the default, resolves later.
+    "request_timeout_seconds": None,
     "prompt": None,
     "instructions": None,
     "save_path": Path("interaction.jsonl"),
@@ -276,7 +277,9 @@ class DemoStartupBaselineTests(unittest.TestCase):
                 UserInteractionBoundary(),
             ),
         )
-        self.assertEqual(options, SampleParams(enable_auto_compaction=True))
+        self.assertEqual(options, SampleParams(
+            enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ))
 
     def test_initial_query_is_one_item_once_across_tool_follow_up(self):
         query = "/quit\nInspect café without splitting this query.\n"
@@ -323,7 +326,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
             )
             self.assertEqual(
                 options,
-                SampleParams(max_output_tokens=77, enable_auto_compaction=True),
+                SampleParams(max_output_tokens=77, enable_auto_compaction=True,
+                             request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
             )
         self.assertEqual(
             tuple(

@@ -18,7 +18,8 @@ from pythia.interaction import (
     ChatCompletionsEndpoint, ChatCompletionsModel, CodexAuth, CodexAuthUnavailable,
     CodexResponsesModel, CompactionContextWindowError, CompactionError, CompactionMetadata,
     CompactionResult, CompactionSettings, ContextPrefix,
-    ContextValidationError, DefaultEnvironment, Environment,
+    ContextValidationError, DEFAULT_LOGIN_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DefaultEnvironment, Environment,
     Instructions, InteractionConfig, Message, MessagesEndpoint, MessagesModel, InteractionContext, ModelSample,
     ModelSampleBoundary, NothingToCompact, OpaqueCompaction, PiCompactor, SampleParams, Init,
     TokenUsage, ToolCall, ToolResult, Tools, SampleMetadata, TurnSummary, UserInteraction,
@@ -57,6 +58,19 @@ class UserToolValueTests(unittest.TestCase):
                 "/config.json max_samples 3",
                 '{"key":"max_samples","value":3,"format":"json"}',
             ),
+            # Seconds are float in the canonical arguments.
+            (
+                "/config request_timeout_seconds 600",
+                '{"key":"request_timeout_seconds","value":600.0}',
+            ),
+            (
+                "/config.json request_timeout_seconds 90.5",
+                '{"key":"request_timeout_seconds","value":90.5,"format":"json"}',
+            ),
+            (
+                "/config request_timeout_seconds null",
+                '{"key":"request_timeout_seconds","value":null}',
+            ),
         )
         for command, expected in cases:
             with self.subTest(command=command):
@@ -70,6 +84,10 @@ class UserToolValueTests(unittest.TestCase):
             ("/config enable_workspace None", "None"),
             ("/config max_output_tokens True", "True"),
             ("/config max_samples FAKE_SECRET", "FAKE_SECRET"),
+            ("/config max_samples 1.5", "1.5"),
+            ("/config request_timeout_seconds 1e9", "1e9"),
+            ("/config request_timeout_seconds 100000", "100000"),
+            ("/config request_timeout_seconds FAKE_SECRET", "FAKE_SECRET"),
             ("/config max_output_tokens 1 extra", "1 extra"),
             ("/config.json\nFAKE_SECRET", "FAKE_SECRET"),
         ):
@@ -105,6 +123,7 @@ class UserToolValueTests(unittest.TestCase):
             "enable_workspace = True",
             "max_samples = None",
             "max_output_tokens = None",
+            "request_timeout_seconds = None",
             "enable_auto_compaction = True",
             "auto_compact_tokens = None",
             "max_context_tokens = None",
@@ -440,7 +459,10 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.run_cli(model, terminal), 0)
 
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(model.calls[0][2], SampleParams(max_output_tokens=17, enable_auto_compaction=True))
+        self.assertEqual(model.calls[0][2], SampleParams(
+            max_output_tokens=17, enable_auto_compaction=True,
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ))
         self.assertFalse(any(
             isinstance(item, (UserToolCall, UserToolResult))
             for item in model.calls[0][0].model_items()
@@ -461,6 +483,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "enable_workspace": True,
             "max_samples": None,
             "max_output_tokens": None,
+            "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             "enable_auto_compaction": True,
             "auto_compact_tokens": None,
             "max_context_tokens": None,
@@ -561,7 +584,9 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         terminal = _Terminal(second_frame)
         self.assertEqual(await self.run_cli(model, terminal), 0)
 
-        self.assertEqual(model.calls[0][2], SampleParams(enable_auto_compaction=True))
+        self.assertEqual(model.calls[0][2], SampleParams(
+            enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ))
         self.assertTrue(any(
             "saved config commands were not replayed" in item.text
             for item in terminal.items
@@ -606,7 +631,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         create.assert_not_called()
         self.assertEqual(
             model.calls[0][2],
-            SampleParams(enable_auto_compaction=False, auto_compact_tokens=100),
+            SampleParams(enable_auto_compaction=False, auto_compact_tokens=100,
+                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
         )
 
     async def test_config_max_samples_applies_to_the_next_turn(self):
@@ -723,7 +749,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(request.get_method(), "GET")
                     self.assertEqual(request.full_url, "https://chatgpt.com/backend-api/wham/usage")
                     self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
-                    self.assertEqual(timeout, self.args.request_timeout_seconds)
+                    # The fixed account budget, not the model request timeout.
+                    self.assertEqual(timeout, DEFAULT_LOGIN_TIMEOUT_SECONDS)
                     return response
 
                 def frame(t, editor, status):
@@ -1040,7 +1067,9 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.run_cli(model, terminal), 0)
         # The official Codex route defaults to provider compaction.
         create.assert_called_once_with(model, CompactionSettings(mode="provider"))
-        self.assertEqual(parameters, [(SampleParams(enable_auto_compaction=True), None)])
+        self.assertEqual(parameters, [(SampleParams(
+            enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ), None)])
         self.assertEqual(len(observations), 1)
         source_items, tools, persisted_items = observations[0]
         self.assertEqual(source_items, original)
@@ -1137,7 +1166,11 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         [(request, tools, params)] = model.calls
         self.assertEqual(tools, ())
-        self.assertEqual(params, SampleParams(max_output_tokens=512, enable_auto_compaction=False))
+        # Pi summaries inherit the turn's request timeout.
+        self.assertEqual(params, SampleParams(
+            max_output_tokens=512, enable_auto_compaction=False,
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ))
         prompt = request.model_items()[-1].content
         self.assertTrue(prompt.startswith("<conversation>\n[User]: old request"))
         self.assertTrue(prompt.endswith("\n\nAdditional focus: keep file paths"))

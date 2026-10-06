@@ -26,9 +26,12 @@ from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingTo
 from pythia.interaction import load_interaction_save
 from pythia.interaction import auto
 from pythia.interaction import SampleParams
+from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from pythia.interaction._auto_board import BoardError
 from pythia.interaction._auto_config import FOLLOWS_MAIN, build_parser, namespace, resolve_config
 from pythia.interaction.messages import resolve_messages_max_output_tokens
+from pythia.interaction.model_catalog_config import parse_model_catalog
+from pythia.interaction.model_config import relay_endpoint
 from pythia.interaction.runtime_config import InteractionConfig
 
 
@@ -317,9 +320,14 @@ class ConfigTests(unittest.TestCase):
         for settings in resolve_config().values():
             self.assertIsNone(settings["max_samples"])
             self.assertIsNone(settings["max_output_tokens"])
+            # Unset, so each role resolves its own model's catalog timeout.
+            self.assertIsNone(settings["request_timeout_seconds"])
             snapshot = InteractionConfig.from_namespace(namespace(settings)).snapshot()
             self.assertIsNone(snapshot.max_samples)
-            self.assertEqual(snapshot.sample_params(), SampleParams(enable_auto_compaction=True))
+            self.assertEqual(snapshot.sample_params(), SampleParams(
+                enable_auto_compaction=True,
+                request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            ))
 
     def test_explicit_limits_and_per_role_null_overrides(self):
         args = build_parser().parse_args(["--max-samples", "3", "--max-output-tokens", "128"])
@@ -426,6 +434,105 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings[1]["instructions"], "launch main")
             self.assertEqual(settings[-1]["instructions"], "file watcher")
             self.assertIsNone(settings[2]["instructions"])
+
+
+class TimeoutConfigTests(unittest.TestCase):
+    """Each role's request timeout: explicit setting, its model's catalog, then the default."""
+
+    CATALOG = "".join((
+        "[catalog]\nversion = 4\n",
+        *(f"[model.{name}]\nendpoint.api = chat-completions\n"
+          f"endpoint.url = http://127.0.0.1:{port}/v1/chat/completions\n"
+          f"endpoint.model = {name}\nendpoint.auth = none\n{extra}"
+          for name, port, extra in (("slow", 8000, "timeouts.request_seconds = 1800\n"),
+                                    ("fast", 8001, ""))),
+        "[model.relay]\nendpoint.api = claude-relay\nendpoint.model = claude-opus-5-5\n"
+        "timeouts.generation_seconds = 2400\n",
+    ))
+    RELAY_OPTIONS = {"claude_relay_launcher": "/nonexistent/claude_relay.py",
+                     "claude_relay_socket": "/nonexistent/broker.sock",
+                     "claude_relay_server_uid": 1000, "claude_relay_cli_version": "2.1.0-fixture"}
+
+    def setUp(self):
+        self.catalog = parse_model_catalog(self.CATALOG)
+
+    def resolve(self, path=None, *, roles=(1, -1), **kwargs):
+        settings = resolve_config(path, catalog=self.catalog, roles=roles, **kwargs)
+        settings.relay_options = dict(self.RELAY_OPTIONS)
+        return settings
+
+    def timeouts(self, settings):
+        """Each role's config timeout, as its runtime owner resolves it."""
+        return {index: InteractionConfig.from_namespace(namespace(value, self.catalog))
+                .get("request_timeout_seconds") for index, value in settings.items()}
+
+    def test_each_role_resolves_its_own_model_catalog_timeout(self):
+        settings = self.resolve(overrides={"model": "slow"}, role_models={-1: "fast"})
+        self.assertTrue(all(value["request_timeout_seconds"] is None for value in settings.values()))
+        self.assertEqual(self.timeouts(settings), {1: 1800.0, -1: DEFAULT_REQUEST_TIMEOUT_SECONDS})
+        settings = self.resolve(overrides={"model": "slow", "request_timeout_seconds": 600.0},
+                                role_models={-1: "fast"})
+        self.assertEqual(self.timeouts(settings), {1: 600.0, -1: 600.0})
+
+    def test_a_common_timeout_configures_only_http_roles(self):
+        settings = self.resolve(overrides={"model": "slow", "request_timeout_seconds": 600.0},
+                                role_models={-1: "relay"})
+        self.assertEqual(self.timeouts(settings), {1: 600.0, -1: None})
+        # This used to fail startup for the relay watcher.
+        auto._check_credentials(settings, (1, -1), self.catalog)
+        args = namespace(settings[-1], self.catalog)
+        vars(args).update(self.RELAY_OPTIONS)
+        self.assertEqual(relay_endpoint(args, args.model_binding).generation_timeout_seconds, 2400.0)
+
+    def test_an_older_save_keeps_its_explicit_timeout_until_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            document = auto.saved_document(self.resolve(overrides={"model": "slow", "cwd": tmp}))
+            self.assertIsNone(document["main"]["request_timeout_seconds"])
+            document["main"]["request_timeout_seconds"] = 300.0  # as saved before catalog timeouts
+            path.write_text(json.dumps(document))
+            saved = auto.load_saved_config(path)
+            self.assertEqual(self.timeouts(self.resolve(saved=saved)), {1: 300.0, -1: 300.0})
+            # A config-file null, or an explicit option, replaces the saved value.
+            entries = Path(tmp) / "contexts.json"
+            entries.write_text(json.dumps({"version": 3, "main": {"request_timeout_seconds": None}}))
+            self.assertEqual(self.timeouts(self.resolve(entries, saved=saved)), {1: 1800.0, -1: 1800.0})
+            self.assertEqual(self.timeouts(self.resolve(
+                overrides={"request_timeout_seconds": 90.0}, saved=saved)), {1: 90.0, -1: 90.0})
+            # A relay main resumed from an older save ignores the saved value.
+            document["main"].update(model="relay", model_api=None)
+            path.write_text(json.dumps(document))
+            settings = self.resolve(roles=(1,), saved=auto.load_saved_config(path))
+            self.assertEqual(settings[1]["request_timeout_seconds"], 300.0)
+            self.assertEqual(self.timeouts(settings), {1: None})
+            auto._check_credentials(settings, (1,), self.catalog)
+
+    def test_print_config_shows_each_role_timeout_and_its_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog_path = Path(tmp) / "catalog.ini"
+            catalog_path.write_text(self.CATALOG)
+            for flags, expected in (
+                ([], ["#1 (main): chat-completions / slow (command line); "
+                      "request timeout 1800s (model catalog)",
+                      "#-1 (watcher): claude-relay / relay (command line); "
+                      "generation timeout 2400s (model catalog)"]),
+                (["--request-timeout-seconds", "600", "--claude-relay-generation-timeout", "60"],
+                 ["#1 (main): chat-completions / slow (command line); "
+                  "request timeout 600s (configured)",
+                  "#-1 (watcher): claude-relay / relay (command line); "
+                  "generation timeout 60s (command line)"]),
+            ):
+                with self.subTest(flags=flags):
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (mock.patch.object(auto, "_Session") as session,
+                          redirect_stdout(stdout), redirect_stderr(stderr)):
+                        code = auto.main([
+                            "--model-catalog", str(catalog_path), "--model", "slow",
+                            "--watcher-model", "relay", "--save", str(Path(tmp) / "run"),
+                            "--print-config", *flags])
+                    self.assertEqual(code, 0, stderr.getvalue())
+                    session.assert_not_called()
+                    self.assertEqual(stdout.getvalue().splitlines()[:2], expected)
 
 
 class RoleModelTests(unittest.TestCase):
@@ -904,7 +1011,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(self.finished(session, source["thread_id"]))
         for index in (1, 2):
             self.assertEqual(len(self.calls[index]), 10)
-            self.assertTrue(all(options == SampleParams(enable_auto_compaction=True) for options in self.options[index]))
+            self.assertTrue(all(options == SampleParams(
+                enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            ) for options in self.options[index]))
 
     def test_explicit_limits_still_apply(self):
         tool = Tool(ToolSpec("noop", "continue the test", {}),
@@ -2313,9 +2422,10 @@ class EntryPointTests(unittest.TestCase):
             session.assert_not_called()
             self.assertFalse(save.exists())
             lines = stdout.getvalue().splitlines()
+            timeout = f"; request timeout {DEFAULT_REQUEST_TIMEOUT_SECONDS:g}s (default)"
             self.assertEqual(lines[:2], [
-                "#1 (main): chat-completions / big at gpu:8000 (command line)",
-                "#-1 (watcher): chat-completions / small at gpu:8000 (command line)",
+                "#1 (main): chat-completions / big at gpu:8000 (command line)" + timeout,
+                "#-1 (watcher): chat-completions / small at gpu:8000 (command line)" + timeout,
             ])
             document = json.loads("\n".join(lines[2:]))
             self.assertEqual(set(document), {"version", "main", "watcher"})

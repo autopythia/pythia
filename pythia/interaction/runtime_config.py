@@ -21,14 +21,18 @@ from .compaction import DEFAULT_KEEP_RECENT_TOKENS
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .messages import resolve_messages_max_output_tokens
 from .model import SampleParams
+from .model_catalog import ModelBinding
 from .model_catalog import binding_from_namespace, freeze_extra_sample_params, thaw_json
+from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import validate_timeout_seconds
 
 
-ConfigValue = Union[bool, int, str, None, Mapping]
+ConfigValue = Union[bool, int, float, str, None, Mapping]
 CONFIG_KEYS = (
     "enable_workspace",
     "max_samples",
     "max_output_tokens",
+    "request_timeout_seconds",
     "enable_auto_compaction",
     "auto_compact_tokens",
     "max_context_tokens",
@@ -47,9 +51,17 @@ _OPTIONAL_POSITIVE_INTEGER_KEYS = frozenset((
 ))
 # ``null`` restores the default through the config's fallback.
 _OPTIONAL_NONNEGATIVE_INTEGER_KEYS = frozenset(("compaction_keep_recent_tokens",))
+# Optional seconds; ``null`` restores the default through the config's fallback.
+_OPTIONAL_SECONDS_KEYS = frozenset(("request_timeout_seconds",))
 # Readable in /config, but only set at launch.
 _LAUNCH_ONLY_KEYS = frozenset(("compaction_mode", "extra_sample_params"))
 _INTEGER_LITERAL_RE = re.compile(r"^[+-]?[0-9]+$")
+# Seconds also accept plain decimals; no exponent, infinity, or NaN spellings.
+_DECIMAL_LITERAL_RE = re.compile(r"^[+-]?[0-9]+\.[0-9]+$")
+_NO_REQUEST_TIMEOUT = (
+    "request_timeout_seconds does not apply to Claude Relay; use the model "
+    "catalog's timeouts.generation_seconds or --claude-relay-generation-timeout."
+)
 
 
 class ConfigError(ValueError):
@@ -102,11 +114,22 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
                 f"{key} requires a nonnegative integer or None."
             )
         return value
+    if key in _OPTIONAL_SECONDS_KEYS:
+        if value is None:
+            return None
+        try:
+            return validate_timeout_seconds(value, key)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
     raise AssertionError(f"missing config validator for {key}")
 
 
 def parse_config_literal(key: str, text: object) -> ConfigValue:
-    """Parse the intentionally small JSON/Python scalar input grammar."""
+    """Parse the intentionally small JSON/Python scalar input grammar.
+
+    Integers, booleans, and null for every key; seconds keys also take plain
+    decimals such as ``90.5``.
+    """
     key = _require_key(key)
     if key in _LAUNCH_ONLY_KEYS:
         raise _launch_only_error(key)
@@ -125,6 +148,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
         value = aliases[literal]
     elif _INTEGER_LITERAL_RE.fullmatch(literal) is not None:
         value = int(literal)
+    elif key in _OPTIONAL_SECONDS_KEYS and _DECIMAL_LITERAL_RE.fullmatch(literal) is not None:
+        value = float(literal)
     else:
         raise ConfigError(f"Invalid value for {key}.")
     return validate_config_value(key, value)
@@ -149,6 +174,24 @@ def resolve_compaction_mode(binding, requested: Optional[str] = None) -> str:
             "this route has no provider compaction; use --compaction-mode pi"
         )
     return requested
+
+
+def resolve_request_timeout_seconds(binding, requested=None) -> Optional[float]:
+    """Resolve ``--request-timeout-seconds`` for one model binding.
+
+    An explicit request wins, then the bound model's catalog
+    ``timeouts.request_seconds``, then ``DEFAULT_REQUEST_TIMEOUT_SECONDS``.
+    Claude Relay sends no HTTP model requests: it resolves to ``None``, and an
+    explicit request is an error.
+    """
+    if binding.api == "claude-relay":
+        if requested is not None:
+            raise ConfigError(_NO_REQUEST_TIMEOUT)
+        return None
+    if requested is not None:
+        return validate_config_value("request_timeout_seconds", requested)
+    configured = binding.timeouts.request_seconds
+    return DEFAULT_REQUEST_TIMEOUT_SECONDS if configured is None else configured
 
 
 def _model_compaction_mode(model, requested: Optional[str]) -> str:
@@ -192,11 +235,17 @@ class InteractionConfigSnapshot:
     the binding's map, so samples and compactions send the same extensions.
     ``compaction_mode`` is launch-only too; ``None`` means the route's
     default until a config binds it.
+
+    ``request_timeout_seconds`` is projected into sample params as each
+    request's HTTP timeout. ``None`` leaves the model endpoint's own timeout;
+    namespace-bound configs always resolve it except on Claude Relay, where it
+    does not apply.
     """
 
     enable_workspace: bool = True
     max_samples: Optional[int] = None
     max_output_tokens: Optional[int] = None
+    request_timeout_seconds: Optional[float] = None
     enable_auto_compaction: bool = True
     auto_compact_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
@@ -217,14 +266,16 @@ class InteractionConfigSnapshot:
     ) -> SampleParams:
         """Project config-owned fields over a caller's other per-call params.
 
-        Budget and compaction policy come from this snapshot. Other fields,
-        including a per-call ``extra`` (usually None), come from ``base``.
+        Budget, request timeout, and compaction policy come from this snapshot.
+        Other fields, including a per-call ``extra`` (usually None), come from
+        ``base``.
         """
         if base is not None and not isinstance(base, SampleParams):
             raise TypeError("base must be SampleParams or None")
         return replace(
             base or SampleParams(),
             max_output_tokens=self.max_output_tokens,
+            request_timeout_seconds=self.request_timeout_seconds,
             enable_auto_compaction=self.enable_auto_compaction,
             auto_compact_tokens=self.auto_compact_tokens,
         )
@@ -245,6 +296,8 @@ class InteractionConfig:
     Factories bind raw frontend inputs to defaults. ``set(key, None)`` resolves
     against that captured default, while ``reset`` restores the launch value.
     Reads and request projection never consult models or the catalog.
+    ``request_timeout_applies=False`` (Claude Relay) rejects any request
+    timeout.
     """
 
     def __init__(
@@ -258,6 +311,8 @@ class InteractionConfig:
         auto_compact_tokens_fallback: Optional[int] = None,
         max_context_tokens_fallback: Optional[int] = None,
         min_auto_compact_tokens: Optional[int] = None,
+        request_timeout_seconds_fallback: Optional[float] = None,
+        request_timeout_applies: bool = True,
     ) -> None:
         if not isinstance(snapshot, InteractionConfigSnapshot):
             raise TypeError("snapshot must be InteractionConfigSnapshot")
@@ -271,11 +326,14 @@ class InteractionConfig:
             raise TypeError("on_enable_workspace must be callable or None")
         if not isinstance(require_max_output_tokens, bool):
             raise TypeError("require_max_output_tokens must be a bool")
+        if not isinstance(request_timeout_applies, bool):
+            raise TypeError("request_timeout_applies must be a bool")
         # Bound defaults are used only at initialization/mutation, never on read.
         self._fallbacks = {
             key: validate_config_value(key, value)
             for key, value in (
                 ("max_output_tokens", max_output_tokens_fallback),
+                ("request_timeout_seconds", request_timeout_seconds_fallback),
                 ("auto_compact_tokens", auto_compact_tokens_fallback),
                 ("max_context_tokens", max_context_tokens_fallback),
                 ("compaction_mode", "pi"),
@@ -283,6 +341,7 @@ class InteractionConfig:
             )
         }
         self._require_max_output_tokens = require_max_output_tokens
+        self._request_timeout_applies = request_timeout_applies
         self._min_auto_compact_tokens = validate_config_value(
             "auto_compact_tokens", min_auto_compact_tokens,
         )
@@ -307,6 +366,8 @@ class InteractionConfig:
     def _validate(self, snapshot: InteractionConfigSnapshot) -> None:
         if self._require_max_output_tokens and snapshot.max_output_tokens is None:
             raise ConfigError("max_output_tokens is required for this Messages model.")
+        if not self._request_timeout_applies and snapshot.request_timeout_seconds is not None:
+            raise ConfigError(_NO_REQUEST_TIMEOUT)
         threshold = snapshot.auto_compact_tokens
         minimum = self._min_auto_compact_tokens
         if threshold is not None and minimum is not None and threshold < minimum:
@@ -347,11 +408,17 @@ class InteractionConfig:
                 binding,
                 max_output_tokens,
             )
+        # The launch value resolves now (flag, catalog, default); ``null``
+        # later restores the catalog value or default, not the flag.
+        request_timeout_seconds = resolve_request_timeout_seconds(
+            binding, getattr(args, "request_timeout_seconds", None),
+        )
         return cls(
             InteractionConfigSnapshot(
                 enable_workspace=args.enable_workspace,
                 max_samples=args.max_samples,
                 max_output_tokens=max_output_tokens,
+                request_timeout_seconds=request_timeout_seconds,
                 enable_auto_compaction=args.enable_auto_compaction,
                 auto_compact_tokens=getattr(args, "auto_compact_tokens", None),
                 max_context_tokens=getattr(args, "max_context_tokens", None),
@@ -367,6 +434,8 @@ class InteractionConfig:
             on_enable_workspace=on_enable_workspace,
             require_max_output_tokens=binding.api == "messages",
             max_output_tokens_fallback=max_output_tokens_fallback,
+            request_timeout_seconds_fallback=resolve_request_timeout_seconds(binding),
+            request_timeout_applies=binding.api != "claude-relay",
             auto_compact_tokens_fallback=(
                 None if limits is None else limits.auto_compact_context_tokens
             ),
@@ -395,7 +464,9 @@ class InteractionConfig:
         from the adapter: ``provider`` for a Messages endpoint with server
         compaction or a Codex model with remote compaction, else ``pi``. A
         snapshot may request ``pi`` on Codex, but not a mode the model can't
-        run.
+        run. An HTTP endpoint's ``request_timeout_seconds`` seeds the launch
+        timeout unless the snapshot sets one; ``null`` later restores the
+        binding's catalog value or default. Claude Relay rejects a timeout.
         """
         from .chat_completions import ChatCompletionsModel
         from .messages import MessagesModel
@@ -430,12 +501,16 @@ class InteractionConfig:
             endpoint = model.endpoint
             profile = "chat-completions"
         else:
+            binding = getattr(model, "binding", None)
             return cls(
                 snapshot,
                 auto_compact_tokens_fallback=getattr(
                     model, "auto_compact_context_tokens", None,
                 ),
                 max_context_tokens_fallback=getattr(model, "max_context_tokens", None),
+                request_timeout_applies=not (
+                    isinstance(binding, ModelBinding) and binding.api == "claude-relay"
+                ),
             )
         binding = model.binding
         if (snapshot.extra_sample_params
@@ -443,6 +518,10 @@ class InteractionConfig:
             raise ConfigError(
                 "extra_sample_params come from the model binding; bind them on "
                 "the model, or pass SampleParams(extra=...) for per-call extras."
+            )
+        if snapshot.request_timeout_seconds is None:
+            snapshot = replace(
+                snapshot, request_timeout_seconds=endpoint.request_timeout_seconds,
             )
         return cls.from_namespace(SimpleNamespace(
             model_api=profile, model=endpoint.model,
@@ -529,5 +608,6 @@ __all__ = [
     "InteractionConfigSnapshot",
     "parse_config_literal",
     "resolve_compaction_mode",
+    "resolve_request_timeout_seconds",
     "validate_config_value",
 ]

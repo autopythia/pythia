@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from pythia.interaction import (
-    CompactionResult, ConfigError, ContextPrefix, Environment, Init,
+    CompactionResult, ConfigError, ContextPrefix, DEFAULT_REQUEST_TIMEOUT_SECONDS, Environment, Init,
     InteractionConfig, InteractionConfigSnapshot, InteractionContext, Message,
     ModelConfigurationError, ModelSample, ModelSampleBoundary,
     SampleMetadata, SampleParams, TokenUsage,
@@ -27,8 +27,11 @@ from pythia.interaction._auto_config import (
     DEFAULTS, build_parser, load_saved_config, namespace, resolve_config, saved_document,
 )
 from pythia.interaction.chat_completions import ChatCompletionsEndpoint, ChatCompletionsModel
+from pythia.interaction.claude_relay import ClaudeRelayEndpoint, ClaudeRelayModel
 from pythia.interaction.codex_auth import CodexAuth
 from pythia.interaction.messages import MessagesEndpoint, MessagesModel, MessagesServerCompaction
+from pythia.interaction.model_catalog_config import parse_model_catalog
+from pythia.interaction.model_config import prepare_namespace
 from pythia.interaction.responses import CodexResponsesModel, StreamingResponsesEndpoint
 
 
@@ -97,12 +100,13 @@ class ConfigSeedingTests(unittest.TestCase):
                 self.assertEqual(config.get("auto_compact_tokens"), 872_000)
                 self.assertEqual(config.get("max_context_tokens"), 1_000_000)
                 self.assertEqual(config.get("max_output_tokens"), budget)
+                self.assertEqual(config.get("request_timeout_seconds"), DEFAULT_REQUEST_TIMEOUT_SECONDS)
                 # Catalog extras (thinking, effort) seed the read-only view; the
                 # projection leaves them to the binding, as for every request.
                 self.assertEqual(config.get("extra_sample_params"), extra_sample_params)
                 self.assertEqual(config.snapshot().sample_params(), SampleParams(
                     auto_compact_tokens=872_000, max_output_tokens=budget,
-                    enable_auto_compaction=True,
+                    enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 ))
 
     def test_unknown_or_wrong_profile_never_inherits_codex_limits(self):
@@ -121,7 +125,9 @@ class ConfigSeedingTests(unittest.TestCase):
             api_url="https://api.openai.com/v1", model="codex-gpt-6-astra", bearer_token="FAKE",
         ))
         config = InteractionConfig.from_model(model)
-        self.assertEqual(config.snapshot(), InteractionConfigSnapshot(compaction_mode="pi"))
+        self.assertEqual(config.snapshot(), InteractionConfigSnapshot(
+            compaction_mode="pi", request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        ))
 
     def test_python_models_infer_the_compaction_mode(self):
         official = codex_model(model="codex-gpt-6-astra", auth=CodexAuth("FAKE"))
@@ -166,6 +172,51 @@ class ConfigSeedingTests(unittest.TestCase):
         payload = model._build_request_payload(previous_context(), (), config.snapshot().sample_params())
         self.assertEqual(payload["max_tokens"], 77)
         self.assertEqual(payload["context_management"]["edits"][0]["trigger"]["value"], 872_000)
+
+    def test_request_timeout_seeds_from_catalog_and_python_endpoints(self):
+        registry = parse_model_catalog(
+            "[catalog]\nversion = 4\n[model.codex-gpt-6-astra]\noverride = true\n"
+            "timeouts.request_seconds = 1800\n"
+        )
+        with mock.patch.object(
+            CodexResponsesModel, "__init__", side_effect=AssertionError("credentials"),
+        ):
+            config = InteractionConfig.from_namespace(
+                prepare_namespace(arguments("codex", "codex-gpt-6-astra"), registry))
+        self.assertEqual(config.get("request_timeout_seconds"), 1800.0)
+        self.assertEqual(config.initial_snapshot(), config.snapshot())
+        # A Python endpoint's timeout seeds the launch value; null restores the
+        # binding's catalog value or default, and a snapshot value wins.
+        for model in (
+            ChatCompletionsModel(chat_endpoint("http://localhost", request_timeout_seconds=17.5)),
+            MessagesModel(messages_endpoint(
+                "http://localhost", "model", max_output_tokens=100, request_timeout_seconds=17.5)),
+            codex_model(responses_endpoint(
+                api_url="http://localhost", model="model", bearer_token="FAKE",
+                request_timeout_seconds=17.5)),
+        ):
+            with self.subTest(model=type(model).__name__):
+                config = InteractionConfig.from_model(model)
+                self.assertEqual(config.get("request_timeout_seconds"), 17.5)
+                self.assertEqual(config.snapshot().sample_params().request_timeout_seconds, 17.5)
+                self.assertEqual(
+                    config.set("request_timeout_seconds", None), DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                )
+                self.assertEqual(InteractionConfig.from_model(
+                    model, InteractionConfigSnapshot(request_timeout_seconds=5),
+                ).get("request_timeout_seconds"), 5.0)
+        # Custom models get none unless the caller supplies one.
+        custom = SimpleNamespace(sample=lambda context, **kwargs: None)
+        self.assertIsNone(InteractionConfig.from_model(custom).get("request_timeout_seconds"))
+        self.assertEqual(InteractionConfig.from_model(
+            custom, InteractionConfigSnapshot(request_timeout_seconds=5),
+        ).get("request_timeout_seconds"), 5.0)
+        # Claude Relay has no HTTP request timeout.
+        relay = ClaudeRelayModel(ClaudeRelayEndpoint("native-model", "/a", "/b", 1000, "2.1.0"))
+        self.addCleanup(relay.close)
+        self.assertIsNone(InteractionConfig.from_model(relay).get("request_timeout_seconds"))
+        with self.assertRaisesRegex(ConfigError, "does not apply to Claude Relay"):
+            InteractionConfig.from_model(relay, InteractionConfigSnapshot(request_timeout_seconds=5))
 
     def test_null_resolves_immediately_but_reset_restores_launch_override(self):
         config = InteractionConfig.from_namespace(arguments(
@@ -409,6 +460,24 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["context_management"]["edits"][0]["trigger"]["value"], 150_000)
         # The per-call map replaces the catalog's adaptive thinking.
         self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_demo_keeps_a_per_call_request_timeout(self):
+        for params, expected in (
+            (SampleParams(request_timeout_seconds=5), 5.0),
+            (None, DEFAULT_REQUEST_TIMEOUT_SECONDS),  # the endpoint's own
+        ):
+            with self.subTest(params=params):
+                model = ChatCompletionsModel(chat_endpoint("http://localhost"))
+                seen = []
+
+                def sample(context, *, tools=(), sample_params=None):
+                    seen.append(sample_params)
+                    return ModelSample((Message("assistant", "done"),))
+
+                model.sample = sample
+                with redirect_stdout(io.StringIO()):
+                    demo.run(model, Environment(), prompt="hello", sample_params=params)
+                self.assertEqual([call.request_timeout_seconds for call in seen], [expected])
 
     def test_demo_samples_after_custom_metadata_is_bound_once(self):
         class OneReadModel(CaptureHost):

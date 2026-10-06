@@ -27,9 +27,14 @@ from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.compaction import PiCompactor, CompactionError, auto_compaction_due
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.model_catalog import EndpointSpec, BUILTIN_MODEL_CATALOG
-from pythia.interaction.model_config import build_parser, build_model, prepare_namespace
+from pythia.interaction.model_config import build_parser, build_model, prepare_namespace, relay_endpoint
 from pythia.interaction.save import load_interaction_save
 from pythia.interaction.model_catalog_config import parse_model_catalog
+from pythia.interaction.timeouts import (
+    DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
+    DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RELAY = ROOT / 'claude-relay/claude_relay.py'
@@ -156,6 +161,55 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(binding.api, 'claude-relay')
         self.assertIsNone(binding.endpoint.url)
         self.assertEqual(binding.endpoint.auth, 'runtime')
+
+
+class RelayTimeoutConfigTests(unittest.TestCase):
+    """Relay deadlines: launch option, then catalog, then default. No HTTP timeout."""
+
+    CATALOG = ('[catalog]\nversion=4\n[model.relay-test]\nendpoint.api=claude-relay\n'
+               'endpoint.model=fixture-model\ntimeouts.generation_seconds=2400\n'
+               'timeouts.parked_seconds=3600\ntimeouts.startup_seconds=45\ntimeouts.stop_seconds=2.5\n')
+
+    def args(self, model, *flags, catalog=None):
+        return prepare_namespace(build_parser('test').parse_args([
+            '--model', model, '--claude-relay-launcher', '/nonexistent/claude_relay.py',
+            '--claude-relay-socket', '/nonexistent/broker.sock', '--claude-relay-server-uid', '1000',
+            '--claude-relay-cli-version', '2.1.0-fixture', *flags]), catalog)
+
+    def deadlines(self, endpoint):
+        return (endpoint.generation_timeout_seconds, endpoint.parked_timeout_seconds,
+                endpoint.startup_timeout_seconds, endpoint.stop_timeout_seconds)
+
+    def test_catalog_deadlines_reach_the_endpoint_and_launch_options_win(self):
+        catalog = parse_model_catalog(self.CATALOG)
+        args = self.args('relay-test', catalog=catalog)
+        self.assertEqual(self.deadlines(relay_endpoint(args, args.model_binding)), (2400, 3600, 45, 2.5))
+        args = self.args('relay-test', '--claude-relay-generation-timeout', '30',
+                         '--claude-relay-stop-timeout', '1', catalog=catalog)
+        self.assertEqual(self.deadlines(relay_endpoint(args, args.model_binding)), (30, 3600, 45, 1))
+        # Without catalog values the defaults are unchanged.
+        args = self.args('fixture-model', '--endpoint-api', 'claude-relay')
+        self.assertEqual(self.deadlines(relay_endpoint(args, args.model_binding)), (
+            DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
+            DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS))
+        self.assertEqual(self.deadlines(ClaudeRelayEndpoint('fixture-model', '/a', '/b', 1000, '2.1.0')),
+                         self.deadlines(relay_endpoint(args, args.model_binding)))
+        for value in ('0', str(MAX_TIMEOUT_SECONDS * 2)):
+            with self.subTest(value=value), self.assertRaises(ModelConfigurationError):
+                args = self.args('fixture-model', '--endpoint-api', 'claude-relay',
+                                 '--claude-relay-parked-timeout', value)
+                relay_endpoint(args, args.model_binding)
+
+    def test_http_request_timeouts_do_not_apply(self):
+        args = self.args('relay-test', '--request-timeout-seconds', '60',
+                         catalog=parse_model_catalog(self.CATALOG))
+        with self.assertRaisesRegex(ValueError, 'timeouts.generation_seconds'):
+            build_model(args)
+        model = ClaudeRelayModel(ClaudeRelayEndpoint('fixture-model', '/a', '/b', 1000, '2.1.0'))
+        self.addCleanup(model.close)
+        with self.assertRaisesRegex(ModelConfigurationError, 'request_timeout_seconds'):
+            model.sample(InteractionContext(), sample_params=SampleParams(request_timeout_seconds=5))
+        self.assertIsNone(model._runtime)
 
 
 class MCPTransportTests(unittest.TestCase):
