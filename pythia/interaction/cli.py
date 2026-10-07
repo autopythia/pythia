@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import uuid
+from typing import Callable
 from typing import Optional
 from typing import Sequence
 from typing import Union
@@ -56,7 +57,6 @@ from .items import Instructions
 from .items import Tools
 from .items import InteractionItem
 from .items import Message
-from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
@@ -69,10 +69,15 @@ from .items import UserToolCall
 from .items import UserToolResult
 from .media import AttachmentError
 from .media import parse_user_prompt
+from .media import split_leading_references
 from .loop import Interrupt
+from .loop import Preemption
 from .loop import Steer
 from .loop import TurnHost
+from .loop import Urgency
 from .loop import run_turn
+from .loop.tail import describe_tail
+from .loop.tail import turn_tail
 from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
@@ -108,10 +113,32 @@ class _RetryIntent:
     """Identity ticket for one live sampling failure, never model input."""
 
 
+@dataclass(frozen=True, eq=False)
+class _ContinueIntent:
+    """/continue: sample the saved context without a user message; never model input."""
+
+
+@dataclass(frozen=True, eq=False)
+class _Submission:
+    """Submitted text and its user message, read when Enter accepted the text."""
+
+    text: str
+    message: Message
+
+
+def _plain_message(text: str) -> Message:
+    return Message("user", text)
+
+
+def _reads_no_files(text: str) -> bool:
+    return False
+
+
 @dataclass
 class _UIState:
     editor: Editor = field(default_factory=Editor)
-    pending: deque[Union[str, UserToolIntent, _RetryIntent]] = field(default_factory=deque)
+    pending: deque[Union[_Submission, UserToolIntent, _RetryIntent, _ContinueIntent]] = field(
+        default_factory=deque)
     retry: Optional[_RetryIntent] = None
     headless: bool = False
     displays: deque[DisplayItem] = field(default_factory=deque)
@@ -133,6 +160,19 @@ class _UIState:
     # True while a model turn runs that started with nothing queued: plain text
     # submitted then steers it. Otherwise it queues behind the older input.
     turn_active: bool = False
+    # Submitted text -> its user message, raising AttachmentError; the outer
+    # loop sets it from the launch options. reads_files tells whether that
+    # reads files (leading @ references with experimental media).
+    read_query: Callable[[str], Message] = field(default=_plain_message, repr=False)
+    reads_files: Callable[[str], bool] = field(default=_reads_no_files, repr=False)
+    # A draft whose files are being read, on a helper thread: it stays in the
+    # editor, and Enter queues nothing else until it is queued or rejected.
+    reading: Optional[str] = None
+    # Flushed steers (/steer, /steer!) and preempting stops reach the running
+    # turn here, from the event loop; the context thread checks it.
+    preemption: Preemption = field(default_factory=Preemption, repr=False)
+    # The second stage of exit (a second Ctrl-C, or /exit!) was requested.
+    preempting: bool = False
     # The context thread: this context's model, tools, and saves run here, so
     # the event loop thread (terminal, redraw, exit keys) never blocks.
     context_executor: ThreadPoolExecutor = field(
@@ -152,13 +192,31 @@ class _UIState:
             self.displays.append(DisplayItem(f"[cli] {text}"))
 
     def request_exit(self) -> None:
-        first = not self.closing
+        """The first stage of exit: start no new operation, cancel nothing.
+
+        The sample or tool call in flight finishes and is saved, for every
+        model; queued input is dropped. See request_preempt for the second.
+        """
         self.closing = True
         self.retry = None
         self.pending.clear()
         self.login_cancel.set()
         self.changed.set()
-        if first and callable(getattr(self.active_model, "retire", None)):
+
+    def request_preempt(self) -> None:
+        """The second stage of exit (and the first, if it wasn't requested).
+
+        Cancels the operation in flight where possible (a Claude relay sample,
+        a command's wait), starts no later one, and retires the model, which
+        also cancels model work outside a turn, such as /compact. Outcomes are
+        still saved.
+        """
+        self.request_exit()
+        if self.preempting:
+            return
+        self.preempting = True
+        self.preemption.preempt_stop()
+        if callable(getattr(self.active_model, "retire", None)):
             model = self.active_model
             def retire():
                 try:
@@ -169,8 +227,26 @@ class _UIState:
 
     def handle_key(self, key: str, data: str) -> None:
         if key in {"c-c", "c-d"}:
-            self.request_exit()
-        elif not self.closing and self.ready:
+            # The first press stops; a later one also cancels.
+            if self.closing:
+                self.request_preempt()
+            else:
+                self.request_exit()
+        elif self.closing:
+            # The editor stays usable, so that /exit! can be typed.
+            if key != "c-m":
+                self.editor = self.editor.edit(key, data)
+                return
+            text = self.editor.text
+            head = text.split(maxsplit=1)[0] if text.strip() else ""
+            if head in {"/exit!", "/quit!"}:
+                self.editor = Editor()
+                self.request_preempt()
+            elif head in {"/quit", "/exit"}:
+                self.notice("Already stopping; /exit! or Ctrl-C cancels the current operation.")
+            elif text.strip():
+                self.notice("Stopping; only /exit! or Ctrl-C is accepted.")
+        elif self.ready:
             if key != "c-m":
                 self.editor = self.editor.edit(key, data)
                 return
@@ -179,11 +255,18 @@ class _UIState:
             if head in {"/quit", "/exit"}:
                 self.request_exit()
                 return
+            if head in {"/exit!", "/quit!"}:
+                self.editor = Editor()
+                self.request_preempt()
+                return
             if not text.strip():
                 self.editor = Editor()
                 return
             if self.persistence_failed:
                 self.notice("Checkpoint failed; no further work will run. Use /quit.")
+                return
+            if self.reading is not None:
+                self.notice("A submission is still pending. Draft preserved.")
                 return
             intent = text
             if head == "/retry":
@@ -196,11 +279,44 @@ class _UIState:
                     error = "No retryable sampling failure in this session."
                 elif any(isinstance(item, _RetryIntent) for item in self.pending):
                     error = "A retry is already queued."
+                elif any(isinstance(item, _ContinueIntent) for item in self.pending):
+                    error = "A continuation is already queued."
                 if error is not None:
                     self.notice(error)
                     self.editor = Editor()
                     return
                 intent = self.retry
+            elif head == "/continue":
+                # Like /retry: no arguments, idle, and not auth-gated (the
+                # owner reloads credentials). The owner checks the saved log.
+                error = None
+                if text.strip() != "/continue" or "\n" in text or "\r" in text:
+                    error = "Usage: /continue (no arguments; single line)."
+                elif self.phase not in {"idle", "failed", "auth needed"}:
+                    error = "Cannot continue while work is in progress."
+                elif any(isinstance(item, _ContinueIntent) for item in self.pending):
+                    error = "A continuation is already queued."
+                elif any(isinstance(item, _RetryIntent) for item in self.pending):
+                    error = "A retry is already queued."
+                if error is not None:
+                    self.notice(error)
+                    self.editor = Editor()
+                    return
+                intent = _ContinueIntent()
+            elif head in {"/steer", "/steer!"}:
+                # Steer now: queue the text (if any) like plain text, then
+                # flush every queued steer. /steer! also cancels the sample
+                # or command wait in flight, where possible.
+                level = Urgency.PREEMPT if head == "/steer!" else Urgency.IMMEDIATE
+                parts = text.split(maxsplit=1)
+                if len(parts) == 1:
+                    self.editor = Editor()
+                    self._flush_steers(level)
+                elif self.auth_required:
+                    self.notice(f"{self.auth_notice} Draft was not submitted.")
+                else:
+                    self._submit_text(parts[1], draft=text, flush=level)
+                return
             elif head.startswith("/"):
                 try:
                     intent = parse_user_tool(text)
@@ -212,12 +328,85 @@ class _UIState:
             elif self.auth_required:
                 self.notice(f"{self.auth_notice} Draft was not submitted.")
                 return
+            else:
+                self._submit_text(text)
+                return
             if len(self.pending) >= _MAX_PENDING_QUERIES:
                 self.notice("Query queue is full; the draft has not been submitted.")
             else:
                 self.pending.append(intent)
                 self.editor = Editor()
                 self.changed.set()
+
+    def _submit_text(self, text: str, *, draft: Optional[str] = None,
+                     flush: Optional[Urgency] = None) -> None:
+        """Read a draft's attachments now, then queue its message.
+
+        A bad reference rejects only this draft: it stays in the editor with
+        the error, and nothing is queued. A draft with files to read is read
+        on a helper thread, as auto submits tasks; meanwhile it stays in the
+        editor, and Enter queues nothing else, so the queue keeps its order.
+        ``draft`` is the editor text (``/steer <text>``), and ``flush`` the
+        urgency to flush the queued steers with once the text is queued.
+        """
+        draft = text if draft is None else draft
+        if len(self.pending) >= _MAX_PENDING_QUERIES:
+            self.notice("Query queue is full; the draft has not been submitted.")
+            return
+        if self.reads_files(text):
+            self.reading = draft
+            future = asyncio.get_running_loop().run_in_executor(None, self.read_query, text)
+            future.add_done_callback(functools.partial(self._read_done, text, draft, flush))
+            return
+        try:
+            message = self.read_query(text)
+        except AttachmentError as exc:
+            self.notice(str(exc))
+            return
+        self._queue_submission(_Submission(text, message), draft, flush)
+
+    def _read_done(self, text: str, draft: str, flush: Optional[Urgency], future) -> None:
+        self.reading = None
+        if future.cancelled() or self.closing:
+            return
+        error = future.exception()
+        if isinstance(error, AttachmentError):
+            self.notice(str(error))
+        elif error is not None:
+            # Never reflect an unexpected error's text (it may quote content).
+            self.notice(f"Reading attachments failed ({type(error).__name__}); "
+                        "the draft has not been submitted.")
+        else:
+            self._queue_submission(_Submission(text, future.result()), draft, flush)
+
+    def _queue_submission(self, submission: _Submission, draft: str,
+                          flush: Optional[Urgency] = None) -> None:
+        if len(self.pending) >= _MAX_PENDING_QUERIES:
+            self.notice("Query queue is full; the draft has not been submitted.")
+            return
+        self.pending.append(submission)
+        if self.editor.text == draft:
+            self.editor = Editor()
+        self.changed.set()
+        if flush is not None:
+            if _steer_count(self) < len(self.pending):
+                # Older input is queued ahead of it, or no turn is running.
+                self.notice("No running turn can take a steer now; queued as the next query.")
+            if _steer_count(self):
+                self._flush_steers(flush)
+
+    def _flush_steers(self, level: Urgency) -> None:
+        """Have the running turn take the queued steers sooner (see Preemption)."""
+        count = _steer_count(self)
+        if not count:
+            self.notice("No queued steers to flush.")
+            return
+        self.preemption.flush(level)
+        steers = f"{count} steer{'s' if count > 1 else ''}"
+        self.notice(f"Flushing {steers}: delivered once the current sample or tool call "
+                    "finishes." if level < Urgency.PREEMPT else
+                    f"Flushing {steers}: delivered now; the current sample or command wait "
+                    "is cancelled where possible.")
 
 
 def _build_model(args: argparse.Namespace, trace: Optional[DebugTrace]) -> Model:
@@ -624,27 +813,31 @@ def _query_message(query: str, args, cwd: Path) -> Message:
     return message
 
 
+def _reads_files(text: str, args) -> bool:
+    """Whether _query_message reads files for this text (leading @ references)."""
+    return bool(args.enable_experimental_media and split_leading_references(text)[0])
+
+
 def _steer_count(state: _UIState) -> int:
-    """Leading plain-text entries of the queue: a running turn takes them as steers."""
+    """Leading text submissions in the queue: a running turn takes them as steers."""
     if not state.turn_active:
         return 0
     count = 0
     for entry in state.pending:
-        if not isinstance(entry, str):
+        if not isinstance(entry, _Submission):
             break
         count += 1
     return count
 
 
 def _take_steers(state: _UIState) -> tuple:
-    texts = []
-    while state.turn_active and state.pending and isinstance(state.pending[0], str):
-        texts.append(state.pending.popleft())
-    return tuple(texts)
-
-
-def _requeue(state: _UIState, texts) -> None:
-    state.pending.extendleft(reversed(tuple(texts)))
+    """The steers a running turn takes at its interrupt point; this also resets
+    their urgency (flushed steers are delivered now)."""
+    submissions = []
+    while state.turn_active and state.pending and isinstance(state.pending[0], _Submission):
+        submissions.append(state.pending.popleft())
+    state.preemption.take()
+    return tuple(submissions)
 
 
 def _safe_notice(state: _UIState, text: str) -> None:
@@ -661,9 +854,9 @@ class _CliHost(TurnHost):
     before the turn's outcome reaches ``_drive_interaction``.
     """
 
-    def __init__(self, state: _UIState, path: Path, loop, steer=None) -> None:
+    def __init__(self, state: _UIState, path: Path, loop, steering=False) -> None:
         self._state, self._path, self._loop = state, path, loop
-        self._steer = steer  # text -> user Message; None: no steering
+        self._steering = steering
 
     def _post(self, function, *args) -> None:
         self._loop.call_soon_threadsafe(function, *args)
@@ -682,25 +875,20 @@ class _CliHost(TurnHost):
         return future.result()
 
     def interrupt(self):
-        """Right before a sample: plain text submitted since becomes steers.
+        """Right before a sample: text submitted since becomes steers.
 
         Slash commands and /retry wait for the turn to end, and a steer never
-        overtakes one queued before it.
+        overtakes one queued before it. Each steer's attachments were read
+        when Enter accepted it.
         """
-        if self._steer is None or self._state.closing:
+        if not self._steering or self._state.closing:
             return super().interrupt()
-        texts = self._on_loop(_take_steers, self._state)
-        messages = []
-        for index, text in enumerate(texts):
-            try:
-                messages.append(self._steer(text))
-            except AttachmentError:
-                # The outer loop reports it, as for any query, after the turn.
-                self._on_loop(_requeue, self._state, texts[index:])
-                break
+        submissions = self._on_loop(_take_steers, self._state)
         if self._state.closing:
             return Interrupt.STOP
-        return Steer(tuple(messages)) if messages else Interrupt.CONTINUE
+        if not submissions:
+            return Interrupt.CONTINUE
+        return Steer(tuple(submission.message for submission in submissions))
 
     def append(self, context, items) -> None:
         context.extend(items)
@@ -722,6 +910,12 @@ class _CliHost(TurnHost):
 
     def should_stop(self) -> bool:
         return self._state.closing
+
+    def should_steer(self) -> bool:
+        return self._steering and self._state.preemption.due()
+
+    def preemptible(self, cancel):
+        return self._state.preemption.operation(cancel)
 
     @contextmanager
     def trace(self, op: str, **tags):
@@ -749,22 +943,23 @@ class _CliHost(TurnHost):
         self._post(_arm_retry, self._state)
 
 
-async def _turn(context, model, environment, state, path, config, *, steer=None):
+async def _turn(context, model, environment, state, path, config, *, steering=False):
     """One turn of the shared loop, on the context thread.
 
-    With ``steer`` (text -> user message), plain text submitted during the
-    turn reaches it right before the next sample.
+    With ``steering``, text submitted during the turn reaches it right before
+    the next sample.
     """
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.
     state.retry = None
-    host = _CliHost(state, path, asyncio.get_running_loop(), steer)
+    host = _CliHost(state, path, asyncio.get_running_loop(), steering)
     state.turn_active = not state.pending  # a steer never overtakes older input
     try:
         return await _on_context_thread(
             state, run_turn, context, model, environment, config.snapshot(), host)
     finally:
         state.turn_active = False
+        state.preemption.take()  # steers left over become the next query
 
 
 async def _reload_retry_model(
@@ -845,26 +1040,13 @@ def _resume_notice(context: InteractionContext) -> Optional[str]:
             continue
         if isinstance(item, (TurnSummary, Init)):
             return None
-        if isinstance(item, OpaqueCompaction):
-            tail = "a compaction checkpoint"
-        elif isinstance(item, ContextPrefix):
-            tail = "a context-prefix checkpoint"
-        elif isinstance(item, ToolResult):
-            tail = "tool results"
-        elif isinstance(item, Message) and item.role == "user":
-            tail = "a user submission"
-        elif isinstance(item, Message) and item.role == "assistant":
-            tail = "assistant output"
-        elif isinstance(item, Instructions):
-            tail = "an instructions update"
-        elif isinstance(item, ModelFailure):
-            tail = "a failed model attempt"
-        else:
-            tail = "incomplete model output"
+        next_step = ("enter /continue to sample from here, or a query to continue "
+                     "with a new message" if turn_tail(context.items).unfinished
+                     else "enter a query to continue")
         return (
-            f"Resumed save ends with {tail}, without recorded turn completion. "
+            f"Resumed save ends with {describe_tail(item)}, without recorded turn completion. "
             "The model stop reason is not saved. No model request was started; "
-            "enter a query to continue."
+            f"{next_step}."
         )
     return None
 
@@ -887,6 +1069,9 @@ async def _drive_interaction_body(
     config: InteractionConfig,
 ) -> None:
     attachment_cwd = Path(args.cwd).expanduser().resolve()
+    # Enter reads each submission's attachments (see _UIState._submit_text).
+    state.read_query = functools.partial(_query_message, args=args, cwd=attachment_cwd)
+    state.reads_files = functools.partial(_reads_files, args=args)
     tools_snapshot = Tools(environment.tool_specs)
     existing = args.resume and await _on_context_thread(state, path.exists)
     if existing:
@@ -997,6 +1182,25 @@ async def _drive_interaction_body(
                             state.set_phase("auth needed")
                             continue
                     query = None  # Continue context; do not append a user turn.
+                elif isinstance(query, _ContinueIntent):
+                    # Continue the saved turn where it stopped, without a user
+                    # message (and so without a boundary), if its next step
+                    # would be a sample. Unlike /retry, this reads the log, so
+                    # it also works after a restart.
+                    if context.pending_tool_calls() or context.pending_user_tool_calls():
+                        state.notice("Cannot continue with unresolved tool outcomes.")
+                        continue
+                    refusal = turn_tail(context.items).refusal
+                    if refusal is not None:
+                        state.notice(f"Nothing to continue: {refusal}. Enter a query instead.")
+                        continue
+                    if model is None:
+                        model = await _reload_retry_model(context, state, args)
+                        state.active_model = model
+                        if model is None:
+                            state.set_phase("auth needed")
+                            continue
+                    query = None
                 else:
                     await _fail_pending_user_tools(context, state, path)
                     # A new query is not permission to retry old calls whose
@@ -1024,7 +1228,7 @@ async def _drive_interaction_body(
                         state.set_phase("auth needed" if state.auth_required else "idle")
                         continue
                     if model is None:
-                        state.editor = Editor(query, len(query))
+                        state.editor = Editor(query.text, len(query.text))
                         state.notice(f"{state.auth_notice} Draft was not submitted.")
                         state.set_phase("auth needed")
                         continue
@@ -1033,17 +1237,20 @@ async def _drive_interaction_body(
             if state.closing:
                 return
             if query is not None:
-                try:
-                    message = _query_message(query, args, attachment_cwd)
-                except AttachmentError as exc:
-                    state.notice(str(exc))
-                    if state.headless:
-                        state.exit_code = 1
-                        state.set_phase("failed")
-                        return
-                    state.editor = Editor(query, len(query))
-                    state.set_phase("idle")
-                    continue
+                if isinstance(query, _Submission):
+                    message = query.message  # read when Enter accepted it
+                else:  # the startup prompt
+                    try:
+                        message = _query_message(query, args, attachment_cwd)
+                    except AttachmentError as exc:
+                        state.notice(str(exc))
+                        if state.headless:
+                            state.exit_code = 1
+                            state.set_phase("failed")
+                            return
+                        state.editor = Editor(query, len(query))
+                        state.set_phase("idle")
+                        continue
                 user = UserInteraction((message,))
                 await _append(context, user.context_items(), state, path)
                 state.displays.extend(user.display_items())
@@ -1056,7 +1263,7 @@ async def _drive_interaction_body(
                     state,
                     path,
                     config,
-                    steer=functools.partial(_query_message, args=args, cwd=attachment_cwd),
+                    steering=True,
                 )
             state.set_phase("auth needed" if state.auth_required else "idle")
             if state.headless:
@@ -1171,8 +1378,10 @@ async def _run_headless(model, environment, args, path, *, trace=None):
 
     def interrupt(signum, frame):
         nonlocal interrupted
+        # The first signal stops; a later one also cancels (request_preempt).
+        stage = state.request_preempt if interrupted else state.request_exit
         interrupted = True
-        loop.call_soon_threadsafe(state.request_exit)
+        loop.call_soon_threadsafe(stage)
 
     if threading.current_thread() is threading.main_thread():
         # asyncio.run on older Python versions cancels *all* tasks on SIGINT.
@@ -1216,8 +1425,9 @@ async def _run(
         trace=trace,
     )
     state.notice(
-        "pythia.interaction — /retry, /compact [focus], /config, /config.json, /login, /quota; "
-        "/quit or /exit; Ctrl-C/Ctrl-D exit."
+        "pythia.interaction — /retry, /continue, /steer[!] [text], /compact [focus], /config, "
+        "/config.json, /login, /quota; /quit or /exit; Ctrl-C/Ctrl-D exit. A second "
+        "Ctrl-C, or /exit!, cancels the current operation."
     )
     _startup_notices(state, args, path)
     worker = None
@@ -1233,8 +1443,9 @@ async def _run(
             while True:
                 for key in terminal.read_keys():
                     state.handle_key(key.key, key.data or "")
-                if terminal.closed:
-                    state.request_exit()
+                if terminal.closed and not state.preempting:
+                    # No one is left to press again: stop and cancel at once.
+                    state.request_preempt()
                 while True:
                     try:
                         call_id, text = state.transient.get_nowait()
@@ -1243,15 +1454,22 @@ async def _run(
                     if call_id == state.active_user_call:
                         state.notice(text)
                 busy = state.phase not in {"idle", "failed", "auth needed"}
-                status = (
-                    "closing — waiting for current operation"
-                    if state.closing else state.phase
-                )
+                if state.preempting:
+                    status = "closing — cancelling current operation"
+                elif state.closing:
+                    status = ("closing — waiting for current operation; "
+                              "Ctrl-C again or /exit! cancels it")
+                else:
+                    status = state.phase
                 if busy:
                     status += f" {int(time.monotonic() - state.phase_started)}s"
                 steers = _steer_count(state)
                 if steers:
                     status += f" | steers={steers}"
+                    level = state.preemption.level
+                    if level >= Urgency.IMMEDIATE:
+                        status += (" (preempting)" if level >= Urgency.PREEMPT
+                                   else " (immediate)")
                 if len(state.pending) > steers:
                     status += f" | queued={len(state.pending) - steers}"
                 prompt = (

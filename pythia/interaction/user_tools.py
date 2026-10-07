@@ -38,8 +38,9 @@ def parse_user_tool(text: str) -> UserToolIntent:
         "/quota",
     }:
         raise ValueError(
-            "Unsupported command. Use /retry, /compact [focus], /config, "
-            "/config.json, /login, /quota, /quit, or /exit."
+            "Unsupported command. Use /retry, /continue, /steer, /steer!, "
+            "/compact [focus], /config, /config.json, /login, /quota, /quit, "
+            "/exit, or /exit!."
         )
     command = words[0]
     if command in {"/config", "/config.json"}:

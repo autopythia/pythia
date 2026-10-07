@@ -9,6 +9,12 @@ tools, and saves.
 Right before each sample the loop resumes the host's *interrupt*, the logical
 coroutine that stands for the user's top-level input. Its blocking case is
 the caller's quiescent wait between tasks; here it answers at once.
+
+Steers enter a turn only there. Flushed steers (``/steer``) get the turn there
+sooner: the loop starts no new sample or tool call before it delivers them,
+and closes the calls they kept from starting. Each sample and tool call is
+*preemptible*: a preempting steer or stop can cancel it from another thread
+(see ``preemption``), where the model or tool supports that.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from ..compaction import auto_compaction_due
 from ..compaction import create_default_compactor
 from ..compaction import uses_host_auto_compaction
 from ..display import render_interaction_items
+from ..environment import CancelToken
+from ..environment import cancel_scope
 from ..items import InteractionItem
 from ..items import Message
 from ..items import ModelSampleBoundary
@@ -36,9 +44,11 @@ from ..model import ModelContinuationExpired
 from ..model import ModelError
 from ..model import ModelSample
 from ..model import retire_model
+from .preemption import NOT_PREEMPTIBLE
 
 
 NOT_EXECUTED_OUTPUT = "Not executed: the model response did not complete."
+SKIPPED_OUTPUT = "Not executed: the user sent a message before this call started."
 OVERFLOW_NOTICE = "Model context window exceeded; compacting before one retry."
 CONTINUATION_NOTICE = "Model continuation expired; restarting from saved tool results (1/1)."
 CONTINUATION_RECOVERY = "continuation_expired_cold_restart"
@@ -50,6 +60,10 @@ class SampleLimitExceeded(RuntimeError):
 
 class MissingFinalText(RuntimeError):
     """A turn ended without nonblank final assistant text."""
+
+
+class _CompactionStopped(Exception):
+    """A compaction failed while the host was stopping (the stop caused it)."""
 
 
 class Interrupt(enum.Enum):
@@ -139,9 +153,29 @@ class TurnHost:
         Returns ``Interrupt.CONTINUE``, ``Interrupt.STOP``, or a :class:`Steer`
         with what the user entered since. The default only checks for a stop,
         as for a host with no top-level input (the watcher, the worker, the
-        demo).
+        demo). A host with flushed steers resets their urgency here
+        (``Preemption.take``), since :meth:`should_steer` must turn false.
         """
         return Interrupt.STOP if self.should_stop() else Interrupt.CONTINUE
+
+    def should_steer(self) -> bool:
+        """True while flushed steers wait for the interrupt point.
+
+        The turn then starts no new sample or tool call, closes the calls
+        that have not started, and goes to the interrupt point. The default
+        host has no steers.
+        """
+        return False
+
+    def preemptible(self, cancel):
+        """Bracket one sample or tool call; ``cancel`` (or None) ends it early.
+
+        Returns a context manager whose ``skipped`` is true when the operation
+        must not start (input came after the interrupt point), and whose
+        ``cancelled`` is true once ``cancel`` was started from another thread.
+        The default never skips or cancels.
+        """
+        return NOT_PREEMPTIBLE
 
     def trace(self, op: str, **tags):
         """A context manager around each sample and compaction."""
@@ -189,25 +223,36 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
         if host.should_stop():
             return STOPPED
         if auto_compaction_due(model, context, config):
-            compact(context, model, environment, config, host, sample_params)
+            try:
+                compact(context, model, environment, config, host, sample_params)
+            except _CompactionStopped:
+                return STOPPED
         answer = host.interrupt()
         if answer is Interrupt.STOP:
             return STOPPED
         if isinstance(answer, Steer):
             host.append(context, answer.messages)
             host.show(render_interaction_items(answer.messages))
-        host.phase("sampling")
+        operation = host.preemptible(_retirer(model))
         try:
-            with host.trace("sample", context_revision=len(context)):
-                sample = model.sample(
-                    context.copy(), tools=environment.tool_specs,
-                    sample_params=sample_params,
-                )
+            with operation:
+                if operation.skipped:
+                    continue  # input came after the interrupt point: go back to it
+                host.phase("sampling")
+                with host.trace("sample", context_revision=len(context)):
+                    sample = model.sample(
+                        context.copy(), tools=environment.tool_specs,
+                        sample_params=sample_params,
+                    )
         except ModelError as exc:
             record_sample_failure(context, exc, host)
             if host.should_stop():
                 # The stop caused the failure (e.g. it retired the model).
                 return STOPPED
+            if operation.cancelled:
+                # A preempting steer cancelled it: not a failure, and not
+                # counted. The steer is delivered at the interrupt point.
+                continue
             if isinstance(exc, ModelContinuationExpired):
                 ready = exc.failure is not None and not exc.completed_items
                 try:
@@ -233,6 +278,8 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 try:
                     compacted = compact(context, model, environment, config, host,
                                         sample_params)
+                except _CompactionStopped:
+                    return STOPPED
                 except Exception:
                     host.retryable_failure()
                     raise
@@ -259,6 +306,13 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
         if sample.stop_reason == "compaction":
             # A paused provider compaction has no final text; sample again.
             continue
+        if host.should_steer() and (config.max_samples is None
+                                    or samples < config.max_samples):
+            # Flushed steers wait: close this sample's calls unstarted and go
+            # to the interrupt point. After a final answer too: the user
+            # steered this turn, so it goes on, if another sample is allowed.
+            skip_calls(context, sample.tool_calls, host)
+            continue
         if not sample.tool_calls:
             text = sample.last_assistant_text
             if not text or not text.strip():
@@ -284,7 +338,12 @@ def _save_summary(context, host, started) -> None:
 
 
 def compact(context, model, environment, config, host, sample_params) -> bool:
-    """Install one automatic compaction; False when there is nothing to compact."""
+    """Install one automatic compaction; False when there is nothing to compact.
+
+    A compaction that fails while the host is stopping (as when a stop retires
+    the model) raises ``_CompactionStopped``, which the turn loop treats as a
+    stop, not a failure.
+    """
     host.phase("compacting")
     compactor = create_default_compactor(model, config.compaction_settings())
     try:
@@ -293,6 +352,10 @@ def compact(context, model, environment, config, host, sample_params) -> bool:
                                        sample_params=sample_params)
     except NothingToCompact:
         return False
+    except Exception:
+        if host.should_stop():
+            raise _CompactionStopped() from None
+        raise
     if not isinstance(result, CompactionResult):
         raise TypeError("Expected CompactionResult.")
     host.append(context, result.context_items())
@@ -323,16 +386,30 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
                    host: TurnHost) -> bool:
     """Run one batch, one call at a time; False if a stop came first.
 
-    Each result is saved and shown as it arrives. User messages that tools
-    inject wait until every call has a result. On a stop, calls that have not
-    started stay unanswered; the next use of the context closes them.
+    Each result is saved and shown as it arrives, and each call runs with a
+    cancel token (``cancel_scope``) that a preempting steer or stop can set.
+    Flushed steers close the calls that have not started (``skip_calls``).
+    User messages that tools inject wait until every call has a result. On a
+    stop, calls that have not started stay unanswered; the next use of the
+    context closes them.
     """
+    calls = tuple(calls)
     held: list[Message] = []
-    for call in calls:
+    for index, call in enumerate(calls):
         if host.should_stop():
             return False
-        host.tool_phase(call)
-        result = environment.execute_tool_calls((call,))
+        with CancelToken() as token:
+            operation = host.preemptible(token.cancel)
+            with operation:
+                if not operation.skipped:
+                    host.tool_phase(call)
+                    with cancel_scope(token):
+                        result = environment.execute_tool_calls((call,))
+        if operation.skipped:
+            if host.should_stop():
+                return False  # a preempting stop
+            skip_calls(context, calls[index:], host)
+            break
         host.append(context, result.items)
         host.show(render_interaction_items(result.items, source_calls=(call,)))
         held.extend(result.user_messages)
@@ -340,3 +417,20 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
         host.append(context, tuple(held))
         host.show(render_interaction_items(tuple(held)))
     return True
+
+
+def skip_calls(context, calls: Iterable[ToolCall], host: TurnHost) -> None:
+    """Close tool calls that a steer kept from starting; they never ran."""
+    calls = tuple(calls)
+    if not calls:
+        return
+    results = tuple(ToolResult(call.call_id, SKIPPED_OUTPUT, success=False) for call in calls)
+    host.append(context, results)
+    host.show(render_interaction_items(results, source_calls=calls))
+
+
+def _retirer(model):
+    """A sample's cancel: retire the model's live continuation, if it has one."""
+    if callable(getattr(model, "retire", None)):
+        return lambda: retire_model(model)
+    return None

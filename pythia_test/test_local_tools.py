@@ -5,6 +5,8 @@ import os
 import re
 import select
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,6 +29,7 @@ from pythia.interaction import create_update_plan_tool
 from pythia.interaction import create_write_stdin_tool
 from pythia.interaction.demo import DEFAULT_PROMPT
 from pythia.interaction.demo import run_repository_summary
+from pythia.interaction.environment import CancelToken, cancel_scope, current_cancel
 
 
 def _execute(environment, name, call_id, arguments):
@@ -187,6 +190,66 @@ class PlanToolTests(unittest.TestCase):
 
 
 class CommandToolTests(unittest.TestCase):
+    def test_cancel_token_is_one_shot_and_selectable_from_any_thread(self):
+        with CancelToken() as early:
+            early.cancel()
+            self.assertTrue(select.select([early.fileno()], [], [], 0)[0])  # made after cancel
+        with self.assertRaises(ValueError):
+            early.fileno()
+        early.cancel()  # after close: harmless
+        with CancelToken() as token, cancel_scope(token):
+            self.assertIs(current_cancel(), token)
+            fd = token.fileno()
+            self.assertFalse(select.select([fd], [], [], 0)[0])
+            threading.Thread(target=token.cancel).start()
+            self.assertTrue(select.select([fd], [], [], 5)[0])
+            token.cancel()
+            self.assertTrue(token.cancelled)
+        self.assertIsNone(current_cancel())
+
+    def test_a_cancel_ends_a_command_wait_and_the_command_keeps_running(self):
+        with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
+            environment = Environment((create_exec_command_tool(runtime),
+                                       create_write_stdin_tool(runtime)))
+            token = CancelToken()
+            timer = threading.Timer(0.3, token.cancel)
+            started = time.monotonic()
+            timer.start()
+            try:
+                with token, cancel_scope(token):
+                    result = _execute(environment, "exec_command", "one", {
+                        "cmd": "echo before; sleep 30", "yield_time_ms": 30_000})
+            finally:
+                timer.cancel()
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertTrue(result.success)
+            self.assertIn("before", result.output)
+            match = re.search(r"Process running with session ID (\d+)\nWait interrupted by the "
+                              r"user\.\n", result.output)
+            self.assertIsNotNone(match, result.output)
+            session_id = int(match.group(1))
+            # The command runs on; a wait without a cancel works as usual.
+            again = _execute(environment, "write_stdin", "two",
+                             {"session_id": session_id, "yield_time_ms": 10})
+            self.assertIn(f"Process running with session ID {session_id}", again.output)
+            self.assertNotIn("interrupted", again.output)
+            # A cancel that came first ends write_stdin's wait at once.
+            with CancelToken() as cancelled, cancel_scope(cancelled):
+                cancelled.cancel()
+                started = time.monotonic()
+                third = _execute(environment, "write_stdin", "three",
+                                 {"session_id": session_id, "yield_time_ms": 30_000})
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertIn("Wait interrupted by the user.", third.output)
+
+    def test_a_finished_command_reports_no_interruption(self):
+        with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
+            environment = Environment((create_exec_command_tool(runtime),))
+            with CancelToken() as token, cancel_scope(token):
+                result = _execute(environment, "exec_command", "one", {"cmd": "echo done"})
+            self.assertIn("Process exited with code 0", result.output)
+            self.assertNotIn("interrupted", result.output)
+
     def test_exec_failure_cleans_up_child_before_and_after_session_registration(self):
         for method in ("_read_process_output", "_format_response"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as tmpdir:
@@ -317,7 +380,7 @@ class CommandToolTests(unittest.TestCase):
                 with mock.patch.object(
                     runtime,
                     "_read_process_output",
-                    return_value="",
+                    return_value=("", False),
                 ) as read_output:
                     result = _execute(
                         environment,

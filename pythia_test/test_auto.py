@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,8 @@ from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary, T
 from pythia.interaction import ModelFailure, ModelTransportError, Reasoning, OpaqueCompaction
 from pythia.interaction import CompactionContextWindowError, CompactionResult, CompactionSettings
 from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingToCompact
-from pythia.interaction import load_interaction_save
+from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import load_interaction_save, save_interaction_save
 from pythia.interaction import auto
 from pythia.interaction.loop import kernel
 from pythia.interaction import SampleParams
@@ -1027,6 +1029,124 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(closing.success)
         self.assertIn("Result unavailable after restart", closing.output)
 
+    def test_a_stop_cancels_nothing_and_a_preempting_stop_retires_every_model(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def busy(context):
+            entered.set()  # main's owner, and so its model, stays registered
+            self.assertTrue(release.wait(5))
+            return answer("done")
+        session = self.session({1: [busy]}, worker_board=False)
+        retires = {index: mock.Mock() for index in session._models}
+        for index, retire in retires.items():
+            session._models[index].retire = retire
+        session.submit("task")
+        self.assertTrue(entered.wait(5))
+        try:
+            session.request_stop()
+            self.assertFalse(session.preempting)
+            self.assertFalse(any(p.stopped for p in session._preemption.values()))
+            time.sleep(0.05)
+            self.assertFalse(any(retire.called for retire in retires.values()))
+            session.preempt()
+            session.preempt()
+            self.assertTrue(session.preempting)
+            self.assertTrue(all(p.stopped for p in session._preemption.values()))
+            wait_for(lambda: all(retire.called for retire in retires.values()))
+        finally:
+            release.set()
+        # Main's model may be retired twice (its sample's cancel, then every
+        # model's); retiring is idempotent.
+
+    def test_interactive_second_ctrl_c_preempts_and_the_editor_works_while_stopping(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def first_sample(context):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return answer("done")
+        session = self.session({1: [first_sample], -1: [answer("Complete.")]},
+                               worker_board=False)
+        waiting = "closing - waiting for current work... (Ctrl-C again or /exit! cancels it)"
+        stopping = "Stopping; only /exit! or Ctrl-C is accepted."
+        already = "Already stopping; /exit! or Ctrl-C cancels the current work."
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys, self.seen, self.stage, self.statuses = deque(), [], 0, []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def submit(self, text):
+                self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                    ("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")))
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                self.seen.extend(item.text for item in items)
+                self.statuses.append(status)
+                if self.stage == 0:
+                    self.submit("task")
+                    self.stage = 1
+                elif self.stage == 1 and entered.is_set():
+                    self.keys.append(SimpleNamespace(key="c-c", data=""))
+                    self.stage = 2
+                elif self.stage == 2 and status == waiting:
+                    self.submit("more work")
+                    self.submit("/exit")
+                    self.stage = 3
+                elif self.stage == 3 and stopping in self.seen and already in self.seen:
+                    self.submit("/exit!")
+                    self.stage = 4
+                elif self.stage == 4 and status == "closing - cancelling current work...":
+                    release.set()  # this test's model can't be cancelled
+                    self.stage = 5
+        terminal = Terminal()
+        try:
+            asyncio.run(asyncio.wait_for(auto._interactive(session, terminal), timeout=8))
+        finally:
+            release.set()
+            session.close()
+        self.assertEqual(terminal.stage, 5)
+        self.assertTrue(session.preempting)
+
+    def test_slash_exit_bang_stops_and_preempts_at_once(self):
+        session = self.session({}, worker_board=False)
+        self.assertEqual(auto._local_command("/exit!", 1, session)[2], "preempt")
+        self.assertEqual(auto._local_command("/quit", 1, session)[2], "stop")
+
+        class Terminal:
+            closed = False
+            keys = deque(SimpleNamespace(key=key, data=data) for key, data in (
+                ("<bracketed-paste>", "/quit!"), ("c-m", "\r")))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                pass
+        self.assertEqual(asyncio.run(asyncio.wait_for(
+            auto._interactive(session, Terminal()), timeout=8)), 0)
+        self.assertTrue(session.preempting)
+
     def test_yield_hands_off_and_a_resume_continues_the_same_task(self):
         session = self.session({
             1: [yield_call("I traced the path; please check the ordering."), answer("done")],
@@ -1148,7 +1268,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(self.settled(session, {"record_id": "2"}))
         self.assertEqual(self.last_user(self.calls[1][1]).content, "One more thing.")
         texts = [item.text for event in session.drain_events() for item in event.items]
-        self.assertIn("Queued 1 steer that task 1 never received as new tasks.", texts)
+        self.assertIn("Queued 1 steer that task 1 never received as new task 2.", texts)
+
+    def test_late_steers_after_a_release_become_one_new_task(self):
+        holder = {}
+
+        def deciding(context):
+            holder["session"].submit("One more thing.")
+            holder["session"].submit("And another.")
+            return answer("Complete.")
+        session = self.session({
+            1: [answer("done"), answer("both done")],
+            -1: [deciding, answer("Complete.")],
+        }, worker_board=False)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertTrue(self.settled(session, {"record_id": "2"}))
+        with self.assertRaises(auto.BoardError):
+            session.task_result({"record_id": "3"})  # one task, not one per steer
+        self.assertEqual(self.last_user(self.calls[1][1]).content,
+                         "One more thing.\n\nAnd another.")
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertIn("Queued 2 steers that task 1 never received together as new task 2.",
+                      texts)
+        self.assertIn("User request:\nOne more thing.\n\nAnd another.\n",
+                      self.last_user(self.calls[-1][1]).content)
 
     def test_reports_quote_the_first_user_message_across_tasks_and_restarts(self):
         session = self.session({1: [answer("A done"), answer("B done")],
@@ -1282,6 +1426,321 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.last_user(self.calls[1][1]).content, "Also cover the CLI.")
         self.assertEqual(self.last_user(self.calls[1][2]).content, "second task")
         self.assertIn("1. Also cover the CLI.\n", self.last_user(self.calls[-1][0]).content)
+
+    def interrupted_main(self, *tail):
+        """Finish one task, then append an interrupted turn to main's saved log."""
+        session = self.session({1: [answer("A done")], -1: [answer("Complete.")]},
+                               worker_board=False)
+        self.assertTrue(self.settled(session, session.submit("request A")))
+        session.close()
+        path = self.path / "contexts" / "1.jsonl"
+        context = load_interaction_save(path)
+        context.extend(tail)
+        save_interaction_save(path, context)
+
+    def test_steer_flushes_the_open_task_s_steers_and_skips_the_rest_of_the_batch(self):
+        holder = {}
+        later = mock.Mock(return_value=ToolOutcome("never"))
+
+        def probe(args, **kwargs):
+            session = holder["session"]
+            holder["plain"] = session.submit("Also cover the CLI.")
+            holder["flushed"] = session.flush_steers(auto.Urgency.IMMEDIATE)  # a bare /steer
+            holder["status"] = session.status(1)
+            return ToolOutcome("probed")
+        session = self.session({
+            1: [ModelSample((ToolCall("probe", "p1", "{}"), ToolCall("later", "p2", "{}"))),
+                answer("done")],
+            -1: [answer("Complete.")],
+        }, worker_board=False, extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),
+                                            Tool(ToolSpec("later", "Later.", {}), later)))
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("review it")))
+        later.assert_not_called()
+        self.assertEqual(holder["flushed"], {"count": 1, "record_id": "1", "level": 1,
+                                             "awaiting": False})
+        self.assertEqual(auto._flush_notice(session, holder["flushed"]),
+                         "Flushing 1 steer for task 1 of #1 (main): delivered once the current "
+                         "sample or tool call finishes.")
+        self.assertIn("| Enter steers task 1 | steer pending (immediate)", holder["status"])
+        sampled = self.calls[1][1]
+        results = [(i.call_id, i.output) for i in sampled if isinstance(i, ToolResult)]
+        self.assertEqual(results, [("p1", "probed"), ("p2", kernel.SKIPPED_OUTPUT)])
+        self.assertEqual(self.last_user(sampled).content, "Also cover the CLI.")
+        self.assertNotIn("steer pending", session.status(1))
+        self.assertEqual(session.flush_steers(auto.Urgency.PREEMPT), {"count": 0})
+        self.assertEqual(auto._flush_notice(session, {"count": 0}),
+                         "No queued steers to flush for #1 (main).")
+
+    def test_steer_with_text_steers_now_or_queues_a_new_task(self):
+        holder = {}
+
+        def first_sample(context):
+            # The sample can't be cancelled (no retire), so /steer! waits for it.
+            holder["posted"] = holder["session"].submit("now", flush=auto.Urgency.PREEMPT)
+            return ModelSample((ToolCall("probe", "p1", "{}"),))
+        probe = mock.Mock(return_value=ToolOutcome("never"))
+        session = self.session({1: [first_sample, answer("done"), answer("later done")],
+                                -1: [answer("Complete."), answer("Complete.")]},
+                               worker_board=False,
+                               extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        probe.assert_not_called()
+        self.assertEqual(holder["posted"]["flush"]["level"], 2)
+        self.assertEqual(auto._posted_notice(session, holder["posted"]),
+                         "Flushing 1 steer for task 1 of #1 (main): delivered now; the current "
+                         "sample or command wait is cancelled where possible.")
+        self.assertEqual(self.last_user(self.calls[1][1]).content, "now")
+        # With no open task, the text is a new task.
+        posted = session.submit("later", flush=auto.Urgency.IMMEDIATE)
+        self.assertEqual(posted, {"record_id": "2", "unsteered": True})
+        self.assertEqual(auto._posted_notice(session, posted),
+                         "No open task can take a steer now; queued user task 2 for #1 (main).")
+        self.assertTrue(self.settled(session, posted))
+
+    def test_a_flush_while_main_awaits_the_watcher_changes_nothing(self):
+        holder = {}
+
+        def deciding(context):
+            session = holder["session"]
+            session.submit("Mention the tests too.")
+            holder["flushed"] = session.flush_steers(auto.Urgency.PREEMPT)
+            return resume("Add a summary.")
+        session = self.session({
+            1: [answer("draft"), answer("final")],
+            -1: [deciding, answer("Resuming."), answer("Complete.")],
+        }, worker_board=False)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("write it")))
+        self.assertTrue(holder["flushed"]["awaiting"])
+        self.assertEqual(auto._flush_notice(session, holder["flushed"]),
+                         "Steers for task 1 of #1 (main) wait for the watcher: main gets them if "
+                         "the watcher resumes it, and as a new task otherwise.")
+        users = [item.content for item in self.calls[1][1].items
+                 if isinstance(item, Message) and item.role == "user"]
+        self.assertEqual(users[-2:], [auto._FOLLOW_UP_HEADER + "Add a summary.",
+                                      "Mention the tests too."])
+
+    def test_interactive_steer_flushes_a_typed_steer(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def first_sample(context):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return ModelSample((ToolCall("probe", "p1", "{}"),))
+        probe = mock.Mock(return_value=ToolOutcome("never"))
+        session = self.session({1: [first_sample, answer("done")], -1: [answer("Complete.")]},
+                               worker_board=False,
+                               extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        steered = "Steer for task 1 of #1 (main), delivered before its next sample."
+        flushing = ("Flushing 1 steer for task 1 of #1 (main): delivered once the current "
+                    "sample or tool call finishes.")
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys, self.seen, self.stage, self.statuses = deque(), [], 0, []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def submit(self, text):
+                self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                    ("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")))
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                self.seen.extend(item.text for item in items)
+                self.statuses.append(status)
+                if self.stage == 0:
+                    self.submit("first task")
+                    self.stage = 1
+                elif self.stage == 1 and entered.is_set() and "| Enter steers task 1" in status:
+                    self.submit("Also cover the CLI.")
+                    self.stage = 2
+                elif self.stage == 2 and steered in self.seen:
+                    self.submit("/steer")
+                    self.stage = 3
+                elif self.stage == 3 and flushing in self.seen:
+                    release.set()
+                    self.stage = 4
+                elif self.stage == 4 and session.task_result({"record_id": "1"}) is not None:
+                    self.submit("/quit")
+                    self.stage = 5
+        terminal = Terminal()
+        try:
+            self.assertEqual(asyncio.run(asyncio.wait_for(
+                auto._interactive(session, terminal), timeout=8)), 0)
+        finally:
+            release.set()
+            session.close()
+        self.assertEqual(terminal.stage, 5)
+        self.assertTrue(any("steer pending (immediate)" in status for status in terminal.statuses))
+        probe.assert_not_called()  # the sample's call was skipped
+        self.assertEqual(self.last_user(self.calls[1][1]).content, "Also cover the CLI.")
+
+    def test_continue_resumes_main_s_interrupted_turn_after_a_restart(self):
+        self.interrupted_main(Message("user", "request B"), UserInteractionBoundary(),
+                              ToolCall("probe", "p1", "{}"), ModelSampleBoundary())
+        session = self.session({1: [answer("B done")], -1: [answer("Complete.")]},
+                               worker_board=False, resume=True)
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertIn("Main's log ends inside a turn (tool results); /continue resumes it "
+                      "without a new message.", texts)
+        self.assertEqual(session.status(1), "#1 (main) - quiescent | /continue resumes its turn")
+        posted = session.continue_main()
+        self.assertEqual(posted, {"record_id": "1", "continued": True})
+        self.assertEqual(auto._posted_notice(session, posted),
+                         "Continuing #1 (main) as task 1, without a new message.")
+        self.assertTrue(self.settled(session, posted))
+        sampled = self.calls[1][-1]
+        users = [item.content for item in sampled if isinstance(item, Message) and item.role == "user"]
+        self.assertEqual(users, ["request A", "request B"])  # no new message
+        self.assertEqual(sum(isinstance(item, UserInteractionBoundary) for item in sampled), 2)
+        closing = [item for item in sampled if isinstance(item, ToolResult)][-1]
+        self.assertEqual((closing.call_id, closing.success), ("p1", False))
+        report = self.last_user(self.calls[-1][-1]).content
+        self.assertIn("(watcher resumes so far: 0).\n\nMain continued an unfinished turn from "
+                      "its saved log (/continue); the user sent no new message. The request "
+                      "below is the one that turn belongs to.\n\n", report)
+        self.assertIn("User request:\nrequest B\n", report)
+        # The turn has ended now; a new task is needed.
+        self.assertNotIn("/continue", session.status(1))
+        with self.assertRaisesRegex(BoardError, r"^Nothing to continue for #1 \(main\): the last "
+                                    r"turn ended\. Enter a new task instead\.$"):
+            session.continue_main()
+
+    def test_continue_is_refused_while_a_task_is_open_and_after_a_finished_turn(self):
+        holder = {}
+
+        def probe(args, **kwargs):
+            try:
+                holder["session"].continue_main()
+            except BoardError as exc:
+                holder["error"] = str(exc)
+            return ToolOutcome("probed")
+        session = self.session({
+            1: [ModelSample((ToolCall("probe", "p1", "{}"),)), answer("done")],
+            -1: [answer("Complete.")],
+        }, worker_board=False, extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertEqual(holder["error"], "Cannot continue: #1 (main) has an open task (1); "
+                                          "plain text steers it.")
+        with self.assertRaisesRegex(BoardError, "the last turn ended"):
+            session.continue_main()
+        with self.assertRaises(BoardError):
+            session.task_result({"record_id": "2"})  # nothing was queued
+
+    def test_continue_is_not_available_with_the_worker_board(self):
+        board = self.session({}, worker_board=True)
+        with self.assertRaisesRegex(BoardError, "worker/board"):
+            board.continue_main()
+
+    def test_continue_is_refused_after_a_yield_and_a_reply_runs_as_a_new_task(self):
+        session = self.session({1: [yield_call("Drop the old table first?"), answer("dropped")],
+                                -1: [answer("Noted."), answer("Complete.")]},
+                               worker_board=False)
+        self.assertFalse(self.settled(session, session.submit("migrate")))
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertIn("Task incomplete: main handed off with yield and was released without a "
+                      "final answer. Enter a message to reply to main's handoff note (quoted "
+                      "in the watcher's report).", texts)
+        with self.assertRaisesRegex(BoardError, r"^Cannot continue: main's last turn handed "
+                                    r"off with yield, which still needs a reply\. Enter a "
+                                    r"message instead\.$"):
+            session.continue_main()
+        self.assertNotIn("/continue", session.status(1))
+        self.assertTrue(self.settled(session, session.submit("Yes, drop it.")))
+        self.assertEqual(self.last_user(self.calls[1][-1]).content, "Yes, drop it.")
+
+    def test_continue_is_refused_after_a_yield_that_a_stop_cut_short(self):
+        # The yield's result was saved, but the batch never finished: no turn
+        # summary, so the log looks unfinished. The yield still needs a reply.
+        self.interrupted_main(
+            Message("user", "request B"), UserInteractionBoundary(),
+            ToolCall("yield", "y1", json.dumps({"content": "Decide?"})),
+            ToolCall("probe", "p2", "{}"), ModelSampleBoundary(),
+            ToolResult("y1", "Recorded. Control passes to the watcher after this tool batch "
+                       "is saved."))
+        session = self.session({}, worker_board=False, resume=True)
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertFalse(any("/continue" in text for text in texts), texts)
+        self.assertEqual(session.status(1), "#1 (main) - quiescent")
+        with self.assertRaisesRegex(BoardError, "handed off with yield"):
+            session.continue_main()
+
+    def test_interactive_continue_reports_and_queues(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def blocked(context):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return answer("B done")
+        self.interrupted_main(Message("user", "request B"), UserInteractionBoundary(),
+                              ToolCall("probe", "p1", "{}"), ModelSampleBoundary())
+        session = self.session({1: [blocked], -1: [answer("Complete.")]},
+                               worker_board=False, resume=True)
+        usage = "Usage: /continue (no arguments; single line)."
+        continuing = "Continuing #1 (main) as task 1, without a new message."
+        refused = "Cannot continue: #1 (main) has an open task (1); plain text steers it."
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys, self.seen, self.stage = deque(), [], 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def submit(self, text):
+                self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                    ("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")))
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                self.seen.extend(item.text for item in items)
+                if self.stage == 0 and status.endswith("| /continue resumes its turn"):
+                    self.submit("/continue now")
+                    self.stage = 1
+                elif self.stage == 1 and usage in self.seen:
+                    self.submit("/continue")
+                    self.stage = 2
+                elif self.stage == 2 and continuing in self.seen and entered.is_set():
+                    self.submit("/continue")
+                    self.stage = 3
+                elif self.stage == 3 and refused in self.seen:
+                    release.set()
+                    self.stage = 4
+                elif self.stage == 4 and session.task_result({"record_id": "1"}) is not None:
+                    self.keys.append(SimpleNamespace(key="c-d", data=""))
+                    self.stage = 5
+        terminal = Terminal()
+        try:
+            self.assertEqual(asyncio.run(asyncio.wait_for(
+                auto._interactive(session, terminal), timeout=8)), 0)
+        finally:
+            release.set()
+            session.close()
+        self.assertEqual(terminal.stage, 5)
+        self.assertTrue(session.task_result({"record_id": "1"}))
 
     def test_pre_rename_watcher_history_restores_without_reruns(self):
         import dataclasses
@@ -3182,6 +3641,46 @@ class EntryPointTests(unittest.TestCase):
                     self.assertEqual(auto.main(argv), 1)
                 session.assert_not_called()
                 self.assertIn("--headless", stderr.getvalue())
+
+    @unittest.skipUnless(os.name == "posix", "uses POSIX signals")
+    def test_prompt_mode_sigint_stops_then_preempts_and_exits_130(self):
+        calls = []
+
+        class Session:
+            has_errors = False
+            service = SimpleNamespace(base_url="http://127.0.0.1:43210")
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                return self
+
+            def request_stop(self):
+                calls.append("stop")
+
+            def preempt(self):
+                calls.append("preempt")
+
+            def close(self):
+                calls.append("close")
+
+            def drain_events(self):
+                return []
+
+        def one_prompt(session, prompt, *, display=True):
+            for expected in (["stop"], ["stop", "preempt"]):
+                os.kill(os.getpid(), signal.SIGINT)  # handled here, not raised
+                wait_for(lambda: calls == expected)
+            return 1
+        previous = signal.getsignal(signal.SIGINT)
+        with (mock.patch.object(auto, "_Session", Session),
+              mock.patch.object(auto, "_one_prompt", one_prompt),
+              redirect_stdout(io.StringIO())):
+            self.assertEqual(auto.main(["--enable-experimental-worker-board", "--save",
+                                        "unused", "--prompt", "task"]), 130)
+        self.assertEqual(calls, ["stop", "preempt", "close"])
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
 
     def test_headless_main_suppresses_events_on_startup_runtime_and_interrupt(self):
         class Session:

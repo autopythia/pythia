@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 import json
 import math
+import os
+import threading
 from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Dict
+from typing import Iterator
 from typing import Optional
 from typing import Protocol
 from typing import Sequence
@@ -24,6 +29,84 @@ if TYPE_CHECKING:
 
 class EnvironmentError(ValueError):
     pass
+
+
+class CancelToken:
+    """A one-shot cancel for one tool call, safe to set from any thread.
+
+    A tool that waits can poll ``cancelled``, or add ``fileno()`` to a
+    ``select``: it becomes readable once the token is cancelled. The
+    descriptor is made on first use and closed with the token. Cancelling
+    asks the tool to return early; it never forces it to.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._closed = False
+        self._pipe: Optional[Tuple[int, int]] = None
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            if self._pipe is not None:
+                os.write(self._pipe[1], b"x")
+
+    def fileno(self) -> int:
+        with self._lock:
+            if self._closed:
+                raise ValueError("cancel token is closed")
+            if self._pipe is None:
+                read, write = os.pipe()
+                os.set_blocking(write, False)
+                self._pipe = (read, write)
+                if self._cancelled:
+                    os.write(write, b"x")
+            return self._pipe[0]
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            pipe, self._pipe = self._pipe, None
+        for fd in pipe or ():
+            os.close(fd)
+
+    def __enter__(self) -> "CancelToken":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+
+_CANCEL: contextvars.ContextVar[Optional[CancelToken]] = contextvars.ContextVar(
+    "pythia_interaction_cancel", default=None)
+
+
+@contextmanager
+def cancel_scope(token: Optional[CancelToken]) -> Iterator[Optional[CancelToken]]:
+    """Make ``token`` the running tool call's cancel (see :func:`current_cancel`)."""
+    reset = _CANCEL.set(token)
+    try:
+        yield token
+    finally:
+        _CANCEL.reset(reset)
+
+
+def current_cancel() -> Optional[CancelToken]:
+    """The running tool call's cancel token, if its caller supplied one.
+
+    Tool handlers read it instead of taking a new argument: the turn loop
+    sets it around each call (``cancel_scope``), so a preempting steer or
+    stop can end a long wait early.
+    """
+    return _CANCEL.get()
 
 
 def _validate_user_messages(messages: Iterable[Message]) -> Tuple[Message, ...]:
@@ -260,6 +343,7 @@ class Environment:
 
 
 __all__ = [
+    "CancelToken",
     "Environment",
     "EnvironmentError",
     "EnvironmentResult",
@@ -267,4 +351,6 @@ __all__ = [
     "ToolHandler",
     "ToolOutcome",
     "ToolSpec",
+    "cancel_scope",
+    "current_cancel",
 ]

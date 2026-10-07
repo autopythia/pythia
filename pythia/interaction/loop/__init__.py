@@ -20,16 +20,24 @@ from .kernel import Steer
 from .kernel import TurnHost
 from .kernel import TurnResult
 from .kernel import run_turn
+from .preemption import Preemption
+from .preemption import Urgency
+from .tail import TurnTail
+from .tail import turn_tail
+from .tail import unfinished_turn
 
 __all__ = [
     "Fault",
     "Interrupt",
     "MissingFinalText",
+    "Preemption",
     "SampleLimitExceeded",
     "Steer",
     "SupervisedHandle",
     "TurnHost",
     "TurnResult",
+    "TurnTail",
+    "Urgency",
     "YIELD_KINDS",
     "Yield",
     "YieldChannel",
@@ -38,4 +46,6 @@ __all__ = [
     "run_turn",
     "supervise",
     "supervised_turn",
+    "turn_tail",
+    "unfinished_turn",
 ]

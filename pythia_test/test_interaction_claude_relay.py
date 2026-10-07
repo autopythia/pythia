@@ -566,7 +566,9 @@ class ModelTests(unittest.TestCase):
                     self.assertIn('exec_command runs without a sandbox', result.stderr)
                     self.assertIn('host tools run as the Pythia user, outside the Claude sandbox', result.stderr)
 
-    def test_headless_interrupt_retires_a_live_model_before_generation_deadline(self):
+    def test_headless_second_interrupt_retires_a_live_model_before_generation_deadline(self):
+        # The first SIGINT stops without cancelling the sample in flight; the
+        # second cancels it, retiring the live model.
         save = self.root / 'interrupted.jsonl'
         with subprocess.Popen(['/usr/bin/python3', '-m', 'pythia.interaction.cli', *self.launch_options(),
                                '--claude-relay-generation-timeout', '60', '--headless', '--prompt', 'park',
@@ -579,6 +581,9 @@ class ModelTests(unittest.TestCase):
                     time.sleep(.01)
                 self.assertTrue(save.exists())
                 time.sleep(.4)
+                process.send_signal(signal.SIGINT)
+                time.sleep(.5)
+                self.assertIsNone(process.poll())
                 process.send_signal(signal.SIGINT)
                 _, errors = process.communicate(timeout=7)
                 self.assertEqual(process.returncode, 130, errors)

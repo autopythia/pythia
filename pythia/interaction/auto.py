@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import signal
 import sys
 import threading
 import time
@@ -40,12 +41,13 @@ from ._prompt import load_prompt
 from .loop.supervision import Fault, SupervisedHandle, Yield, YieldChannel, supervise
 from .loop.supervision import SupervisorTools, YieldTool, decide, run_supervised_task
 from .loop import MissingFinalText, SampleLimitExceeded  # noqa: F401 (re-exported)
-from .loop import Interrupt, Steer, TurnHost, run_turn
+from .loop import Interrupt, Preemption, Steer, TurnHost, Urgency, run_turn
+from .loop import turn_tail
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem, render_interaction_items  # noqa: F401 (re-exported)
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
-from .items import Init, Instructions, Message, ToolResult, Tools
+from .items import Init, Instructions, Message, ToolResult, Tools, UserInteractionBoundary
 from .items import UserToolResult
 from .model_config import build_model
 from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
@@ -142,7 +144,9 @@ _SUPERVISOR_INSTRUCTIONS = (
     "user, resume main and have it write the answer. Do not add "
     "requirements beyond the user's request or repeat finished work. Main receives "
     "your message as an automated follow-up, not as the user. You have no "
-    "workspace tools."
+    "workspace tools. A report may say that main continued an unfinished turn from "
+    "its saved log (/continue): the user sent no new message then, and the quoted "
+    "request is the one that turn belongs to."
 )
 _SUPERVISED_MAIN_INSTRUCTIONS = (
     "A watcher (#-1) supervises your work on the user's tasks: it reviews each final "
@@ -155,6 +159,9 @@ _SUPERVISED_MAIN_INSTRUCTIONS = (
 _FOLLOW_UP_HEADER = "Automated follow-up from the watcher (#-1):\n\n"
 _RESTART_NOTICE = ("Restart notice: saved history was resumed without "
                    "restoring old command-session IDs or runtime state.")
+_YIELD_CONTINUE_REFUSAL = ("Cannot continue: main's last turn handed off with yield, which "
+                           "still needs a reply. Enter a message instead.")
+_NO_REQUEST = "(No request was found in main's saved log.)"
 
 
 def _instructions(index, settings, base_url, *, supervisor=False):
@@ -199,6 +206,29 @@ class _Task:
     # For a task queued from a steer main never received: the content of the
     # task that steer was sent to.
     steer_target: Optional[str] = None
+    # A task queued by /continue: main's first turn adds no user message and
+    # continues its saved, unfinished turn; content is that turn's request.
+    continued: bool = False
+
+
+@dataclass(frozen=True)
+class _MainTail:
+    """Whether /continue can resume main's last turn, from main's saved log."""
+    refusal: Optional[str]  # None: it can
+    description: str  # what the log ends with, as in the CLI's resume notice
+    request: str  # the request that turn belongs to
+
+
+def _last_request(items):
+    """The last request in main's raw log: a task's user message, which a
+    boundary follows (a steer has none) and the watcher's header doesn't start."""
+    for index in range(len(items) - 2, -1, -1):
+        item = items[index]
+        if (isinstance(item, Message) and item.role == "user"
+                and isinstance(items[index + 1], UserInteractionBoundary)
+                and not item.content_text.startswith(_FOLLOW_UP_HEADER)):
+            return item.content_text
+    return None
 
 
 class _Stopping(RuntimeError):
@@ -365,6 +395,13 @@ class _AutoHost(TurnHost):
         texts = self._session._take_steers()
         return Steer(tuple(Message("user", text) for text in texts)) if texts else answer
 
+    def should_steer(self):
+        return self._index == 1 and self._session._preemption[1].due()
+
+    def preemptible(self, cancel):
+        # Every role: a preempting stop cancels each context's operation.
+        return self._session._preemption[self._index].operation(cancel)
+
 
 class _Session:
     """Private fixed-role runtime; no dynamic manager/template API.
@@ -446,6 +483,12 @@ class _Session:
         # until _settle. Submissions meanwhile steer it ([text, delivered]).
         self._open_task = None
         self._steers = []
+        # Whether /continue applies to main's log; main's owner records it
+        # after startup and after each task (a _MainTail, guarded by _changed).
+        self._main_tail = None
+        # Each context's flushed steers (main only) and preempting stops.
+        self._preemption = {i: Preemption() for i in self.roles}
+        self._preempting = False
         self._threads = {}
         self._errors = []
         self._fatal = False
@@ -572,6 +615,12 @@ class _Session:
                 self._emit(None, (DisplayItem(
                     "Resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
                 ),))
+                with self._changed:
+                    tail = self._main_tail
+                if tail is not None and tail.refusal is None:
+                    self._emit(None, (DisplayItem(
+                        f"Main's log ends inside a turn ({tail.description}); /continue "
+                        "resumes it without a new message."),))
             summaries = "\n".join(
                 _role_summary(i, self.settings[i], self.bindings[i], self.sources.get(i),
                               i != -1 or self._supervising)
@@ -641,12 +690,27 @@ class _Session:
         with self._changed:
             phase, started = self._states[index]
             task = self._open_task if index == 1 else None
+            continuable = (index == 1 and phase == "quiescent" and self._continuable_locked())
+            urgency = self._preemption[1].level if task is not None else Urgency.QUEUED
         text = f"#{index} ({self.names[index]}) - {phase}"
         if phase in _TIMED_PHASES:
             text += f"... {int(time.monotonic() - started)}s"
         if task is not None:
             text += f" | Enter steers task {task.record_id}"
+        if urgency >= Urgency.IMMEDIATE:
+            text += (" | steer pending (preempting)" if urgency >= Urgency.PREEMPT
+                     else " | steer pending (immediate)")
+        if continuable:
+            text += " | /continue resumes its turn"
         return text
+
+    def _continuable_locked(self):
+        """Whether /continue applies now (with _changed held): main has no open
+        or queued task, and its log stopped inside a turn whose next step would
+        be a sample."""
+        return (self._open_task is None and self._main_tail is not None
+                and self._main_tail.refusal is None
+                and all(task.record_id in self._done for task in self._tasks))
 
     def _is_busy(self, index):
         with self._changed:
@@ -667,7 +731,8 @@ class _Session:
             self._fatal = self._fatal or fatal
         self._emit(index, (DisplayItem(message),), "error")
         if fatal:
-            self.request_stop()
+            # Nothing more can run: stop, and cancel what is in flight.
+            self.preempt()
 
     def _checkpoint(self, index, context, items=()):
         self._phase(index, "saving")
@@ -738,6 +803,8 @@ class _Session:
                                               *(() if current is None else (current,)),
                                               tools_snapshot))
                 self._checkpoint(index, context)
+            if index == 1 and not self.worker_board:
+                self._note_main_tail(context)
             self._phase(index, "quiescent")
             self._ready[index].set()
             if index == -1:
@@ -860,16 +927,35 @@ class _Session:
                                     label="debug"),), "debug")
         return resume
 
+    def _note_main_tail(self, context):
+        """Main's owner: record whether /continue applies to main's log now."""
+        items = context.items
+        tail = turn_tail(items)
+        if YieldTool.recorded_in(items):
+            refusal = _YIELD_CONTINUE_REFUSAL
+        elif not tail.unfinished:
+            refusal = (f"Nothing to continue for #1 ({self.names[1]}): {tail.refusal}. "
+                       "Enter a new task instead.")
+        else:
+            refusal = None
+        record = _MainTail(refusal, tail.description, _last_request(items) or _NO_REQUEST)
+        with self._changed:
+            self._main_tail = record
+
     def _supervised_job(self, source, model, environment, config, context):
         """One user task for main without the board: turns until the watcher releases it.
 
         The task loop is the supervision module's; auto supplies main's host,
-        its yield tool, the follow-up header, steers, and the task's outcome.
+        its yield tool, the follow-up header, steers, and the task's outcome. A
+        continued task (/continue) starts with no user message.
         """
         def on_fault(yield_):
             with self._changed:
                 self._accepting = False  # A faulted main admits no new tasks.
 
+        if source.continued:
+            self._emit(1, (DisplayItem(f"Task {source.record_id} continues main's unfinished "
+                                       "turn, without a new message."),))
         # The chronologically first user message: the raw log keeps it across
         # compaction and restarts; before main's first task, it is this one.
         first = next((item.content_text for item in context
@@ -882,15 +968,20 @@ class _Session:
             steers=self._steer_snapshot, stopping=self._stop.is_set, on_fault=on_fault,
             settle=lambda yield_: self._settle(source, yield_, context),
             waiting_phase="awaiting watcher",
-            first_user_text=first, steer_target_text=source.steer_target)
+            first_user_text=first, steer_target_text=source.steer_target,
+            continued=source.continued)
 
     def _settle(self, source, yield_, context):
         """Record a task's outcome from main's last yield; recovery counts as success."""
         success = yield_ is not None and yield_.kind == "ended"
         if yield_ is not None and yield_.kind == "yielded":
             # Released right after a handoff: not a success, and not an error.
+            # Main still waits for a reply to its note: from the user, as a new
+            # task (/continue is refused; see _note_main_tail).
             self._emit(1, (DisplayItem("Task incomplete: main handed off with yield and "
-                                       "was released without a final answer."),))
+                                       "was released without a final answer. Enter a message "
+                                       "to reply to main's handoff note (quoted in the "
+                                       "watcher's report)."),))
         elif not success:
             if yield_ is not None and yield_.kind == "stopped":
                 message = "Stopped before further effects; prior effects may have occurred."
@@ -901,22 +992,29 @@ class _Session:
             fatal = yield_ is None or (not yield_.resumable and (
                 yield_.kind == "failed" or bool(context.pending_tool_calls())))
             self._error(1, message, fatal=fatal)
+        self._note_main_tail(context)
         with self._changed:
             self._done[source.record_id] = success
-            # Steers main never received: on a release they become new tasks,
-            # in the same locked step, so none is pending once main is quiescent.
+            # Steers main never received: on a release they become one new task
+            # (they were additions to one request), in the same locked step, so
+            # none is pending once main is quiescent.
             undelivered = [text for text, delivered in self._steers if not delivered]
             self._open_task, self._steers = None, []
-            requeued = self._accepting and not self._stop.is_set()
-            for text in undelivered if requeued else ():
+            self._preemption[1].take()
+            requeued = None
+            if undelivered and self._accepting and not self._stop.is_set():
                 sequence = len(self._tasks) + 1
-                self._tasks.append(_Task(sequence, str(sequence), text, source.content))
+                requeued = str(sequence)
+                self._tasks.append(_Task(sequence, requeued, "\n\n".join(undelivered),
+                                         source.content))
             self._changed.notify_all()
         if undelivered:
-            count = f"{len(undelivered)} steer{'s' if len(undelivered) > 1 else ''}"
+            many = len(undelivered) > 1
+            count = f"{len(undelivered)} steer{'s' if many else ''}"
             self._emit(1, (DisplayItem(
-                f"Queued {count} that task {source.record_id} never received as new tasks."
-                if requeued else
+                f"Queued {count} that task {source.record_id} never received "
+                f"{'together ' if many else ''}as new task {requeued}."
+                if requeued is not None else
                 f"Dropped {count} that task {source.record_id} never received."),))
 
     def _job(self, index, source, model, environment, config, context, binding):
@@ -969,23 +1067,32 @@ class _Session:
             raise _Stopping()
 
     def _take_steers(self):
-        """Main's undelivered steers, now marked delivered (main's owner thread)."""
+        """Main's undelivered steers, now marked delivered (main's owner thread).
+
+        Their urgency resets in the same step: flushed steers are delivered now.
+        """
         with self._changed:
             texts = [entry[0] for entry in self._steers if not entry[1]]
             for entry in self._steers:
                 entry[1] = True
+            self._preemption[1].take()
             return texts
 
     def _steer_snapshot(self):
         with self._changed:
             return tuple((text, delivered) for text, delivered in self._steers)
 
-    def submit(self, text, *, request_id=None, new_task=False):
+    def submit(self, text, *, request_id=None, new_task=False, flush=None):
         """Submit one user task for main; returns its handle for task_result().
 
         With the board this posts a fresh user thread (request_id makes an
         uncertain HTTP outcome retryable). Otherwise the task is queued in
         process, which has no uncertain outcome, so request_id is unused.
+
+        While main has an open task, the text steers it instead. ``flush``
+        (an Urgency, from /steer and /steer!) also flushes that task's queued
+        steers (see flush_steers); without an open task it queues a new task,
+        as plain text does, and the handle says so (``unsteered``).
         """
         if self._stop.is_set():
             raise BoardError("Auto is not accepting new work.", 503)
@@ -1011,11 +1118,70 @@ class _Session:
             if not new_task and self._open_task is not None:
                 # Steer main's open task: delivered right before its next sample.
                 self._steers.append([text, False])
-                return {"record_id": self._open_task.record_id, "steer": True}
+                posted = {"record_id": self._open_task.record_id, "steer": True}
+                if flush is not None:
+                    posted["flush"] = self._flush_locked(flush)
+                return posted
             sequence = len(self._tasks) + 1
             self._tasks.append(_Task(sequence, str(sequence), text))
             self._changed.notify_all()
-        return {"record_id": str(sequence)}
+        return {"record_id": str(sequence), **({"unsteered": True} if flush is not None else {})}
+
+    def flush_steers(self, level):
+        """/steer or /steer! alone: have main take its open task's queued steers
+        sooner; returns what was flushed, for the notice (_flush_notice)."""
+        if self.worker_board:
+            raise BoardError("Steering is not available with the experimental worker/board.")
+        with self._changed:
+            return self._flush_locked(level)
+
+    def _flush_locked(self, level):
+        """Flush main's undelivered steers (with _changed held).
+
+        At Urgency.IMMEDIATE main starts no new sample or tool call before it
+        takes them; at Urgency.PREEMPT it also cancels the one in flight where
+        possible. While main awaits the watcher it is not in a turn, so this
+        changes nothing: the steers wait for the watcher's decision, as today.
+        """
+        level = Urgency(level)
+        count = sum(not delivered for _, delivered in self._steers)
+        task = self._open_task
+        if task is None or not count:
+            return {"count": 0}
+        awaiting = self._states[1][0] == "awaiting watcher"
+        if not awaiting:
+            self._preemption[1].flush(level)
+        return {"count": count, "record_id": task.record_id, "level": int(level),
+                "awaiting": awaiting}
+
+    def continue_main(self):
+        """Queue a task that continues main's unfinished turn without a new message.
+
+        Applies while main has no open or queued task and its saved log stopped
+        inside a turn whose next step would be a sample (not after a final
+        answer, and not after a yield, which needs a reply). Otherwise raises
+        BoardError with the reason. Returns the task's handle for task_result().
+        """
+        if self.worker_board:
+            raise BoardError("/continue is not available with the experimental worker/board.")
+        with self._changed:
+            if self._stop.is_set() or not self._accepting:
+                raise BoardError("Auto is not accepting new work.", 503)
+            if self._open_task is not None:
+                raise BoardError(f"Cannot continue: #1 ({self.names[1]}) has an open task "
+                                 f"({self._open_task.record_id}); plain text steers it.")
+            if any(task.record_id not in self._done for task in self._tasks):
+                raise BoardError("Cannot continue: tasks are queued for "
+                                 f"#1 ({self.names[1]}).")
+            tail = self._main_tail
+            if tail is None:
+                raise BoardError("Auto is not accepting new work.", 503)
+            if tail.refusal is not None:
+                raise BoardError(tail.refusal)
+            sequence = len(self._tasks) + 1
+            self._tasks.append(_Task(sequence, str(sequence), tail.request, continued=True))
+            self._changed.notify_all()
+        return {"record_id": str(sequence), "continued": True}
 
     def task_result(self, submitted):
         """None while a submit() handle's task is pending; then its bool outcome.
@@ -1057,7 +1223,48 @@ class _Session:
         return all(done[key] for key in sources)
 
     def request_stop(self):
+        """The first stage of a stop: start no new effects, cancel nothing.
+
+        Each context's sample or tool call in flight finishes and is saved,
+        for every model; queued tasks are not run. See preempt for the second.
+        """
         self._stop.set()
+        with self._changed:
+            self._accepting = False
+            self._changed.notify_all()  # Wakes an idle main waiting for a task.
+        if self._channel is not None:
+            self._channel.wake()  # Releases a main waiting for the watcher.
+        if self.service is not None:
+            with self.service.board.changed:
+                self.service.board.accepting = False
+                self.service.board.changed.notify_all()
+
+    @property
+    def preempting(self):
+        """True once the second stage of a stop was requested."""
+        with self._changed:
+            return self._preempting
+
+    def preempt(self):
+        """The second stage of a stop (and the first, if it wasn't requested).
+
+        Cancels each context's operation in flight where possible (a Claude
+        relay sample, a command's wait), starts no later one, and retires
+        every model, which also cancels model work outside a turn, such as
+        compaction. Outcomes are still saved. Never blocks: the cancels and
+        retirements run on helper threads.
+        """
+        self.request_stop()
+        with self._changed:
+            if self._preempting:
+                return
+            self._preempting = True
+        for preemption in self._preemption.values():
+            preemption.preempt_stop()
+        threading.Thread(target=self._retire_models, name="auto-retire-models",
+                         daemon=True).start()
+
+    def _retire_models(self):
         # Model-only cancellation wakes a parked sampler. Host-side effects still
         # finish/checkpoint under their owners before environment cleanup.
         with self._model_lock:
@@ -1068,15 +1275,6 @@ class _Session:
             except Exception:
                 self._fatal = True
                 self._emit(None, (DisplayItem("Model retirement failed; final cleanup will run."),), "error")
-        with self._changed:
-            self._accepting = False
-            self._changed.notify_all()  # Wakes an idle main waiting for a task.
-        if self._channel is not None:
-            self._channel.wake()  # Releases a main waiting for the watcher.
-        if self.service is not None:
-            with self.service.board.changed:
-                self.service.board.accepting = False
-                self.service.board.changed.notify_all()
 
     def close(self):
         with self._close_lock:
@@ -1167,12 +1365,18 @@ def _headless(session):
 
 
 def _local_command(text, selected, session):
-    """Pure navigation/exit dispatch; never submit local slash commands."""
+    """Pure navigation/exit dispatch; never submit local slash commands.
+
+    Returns (selected, notices, stop): stop is False, "stop" (/quit, /exit),
+    or "preempt" (/quit!, /exit!: also cancel what is in flight).
+    """
     if "\n" in text or "\r" in text:
         raise ValueError("Local commands must be a single line.")
     words = text.split()
     if words in (["/quit"], ["/exit"]):
-        return selected, (), True
+        return selected, (), "stop"
+    if words in (["/quit!"], ["/exit!"]):
+        return selected, (), "preempt"
     if words == ["/contexts"]:
         summaries = "\n".join(
             ("* " if i == selected else "  ") + session.status(i) for i in session.roles
@@ -1189,16 +1393,70 @@ def _local_command(text, selected, session):
                         else ", ".join(choices[:-1]) + ", or " + choices[-1])
                 raise ValueError(f"Use {hint}.")
         return target, (DisplayItem(f"Selected #{target} ({session.names[target]})."),), False
-    raise ValueError("Use /contexts, /context N, /quit, or /exit.")
+    raise ValueError("Use /contexts, /context N, /task, /steer, /steer!, /continue, "
+                     "/quit, /exit, or /exit!.")
+
+
+class _InterruptStages:
+    """SIGINT in two stages, for auto's non-interactive modes.
+
+    The first signal stops (the run exits 130), and a later one preempts. The
+    handler only starts a helper thread, so no session lock is taken inside a
+    signal handler, and close() never sees a KeyboardInterrupt. Outside the
+    main thread no handler can be installed, and nothing changes.
+    """
+
+    def __init__(self, session):
+        self.session, self.count, self._previous = session, 0, None
+
+    def install(self):
+        if threading.current_thread() is threading.main_thread():
+            self._previous = signal.signal(signal.SIGINT, self._handle)
+        return self
+
+    def restore(self):
+        if self._previous is not None:
+            signal.signal(signal.SIGINT, self._previous)
+            self._previous = None
+
+    def _handle(self, signum, frame):
+        self.count += 1
+        stage = self.session.request_stop if self.count == 1 else self.session.preempt
+        threading.Thread(target=stage, name="auto-interrupt", daemon=True).start()
 
 
 def _posted_notice(session, posted):
     if session.worker_board:
         return f"Posted user thread {posted['thread_id']}."
+    if posted.get("continued"):
+        return (f"Continuing #1 ({session.names[1]}) as task {posted['record_id']}, "
+                "without a new message.")
     if posted.get("steer"):
+        if "flush" in posted:
+            return _flush_notice(session, posted["flush"])
         return (f"Steer for task {posted['record_id']} of #1 ({session.names[1]}), "
                 "delivered before its next sample.")
+    if posted.get("unsteered"):
+        return ("No open task can take a steer now; queued user task "
+                f"{posted['record_id']} for #1 ({session.names[1]}).")
     return f"Queued user task {posted['record_id']} for #1 ({session.names[1]})."
+
+
+def _flush_notice(session, flushed):
+    """The notice for /steer and /steer! (see _Session._flush_locked)."""
+    name = f"#1 ({session.names[1]})"
+    if not flushed["count"]:
+        return f"No queued steers to flush for {name}."
+    task = flushed["record_id"]
+    if flushed["awaiting"]:
+        return (f"Steers for task {task} of {name} wait for the watcher: main gets them "
+                "if the watcher resumes it, and as a new task otherwise.")
+    count = flushed["count"]
+    steers = f"{count} steer{'s' if count > 1 else ''} for task {task} of {name}"
+    if flushed["level"] >= Urgency.PREEMPT:
+        return (f"Flushing {steers}: delivered now; the current sample or command wait is "
+                "cancelled where possible.")
+    return f"Flushing {steers}: delivered once the current sample or tool call finishes."
 
 
 async def _interactive(session, terminal):
@@ -1218,7 +1476,23 @@ async def _interactive(session, terminal):
                         if closing is None:
                             session.request_stop()
                             closing = asyncio.create_task(asyncio.to_thread(session.close))
-                    elif closing is None:
+                        else:
+                            session.preempt()  # a later press cancels what is in flight
+                    elif closing is not None:
+                        # The editor stays usable, so that /exit! can be typed.
+                        words = editor.text.split()
+                        if key.key != "c-m":
+                            editor = editor.edit(key.key, key.data or "")
+                        elif words in (["/exit!"], ["/quit!"]):
+                            session.preempt()
+                            editor = Editor()
+                        elif words in (["/exit"], ["/quit"]):
+                            notices.append(DisplayItem(
+                                "Already stopping; /exit! or Ctrl-C cancels the current work."))
+                        elif words:
+                            notices.append(DisplayItem(
+                                "Stopping; only /exit! or Ctrl-C is accepted."))
+                    else:
                         if key.key != "c-m":
                             editor = editor.edit(key.key, key.data or "")
                         elif editor.text.strip():
@@ -1227,6 +1501,45 @@ async def _interactive(session, terminal):
                             if new_task and len(words) == 1:
                                 notices.append(DisplayItem("Usage: /task <text> queues a new task "
                                                            "instead of steering the open one."))
+                            elif words[0] == "/continue":
+                                text = editor.text
+                                if text.strip() != "/continue" or "\n" in text or "\r" in text:
+                                    notices.append(DisplayItem(
+                                        "Usage: /continue (no arguments; single line)."))
+                                elif selected != 1:
+                                    notices.append(DisplayItem(
+                                        "Switch to /context 1 to continue main. Draft preserved."))
+                                elif pending is not None:
+                                    notices.append(DisplayItem(
+                                        "A submission is still pending. Draft preserved."))
+                                else:
+                                    try:
+                                        posted = session.continue_main()
+                                    except BoardError as exc:
+                                        notices.append(DisplayItem(str(exc)))
+                                    else:
+                                        notices.append(DisplayItem(_posted_notice(session, posted)))
+                                        editor = Editor()
+                            elif words[0] in {"/steer", "/steer!"}:
+                                level = (Urgency.PREEMPT if words[0] == "/steer!"
+                                         else Urgency.IMMEDIATE)
+                                if selected != 1:
+                                    notices.append(DisplayItem(
+                                        "Switch to /context 1 to steer main. Draft preserved."))
+                                elif session.worker_board:
+                                    notices.append(DisplayItem("Steering is not available with "
+                                                               "the experimental worker/board."))
+                                elif pending is not None:
+                                    notices.append(DisplayItem(
+                                        "A submission is still pending. Draft preserved."))
+                                elif len(words) == 1:
+                                    notices.append(DisplayItem(_flush_notice(
+                                        session, session.flush_steers(level))))
+                                    editor = Editor()
+                                else:
+                                    submitted_text, retry = editor.text, None
+                                    pending = asyncio.create_task(asyncio.to_thread(
+                                        session.submit, words[1], flush=level))
                             elif editor.text.lstrip().startswith("/") and not new_task:
                                 try:
                                     selected, result, quit_ = _local_command(editor.text, selected, session)
@@ -1234,6 +1547,8 @@ async def _interactive(session, terminal):
                                     editor = Editor()
                                     if quit_:
                                         session.request_stop()
+                                        if quit_ == "preempt":
+                                            session.preempt()
                                         closing = asyncio.create_task(asyncio.to_thread(session.close))
                                 except ValueError as exc:
                                     notices.append(DisplayItem(str(exc)))
@@ -1250,9 +1565,12 @@ async def _interactive(session, terminal):
                                 options = {"new_task": True} if new_task else {}
                                 pending = asyncio.create_task(asyncio.to_thread(
                                     session.submit, text, request_id=request_id, **options))
-                if terminal.closed and closing is None:
-                    session.request_stop()
-                    closing = asyncio.create_task(asyncio.to_thread(session.close))
+                if terminal.closed:
+                    # No one is left to press again: stop and cancel at once.
+                    if not session.preempting:
+                        session.preempt()
+                    if closing is None:
+                        closing = asyncio.create_task(asyncio.to_thread(session.close))
                 if pending is not None and pending.done():
                     try:
                         posted = pending.result()
@@ -1271,10 +1589,16 @@ async def _interactive(session, terminal):
                     pending = None
                 notices.extend(_display_events(session, session.drain_events()))
                 if session.board_failed and not board_failure_shown:
-                    session.request_stop()
+                    session.preempt()
                     notices.append(DisplayItem("Use /quit to close the failed session."))
                     board_failure_shown = True
-                status = "closing - waiting for current work..." if closing else session.status(selected)
+                if closing is None:
+                    status = session.status(selected)
+                elif session.preempting:
+                    status = "closing - cancelling current work..."
+                else:
+                    status = ("closing - waiting for current work... "
+                              "(Ctrl-C again or /exit! cancels it)")
                 busy = (session._is_busy(selected) or pending is not None
                         or (closing is not None and not closing.done()))
                 prompt = f"{_SPINNER[(frame // 16) % len(_SPINNER)]}> " if busy else ":> "
@@ -1301,6 +1625,7 @@ async def _interactive(session, terminal):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     session = None
+    interrupts = None
     exit_code = 1
     try:
         catalog = frontend_catalog(args)
@@ -1379,6 +1704,8 @@ def main(argv=None):
                 print("Warning: board authentication is disabled; local clients can read board data "
                       "and submit tasks that may run unsandboxed tools.", file=sys.stderr, flush=True)
             print(f"Board: {session.service.base_url}/README.md", flush=True)
+        if args.prompt is not None or args.headless:
+            interrupts = _InterruptStages(session).install()
         if args.prompt is not None:
             exit_code = _one_prompt(session, args.prompt, display=not args.headless)
         elif args.headless:
@@ -1394,13 +1721,19 @@ def main(argv=None):
                   else type(exc).__name__)
         print(f"auto failed: {detail}", file=sys.stderr)
     finally:
-        if session is not None:
-            session.close()
-            if not args.headless:
-                try:
-                    _print_events(session)
-                except (OSError, ValueError):
-                    exit_code = 1 if exit_code == 0 else exit_code
+        try:
+            if session is not None:
+                session.close()
+                if not args.headless:
+                    try:
+                        _print_events(session)
+                    except (OSError, ValueError):
+                        exit_code = 1 if exit_code == 0 else exit_code
+        finally:
+            if interrupts is not None:
+                interrupts.restore()
+                if interrupts.count:
+                    exit_code = 130
     return 1 if exit_code == 0 and session.has_errors else exit_code
 
 

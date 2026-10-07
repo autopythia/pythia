@@ -19,6 +19,7 @@ from typing import Union
 from ..environment import Tool
 from ..environment import ToolOutcome
 from ..environment import ToolSpec
+from ..environment import current_cancel
 from ._workspace import WorkspacePolicy
 
 # After stdout reaches EOF, the shell may still be exiting. Wait at least this
@@ -310,7 +311,7 @@ class CommandRuntime:
             if process.stdout is not None:
                 os.set_blocking(process.stdout.fileno(), False)
 
-            output = self._read_process_output(process, wait_seconds)
+            output, interrupted = self._read_process_output(process, wait_seconds)
             exit_code = process.poll()
             if exit_code is None:
                 session_id = self._next_session(process, workdir, cmd)
@@ -325,6 +326,7 @@ class CommandRuntime:
                     session_id=session_id,
                     output=output,
                     max_output_tokens=max_output_tokens,
+                    interrupted=interrupted,
                 ),
                 success=True,
             )
@@ -381,7 +383,7 @@ class CommandRuntime:
                 except BrokenPipeError as exc:
                     raise ValueError("process stdin is closed") from exc
 
-            output = self._read_process_output(process, wait_seconds)
+            output, interrupted = self._read_process_output(process, wait_seconds)
             exit_code = process.poll()
             session_id = raw_session_id
             if exit_code is not None:
@@ -398,6 +400,7 @@ class CommandRuntime:
                 session_id=session_id,
                 output=output,
                 max_output_tokens=max_output_tokens,
+                interrupted=interrupted,
             ),
             success=True,
         )
@@ -406,21 +409,35 @@ class CommandRuntime:
         self,
         process: subprocess.Popen,
         timeout_seconds: float,
-    ) -> str:
+    ) -> Tuple[str, bool]:
+        """The output within the wait, and whether a cancel ended the wait.
+
+        The running tool call's cancel token (``current_cancel``), if any,
+        ends the wait early, as if the yield time had run out: the process
+        keeps running and its output so far is returned.
+        """
         if process.stdout is None:
-            return ""
+            return "", False
         fd = process.stdout.fileno()
+        cancel = current_cancel()
+        watched = [fd] if cancel is None else [fd, cancel.fileno()]
         chunks = []
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         eof = False
+        interrupted = False
 
         while True:
+            if cancel is not None and cancel.cancelled:
+                interrupted = True
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            ready, _, _ = select.select([fd], [], [], remaining)
+            ready, _, _ = select.select(watched, [], [], remaining)
             if not ready:
                 break
+            if fd not in ready:
+                continue  # the cancel: checked above
             try:
                 data = os.read(fd, 65_536)
             except BlockingIOError:
@@ -454,7 +471,7 @@ class CommandRuntime:
             except subprocess.TimeoutExpired:
                 pass
 
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        return b"".join(chunks).decode("utf-8", errors="replace"), interrupted
 
     def _format_response(
         self,
@@ -465,6 +482,7 @@ class CommandRuntime:
         session_id: Optional[int],
         output: str,
         max_output_tokens: Optional[int],
+        interrupted: bool = False,
     ) -> str:
         rendered_output = _truncate_output(output, max_output_tokens)
         sections = [
@@ -475,6 +493,8 @@ class CommandRuntime:
             sections.append(f"Process exited with code {exit_code}")
         if session_id is not None:
             sections.append(f"Process running with session ID {session_id}")
+            if interrupted:
+                sections.append("Wait interrupted by the user.")
         sections.extend(
             (
                 f"Original token count: {_approx_token_count(output)}",

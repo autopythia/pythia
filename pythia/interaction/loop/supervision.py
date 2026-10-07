@@ -23,7 +23,8 @@ from typing import Awaitable, Callable, Optional, Sequence, Tuple
 
 from ..display import render_interaction_items
 from ..environment import Tool, ToolOutcome, ToolSpec
-from ..items import InteractionItem, Message, ModelFailure, ToolCall
+from ..items import InteractionItem, Message, ModelFailure, ToolCall, ToolResult
+from ..items import UserInteractionBoundary
 from ..model import ModelError
 from ..save import SaveError
 from ..user import UserInteraction
@@ -59,12 +60,17 @@ class Yield:
     # that steer was sent to.
     first_user_text: Optional[str] = None
     steer_target_text: Optional[str] = None
+    # The task continued the supervised log's unfinished turn (/continue): its
+    # first turn had no new user message, and job_text is the request that
+    # turn belongs to.
+    continued: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in YIELD_KINDS:
             raise ValueError(f"Yield kind must be one of {YIELD_KINDS}.")
-        if type(self.resumable) is not bool:
-            raise TypeError("resumable must be a bool.")
+        for name in ("resumable", "continued"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be a bool.")
         for name in ("revision", "resumes"):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
@@ -254,6 +260,13 @@ async def supervise(
 READ_LIMIT, READ_MAX_LIMIT, READ_ITEM_CHARS = 20, 50, 2000
 
 
+def _clip(text: str) -> str:
+    """Cut text like one ``read_items`` entry, saying how much was left out."""
+    if len(text) <= READ_ITEM_CHARS:
+        return text
+    return text[:READ_ITEM_CHARS] + f"\n[{len(text) - READ_ITEM_CHARS} more characters omitted]"
+
+
 def read_items(view: Sequence[InteractionItem], start: int, limit: int) -> dict:
     """Render items start..start+limit-1 of a read-only log view as plain text."""
     calls = [item for item in view[:start] if isinstance(item, ToolCall)]
@@ -264,10 +277,7 @@ def read_items(view: Sequence[InteractionItem], start: int, limit: int) -> dict:
             (item,), source_calls=calls, color=False))
         if isinstance(item, ToolCall):
             calls.append(item)
-        if len(text) > READ_ITEM_CHARS:
-            text = (text[:READ_ITEM_CHARS]
-                    + f"\n[{len(text) - READ_ITEM_CHARS} more characters omitted]")
-        entries.append({"index": index, "type": type(item).__name__, "text": text})
+        entries.append({"index": index, "type": type(item).__name__, "text": _clip(text)})
     end = start + len(entries)
     return {"revision": len(view), "start": start, "next": end,
             "has_more": end < len(view), "items": entries}
@@ -348,22 +358,27 @@ def report_text(yield_: Yield, *, supervised: str = "Main") -> str:
 
     The first user message and the steer target appear only when they differ
     from the job text; a steer target equal to the quoted first user message
-    is noted rather than quoted twice.
+    is noted rather than quoted twice. Both are context, so each is cut to
+    ``READ_ITEM_CHARS`` like a ``read_context`` entry; the request is whole.
     """
     outcome = yield_.kind if yield_.reason is None else f"{yield_.kind} ({yield_.reason})"
     first, target = (text if text is not None and text.strip() and text != yield_.job_text
                      else None for text in (yield_.first_user_text, yield_.steer_target_text))
     lines = [f"{supervised} (#{yield_.context}) handed off task {yield_.job_id} "
              f"(watcher resumes so far: {yield_.resumes}).", ""]
+    if yield_.continued:
+        lines += [f"{supervised} continued an unfinished turn from its saved log (/continue); "
+                  "the user sent no new message. The request below is the one that turn "
+                  "belongs to.", ""]
     if first is not None:
-        lines += ["First user message of the session (for context):", first, ""]
+        lines += ["First user message of the session (for context):", _clip(first), ""]
     if target is not None:
         why = f"; {supervised} never received that steer, so it was queued as a separate request"
         if target == first:
             lines += [f"The user sent the request below to steer the message above{why}.", ""]
         else:
             lines += [f"Earlier request (the user sent the request below to steer it{why}):",
-                      target, ""]
+                      _clip(target), ""]
     lines += ["User request:", yield_.job_text]
     if yield_.steers:
         lines += ["", "User steers during this task:"]
@@ -393,6 +408,8 @@ class YieldTool:
     records the note; the turn ends once the batch is saved.
     """
 
+    NAME = "yield"
+
     def __init__(self, supervisor: str = "the watcher") -> None:
         self._supervisor = supervisor
         self._open = False
@@ -408,6 +425,24 @@ class YieldTool:
     def request(self) -> Optional[str]:
         """The recorded handoff note, if any (``run_turn``'s control)."""
         return self._note
+
+    @classmethod
+    def recorded_in(cls, items: Sequence[InteractionItem]) -> bool:
+        """True when a raw log's last turn has a successful ``yield`` result.
+
+        The last turn is the log after its last ``UserInteractionBoundary``
+        (steers and ``/continue`` add none). Such a turn handed off, or would
+        have once its batch was saved (a stop can cut the batch short), so its
+        next step is a reply to the note, not a sample.
+        """
+        items = tuple(items)
+        start = max((index + 1 for index, item in enumerate(items)
+                     if isinstance(item, UserInteractionBoundary)), default=0)
+        turn = items[start:]
+        calls = {item.call_id for item in turn
+                 if isinstance(item, ToolCall) and item.name == cls.NAME}
+        return any(isinstance(item, ToolResult) and item.success and item.call_id in calls
+                   for item in turn)
 
     def tools(self) -> Tuple[Tool, ...]:
         def yield_(arguments, *, timeout_seconds=None):
@@ -431,7 +466,7 @@ class YieldTool:
                                "tool batch is saved.")
 
         return (Tool(ToolSpec(
-            "yield",
+            self.NAME,
             f"Pause this task and hand off to {self._supervisor} for review or a decision. "
             "content says what you have done, why you are handing off, and what you "
             "need. Your turn ends once this tool batch is saved; you get a follow-up "
@@ -475,11 +510,14 @@ def supervised_turn(text: str, resumes: int, context, model, environment, config
                     follow_up: Optional[Callable[[str], str]] = None,
                     steers: Optional[Callable[[], Sequence[Tuple[str, bool]]]] = None,
                     first_user_text: Optional[str] = None,
-                    steer_target_text: Optional[str] = None) -> Yield:
+                    steer_target_text: Optional[str] = None,
+                    continued: bool = False) -> Yield:
     """Run one supervised turn on ``text`` and describe how its loop stopped.
 
     The first turn of a task (``resumes == 0``) gets ``text`` verbatim; a
-    resumed turn gets ``follow_up(text)``. ``control`` (the context's
+    resumed turn gets ``follow_up(text)``. The first turn of a ``continued``
+    task gets no user message: it continues the saved turn where it stopped
+    (``/continue``), and ``text`` only names its request. ``control`` (the context's
     :class:`YieldTool`) is opened for this turn only. ``steers`` returns the
     task's steers as (text, delivered) pairs once the turn has stopped.
     ``first_user_text`` and ``steer_target_text`` are copied into the Yield for
@@ -488,12 +526,13 @@ def supervised_turn(text: str, resumes: int, context, model, environment, config
     """
     fields = {"context": context_id, "job_id": job_id, "job_text": job_text,
               "resumes": resumes, "first_user_text": first_user_text,
-              "steer_target_text": steer_target_text}
+              "steer_target_text": steer_target_text, "continued": continued}
     try:
-        content = text if resumes == 0 or follow_up is None else follow_up(text)
-        user = UserInteraction((Message("user", content),))
-        host.append(context, user.context_items())
-        host.show(user.display_items())
+        if not (continued and resumes == 0):
+            content = text if resumes == 0 or follow_up is None else follow_up(text)
+            user = UserInteraction((Message("user", content),))
+            host.append(context, user.context_items())
+            host.show(user.display_items())
         if control is not None:
             control.begin()
         try:
@@ -527,7 +566,8 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
                         settle: Optional[Callable[[Optional[Yield]], None]] = None,
                         waiting_phase: str = "awaiting supervisor",
                         first_user_text: Optional[str] = None,
-                        steer_target_text: Optional[str] = None) -> Optional[Yield]:
+                        steer_target_text: Optional[str] = None,
+                        continued: bool = False) -> Optional[Yield]:
     """Run one task's turns until the supervisor releases it; return the last Yield.
 
     Runs on the supervised context's thread. Each turn ends in a handoff: its
@@ -546,7 +586,8 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
                 text, resumes, context, model, environment, config, host,
                 job_text=job_text, job_id=job_id, context_id=context_id,
                 control=control, follow_up=follow_up, steers=steers,
-                first_user_text=first_user_text, steer_target_text=steer_target_text)
+                first_user_text=first_user_text, steer_target_text=steer_target_text,
+                continued=continued)
             if not yield_.resumable and on_fault is not None:
                 on_fault(yield_)
             host.phase(waiting_phase)

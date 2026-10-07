@@ -63,21 +63,25 @@ class CLIRecoveryTests(_ControllerTestCase):
     async def test_resume_tail_matrix_replays_raw_history_without_saving_or_sampling(self):
         old = (Init("old"), Tools(), Message("assistant", "historical answer"),
                TurnSummary(sample_count=1))
+        # Each tail: its notice, and whether /continue applies (the turn's
+        # next step would be a sample).
         tails = (
-            ((), None),
-            ((Message("user", "unfinished"), UserInteractionBoundary()), "user submission"),
+            ((), None, False),
+            ((Message("user", "unfinished"), UserInteractionBoundary()), "user submission", True),
             ((ToolCall("record", "one", "{}"), ModelSampleBoundary(),
-              ToolResult("one", "saved result")), "tool results"),
-            ((Message("assistant", "possibly truncated"), ModelSampleBoundary()), "assistant output"),
+              ToolResult("one", "saved result")), "tool results", True),
+            ((Message("assistant", "possibly truncated"), ModelSampleBoundary()),
+             "assistant output", False),
             ((OpaqueCompaction.from_messages("secret messages checkpoint"),
-              ModelSampleBoundary()), "compaction checkpoint"),
-            ((OpaqueCompaction.from_responses("secret responses checkpoint"),), "compaction checkpoint"),
+              ModelSampleBoundary()), "compaction checkpoint", True),
+            ((OpaqueCompaction.from_responses("secret responses checkpoint"),),
+             "compaction checkpoint", True),
             ((ContextPrefix((Message("assistant", "replacement, not transcript"),)),),
-             "context-prefix checkpoint"),
-            ((Instructions("changed"),), "instructions update"),
-            ((Reasoning("thinking"), ModelSampleBoundary()), "incomplete model output"),
+             "context-prefix checkpoint", False),
+            ((Instructions("changed"),), "instructions update", False),
+            ((Reasoning("thinking"), ModelSampleBoundary()), "incomplete model output", True),
         )
-        for tail, notice in tails:
+        for tail, notice, continuable in tails:
             with self.subTest(tail=tail):
                 context = InteractionContext((*old, *tail))
                 save_interaction_save(self.path, context)
@@ -97,6 +101,7 @@ class CLIRecoveryTests(_ControllerTestCase):
                 self.assertEqual("No model request was started" in notices, notice is not None)
                 if notice:
                     self.assertIn(notice, notices)
+                self.assertEqual("enter /continue" in notices, continuable)
                 self.assertNotIn("secret", "\n".join(i.text for i in terminal.items))
 
     async def test_incomplete_response_contributes_completed_items_and_diagnostics(self):

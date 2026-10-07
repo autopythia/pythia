@@ -89,6 +89,11 @@ from .loop import Steer
 from .loop import YIELD_KINDS
 from .loop import run_supervised_task
 from .loop import supervised_turn
+from .loop import TurnTail
+from .loop import turn_tail
+from .loop import unfinished_turn
+from .loop import Preemption
+from .loop import Urgency
 from .messages import DEFAULT_ANTHROPIC_VERSION
 from .messages import MESSAGES_COMPACTION_BETA
 from .messages import MessagesEndpoint
@@ -169,6 +174,11 @@ __all__ = [
     "YIELD_KINDS",
     "run_supervised_task",
     "supervised_turn",
+    "TurnTail",
+    "turn_tail",
+    "unfinished_turn",
+    "Preemption",
+    "Urgency",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
     "CompactionContextWindowError",

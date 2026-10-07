@@ -16,6 +16,7 @@ from pythia.interaction.loop.supervision import YIELD_MAX_CHARS, YieldTool, repo
 from pythia.interaction.loop.supervision import run_supervised_task
 from pythia.interaction.loop import TurnHost
 from pythia.interaction import Environment, Init, InteractionContext, ModelSample, ToolCall
+from pythia.interaction import ToolResult, TurnSummary, UserInteractionBoundary
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.save import SaveError
 
@@ -244,6 +245,20 @@ class HandoffTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(TypeError):
                 self._yield(**fields)
 
+    def test_report_text_cuts_long_context_but_not_the_request(self):
+        from pythia.interaction.loop.supervision import READ_ITEM_CHARS
+        long_first, long_target = "F" * (READ_ITEM_CHARS + 5), "T" * (READ_ITEM_CHARS + 7)
+        text = report_text(self._yield(job_text="R" * (READ_ITEM_CHARS + 9),
+                                       first_user_text=long_first,
+                                       steer_target_text=long_target))
+        self.assertIn("F" * READ_ITEM_CHARS + "\n[5 more characters omitted]\n\n", text)
+        self.assertIn("T" * READ_ITEM_CHARS + "\n[7 more characters omitted]\n\n", text)
+        self.assertIn("User request:\n" + "R" * (READ_ITEM_CHARS + 9) + "\n", text)
+        self.assertNotIn("F" * (READ_ITEM_CHARS + 1), text)
+        # Distinctness is judged on the whole texts, before cutting.
+        same = report_text(self._yield(job_text=long_first, first_user_text=long_first))
+        self.assertNotIn("First user message", same)
+
     def test_yield_tool_records_one_valid_note_per_turn(self):
         binding = YieldTool()
         (tool,) = binding.tools()
@@ -264,6 +279,22 @@ class HandoffTests(unittest.TestCase):
         self.assertIsNone(binding.request())  # cleared for the next turn
         with self.assertRaisesRegex(ValueError, "No turn is open"):
             tool.handler({"content": "late"})
+
+    def test_recorded_in_finds_a_successful_yield_in_the_last_turn(self):
+        note = json.dumps({"content": "Decide?"})
+        start = (Init(model="m"), Message("user", "task"), UserInteractionBoundary())
+        yielded = (ToolCall("yield", "y1", note), ToolResult("y1", "Recorded."))
+        self.assertTrue(YieldTool.recorded_in((*start, *yielded)))
+        self.assertTrue(YieldTool.recorded_in((*start, *yielded, TurnSummary())))
+        self.assertTrue(YieldTool.recorded_in((*start, *yielded, Message("user", "a steer"))))
+        self.assertFalse(YieldTool.recorded_in(start))
+        self.assertFalse(YieldTool.recorded_in(
+            (*start, ToolCall("yield", "y1", note), ToolResult("y1", "Bad.", success=False))))
+        self.assertFalse(YieldTool.recorded_in(
+            (*start, ToolCall("probe", "p1", "{}"), ToolResult("p1", "ok"))))
+        # A follow-up or a new task starts a new turn, after a boundary.
+        self.assertFalse(YieldTool.recorded_in(
+            (*start, *yielded, TurnSummary(), Message("user", "next"), UserInteractionBoundary())))
 
 
 
@@ -352,6 +383,22 @@ class SupervisedTaskLoopTests(unittest.TestCase):
         self.assertEqual(result.kind, "ended")
         self.assertEqual(len(channel.yields), 1)
         self.assertEqual(settled, [result])
+
+    def test_a_continued_task_starts_without_a_user_message(self):
+        model = self.Model(ModelSample((Message("assistant", "draft"),)),
+                           ModelSample((Message("assistant", "done"),)))
+        channel = self.Channel("More.", None)
+        self._run(model, channel, continued=True)
+        users = [[item.content for item in context.items
+                  if isinstance(item, Message) and item.role == "user"]
+                 for context in model.contexts]
+        self.assertEqual(users, [[], ["Follow-up: More."]])
+        self.assertEqual([(y.continued, y.resumes) for y in channel.yields],
+                         [(True, 0), (True, 1)])
+        self.assertIn("Main continued an unfinished turn", report_text(channel.yields[0]))
+        with self.assertRaises(TypeError):
+            Yield(context=1, job_id="1", job_text="x", kind="ended", resumable=True,
+                  revision=0, final_text="ok", continued=1)
 
     def test_every_yield_of_the_task_carries_the_context_texts(self):
         texts = {"first_user_text": "Build it.", "steer_target_text": "Plan it."}

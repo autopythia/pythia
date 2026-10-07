@@ -720,7 +720,8 @@ class CLIControllerTests(_ControllerTestCase):
             text = f"query-{index}"
             state.editor = Editor(text, len(text))
             state.handle_key("c-m", "\r")
-        self.assertEqual(tuple(state.pending), tuple(f"query-{i}" for i in range(8)))
+        self.assertEqual(tuple(entry.text for entry in state.pending),
+                         tuple(f"query-{i}" for i in range(8)))
         self.assertEqual(state.editor, Editor("query-8", 7))
         state.handle_key("c-d", "")
         self.assertTrue(state.closing)
@@ -1199,6 +1200,53 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertIn("[user] Also check the tests.", [item.text for item in terminal.items])
         self.assertFalse(any("queued=" in status for _editor, status, _prompt in terminal.frames))
 
+    async def test_steer_flushes_the_queued_steer_and_skips_the_rest_of_the_batch(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def probe(arguments, *, timeout_seconds=None):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release tool")
+            return ToolOutcome("probed")
+        later = mock.Mock(return_value=ToolOutcome("never"))
+        step = 0
+
+        def frame(t, editor, status):
+            nonlocal step
+            if step == 0 and entered.is_set():
+                t.submit("Also check the tests.")
+                step = 1
+            elif step == 1 and "steers=1" in status:
+                t.submit("/steer")  # flush the steer typed above
+                step = 2
+            elif step == 2 and "steers=1 (immediate)" in status:
+                release.set()
+                step = 3
+            elif step == 3 and status == "idle" and any(
+                    i.text == "[assistant] done" for i in t.items):
+                t.key("c-d")
+                step = 4
+
+        terminal = _Terminal(frame)
+        environment = Environment((Tool(ToolSpec("probe", "", {}), probe),
+                                   Tool(ToolSpec("later", "", {}), later)))
+        model = _Model(self.path, ModelSample(items=(ToolCall("probe", "p1", "{}"),
+                                                     ToolCall("later", "p2", "{}"))),
+                       _answer("done"))
+        try:
+            self.assertEqual(await self._run(
+                model, terminal, ["--prompt", "hello"], environment), 0)
+        finally:
+            release.set()
+        self.assertEqual(step, 4)
+        later.assert_not_called()
+        steer = Message("user", "Also check the tests.")
+        self.assertEqual(model.calls[1][0].items[-3:], (
+            ToolResult("p1", "probed"),
+            ToolResult("p2", kernel.SKIPPED_OUTPUT, success=False), steer))
+        self.assertIn("[cli] Flushing 1 steer: delivered once the current sample or tool "
+                      "call finishes.", [item.text for item in terminal.items])
+
     async def test_quit_drains_sample_without_executing_returned_tools(self):
         entered, release = threading.Event(), threading.Event()
         call = ToolCall("must_not_run", "one", "{}")
@@ -1222,6 +1270,93 @@ class CLIControllerTests(_ControllerTestCase):
         finally:
             release.set()
         self.assertEqual(load_interaction_save(self.path).pending_tool_calls(), (call,))
+
+    async def test_one_ctrl_c_lets_the_sample_finish_and_saves_it(self):
+        entered, release, retires = threading.Event(), threading.Event(), []
+        waiting = "closing — waiting for current operation; Ctrl-C again or /exit! cancels it"
+
+        def sample(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release model")
+            return _answer("finished anyway")
+        pressed = []
+
+        def frame(t, editor, status):
+            if entered.is_set() and not pressed:
+                t.key("c-c")
+                pressed.append(True)
+            if status.startswith(waiting):  # then the elapsed time
+                release.set()
+
+        terminal = _Terminal(frame)
+        model = _Model(self.path, sample)
+        model.retire = lambda: retires.append(True)
+        try:
+            self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
+        finally:
+            release.set()
+        self.assertEqual(len(retires), 1)  # only the turn's end: the press cancelled nothing
+        saved = load_interaction_save(self.path)
+        self.assertIn(Message("assistant", "finished anyway"), saved.items)
+
+    async def test_a_second_ctrl_c_or_a_closed_terminal_cancels_the_sample(self):
+        from pythia.interaction import ModelTransportError
+        for how in ("ctrl-c twice", "terminal closed"):
+            with self.subTest(how=how):
+                entered, retired = threading.Event(), threading.Event()
+
+                def sample(context):
+                    entered.set()
+                    if not retired.wait(2):
+                        raise AssertionError("the model was not retired")
+                    raise ModelTransportError("Claude Relay continuation retired")
+                presses = []
+
+                def frame(t, editor, status):
+                    if not entered.is_set():
+                        return
+                    if how == "terminal closed":
+                        t.closed = True
+                    elif len(presses) < 2:
+                        t.key("c-c")
+                        presses.append(status)
+
+                terminal = _Terminal(frame)
+                model = _Model(self.path, sample)
+                model.retire = retired.set
+                self.assertEqual(await self._run(
+                    model, terminal, ["--prompt", "hello", "--resume=False"]), 0)
+                self.assertTrue(retired.is_set())
+                self.assertTrue(any(status.startswith("closing — cancelling current operation")
+                                    for _editor, status, _prompt in terminal.frames))
+
+    def test_exit_commands_and_the_editor_while_stopping(self):
+        state = cli._UIState(ready=True)
+        state.editor = Editor("/exit", 5)
+        state.handle_key("c-m", "\r")
+        self.assertTrue(state.closing)
+        self.assertFalse(state.preempting)
+        for key, data in (("c-u", ""), ("<bracketed-paste>", "/exit")):
+            state.handle_key(key, data)  # the editor stays usable
+        self.assertEqual(state.editor.text, "/exit")
+        state.handle_key("c-m", "\r")
+        state.editor = Editor("more work", 9)
+        state.handle_key("c-m", "\r")
+        self.assertEqual(state.editor.text, "more work")
+        self.assertEqual([item.text for item in state.displays], [
+            "[cli] Already stopping; /exit! or Ctrl-C cancels the current operation.",
+            "[cli] Stopping; only /exit! or Ctrl-C is accepted."])
+        self.assertFalse(state.pending)
+        state.editor = Editor("/exit!", 6)
+        state.handle_key("c-m", "\r")
+        self.assertTrue(state.preempting)
+        self.assertTrue(state.preemption.stopped)
+        self.assertEqual(state.editor.text, "")
+        fresh = cli._UIState(ready=True)
+        fresh.editor = Editor("/quit!", 6)
+        fresh.handle_key("c-m", "\r")
+        self.assertTrue(fresh.closing and fresh.preempting)  # both stages at once
 
     async def test_quit_during_tool_checkpoints_its_result_and_skips_remaining_calls(self):
         entered, release = threading.Event(), threading.Event()

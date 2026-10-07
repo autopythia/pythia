@@ -25,6 +25,7 @@ from pythia.interaction import (
 )
 from pythia.interaction import auto, cli, demo
 from pythia.interaction.loop import kernel
+from pythia.interaction.loop import Preemption
 from pythia.interaction._auto_config import (
     DEFAULTS, build_parser, load_saved_config, namespace, resolve_config, saved_document,
 )
@@ -421,6 +422,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
             _checkpoint=lambda index, context, items: context.extend(items),
             _traced_operation=lambda *args, **kwargs: nullcontext(),
             _take_steers=lambda: (),
+            _preemption={1: Preemption()},
         )
         for model in (CaptureHost(), CaptureMessages(trigger=150_000)):
             for threshold in (None, 100_000):
