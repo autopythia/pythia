@@ -136,10 +136,14 @@ from .runtime_config import CONFIG_KEYS
 from .runtime_config import ConfigError
 from .runtime_config import InteractionConfig
 from .runtime_config import InteractionConfigSnapshot
+from .save import IncompleteSaveLine
+from .save import InteractionSaveWriter
+from .save import ResumedInteractionSave
 from .save import SaveError
 from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
 from .save import load_interaction_save
+from .save import resume_interaction_save
 from .save import save_interaction_save
 from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -257,6 +261,9 @@ __all__ = [
     "parse_model_catalog",
     "LATEST_MODEL_CATALOG_VERSION",
     "Init",
+    "IncompleteSaveLine",
+    "InteractionSaveWriter",
+    "ResumedInteractionSave",
     "SaveError",
     "TextPart",
     "TokenUsage",
@@ -293,6 +300,7 @@ __all__ = [
     "load_codex_auth",
     "load_codex_credentials",
     "load_interaction_save",
+    "resume_interaction_save",
     "save_interaction_save",
     "should_auto_compact",
     "summarize_turn_usage",

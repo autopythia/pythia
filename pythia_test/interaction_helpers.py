@@ -7,6 +7,7 @@ from unittest import mock
 from pythia.interaction import BUILTIN_MODEL_CATALOG
 from pythia.interaction import ChatCompletionsEndpoint
 from pythia.interaction import CodexResponsesModel
+from pythia.interaction import InteractionSaveWriter
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction.codex_auth import _resolve_auth_file
@@ -147,3 +148,17 @@ def patch_compaction(app, name, *args, **kwargs):
             for target in targets[1:]:
                 stack.enter_context(mock.patch.object(target, name, patched))
             yield patched
+
+
+# The unpatched save, for patch_saves side effects that do save.
+real_save = InteractionSaveWriter.save
+
+
+def patch_saves(side_effect=None):
+    """Patch ``InteractionSaveWriter.save``, every frontend's checkpoint path.
+
+    The mock records each call as ``(writer, context)`` and passes the same to
+    ``side_effect``, which may raise to inject a failure or call ``real_save``.
+    """
+    return mock.patch.object(InteractionSaveWriter, "save", autospec=True,
+                             side_effect=side_effect)

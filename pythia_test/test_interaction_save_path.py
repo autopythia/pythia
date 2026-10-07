@@ -19,6 +19,7 @@ from pythia.interaction import (
 )
 from pythia.interaction.model_config import DEFAULT_SAVE_PATH, resolve_save_path
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
+from pythia_test.interaction_helpers import patch_saves
 
 
 _COMPLETED = (Init("previous"), Message("assistant", "previous answer"), TurnSummary())
@@ -274,14 +275,14 @@ class SaveEntrypointTests(_SavePathTestCase):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
                 self.selected.write_bytes(b"previous selected contents\n")
-                with mock.patch.object(frontend, "save_interaction_save", side_effect=OSError("disk failure")) as save:
+                with patch_saves(OSError("disk failure")) as save:
                     code, model, terminal, printed = self._main(
                         frontend, ["--resume=False", "--prompt", "hello"], samples=(),
                     )
                 self.assertEqual(code, 1)
                 self.assertEqual(model.calls, [])
                 save.assert_called_once()
-                self.assertEqual(Path(save.call_args.args[0]), self.selected)
+                self.assertEqual(save.call_args.args[0].path, self.selected)
                 self.assertEqual(self.selected.read_bytes(), b"previous selected contents\n")
                 if frontend is cli:
                     self.assertTrue(any("unsaved state remains in memory" in i.text for i in terminal.items))
@@ -340,7 +341,7 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_programmatic_demo_can_still_disable_persistence(self):
         model = mock.Mock(spec=["sample"])
         model.sample.return_value = _answer()
-        with mock.patch("builtins.print"), mock.patch.object(demo, "save_interaction_save") as save:
+        with mock.patch("builtins.print"), patch_saves() as save:
             self.assertEqual(demo.run(model, Environment(), prompt="hello", save_path=None), "done")
         save.assert_not_called()
         self.assert_default_untouched()

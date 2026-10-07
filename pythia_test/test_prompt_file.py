@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from pythia.interaction import auto, cli, demo
+from pythia_test.interaction_helpers import patch_saves
 from pythia.interaction._auto_config import build_parser as auto_parser
 from pythia.interaction._prompt import load_prompt
 
@@ -98,7 +99,7 @@ class PromptFileTests(unittest.TestCase):
             with self.subTest(frontend=frontend.__name__):
                 with mock.patch.object(frontend, "build_model") as model, \
                         mock.patch.object(frontend, "DefaultEnvironment") as environment, \
-                        mock.patch.object(frontend, "save_interaction_save") as checkpoint, \
+                        patch_saves() as checkpoint, \
                         mock.patch.object(auto, "_Session") as session, \
                         redirect_stderr(io.StringIO()):
                     self.assertEqual(frontend.main([
@@ -116,7 +117,7 @@ class PromptFileTests(unittest.TestCase):
         source.write_text(text, encoding="utf-8")
         for headless in (False, True):
             with self.subTest(headless=headless):
-                session = mock.Mock(has_errors=False)
+                session = mock.Mock(has_errors=False, save_warnings=())
                 session.service.base_url = "http://127.0.0.1:43210"
                 output = io.StringIO()
 

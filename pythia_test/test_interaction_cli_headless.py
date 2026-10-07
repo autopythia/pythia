@@ -23,6 +23,7 @@ from pythia.interaction import (
 from pythia.interaction.codex_auth import CodexAuthUnavailable
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_pty import _SCRIPT
+from pythia_test.interaction_helpers import patch_saves
 
 
 class NoInput:
@@ -144,7 +145,7 @@ class HeadlessCLITests(unittest.TestCase):
 
     def test_save_failure_exits_without_waiting_for_quit(self):
         self.path.write_bytes(b"old save\n")
-        with mock.patch.object(cli, "save_interaction_save", side_effect=OSError("disk failed")):
+        with patch_saves(OSError("disk failed")):
             code, model, _, stderr = self.run_main(["--resume=False", "--prompt", "hello"])
         self.assertEqual(code, 1)
         self.assertEqual(model.calls, [])

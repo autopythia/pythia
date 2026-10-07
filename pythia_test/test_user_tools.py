@@ -12,7 +12,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from pythia_test.interaction_helpers import patch_compaction
+from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save
 from unittest import mock
 
 from pythia.interaction import (
@@ -786,7 +786,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     before = self.path.read_bytes()
                     self.args.resume = True
                     replay = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-                    with mock.patch.object(cli, "save_interaction_save") as save:
+                    with patch_saves() as save:
                         self.assertEqual(await self.run_cli(model, replay), 0)
                     save.assert_not_called()
                     opener.assert_called_once()
@@ -866,11 +866,11 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(fail_result=fail_result):
                 attempted = []
 
-                def save(path, context):
+                def save(writer, context):
                     target = UserToolResult if fail_result else UserToolCall
                     if any(isinstance(i, target) for i in context):
                         raise OSError("disk failed")
-                    save_interaction_save(path, context)
+                    real_save(writer, context)
 
                 def login(path, **kwargs):
                     attempted.append(True)
@@ -881,7 +881,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     if status == "failed":
                         t.key("c-d")
 
-                with mock.patch.object(cli, "save_interaction_save", side_effect=save):
+                with patch_saves(save):
                     with mock.patch.object(user_tools, "login", side_effect=login):
                         with mock.patch.object(cli, "build_model") as activate:
                             self.assertEqual(await self.run_cli(None, _Terminal(frame)), 1)
@@ -1122,7 +1122,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         before = self.path.read_bytes()
         replay = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         with patch_compaction(cli, "create_default_compactor") as replay_create:
-            with mock.patch.object(cli, "save_interaction_save") as save:
+            with patch_saves() as save:
                 self.assertEqual(await self.run_cli(model, replay), 0)
         replay_create.assert_not_called()
         save.assert_not_called()
@@ -1453,12 +1453,10 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         compactor.compact.return_value = CompactionResult((ContextPrefix((
             Message("user", "summary"),
         )),))
-        real_save = save_interaction_save
-
-        def fail_checkpoint(path, context):
+        def fail_checkpoint(writer, context):
             if any(isinstance(item, ContextPrefix) for item in context):
                 raise OSError("disk failed")
-            real_save(path, context)
+            real_save(writer, context)
 
         submitted = False
 
@@ -1471,7 +1469,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 t.key("c-d")
 
         with patch_compaction(cli, "create_default_compactor", return_value=compactor):
-            with mock.patch.object(cli, "save_interaction_save", side_effect=fail_checkpoint):
+            with patch_saves(fail_checkpoint):
                 self.assertEqual(await self.run_cli(model, _Terminal(frame)), 1)
         compactor.compact.assert_called_once()
         interrupted = load_interaction_save(self.path)

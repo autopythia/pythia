@@ -52,12 +52,12 @@ class Environment(cli.DefaultEnvironment):
 cli.DefaultEnvironment = Environment
 
 if failure in {"initial-save", "save"}:
-    save = cli.save_interaction_save
-    def fail_save(path, context):
+    save = cli.InteractionSaveWriter.save
+    def fail_save(writer, context):
         if failure == "initial-save" or any(isinstance(i, ToolResult) for i in context):
             raise OSError("injected checkpoint failure")
-        save(path, context)
-    cli.save_interaction_save = fail_save
+        save(writer, context)
+    cli.InteractionSaveWriter.save = fail_save
 elif failure == "render":
     render = cli.PosixTerminal.render
     def fail_render(self, editor, status, items, prompt=":> "):

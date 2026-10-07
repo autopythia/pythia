@@ -25,6 +25,7 @@ from pythia.interaction import (
     PiCompactor, ResponsesOpaqueCompactor, ToolCall, ToolResult, cli,
     codex_quota, load_interaction_save,
 )
+from pythia.interaction import InteractionSaveWriter
 from pythia.interaction import _debug_trace
 from pythia.interaction._account_http import AccountServiceError
 from pythia.interaction._debug_trace import (
@@ -801,7 +802,7 @@ class CLITraceTests(unittest.TestCase):
             create.return_value.execute_tool_calls.side_effect = execute
             asyncio.run(cli._user_tool(
                 UserToolIntent("quota", "{}"), None, InteractionContext((Init(model="m"),)),
-                state, self.save, args, Environment(), mock.Mock(),
+                state, InteractionSaveWriter(self.save), args, Environment(), mock.Mock(),
             ))
         account_opener = create.call_args.kwargs["opener"]
         self.assertIsInstance(account_opener, TracingOpener)

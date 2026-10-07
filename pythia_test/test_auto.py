@@ -27,6 +27,7 @@ from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingTo
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import load_interaction_save, save_interaction_save
 from pythia.interaction import auto
+from pythia_test.interaction_helpers import patch_saves, real_save
 from pythia.interaction.loop import kernel
 from pythia.interaction import SampleParams
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -869,7 +870,7 @@ class RuntimeTests(unittest.TestCase):
             # A compaction prefix drops tool snapshots from model_items, but
             # resume must still compare the raw log's latest snapshot.
             context.append(ContextPrefix((Message("assistant", "summary"),)))
-            auto.save_interaction_save(path, context)
+            save_interaction_save(path, context)
 
         for tools, expected_count in ((extra("first"), 1), (extra("changed"), 2), ((), 3), ((), 3)):
             session = self.session({}, extra_tools=tools, worker_board=False, resume=True)
@@ -887,7 +888,7 @@ class RuntimeTests(unittest.TestCase):
         for index in (1, -1):
             path = self.path / "contexts" / f"{index}.jsonl"
             context = load_interaction_save(path)
-            auto.save_interaction_save(path, auto.InteractionContext(
+            save_interaction_save(path, auto.InteractionContext(
                 item for item in context if not isinstance(item, Tools)
             ))
         session = self.session({}, worker_board=False, resume=True)
@@ -1766,7 +1767,7 @@ class RuntimeTests(unittest.TestCase):
                 item = auto.Instructions(item.text.replace("read_context", "read_main_context")
                                          .replace("call resume once", "call resume_main once"))
             old.append(item)
-        auto.save_interaction_save(path, auto.InteractionContext(old))
+        save_interaction_save(path, auto.InteractionContext(old))
 
         restored_session = self.session({1: [answer("next done")], -1: [answer("Complete.")]},
                                         worker_board=False, resume=True)
@@ -1966,13 +1967,12 @@ class RuntimeTests(unittest.TestCase):
 
     def test_summary_save_failure_blocks_watcher(self):
         session = self.session({1: [answer()]})
-        real_save = auto.save_interaction_save
-        def save(path, context):
+        def save(writer, context):
             if isinstance(context.items[-1], TurnSummary):
                 from pythia.interaction import SaveError
                 raise SaveError("disk")
-            return real_save(path, context)
-        with mock.patch.object(auto, "save_interaction_save", save):
+            return real_save(writer, context)
+        with patch_saves(save):
             source = session.submit("fail summary")
             self.assertFalse(self.finished(session, source["thread_id"]))
             session.close()
@@ -2534,7 +2534,7 @@ class RuntimeTests(unittest.TestCase):
         session = self.session({})
         session.close()
         context_path = self.path / "contexts" / "2.jsonl"
-        auto.save_interaction_save(
+        save_interaction_save(
             context_path, auto.InteractionContext((Message("user", "not auto metadata"),))
         )
         before = {path.relative_to(self.path): path.read_bytes()
@@ -2590,7 +2590,7 @@ class RuntimeTests(unittest.TestCase):
         context = load_interaction_save(context_path)
         call = ToolCall("exec_command", "old command", '{"cmd":"must-not-run"}')
         context.extend((call, ModelSampleBoundary()))
-        auto.save_interaction_save(context_path, context)
+        save_interaction_save(context_path, context)
         prefix = context.items
         calls = dict((index, len(values)) for index, values in self.calls.items())
 
@@ -2611,6 +2611,37 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(sum(isinstance(item, ToolResult) and item.call_id == call.call_id
                              for item in again), 1)
         repeated.close()
+
+    def test_resume_reports_and_truncates_a_cut_off_context_line(self):
+        session = self.session({}, worker_board=False)
+        session.close()
+        context_path = self.path / "contexts" / "1.jsonl"
+        durable = context_path.read_bytes()
+        complete = load_interaction_save(context_path).items
+        cut_off = b'{"type": "message", "role": "assistant", "content": "unfin'
+        context_path.write_bytes(durable + cut_off)
+        watcher = (self.path / "contexts" / "-1.jsonl").read_bytes()
+
+        resumed = self.session({}, worker_board=False, resume=True)
+        try:
+            warning = (f"Warning: contexts/1.jsonl ends with a line that fails to parse (line "
+                       f"{len(complete) + 1}, {len(cut_off)} bytes), probably cut off by an "
+                       "interrupted save. It was not loaded and is truncated from the file.")
+            self.assertEqual(resumed.save_warnings, [warning])
+            texts = [item.text for event in resumed.drain_events() for item in event.items]
+            self.assertEqual(texts.count(warning), 1)
+            # The startup checkpoint truncated the line, then appended its restart notice.
+            saved = context_path.read_bytes()
+            self.assertTrue(saved.startswith(durable))
+            self.assertNotIn(cut_off, saved)
+            restored = load_interaction_save(context_path)
+            self.assertEqual(restored.items[:len(complete)], complete)
+            self.assertEqual(restored.items[len(complete):],
+                             (auto.Instructions(complete[1].text + "\n\n" + auto._RESTART_NOTICE),))
+            self.assertTrue((self.path / "contexts" / "-1.jsonl").read_bytes().startswith(watcher))
+        finally:
+            resumed.close()
+        self.assertEqual(self.calls, {1: [], 2: []})
 
     def test_default_runs_only_main_and_watcher_without_board(self):
         session = self.session({1: [answer("main done")], -1: [answer("Complete.")]},
@@ -2971,15 +3002,13 @@ class RuntimeTests(unittest.TestCase):
 
     def test_fault_reaches_the_watcher_before_it_stops_the_session(self):
         session = self.session({1: [answer()]}, worker_board=False)
-        real_save = auto.save_interaction_save
-
-        def save(path, context):
-            if path.name == "1.jsonl" and isinstance(context.items[-1], TurnSummary):
+        def save(writer, context):
+            if writer.path.name == "1.jsonl" and isinstance(context.items[-1], TurnSummary):
                 from pythia.interaction import SaveError
                 raise SaveError("disk")
-            return real_save(path, context)
+            return real_save(writer, context)
 
-        with mock.patch.object(auto, "save_interaction_save", save):
+        with patch_saves(save):
             submitted = session.submit("fail summary")
             self.assertFalse(self.settled(session, submitted))
             wait_for(session._stop.is_set)
@@ -3105,6 +3134,7 @@ class EntryPointTests(unittest.TestCase):
 
         class Session:
             has_errors = False
+            save_warnings = ()
             service = None
 
             def __init__(self, *args, **kwargs):
@@ -3155,6 +3185,7 @@ class EntryPointTests(unittest.TestCase):
 
         class Session:
             has_errors = False
+            save_warnings = ()
             service = SimpleNamespace(base_url="http://127.0.0.1:1")  # Board mode prints it.
 
             def __init__(self, path, settings, **kwargs):
@@ -3535,6 +3566,7 @@ class EntryPointTests(unittest.TestCase):
         created = []
         class Session:
             has_errors = False
+            save_warnings = ()
             service = SimpleNamespace(base_url="http://127.0.0.1:43210")
             def __init__(self, *args, **kwargs):
                 created.append(kwargs)
@@ -3575,6 +3607,7 @@ class EntryPointTests(unittest.TestCase):
 
         class Session:
             has_errors = False
+            save_warnings = ()
             service = SimpleNamespace(base_url="http://127.0.0.1:43210")
 
             def __init__(self, *args, **kwargs):
@@ -3630,6 +3663,39 @@ class EntryPointTests(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["display"])
         self.assertEqual(output.getvalue().count("Board: "), 1)
 
+    def test_headless_main_reports_repaired_context_logs_on_stderr(self):
+        warning = "Warning: contexts/1.jsonl ends with a line that fails to parse (line 4, 9 bytes)"
+
+        class Session:
+            has_errors = False
+            save_warnings = (warning,)
+            service = SimpleNamespace(base_url="http://127.0.0.1:43210")
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                return self
+
+            def close(self):
+                pass
+
+            def drain_events(self):
+                return ()
+
+        # Without --headless the warning is a session event, which the run displays.
+        for headless in (True, False):
+            with self.subTest(headless=headless):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (mock.patch.object(auto, "_Session", Session),
+                      mock.patch.object(auto, "_one_prompt", return_value=0),
+                      redirect_stdout(stdout), redirect_stderr(stderr)):
+                    self.assertEqual(auto.main([
+                        "--no-user-model-catalog", "--enable-experimental-worker-board",
+                        f"--headless={headless}", "--prompt", "task", "--save", "unused",
+                    ]), 0)
+                self.assertEqual(stderr.getvalue(), warning + "\n" if headless else "")
+
     def test_headless_false_keeps_non_tty_validation(self):
         for argv in ([], ["--headless", "False"]):
             with self.subTest(argv=argv):
@@ -3648,6 +3714,7 @@ class EntryPointTests(unittest.TestCase):
 
         class Session:
             has_errors = False
+            save_warnings = ()
             service = SimpleNamespace(base_url="http://127.0.0.1:43210")
 
             def __init__(self, *args, **kwargs):
@@ -3685,6 +3752,7 @@ class EntryPointTests(unittest.TestCase):
     def test_headless_main_suppresses_events_on_startup_runtime_and_interrupt(self):
         class Session:
             has_errors = False
+            save_warnings = ()
             service = SimpleNamespace(base_url="http://127.0.0.1:43210")
 
             def __init__(self, *args, **kwargs):

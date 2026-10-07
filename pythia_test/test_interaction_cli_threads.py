@@ -14,7 +14,9 @@ from unittest import mock
 
 from pythia.interaction import Environment, Init, InteractionContext, Message, ModelSample
 from pythia.interaction import Tool, ToolCall, ToolOutcome, ToolSpec
+from pythia.interaction import InteractionSaveWriter
 from pythia.interaction import cli
+from pythia_test.interaction_helpers import patch_saves, real_save
 from pythia.interaction._cli_editor import Editor
 from pythia.interaction.loop import Urgency, kernel
 from pythia.interaction.model import ModelTransportError
@@ -53,17 +55,14 @@ class CliContextThreadTests(unittest.IsolatedAsyncioTestCase):
             seen["tool"].add(threading.get_ident())
             return ToolOutcome(output="ok")
         environment = Environment((Tool(ToolSpec("probe", "Probe.", {"type": "object"}), handler),))
-        original_save = cli.save_interaction_save
-
-        def save(path, context):
+        def save(writer, context):
             seen["save"].add(threading.get_ident())
-            return original_save(path, context)
+            return real_save(writer, context)
         state = cli._UIState(headless=True)
         state.displays = Displays()
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(cli, "save_interaction_save", save):
+        with tempfile.TemporaryDirectory() as directory, patch_saves(save):
             result = await cli._turn(_context(), Model(), environment, state,
-                                     Path(directory) / "log.jsonl",
+                                     InteractionSaveWriter(Path(directory) / "log.jsonl"),
                                      InteractionConfig(InteractionConfigSnapshot()))
         self.assertEqual(result.final_text, "done")
         context_threads = seen["sample"] | seen["tool"] | seen["save"]
@@ -83,7 +82,7 @@ class CliContextThreadTests(unittest.IsolatedAsyncioTestCase):
                 raise ModelTransportError("Claude Relay continuation was retired during sampling")
         with tempfile.TemporaryDirectory() as directory:
             result = await cli._turn(_context(), Model(), Environment(), state,
-                                     Path(directory) / "log.jsonl",
+                                     InteractionSaveWriter(Path(directory) / "log.jsonl"),
                                      InteractionConfig(InteractionConfigSnapshot()))
         self.assertEqual(result.kind, "stopped")
         self.assertIsNone(state.retry)
@@ -97,7 +96,7 @@ class CliContextThreadTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ModelTransportError):
                 await cli._turn(_context(), Model(), Environment(), state,
-                                Path(directory) / "log.jsonl",
+                                InteractionSaveWriter(Path(directory) / "log.jsonl"),
                                 InteractionConfig(InteractionConfigSnapshot()))
         self.assertIsInstance(state.retry, cli._RetryIntent)
 
@@ -107,7 +106,7 @@ class CliSteeringTests(unittest.IsolatedAsyncioTestCase):
     async def _turn(self, state, model, environment=None):
         with tempfile.TemporaryDirectory() as directory:
             return await cli._turn(_context(), model, environment or Environment(), state,
-                                   Path(directory) / "log.jsonl",
+                                   InteractionSaveWriter(Path(directory) / "log.jsonl"),
                                    InteractionConfig(InteractionConfigSnapshot()),
                                    steering=True)
 

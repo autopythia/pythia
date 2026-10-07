@@ -55,7 +55,7 @@ from .model import close_model, retire_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .runtime_config import InteractionConfig
-from .save import SaveError, load_interaction_save, save_interaction_save
+from .save import InteractionSaveWriter, SaveError, resume_interaction_save
 from .timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .user import UserInteraction
@@ -459,6 +459,9 @@ class _Session:
         self._resumed = False
         self._baseline = 0
         self._contexts = {}
+        self._writers = {}
+        # Warnings about context logs repaired on resume, for display.
+        self.save_warnings = []
         self._lock_file = None
         self._stop = threading.Event()
         self._changed = threading.Condition()
@@ -556,10 +559,16 @@ class _Session:
                                      "--enable-experimental-worker-board.")
                 contexts_path = self.path / "contexts"
                 for index in self.roles:
-                    context = load_interaction_save(contexts_path / f"{index}.jsonl")
+                    # Read-only: a resumed writer truncates a line that fails
+                    # to parse at its first save, the owner's startup checkpoint.
+                    context, writer, incomplete = resume_interaction_save(
+                        contexts_path / f"{index}.jsonl")
                     if not len(context) or not isinstance(context[0], Init):
                         raise ValueError("Auto context history must begin with initialization metadata.")
                     self._contexts[index] = context
+                    self._writers[index] = writer
+                    if incomplete is not None:
+                        self.save_warnings.append(incomplete.warning(f"contexts/{index}.jsonl"))
                 if self.worker_board:
                     restored = Board.restore(self.path)
                     self._baseline = len(restored)
@@ -568,6 +577,9 @@ class _Session:
                             self._done[record.reply_to] = record.success
             else:
                 (self.path / "contexts").mkdir(mode=0o700)
+                for index in self.roles:
+                    self._writers[index] = InteractionSaveWriter(
+                        self.path / "contexts" / f"{index}.jsonl")
             if self._debug_trace:
                 for index in self.roles:
                     if index == -1 and not self._supervising:
@@ -615,6 +627,8 @@ class _Session:
                 self._emit(None, (DisplayItem(
                     "Resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
                 ),))
+                if self.save_warnings:
+                    self._emit(None, tuple(DisplayItem(w) for w in self.save_warnings))
                 with self._changed:
                     tail = self._main_tail
                 if tail is not None and tail.refusal is None:
@@ -738,7 +752,7 @@ class _Session:
         self._phase(index, "saving")
         context.extend(items)
         try:
-            save_interaction_save(self.path / "contexts" / f"{index}.jsonl", context)
+            self._writers[index].save(context)
         except Exception:
             # Serialization/encoding failures are persistence failures too, not
             # permission to continue from accepted-but-unsaved state.
@@ -1698,6 +1712,10 @@ def main(argv=None):
                            enable_experimental_worker_board=args.enable_experimental_worker_board,
                            watcher_observe_only=args.watcher_observe_only)
         session.start()
+        if args.headless:
+            # Headless runs drop session events; repairs must still be reported.
+            for warning in session.save_warnings:
+                print(warning, file=sys.stderr, flush=True)
         session._trace_to_events = not args.headless and args.prompt is None
         if args.enable_experimental_worker_board:
             if not args.enable_board_auth:

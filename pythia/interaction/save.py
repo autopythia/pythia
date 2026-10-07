@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
+import threading
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import BinaryIO
 from typing import Dict
 from typing import Iterable
 from typing import Iterator
+from typing import List
 from typing import Mapping
+from typing import NamedTuple
 from typing import Optional
 from typing import Tuple
 from typing import Union
@@ -768,32 +775,60 @@ def iter_interaction_items(
         yield interaction_item_to_dict(item)
 
 
-def save_interaction_save(path: SavePath, context: InteractionContext) -> None:
-    """Atomically write a context as one JSON interaction item per line."""
-    destination = Path(path)
+# Binary, so Windows does not translate newlines in appended lines.
+_OPEN_FLAGS = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _encode_items(items: Iterable[InteractionItem]) -> bytes:
+    """One JSON line per item, encoded completely before any file is touched."""
+    return "".join(
+        json.dumps(encoded, ensure_ascii=False) + "\n"
+        for encoded in iter_interaction_items(items)
+    ).encode("utf-8")
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "short write")
+        view = view[written:]
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` durable, where the platform allows it."""
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | _OPEN_FLAGS)
+    except OSError:
+        return  # Windows cannot open a directory; the file itself was synced.
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass  # Some filesystems cannot sync directories.
+    finally:
+        os.close(descriptor)
+
+
+def _replace_atomically(destination: Path, data: bytes) -> os.stat_result:
+    """Replace ``destination`` with ``data`` atomically; return the file's status."""
     temporary_name: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode="wb",
             dir=destination.parent,
             prefix=f".{destination.name}.",
             suffix=".tmp",
             delete=False,
         ) as temporary:
             temporary_name = temporary.name
-            for encoded in iter_interaction_items(context.items):
-                temporary.write(
-                    json.dumps(
-                        encoded,
-                        ensure_ascii=False,
-                    )
-                )
-                temporary.write("\n")
+            temporary.write(data)
             temporary.flush()
             os.fsync(temporary.fileno())
+            status = os.fstat(temporary.fileno())
         os.replace(temporary_name, destination)
         temporary_name = None
+        _fsync_directory(destination.parent)
     except OSError as exc:
         raise SaveError(
             f"could not write save to {destination}: {exc}"
@@ -804,46 +839,275 @@ def save_interaction_save(path: SavePath, context: InteractionContext) -> None:
                 os.unlink(temporary_name)
             except FileNotFoundError:
                 pass
+    return status
 
 
-def load_interaction_save(path: SavePath) -> InteractionContext:
-    """Load and validate a JSONL interaction-save file."""
-    source = Path(path)
-    items: list[InteractionItem] = []
+def save_interaction_save(path: SavePath, context: InteractionContext) -> None:
+    """Atomically write a context as one JSON interaction item per line.
+
+    This writes a complete snapshot, replacing any file at ``path``. Use an
+    :class:`InteractionSaveWriter` to save a growing context by appending.
+    """
+    _replace_atomically(Path(path), _encode_items(context.items))
+
+
+@dataclass(frozen=True)
+class IncompleteSaveLine:
+    """A save's final line that fails to parse, as an interrupted append leaves it.
+
+    ``offset`` is where the line starts (the length of the save's complete
+    part), ``size`` its length in bytes, and ``error`` why it failed to parse.
+    Loading ignores the line; the writer of a resumed save truncates it at
+    its first save.
+    """
+
+    line_number: int
+    offset: int
+    size: int
+    error: str
+
+    def warning(self, name: str) -> str:
+        """The notice for resuming the save called ``name`` and truncating the line."""
+        return (
+            f"Warning: {name} ends with a line that fails to parse "
+            f"(line {self.line_number}, {self.size} bytes), probably cut off by an "
+            "interrupted save. It was not loaded and is truncated from the file."
+        )
+
+
+class _Unparsed(NamedTuple):
+    line: IncompleteSaveLine
+    message: str
+    error: ValueError
+
+
+class _ReadSave(NamedTuple):
+    context: InteractionContext
+    status: os.stat_result
+    size: int  # bytes read
+    complete_size: int  # bytes before an incomplete final line
+    terminated: bool  # the complete part is empty or ends with a newline
+    incomplete: Optional[IncompleteSaveLine]
+
+
+def _parse_lines(
+    file: BinaryIO, source: Path,
+) -> Tuple[List[InteractionItem], int, bool, Optional[_Unparsed]]:
+    items: List[InteractionItem] = []
+    offset = 0
+    terminated = True
+    unparsed: Optional[_Unparsed] = None
+    # Split on b"\n" only: ensure_ascii=False lines may contain other line
+    # separators (such as U+2028) inside strings.
+    for line_number, line in enumerate(file, 1):
+        if unparsed is not None:
+            # Data follows the line, so no interrupted append left it.
+            raise SaveError(unparsed.message) from unparsed.error
+        start, offset = offset, offset + len(line)
+        terminated = line.endswith(b"\n")
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line.decode("utf-8"))
+        except ValueError as exc:  # UnicodeDecodeError or JSONDecodeError
+            kind = "UTF-8" if isinstance(exc, UnicodeDecodeError) else "JSON"
+            unparsed = _Unparsed(
+                IncompleteSaveLine(line_number, start, len(line), str(exc)),
+                f"invalid {kind} in save {source} at line {line_number}: {exc}",
+                exc,
+            )
+            continue
+
+        try:
+            items.append(interaction_item_from_dict(value))
+        except (SaveError, TypeError, ValueError) as exc:
+            raise SaveError(
+                f"invalid save item in {source} at line "
+                f"{line_number}: {exc}"
+            ) from exc
+    if unparsed is not None and not items:
+        # A save's first items are written atomically, so an interrupted
+        # append cannot leave only this line: it is not a save.
+        raise SaveError(unparsed.message) from unparsed.error
+    return items, offset, terminated, unparsed
+
+
+def _read_save(source: Path) -> _ReadSave:
     try:
-        with source.open("r", encoding="utf-8") as file:
-            for line_number, line in enumerate(file, 1):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise SaveError(
-                        f"invalid JSON in save {source} at line "
-                        f"{line_number}: {exc}"
-                    ) from exc
-
-                try:
-                    items.append(interaction_item_from_dict(value))
-                except (SaveError, TypeError, ValueError) as exc:
-                    raise SaveError(
-                        f"invalid save item in {source} at line "
-                        f"{line_number}: {exc}"
-                    ) from exc
+        with source.open("rb") as file:
+            status = os.fstat(file.fileno())
+            items, size, terminated, unparsed = _parse_lines(file, source)
     except OSError as exc:
         raise SaveError(f"could not load save {source}: {exc}") from exc
 
     try:
-        return InteractionContext(items)
+        context = InteractionContext(items)
     except (TypeError, ValueError) as exc:
         raise SaveError(f"invalid save {source}: {exc}") from exc
+    if unparsed is None:
+        return _ReadSave(context, status, size, size, terminated, None)
+    # The incomplete line starts right after a newline.
+    return _ReadSave(context, status, size, unparsed.line.offset, True, unparsed.line)
+
+
+def load_interaction_save(path: SavePath) -> InteractionContext:
+    """Load and validate a JSONL interaction-save file. The file is never modified.
+
+    A final line that fails to parse (invalid JSON or UTF-8) after complete
+    items is what an interrupted append leaves, and is ignored: see
+    :func:`resume_interaction_save`. Any other invalid line is an error.
+    """
+    return _read_save(Path(path)).context
+
+
+class InteractionSaveWriter:
+    """Append-only writer of one interaction save.
+
+    ``InteractionSaveWriter(path)`` starts a new save: its first :meth:`save`
+    atomically replaces any file at ``path`` with the whole context, as
+    :func:`save_interaction_save` does. Every later save appends only the
+    items added since, in one write followed by ``fsync``; saved lines are
+    never rewritten. :func:`resume_interaction_save` returns a writer that
+    continues an existing save.
+
+    A crash while appending can leave an incomplete final line, which
+    loading ignores and a resumed writer truncates. A failed save restores
+    the file's previous length where it can, and the next save writes the
+    unsaved items again. The writer refuses to append to a file that was
+    replaced or changed since it was loaded or last saved. Saves are
+    serialized by a lock.
+    """
+
+    def __init__(self, path: SavePath) -> None:
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        # (st_dev, st_ino) of the save; None until the first save creates it.
+        self._identity: Optional[Tuple[int, int]] = None
+        self._end = 0  # where the saved lines end and the next append starts
+        # The file's expected length: more than _end with an incomplete final
+        # line; None when a failed append may have left part of its data.
+        self._size: Optional[int] = 0
+        self._newline = False  # the last saved line lacks its newline
+        self._count = 0  # items saved
+        self._last: Optional[InteractionItem] = None
+
+    def save(self, context: InteractionContext) -> None:
+        """Save the items added to ``context`` since the last save.
+
+        ``context`` must extend the saved items: the same context, grown, or
+        a ``copy()`` of it. Afterwards the file holds exactly its items.
+        """
+        with self._lock:
+            count = self._count
+            if len(context) < count or (
+                count and not _same_item(context[count - 1], self._last)
+            ):
+                raise SaveError(
+                    f"cannot save to {self.path}: the context does not extend "
+                    "the saved items"
+                )
+            new = context[count:]
+            if self._identity is None:
+                self._create(new)
+            elif new or self._size != self._end or self._newline:
+                self._append(_encode_items(new))
+            else:
+                return
+            self._count = count + len(new)
+            if new:
+                self._last = new[-1]
+
+    def _continue(self, read: _ReadSave) -> None:
+        self._identity = (read.status.st_dev, read.status.st_ino)
+        self._end, self._size = read.complete_size, read.size
+        self._newline = not read.terminated
+        self._count = len(read.context)
+        self._last = read.context[-1] if len(read.context) else None
+
+    def _create(self, items: List[InteractionItem]) -> None:
+        data = _encode_items(items)
+        status = _replace_atomically(self.path, data)
+        self._identity = (status.st_dev, status.st_ino)
+        self._end = self._size = len(data)
+        self._newline = False
+
+    def _append(self, data: bytes) -> None:
+        if self._newline:
+            data = b"\n" + data
+        try:
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | _OPEN_FLAGS)
+        except OSError as exc:
+            raise SaveError(f"could not append to save {self.path}: {exc}") from exc
+        try:
+            status = os.fstat(descriptor)
+            if (
+                (status.st_dev, status.st_ino) != self._identity
+                or status.st_size < self._end
+                or (self._size is not None and status.st_size != self._size)
+            ):
+                raise SaveError(
+                    f"cannot append to save {self.path}: the file was replaced "
+                    "or changed since it was loaded or last saved"
+                )
+            if status.st_size != self._end:
+                # Drop an incomplete final line, or a failed append's data.
+                os.ftruncate(descriptor, self._end)
+                self._size = self._end
+            try:
+                _write_all(descriptor, data)
+                os.fsync(descriptor)
+            except BaseException:
+                # Keep the file ending with a complete line where possible.
+                self._size = None
+                with suppress(OSError):
+                    os.ftruncate(descriptor, self._end)
+                    self._size = self._end
+                raise
+        except OSError as exc:
+            raise SaveError(f"could not append to save {self.path}: {exc}") from exc
+        finally:
+            os.close(descriptor)
+        self._end = self._size = self._end + len(data)
+        self._newline = False
+
+
+def _same_item(item: InteractionItem, saved: Optional[InteractionItem]) -> bool:
+    return item is saved or item == saved
+
+
+class ResumedInteractionSave(NamedTuple):
+    """A loaded save, a writer that continues it, and any incomplete line."""
+
+    context: InteractionContext
+    writer: InteractionSaveWriter
+    incomplete_line: Optional[IncompleteSaveLine]
+
+
+def resume_interaction_save(path: SavePath) -> ResumedInteractionSave:
+    """Load a save to continue it with an append-only writer.
+
+    Loading is as by :func:`load_interaction_save` and modifies nothing. An
+    incomplete final line is returned for the caller to report (see
+    :meth:`IncompleteSaveLine.warning`); the writer's first save truncates
+    it, or terminates a final line that lacks only its newline, before
+    appending.
+    """
+    source = Path(path)
+    read = _read_save(source)
+    writer = InteractionSaveWriter(source)
+    writer._continue(read)
+    return ResumedInteractionSave(read.context, writer, read.incomplete)
 
 
 __all__ = [
+    "IncompleteSaveLine",
+    "InteractionSaveWriter",
+    "ResumedInteractionSave",
     "SaveError",
     "interaction_item_from_dict",
     "interaction_item_to_dict",
     "iter_interaction_items",
     "load_interaction_save",
+    "resume_interaction_save",
     "save_interaction_save",
 ]

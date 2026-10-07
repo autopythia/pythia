@@ -36,6 +36,7 @@ from pythia.interaction import cli
 from pythia.interaction import load_interaction_save
 from pythia.interaction import render_interaction_items
 from pythia.interaction import save_interaction_save
+from pythia_test.interaction_helpers import patch_saves, real_save
 from pythia_test.test_interaction_cli import _ControllerTestCase
 from pythia_test.test_interaction_cli import _Model
 from pythia_test.test_interaction_cli import _Terminal
@@ -88,7 +89,7 @@ class CLIRecoveryTests(_ControllerTestCase):
                 original_bytes = self.path.read_bytes()
                 model = _Model(self.path)
                 terminal = _Terminal(_quit_when_idle)
-                with mock.patch.object(cli, "save_interaction_save") as save:
+                with patch_saves() as save:
                     self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
                 save.assert_not_called()
                 self.assertEqual(self.path.read_bytes(), original_bytes)
@@ -237,12 +238,12 @@ class CLIRecoveryTests(_ControllerTestCase):
         environment = mock.Mock(spec=Environment, tool_specs=())
         writes = []
 
-        def save(path, context):
-            writes.append((load_interaction_save(path).items, context.items))
-            save_interaction_save(path, context)
+        def save(writer, context):
+            writes.append((load_interaction_save(writer.path).items, context.items))
+            real_save(writer, context)
 
         terminal = _Terminal(_quit_when_idle)
-        with mock.patch.object(cli, "save_interaction_save", side_effect=save):
+        with patch_saves(save):
             self.assertEqual(await self._run(_Model(self.path), terminal, ["--resume"], environment), 0)
         environment.execute_tool_calls.assert_not_called()
         saved = load_interaction_save(self.path)
@@ -256,7 +257,7 @@ class CLIRecoveryTests(_ControllerTestCase):
             self.assertIn("may already have produced side effects", result.output)
         for name in ("two", "three"):
             self.assertEqual(sum(f"record ({name}) [error]" in i.text for i in terminal.items), 1)
-        with mock.patch.object(cli, "save_interaction_save") as save_again:
+        with patch_saves() as save_again:
             await self._run(_Model(self.path), _Terminal(_quit_when_idle), ["--resume"], environment)
         save_again.assert_not_called()
         environment.execute_tool_calls.assert_not_called()
@@ -343,17 +344,17 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
                     durable = self.path.read_bytes()
                     real_checkpoint = cli._checkpoint
 
-                    async def checkpoint(context, state, path):
+                    async def checkpoint(context, state, writer):
                         references.append(weakref.ref(context))
-                        await real_checkpoint(context, state, path)
+                        await real_checkpoint(context, state, writer)
 
-                    def save(path, context):
+                    def save(writer, context):
                         nonlocal durable
                         attempts.append(context.items)
                         if len(attempts) == fail_at:
                             raise SaveError("injected disk failure")
-                        save_interaction_save(path, context)
-                        durable = path.read_bytes()
+                        real_save(writer, context)
+                        durable = writer.path.read_bytes()
 
                     def record(arguments, *, timeout_seconds=None):
                         executions.append(load_interaction_save(self.path).items)
@@ -383,7 +384,7 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
                     else:
                         argv += ["--resume=False"]
                     with mock.patch.object(cli, "_checkpoint", side_effect=checkpoint):
-                        with mock.patch.object(cli, "save_interaction_save", side_effect=save):
+                        with patch_saves(save):
                             self.assertEqual(await self._run(model, terminal, argv, environment), 1)
                     self.assertEqual(len(attempts), fail_at)
                     self.assertEqual(self.path.read_bytes(), durable)
@@ -402,13 +403,13 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
     async def test_failed_checkpoint_during_exit_reports_failure_without_another_effect(self):
         entered, release = threading.Event(), threading.Event()
 
-        def save(path, context):
+        def save(writer, context):
             if any(isinstance(i, ModelSampleBoundary) for i in context):
                 entered.set()
                 if not release.wait(2):
                     raise AssertionError("checkpoint not released")
                 raise SaveError("disk failed during exit")
-            save_interaction_save(path, context)
+            real_save(writer, context)
 
         def frame(terminal, editor, status):
             if entered.is_set():
@@ -420,7 +421,7 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
         terminal = _Terminal(frame)
         environment = Environment()
         try:
-            with mock.patch.object(cli, "save_interaction_save", side_effect=save):
+            with patch_saves(save):
                 with mock.patch.object(environment, "execute_tool_calls") as execute:
                     self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"], environment), 1)
         finally:

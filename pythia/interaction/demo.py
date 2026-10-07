@@ -39,8 +39,8 @@ from ._model_binding_debug import debug_model_binding_path
 from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import InteractionConfig
 from .runtime_config import InteractionConfigSnapshot
-from .save import load_interaction_save
-from .save import save_interaction_save
+from .save import InteractionSaveWriter
+from .save import resume_interaction_save
 from .user import UserInteraction
 
 
@@ -183,13 +183,17 @@ def run(
 
     tools_snapshot = Tools(environment.tool_specs)
     resumed_existing_save = False
+    writer = None
     if resume and Path(save_path).exists():
-        context = load_interaction_save(save_path)
+        context, writer, incomplete_line = resume_interaction_save(save_path)
         resumed_existing_save = True
 
         # Restore the human-visible transcript as well as the model state.
         for display_item in render_interaction_items(context.items):
             print(display_item)
+        if incomplete_line is not None:
+            # The startup save below truncates the line.
+            print(incomplete_line.warning(Path(save_path).name), file=sys.stderr)
     else:
         if resume:
             print(
@@ -206,9 +210,11 @@ def run(
             initial.append(instructions_item)
         initial.append(tools_snapshot)
         context = InteractionContext(tuple(initial))
+        if save_path is not None:
+            writer = InteractionSaveWriter(save_path)
 
-    if save_path is not None:
-        save_interaction_save(save_path, context)
+    if writer is not None:
+        writer.save(context)
         if binding is not None:
             warning = save_debug_model_bindings(
                 debug_model_binding_path(save_path), {"main": binding},
@@ -223,8 +229,8 @@ def run(
             )
 
     def _persist() -> None:
-        if save_path is not None:
-            save_interaction_save(save_path, context)
+        if writer is not None:
+            writer.save(context)
 
     pending_calls = context.pending_tool_calls()
     if pending_calls:

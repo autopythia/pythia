@@ -24,6 +24,7 @@ from pythia.interaction import (
     TurnSummary,
 )
 from pythia.interaction import auto, cli, demo
+from pythia.interaction import InteractionSaveWriter
 from pythia.interaction.loop import kernel
 from pythia.interaction.loop import Preemption
 from pythia.interaction._auto_config import (
@@ -376,7 +377,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                 model = CaptureMessages(trigger=150_000)
                 with patch_compaction(cli, "create_default_compactor", side_effect=AssertionError("host compaction")):
                     await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
-                                    Path(directory) / "log.jsonl", config)
+                                    InteractionSaveWriter(Path(directory) / "log.jsonl"), config)
                 self.assertEqual(len(model.payloads), 1)
                 if enabled:
                     self.assertEqual(model.payloads[0]["context_management"]["edits"][0]["trigger"]["value"],
@@ -396,7 +397,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
             compactor.compact.return_value = CompactionResult((ContextPrefix((Message("user", "summary"),)),))
             with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
                 await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
-                                Path(directory) / "log.jsonl", config)
+                                InteractionSaveWriter(Path(directory) / "log.jsonl"), config)
             create.assert_called_once_with(model, config.snapshot().compaction_settings())
             self.assertEqual(compactor.compact.call_args.kwargs["sample_params"],
                              config.snapshot().sample_params())
@@ -412,7 +413,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                 compactor.compact.return_value = CompactionResult((ContextPrefix((Message("assistant", "summary"),)),))
                 with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
                     await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
-                                    Path(directory) / "log.jsonl", config)
+                                    InteractionSaveWriter(Path(directory) / "log.jsonl"), config)
                 self.assertEqual(compactor.compact.call_count, int(threshold is not None))
                 self.assertEqual(model.sample_params, [config.snapshot().sample_params()])
 

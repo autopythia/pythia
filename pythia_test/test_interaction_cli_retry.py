@@ -5,7 +5,7 @@ import json
 import threading
 from types import SimpleNamespace
 import unittest
-from pythia_test.interaction_helpers import patch_compaction
+from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save
 from unittest import mock
 
 from pythia.interaction import (
@@ -305,13 +305,13 @@ class RetryControllerTests(_ControllerTestCase):
                 else:
                     t.key("c-d")
 
-        def save(path, context):
+        def save(writer, context):
             if failure in context:
                 raise SaveError("disk failed")
-            save_interaction_save(path, context)
+            real_save(writer, context)
 
         terminal = _Terminal(frame)
-        with mock.patch.object(cli, "save_interaction_save", side_effect=save):
+        with patch_saves(save):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 1)
         self.assertEqual(len(model.calls), 1)
         self.assertNotIn(HINT, [i.text for i in terminal.items])

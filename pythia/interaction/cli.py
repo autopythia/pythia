@@ -95,8 +95,8 @@ from .model_config import frontend_catalog, prepare_namespace, render_model_cata
 from ._model_binding_debug import debug_model_binding_path
 from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import InteractionConfig
-from .save import load_interaction_save
-from .save import save_interaction_save
+from .save import InteractionSaveWriter
+from .save import resume_interaction_save
 from .user import UserInteraction
 from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
@@ -432,10 +432,12 @@ def _traced_operation(state: _UIState, op: str, **tags):
                 state.notice(warning)
 
 
-async def _checkpoint(context: InteractionContext, state: _UIState, path: Path) -> None:
+async def _checkpoint(
+    context: InteractionContext, state: _UIState, writer: InteractionSaveWriter,
+) -> None:
     state.set_phase("saving")
     try:
-        await _on_context_thread(state, save_interaction_save, path, context.copy())
+        await _on_context_thread(state, writer.save, context.copy())
     except Exception:
         state.persistence_failed = True
         raise
@@ -445,14 +447,15 @@ async def _append(
     context: InteractionContext,
     items: Iterable[InteractionItem],
     state: _UIState,
-    path: Path,
+    writer: InteractionSaveWriter,
 ) -> None:
     context.extend(items)
-    await _checkpoint(context, state, path)
+    await _checkpoint(context, state, writer)
 
 
 async def _fail_pending_tools(
-    context: InteractionContext, state: _UIState, path: Path, *, reason: str
+    context: InteractionContext, state: _UIState, writer: InteractionSaveWriter,
+    *, reason: str,
 ) -> None:
     """Close missing outcomes without claiming that their effects did not happen."""
     for call in context.pending_tool_calls():
@@ -467,14 +470,14 @@ async def _fail_pending_tools(
                 "It may already have produced side effects."
             ),
         )
-        await _append(context, (result,), state, path)
+        await _append(context, (result,), state, writer)
         state.displays.extend(
             render_interaction_items((result,), source_calls=(call,))
         )
 
 
 async def _fail_pending_user_tools(
-    context: InteractionContext, state: _UIState, path: Path,
+    context: InteractionContext, state: _UIState, writer: InteractionSaveWriter,
 ) -> None:
     for call in context.pending_user_tool_calls():
         if state.closing:
@@ -500,7 +503,7 @@ async def _fail_pending_user_tools(
             output,
             success=False,
         ))
-        await _append(context, (result,), state, path)
+        await _append(context, (result,), state, writer)
         state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
 
 
@@ -587,7 +590,7 @@ async def _compact_user_tool(
     context: InteractionContext,
     model_environment: Environment,
     state: _UIState,
-    path: Path,
+    writer: InteractionSaveWriter,
     config: InteractionConfig,
 ) -> Optional[Model]:
     # A pending UserToolCall deliberately makes a context non-sampleable. Take
@@ -602,7 +605,7 @@ async def _compact_user_tool(
             intent.arguments_json,
         )
     )
-    await _append(context, (call,), state, path)
+    await _append(context, (call,), state, writer)
     state.displays.extend(render_interaction_items((call,)))
     state.active_user_call = call.call.call_id
 
@@ -614,7 +617,7 @@ async def _compact_user_tool(
                 success=False,
             )
         )
-        await _append(context, (result_item,), state, path)
+        await _append(context, (result_item,), state, writer)
         state.displays.extend(
             render_interaction_items(
                 (result_item,),
@@ -688,7 +691,7 @@ async def _compact_user_tool(
                     *compaction.context_items(),
                 )
 
-        await _append(context, contribution, state, path)
+        await _append(context, contribution, state, writer)
         state.displays.extend(
             render_interaction_items(
                 contribution,
@@ -702,7 +705,7 @@ async def _compact_user_tool(
 
 async def _user_tool(
     intent: UserToolIntent, model: Optional[Model], context: InteractionContext,
-    state: _UIState, path: Path, args: argparse.Namespace,
+    state: _UIState, writer: InteractionSaveWriter, args: argparse.Namespace,
     model_environment: Environment, config: InteractionConfig,
 ) -> Optional[Model]:
     if intent.name == "compact":
@@ -712,12 +715,12 @@ async def _user_tool(
             context,
             model_environment,
             state,
-            path,
+            writer,
             config,
         )
     expected_account = state.bound_account_id
     call = UserToolCall(ToolCall(intent.name, "user_" + uuid.uuid4().hex, intent.arguments_json))
-    await _append(context, (call,), state, path)
+    await _append(context, (call,), state, writer)
     state.displays.extend(render_interaction_items((call,)))
     if state.closing:
         return model
@@ -746,7 +749,7 @@ async def _user_tool(
                 environment.execute_tool_calls, (call.call,),
             )
         result = UserToolResult(outcome.items[0])
-        await _append(context, (result,), state, path)
+        await _append(context, (result,), state, writer)
         state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
     finally:
         state.active_user_call = None
@@ -854,8 +857,9 @@ class _CliHost(TurnHost):
     before the turn's outcome reaches ``_drive_interaction``.
     """
 
-    def __init__(self, state: _UIState, path: Path, loop, steering=False) -> None:
-        self._state, self._path, self._loop = state, path, loop
+    def __init__(self, state: _UIState, writer: InteractionSaveWriter, loop,
+                 steering=False) -> None:
+        self._state, self._writer, self._loop = state, writer, loop
         self._steering = steering
 
     def _post(self, function, *args) -> None:
@@ -894,7 +898,7 @@ class _CliHost(TurnHost):
         context.extend(items)
         self.phase("saving")
         try:
-            save_interaction_save(self._path, context.copy())
+            self._writer.save(context.copy())
         except Exception:
             self._post(_mark_persistence_failed, self._state)
             raise
@@ -943,7 +947,7 @@ class _CliHost(TurnHost):
         self._post(_arm_retry, self._state)
 
 
-async def _turn(context, model, environment, state, path, config, *, steering=False):
+async def _turn(context, model, environment, state, writer, config, *, steering=False):
     """One turn of the shared loop, on the context thread.
 
     With ``steering``, text submitted during the turn reaches it right before
@@ -952,7 +956,7 @@ async def _turn(context, model, environment, state, path, config, *, steering=Fa
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.
     state.retry = None
-    host = _CliHost(state, path, asyncio.get_running_loop(), steering)
+    host = _CliHost(state, writer, asyncio.get_running_loop(), steering)
     state.turn_active = not state.pending  # a steer never overtakes older input
     try:
         return await _on_context_thread(
@@ -1074,9 +1078,13 @@ async def _drive_interaction_body(
     state.reads_files = functools.partial(_reads_files, args=args)
     tools_snapshot = Tools(environment.tool_specs)
     existing = args.resume and await _on_context_thread(state, path.exists)
+    incomplete_line = None
     if existing:
-        context = await _on_context_thread(state, load_interaction_save, path)
+        context, writer, incomplete_line = await _on_context_thread(
+            state, resume_interaction_save, path)
         state.displays.extend(render_interaction_items(context.items))
+        if incomplete_line is not None:
+            state.notice(incomplete_line.warning(path.name))
         state.notice(
             "Command sessions and plan state were not restored. "
             "Old command session IDs are not resumable; use only IDs from this run."
@@ -1095,6 +1103,7 @@ async def _drive_interaction_body(
             state.notice(
                 f"Warning: no existing {path.name} was found; a fresh one was created."
             )
+        writer = InteractionSaveWriter(path)
         initial = [Init(model=args.model or initial_model_name(model))]
         if args.instructions is not None:
             initial.append(Instructions(args.instructions))
@@ -1109,25 +1118,29 @@ async def _drive_interaction_body(
         try:
             if startup:
                 if existing:
-                    await _fail_pending_user_tools(context, state, path)
+                    if incomplete_line is not None:
+                        # Repair the tail before any other recovery: this
+                        # save truncates the line that failed to parse.
+                        await _checkpoint(context, state, writer)
+                    await _fail_pending_user_tools(context, state, writer)
                     await _fail_pending_tools(
-                        context, state, path, reason="session restart"
+                        context, state, writer, reason="session restart"
                     )
                 else:
                     # Initial-save failures retain the fresh context too.
-                    await _checkpoint(context, state, path)
+                    await _checkpoint(context, state, writer)
                 if state.closing:
                     return
                 if tools_snapshot != context.latest_tools():
                     # Compare the raw log, not its compacted model projection.
                     # Runtime tools are never restored from these snapshots.
-                    await _append(context, (tools_snapshot,), state, path)
+                    await _append(context, (tools_snapshot,), state, writer)
                     state.displays.extend(render_interaction_items((tools_snapshot,)))
                 elif not existing:
                     state.displays.extend(render_interaction_items((tools_snapshot,)))
                 if existing and args.instructions is not None:
                     instructions = Instructions(args.instructions)
-                    await _append(context, (instructions,), state, path)
+                    await _append(context, (instructions,), state, writer)
                     state.displays.extend(render_interaction_items((instructions,)))
                 if (getattr(args, "debug_save_model_binding", False)
                         and getattr(args, "model_binding", None) is not None):
@@ -1202,11 +1215,11 @@ async def _drive_interaction_body(
                             continue
                     query = None
                 else:
-                    await _fail_pending_user_tools(context, state, path)
+                    await _fail_pending_user_tools(context, state, writer)
                     # A new query is not permission to retry old calls whose
                     # side effects may already have happened.
                     await _fail_pending_tools(
-                        context, state, path, reason="an interrupted operation"
+                        context, state, writer, reason="an interrupted operation"
                     )
                     if state.closing:
                         return
@@ -1217,7 +1230,7 @@ async def _drive_interaction_body(
                             model,
                             context,
                             state,
-                            path,
+                            writer,
                             args,
                             environment,
                             config,
@@ -1252,7 +1265,7 @@ async def _drive_interaction_body(
                         state.set_phase("idle")
                         continue
                 user = UserInteraction((message,))
-                await _append(context, user.context_items(), state, path)
+                await _append(context, user.context_items(), state, writer)
                 state.displays.extend(user.display_items())
             if should_sample:
                 sampling_attempt = True
@@ -1261,7 +1274,7 @@ async def _drive_interaction_body(
                     model,
                     environment,
                     state,
-                    path,
+                    writer,
                     config,
                     steering=True,
                 )

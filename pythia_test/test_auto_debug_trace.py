@@ -20,6 +20,7 @@ from pythia.interaction.compaction import PiCompactor
 from pythia.interaction.environment import Environment
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.model import ModelSample
+from pythia.interaction.save import load_interaction_save
 from pythia_test import test_interaction_claude_relay as relay_fixture
 from pythia_test import test_debug_trace as http_fixture
 
@@ -110,8 +111,11 @@ class AutoTraceTests(unittest.TestCase):
             def sample(self, context, **kwargs):
                 scopes.append(capture_trace_scope())
                 return ModelSample((Message('assistant', 'summary'),))
-        context = InteractionContext((Message('user', 'older material ' * 100), Message('assistant', 'old'),
-                                      ModelSampleBoundary(), Message('user', 'recent')))
+        # Continue main's saved log: its writer appends only to the context it saved.
+        saved = load_interaction_save(self.root / 'run' / 'contexts' / '1.jsonl')
+        context = InteractionContext((*saved, Message('user', 'older material ' * 100),
+                                      Message('assistant', 'old'), ModelSampleBoundary(),
+                                      Message('user', 'recent')))
         with mock.patch.object(kernel, 'create_default_compactor', return_value=PiCompactor(Summary(), keep_recent_tokens=0)):
             self.assertTrue(kernel.compact(context, Summary(), Environment(), InteractionConfigSnapshot(),
                                                 auto._AutoHost(session, 1), None))

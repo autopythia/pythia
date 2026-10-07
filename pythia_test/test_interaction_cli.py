@@ -12,7 +12,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from pythia_test.interaction_helpers import patch_compaction
+from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save
 from unittest import mock
 
 from pythia.interaction import DefaultEnvironment
@@ -339,7 +339,7 @@ for module in (cli, demo):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):
             with mock.patch.object(cli, "build_model") as model:
                 with mock.patch.object(cli, "DefaultEnvironment") as environment:
-                    with mock.patch.object(cli, "save_interaction_save") as save:
+                    with patch_saves() as save:
                         with mock.patch("builtins.print"):
                             self.assertEqual(cli.main(["--prompt", "hello"]), 1)
         model.assert_not_called()
@@ -544,7 +544,7 @@ class CLIToolsSnapshotTests(_ControllerTestCase):
         save_interaction_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer())
         terminal = _Terminal(lambda t, e, s: t.submit("/quit") if s == "failed" else None)
-        with mock.patch.object(cli, "save_interaction_save", side_effect=OSError("no space")):
+        with patch_saves(OSError("no space")):
             self.assertEqual(await self._run(model, terminal, ["--resume", "--prompt", "hello"]), 1)
         self.assertEqual(model.calls, [])
         self.assertEqual(load_interaction_save(self.path).items, original)
@@ -1437,12 +1437,10 @@ class CLIControllerTests(_ControllerTestCase):
             self.assertIn("persistent", result.output)
 
     async def test_failed_checkpoint_blocks_follow_up_and_new_queries(self):
-        real_save = save_interaction_save
-
-        def fail_sample_save(path, context):
+        def fail_sample_save(writer, context):
             if any(isinstance(i, ModelSampleBoundary) for i in context):
                 raise SaveError("disk unavailable")
-            real_save(path, context)
+            real_save(writer, context)
 
         step = 0
 
@@ -1454,7 +1452,7 @@ class CLIControllerTests(_ControllerTestCase):
 
         terminal = _Terminal(frame)
         model = _Model(self.path, _answer())
-        with mock.patch.object(cli, "save_interaction_save", side_effect=fail_sample_save):
+        with patch_saves(fail_sample_save):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 1)
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(load_interaction_save(self.path).items[-1], UserInteractionBoundary())
