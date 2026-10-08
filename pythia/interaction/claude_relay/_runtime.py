@@ -276,6 +276,8 @@ class Runtime:
             self._inventory(record)
             return
         if self.initialized:
+            if subtype == 'api_retry':
+                return  # native retry/backoff metadata, not a terminal outcome
             # Observed in 2.1.289. Do not broadly ignore system/status: in
             # particular "compacting" must still retire this continuation.
             if subtype == 'status' and record.get('status') == 'requesting':
@@ -335,6 +337,12 @@ class Runtime:
                     raise ModelResponseError('Native subagent output is unsupported')
                 if self.result_seen:
                     raise ModelResponseError('Native records after terminal result')
+                if kind == 'system' and value.get('subtype') == 'api_retry':
+                    # Its error field describes a retry, not a final failure.
+                    # Let the native CLI own backoff/refresh; do not validate its
+                    # retry counters, reset deadlines, or add another retry loop.
+                    self._system(value)  # still requires verified initialization
+                    continue
                 error_code = value.get('error')
                 if isinstance(error_code, dict):
                     error_code = error_code.get('code', error_code.get('type'))

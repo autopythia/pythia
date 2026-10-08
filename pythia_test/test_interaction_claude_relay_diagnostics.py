@@ -57,6 +57,17 @@ class DiagnosticTests(unittest.TestCase):
                          'delta': {'type': 'thinking_delta', 'thinking': 'SECRET'}}})[0],
                          'stream_event/content_block_delta/thinking_delta')
 
+    def test_retry_error_is_observational_not_a_terminal_error_code(self):
+        for error in ('authentication_failed', {'type': 'overloaded_error', 'message': 'PRIVATE_BODY'}):
+            d = Diagnostics()
+            record = {'type': 'system', 'subtype': 'api_retry', 'error': error}
+            self.assertEqual(event_identity(record), ('system/api_retry', None))
+            d.record(record)
+            self.assertIsNone(d.snapshot().error_code)
+            self.assertNotIn('PRIVATE_BODY', json.dumps(asdict(d.snapshot())))
+            d.record({'type': 'result', 'error': 'authentication_failed'})
+            self.assertEqual(d.snapshot().error_code, 'authentication_failed')
+
 
 class FramingTests(unittest.IsolatedAsyncioTestCase):
     def runtime(self):

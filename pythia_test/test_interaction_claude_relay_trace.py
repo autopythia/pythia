@@ -14,9 +14,9 @@ from pythia.interaction.context import InteractionContext
 from pythia.interaction.items import Message, ToolResult
 from pythia.interaction.items import ModelFailure, ModelSampleBoundary
 from pythia.interaction.compaction import PiCompactor
-from pythia.interaction.save import load_interaction_save
+from pythia.interaction.save import load_interaction_save, save_interaction_save
 from pythia.interaction.claude_relay._runtime import Runtime
-from pythia.interaction.model import ModelError, ModelTimeoutError
+from pythia.interaction.model import ModelError, ModelAuthenticationError, ModelResponseError, ModelTimeoutError, ModelTransportError
 from pythia_test import test_interaction_claude_relay as fixtures
 
 
@@ -88,6 +88,56 @@ class RelayTraceTests(unittest.TestCase):
         timeout = next(r for r in events if r['type'] == 'generation_timeout')
         self.assertLess(timeout['last_byte_age'], 1)
         self.assertTrue(any(r['type'] == 'claude_stdout' and payload(r).startswith(b'{') for r in events))
+
+    def test_api_retry_then_success_uses_one_runtime_and_keeps_payload_private(self):
+        for tracing in (False, True):
+            with self.subTest(tracing=tracing):
+                trace = self.traced() if tracing else None
+                context = InteractionContext((Message('user', 'api-retry-success'),))
+                sample = self.model.sample(context)
+                self.assertEqual(sample.last_assistant_text, 'cold:api-retry-success')
+                self.assertEqual(sample.stop_reason, 'end_turn')
+                self.assertEqual(sample.usage.total_tokens, 9)
+                self.assertEqual(sample.request_attempts, 1)
+                self.assertEqual(sample.recovery, ())
+                context.extend(sample.context_items())
+                save = self.root / 'retry-success.jsonl'
+                save_interaction_save(save, context)
+                self.assertNotIn('PRIVATE_RETRY_PAYLOAD', save.read_text())
+                self.assertNotIn('authentication_failed', save.read_text())
+                self.assertIsNone(self.model._runtime)
+                if trace:
+                    trace.close()
+                    events = rows(trace.event_path)
+                    self.assertEqual(len({r['runtime_id'] for r in events if r['type'] == 'claude_invocation'}), 1)
+                    self.assertEqual(sum(r['type'] == 'sample_begin' for r in events), 1)
+                    self.assertFalse(any(r['type'] == 'native_failure' for r in events))
+                    self.assertTrue(any(r['type'] == 'native_record' and r['event_type'] == 'system/api_retry' for r in events))
+                    self.assertIn(b'PRIVATE_RETRY_PAYLOAD', b''.join(payload(r) for r in events if r['type'] == 'claude_stdout'))
+
+    def test_api_retry_does_not_mask_later_errors_or_leave_stale_auth_code(self):
+        for text, category, code in (
+                ('api-retry-auth-error', ModelAuthenticationError, 'authentication_failed'),
+                ('api-retry-unknown', ModelResponseError, None),
+                ('api-retry-exit', ModelTransportError, None)):
+            with self.subTest(text=text), self.assertRaises(category) as caught:
+                self.model.sample(InteractionContext((Message('user', text),)))
+            self.assertEqual(caught.exception.failure.error_code, code)
+            self.assertNotIn('PRIVATE_RETRY_PAYLOAD', caught.exception.failure.message)
+
+    def test_api_retry_only_times_out_without_a_python_retry_loop(self):
+        trace = self.traced(timeout=1)
+        with self.assertRaises(ModelTimeoutError) as caught:
+            self.model.sample(InteractionContext((Message('user', 'api-retry-only'),)))
+        self.assertIsNone(caught.exception.failure.error_code)
+        self.assertEqual(caught.exception.failure.last_event_type, 'system/api_retry')
+        self.assertIn('budget=1s', caught.exception.failure.message)
+        self.assertNotIn('PRIVATE_RETRY_PAYLOAD', caught.exception.failure.message)
+        trace.close()
+        events = rows(trace.event_path)
+        self.assertEqual(sum(r['type'] == 'sample_begin' for r in events), 1)
+        self.assertEqual(len({r['runtime_id'] for r in events if r['type'] == 'claude_invocation'}), 1)
+        self.assertTrue(any(r['type'] == 'generation_timeout' for r in events))
 
     def test_warm_mcp_attribution_and_no_deliberate_bearer_dump(self):
         trace = self.traced()

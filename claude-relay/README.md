@@ -39,10 +39,15 @@ by these short tests.
   parent PID, and the client installs a death guard before connecting. B's child
   guard independently covers broker death before the wrapper execs Bubblewrap.
 - An **explicit expected native CLI version** is required. The experimental
-  `claude-stream-json-v5` profile uses print/stream-json input/output, partial
+  `claude-stream-json-v6` profile uses print/stream-json input/output, partial
   events, strict MCP configuration, empty built-in tools/settings sources,
   `dontAsk` permissions, and no native session persistence. Unexpected control
   operations, built-in tools, compaction, or inventory differences fail closed.
+- Exact `system/api_retry` notifications are nonterminal telemetry. Claude Code
+  owns the announced retries/backoff or credential refresh within the existing
+  generation deadline; no extra Pythia retry loop or retry-field validation is
+  added. Genuine terminal failures still fail. See the
+  [API-retry handling notes](../doc/claude-relay-api-retry-plan.md).
 - Native `stream_event/ping` keepalives are no-ops. Early MCP callbacks get a
   registration grace derived from the existing generation timeout instead of a
   separate ten-second cap; full-message validation still precedes tool execution.

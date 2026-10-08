@@ -15,7 +15,7 @@ from ..model import ModelResponseError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
-PROFILE = 'claude-stream-json-v5'  # stream authority, keepalives, generation-sized registration wait
+PROFILE = 'claude-stream-json-v6'  # stream authority, keepalives, nonterminal API retry telemetry
 MAX_RECORD = 8 * 1024 * 1024
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))

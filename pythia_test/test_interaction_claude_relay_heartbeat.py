@@ -18,7 +18,7 @@ from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.claude_relay._trace import RelayTrace
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.items import Message, ToolResult
-from pythia.interaction.model import ModelTimeoutError
+from pythia.interaction.model import ModelAuthenticationError, ModelResponseError, ModelTimeoutError, ModelTransportError
 from pythia_test import test_interaction_claude_relay as fixture
 
 
@@ -33,6 +33,11 @@ FINAL = [
                                      'stop_reason': 'end_turn', 'usage': {'input_tokens': 1, 'output_tokens': 2}}},
     {'type': 'result', 'subtype': 'success', 'is_error': False},
 ]
+
+
+def api_retry(**fields):
+    return {'type': 'system', 'subtype': 'api_retry', 'attempt': 1, 'max_retries': 10,
+            'retry_delay_ms': 615, 'error_status': 401, 'error': 'authentication_failed', **fields}
 
 
 class HeartbeatDispatchTests(unittest.IsolatedAsyncioTestCase):
@@ -120,6 +125,71 @@ class HeartbeatDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('after terminal result', str(rt._failure.call_args.args[0]))
         rt = await self.run_records([heartbeat(error={'type': 'overloaded_error'}), *FINAL])
         self.assertIn('Native CLI reported a model error', str(rt._failure.call_args.args[0]))
+
+
+class ApiRetryDispatchTests(unittest.IsolatedAsyncioTestCase):
+    run_records = HeartbeatDispatchTests.run_records
+
+    async def test_retry_reasons_and_metadata_do_not_add_validation_or_output(self):
+        for record in (api_retry(), api_retry(error={'type': 'rate_limit_error'}, error_status=429),
+                       api_retry(error={'type': 'overloaded_error'}, error_status=529),
+                       {'type': 'system', 'subtype': 'api_retry'},
+                       api_retry(attempt=[], max_retries='unknown', retry_delay_ms=None, error_status=False)):
+            with self.subTest(record=record):
+                rt = await self.run_records([record, record, *FINAL], known_call=True)
+                rt._failure.assert_not_called()
+                self.assertEqual(rt._put.call_count, 1)
+                message, _, calls = rt._put.call_args.args[0]
+                self.assertEqual(message.usage.total_tokens, 3)
+                self.assertFalse(calls)
+                self.assertIsNone(rt.diagnostics.snapshot().error_code)
+
+    async def test_retry_does_not_reset_an_open_assembler(self):
+        from pythia_test.test_interaction_claude_relay_protocol import observed_records
+        records = []
+        for record in observed_records():
+            records.extend((record, api_retry()))
+        rt = await self.run_records([*records, FINAL[-1]])
+        rt._failure.assert_not_called()
+        message, _, _ = rt._put.call_args.args[0]
+        self.assertEqual(message.usage.output_tokens, 546)
+        self.assertEqual([b['type'] for b in message.blocks], ['thinking', 'text'])
+
+    async def test_retry_only_has_no_completion_and_preserves_wait_budget(self):
+        rt = await self.run_records([api_retry()] * 3)
+        self.assertIsInstance(rt._failure.call_args.args[0], ModelTransportError)
+        self.assertIn('without a successful run result', str(rt._failure.call_args.args[0]))
+        rt._put.assert_not_called()
+        self.assertIsNone(rt.final_message)
+        self.assertIsNone(rt.diagnostics.snapshot().last_completion_age)
+        self.assertIsNone(rt.diagnostics.snapshot().error_code)
+        rt.events = mock.Mock()
+        rt.events.get.side_effect = queue.Empty
+        with self.assertRaises(ModelTimeoutError):
+            rt.next_message()
+        rt.events.get.assert_called_once_with(timeout=.1)
+
+    async def test_init_parent_terminal_and_exact_discriminator_guards_remain(self):
+        cases = (([api_retry(), *FINAL], False, 'Unexpected system event'),
+                 ([api_retry(parent_tool_use_id='parent'), *FINAL], True, 'subagent'),
+                 ([*FINAL, api_retry()], True, 'after terminal result'),
+                 ([{'type': 'system', 'subtype': 'unknown_retry'}, *FINAL], True, 'Unexpected system event'))
+        for records, initialize, expected in cases:
+            with self.subTest(expected=expected):
+                rt = await self.run_records(records, initialize=initialize)
+                self.assertIn(expected, str(rt._failure.call_args.args[0]))
+        rt = await self.run_records([api_retry(type='assistant'), *FINAL])
+        self.assertIsInstance(rt._failure.call_args.args[0], ModelAuthenticationError)
+
+    async def test_terminal_errors_still_fail_without_inheriting_retry_auth_code(self):
+        for terminal, expected, code in (
+                ({'type': 'result', 'is_error': True, 'subtype': 'error_during_execution'}, ModelResponseError, None),
+                ({'type': 'result', 'error': 'authentication_failed'}, ModelAuthenticationError, 'authentication_failed'),
+                ({'type': 'stream_event', 'event': {'type': 'fixture_unknown'}}, ModelResponseError, None)):
+            with self.subTest(terminal=terminal):
+                rt = await self.run_records([api_retry(), terminal])
+                self.assertIsInstance(rt._failure.call_args.args[0], expected)
+                self.assertEqual(rt.diagnostics.snapshot().error_code, code)
 
 
 @unittest.skipIf(os.getuid() == 0, 'non-root Python relay fixture required')

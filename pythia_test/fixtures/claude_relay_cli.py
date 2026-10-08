@@ -123,6 +123,25 @@ def tool_result(block):
 
 
 emit({'type': 'system', 'subtype': 'init', 'tools': names + (['Bash'] if text == 'inventory-bad' else []), 'mcp_servers': servers})
+if text.startswith('api-retry-'):
+    retry = {'type': 'system', 'subtype': 'api_retry', 'attempt': 1, 'max_retries': 10,
+             'retry_delay_ms': 615, 'error_status': 401, 'error': 'authentication_failed',
+             'fixture_private': 'PRIVATE_RETRY_PAYLOAD'}
+    emit(retry)  # metadata only; no real credential changes or backoff sleeps
+    if text == 'api-retry-only':
+        for _ in range(200):
+            emit(retry)
+            time.sleep(.01)
+    elif text == 'api-retry-auth-error':
+        emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+              'error': 'authentication_failed'})
+    elif text == 'api-retry-unknown':
+        emit({'type': 'stream_event', 'event': {'type': 'fixture_unknown'}})
+    elif text == 'api-retry-exit':
+        raise SystemExit(0)
+    if text != 'api-retry-success':
+        sys.stdin.read()
+        raise SystemExit(0)
 if text in ('trace-unknown', 'trace-error', 'trace-missing', 'trace-malformed'):
     os.write(2, b'private-native-stderr\xff\n')
     emit({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {'id': 'failing'}}})

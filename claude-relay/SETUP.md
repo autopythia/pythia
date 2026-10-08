@@ -447,6 +447,15 @@ and cancellation/retirement paths still apply; pings do not reset deadlines.
 No new strict generation-window checks or shared-deadline arming were introduced.
 See the [stream-liveness notes](../doc/claude-relay-stream-liveness-plan.md).
 
+The v6 profile treats exact `system/api_retry` notifications as intermediate
+telemetry, including an `authentication_failed` reason. The native CLI can finish
+its own retry/backoff or credential-refresh handling; Pythia does not restart it,
+add retries, reset deadlines or change credentials. Terminal authentication errors
+remain failures. A retry notification alone does not prove that manual
+reauthentication is required, and its reason is not retained as a stale terminal
+error code. See the [API-retry handling notes](../doc/claude-relay-api-retry-plan.md).
+Relaunch the A-side frontend to load the change; no broker restart is required.
+
 Ctrl-C/termination of a client retires its invocation; loss of A's driver or B's
 broker also triggers child cleanup. To shut down the service, stop B's broker
 normally (e.g. Ctrl-C in its session). This terminates active invocations but does

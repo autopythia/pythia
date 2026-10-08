@@ -23,6 +23,8 @@ def event_identity(record):
         parts.append('heartbeat')  # classification, not parent/payload validation
     if kind == 'system':
         parts.append(identifier(record.get('subtype')))
+        if record.get('subtype') == 'api_retry':
+            error = None  # retain the event label, not a stale terminal error code
         if record.get('subtype') == 'status':
             parts.append(identifier(record.get('status')))
     if kind == 'stream_event':
