@@ -75,6 +75,8 @@ from .loop import Preemption
 from .loop import Steer
 from .loop import TurnHost
 from .loop import Urgency
+from .loop import command_urgency
+from .loop import escalated_stop
 from .loop import run_turn
 from .loop.tail import describe_tail
 from .loop.tail import turn_tail
@@ -106,6 +108,12 @@ from .user_tools import parse_user_tool
 FRAME_INTERVAL = 1 / 128
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _MAX_PENDING_QUERIES = 8
+# The status line while closing, by the stop's level.
+_CLOSING_STATUS = {
+    Urgency.QUEUED: "closing — stopping before the next sample; Ctrl-C or /exit! stops sooner",
+    Urgency.IMMEDIATE: "closing — waiting for current operation; Ctrl-C or /exit!! cancels it",
+    Urgency.PREEMPT: "closing — cancelling current operation",
+}
 
 
 @dataclass(frozen=True, eq=False)
@@ -168,11 +176,14 @@ class _UIState:
     # A draft whose files are being read, on a helper thread: it stays in the
     # editor, and Enter queues nothing else until it is queued or rejected.
     reading: Optional[str] = None
-    # Flushed steers (/steer, /steer!) and preempting stops reach the running
-    # turn here, from the event loop; the context thread checks it.
+    # Flushed steers (/steer!, /steer!!) and stops reach the running turn
+    # here, from the event loop; the context thread checks it.
     preemption: Preemption = field(default_factory=Preemption, repr=False)
-    # The second stage of exit (a second Ctrl-C, or /exit!) was requested.
-    preempting: bool = False
+    # The stop's level once one is requested (closing is then true): QUEUED
+    # for /exit, IMMEDIATE for /exit! or a first Ctrl-C, PREEMPT for /exit!!
+    # or a later one. It is the context's level, which steers flushed before
+    # the stop raise to IMMEDIATE (see Preemption.stop). It only rises.
+    stop_level: Optional[Urgency] = None
     # The context thread: this context's model, tools, and saves run here, so
     # the event loop thread (terminal, redraw, exit keys) never blocks.
     context_executor: ThreadPoolExecutor = field(
@@ -191,32 +202,31 @@ class _UIState:
         else:
             self.displays.append(DisplayItem(f"[cli] {text}"))
 
-    def request_exit(self) -> None:
-        """The first stage of exit: start no new operation, cancel nothing.
+    def request_stop(self, level: Urgency = Urgency.IMMEDIATE) -> None:
+        """Exit at ``level``; a lower level than the current one does nothing.
 
-        The sample or tool call in flight finishes and is saved, for every
-        model; queued input is dropped. See request_preempt for the second.
+        Every level drops queued input, cancels a login wait, and starts no
+        new query. QUEUED (/exit): the turn finishes its tool batch and ends
+        before its next sample. IMMEDIATE (/exit!, the first Ctrl-C): the
+        sample or tool call in flight finishes and is saved, for every model,
+        and nothing new starts. PREEMPT (/exit!!, a later Ctrl-C): that
+        operation is also cancelled where possible (a Claude relay sample, a
+        command's wait), and the model is retired, which also cancels model
+        work outside a turn, such as /compact. Outcomes are still saved.
         """
+        level = Urgency(level)
+        if self.stop_level is not None and level <= self.stop_level:
+            return
         self.closing = True
+        self.preemption.stop(level)
+        # The context's level: steers flushed before the stop raise it.
+        self.stop_level = self.preemption.stop_level
         self.retry = None
         self.pending.clear()
         self.login_cancel.set()
         self.changed.set()
-
-    def request_preempt(self) -> None:
-        """The second stage of exit (and the first, if it wasn't requested).
-
-        Cancels the operation in flight where possible (a Claude relay sample,
-        a command's wait), starts no later one, and retires the model, which
-        also cancels model work outside a turn, such as /compact. Outcomes are
-        still saved.
-        """
-        self.request_exit()
-        if self.preempting:
-            return
-        self.preempting = True
-        self.preemption.preempt_stop()
-        if callable(getattr(self.active_model, "retire", None)):
+        if self.stop_level >= Urgency.PREEMPT and callable(
+                getattr(self.active_model, "retire", None)):
             model = self.active_model
             def retire():
                 try:
@@ -225,39 +235,40 @@ class _UIState:
                     self.notice("Model retirement failed; final cleanup will run.")
             threading.Thread(target=retire, name="interaction-model-retire", daemon=True).start()
 
+    def escalate_stop(self) -> None:
+        """Ctrl-C, Ctrl-D, or SIGINT: /exit! the first time, then /exit!!."""
+        self.request_stop(escalated_stop(self.stop_level))
+
+    def _stop_hint(self) -> str:
+        """What a stronger exit would do now, as a sentence (or nothing)."""
+        if self.stop_level is None or self.stop_level < Urgency.IMMEDIATE:
+            return " Ctrl-C or /exit! stops sooner; /exit!! also cancels the current operation."
+        if self.stop_level < Urgency.PREEMPT:
+            return " Ctrl-C or /exit!! cancels the current operation."
+        return ""
+
     def handle_key(self, key: str, data: str) -> None:
         if key in {"c-c", "c-d"}:
-            # The first press stops; a later one also cancels.
+            # The first press is /exit!; a later one also cancels (/exit!!).
+            self.escalate_stop()
+        elif self.closing or self.ready:
+            if key != "c-m":
+                # While closing too, so that a stronger /exit can be typed.
+                self.editor = self.editor.edit(key, data)
+                return
+            text = self.editor.text
+            head = text.split(maxsplit=1)[0] if text.strip() else ""
+            level = command_urgency(head, "/exit", "/quit")
+            if level is not None:
+                if self.stop_level is not None and level <= self.stop_level:
+                    self.notice(f"Already stopping.{self._stop_hint()}")
+                else:
+                    self.editor = Editor()
+                    self.request_stop(level)
+                return
             if self.closing:
-                self.request_preempt()
-            else:
-                self.request_exit()
-        elif self.closing:
-            # The editor stays usable, so that /exit! can be typed.
-            if key != "c-m":
-                self.editor = self.editor.edit(key, data)
-                return
-            text = self.editor.text
-            head = text.split(maxsplit=1)[0] if text.strip() else ""
-            if head in {"/exit!", "/quit!"}:
-                self.editor = Editor()
-                self.request_preempt()
-            elif head in {"/quit", "/exit"}:
-                self.notice("Already stopping; /exit! or Ctrl-C cancels the current operation.")
-            elif text.strip():
-                self.notice("Stopping; only /exit! or Ctrl-C is accepted.")
-        elif self.ready:
-            if key != "c-m":
-                self.editor = self.editor.edit(key, data)
-                return
-            text = self.editor.text
-            head = text.split(maxsplit=1)[0] if text.strip() else ""
-            if head in {"/quit", "/exit"}:
-                self.request_exit()
-                return
-            if head in {"/exit!", "/quit!"}:
-                self.editor = Editor()
-                self.request_preempt()
+                if text.strip():
+                    self.notice(f"Stopping; input is not accepted.{self._stop_hint()}")
                 return
             if not text.strip():
                 self.editor = Editor()
@@ -269,6 +280,7 @@ class _UIState:
                 self.notice("A submission is still pending. Draft preserved.")
                 return
             intent = text
+            steer = command_urgency(head, "/steer")
             if head == "/retry":
                 error = None
                 if text.strip() != "/retry" or "\n" in text or "\r" in text:
@@ -303,19 +315,21 @@ class _UIState:
                     self.editor = Editor()
                     return
                 intent = _ContinueIntent()
-            elif head in {"/steer", "/steer!"}:
-                # Steer now: queue the text (if any) like plain text, then
-                # flush every queued steer. /steer! also cancels the sample
-                # or command wait in flight, where possible.
-                level = Urgency.PREEMPT if head == "/steer!" else Urgency.IMMEDIATE
+            elif steer is not None:
+                # Queue the text (if any) like plain text, then flush every
+                # queued steer at the command's level: /steer waits for the
+                # interrupt point, as plain text does (the notice only reports
+                # the queued steers); /steer! starts nothing new before them;
+                # /steer!! also cancels the sample or command wait in flight,
+                # where possible.
                 parts = text.split(maxsplit=1)
                 if len(parts) == 1:
                     self.editor = Editor()
-                    self._flush_steers(level)
+                    self._flush_steers(steer)
                 elif self.auth_required:
                     self.notice(f"{self.auth_notice} Draft was not submitted.")
                 else:
-                    self._submit_text(parts[1], draft=text, flush=level)
+                    self._submit_text(parts[1], draft=text, flush=steer)
                 return
             elif head.startswith("/"):
                 try:
@@ -389,24 +403,35 @@ class _UIState:
             self.editor = Editor()
         self.changed.set()
         if flush is not None:
-            if _steer_count(self) < len(self.pending):
+            steered = _steer_count(self) == len(self.pending)
+            if not steered:
                 # Older input is queued ahead of it, or no turn is running.
                 self.notice("No running turn can take a steer now; queued as the next query.")
-            if _steer_count(self):
+            # A flush speeds up the steers queued before it; at QUEUED there is
+            # nothing to report if the text itself could not steer.
+            if _steer_count(self) and (steered or flush > Urgency.QUEUED):
                 self._flush_steers(flush)
 
     def _flush_steers(self, level: Urgency) -> None:
-        """Have the running turn take the queued steers sooner (see Preemption)."""
+        """Have the running turn take the queued steers at ``level`` (see
+        Preemption), and say when they arrive: the urgency only rises, so that
+        may be sooner than ``level`` (and at QUEUED nothing changes)."""
         count = _steer_count(self)
         if not count:
             self.notice("No queued steers to flush.")
             return
         self.preemption.flush(level)
-        steers = f"{count} steer{'s' if count > 1 else ''}"
-        self.notice(f"Flushing {steers}: delivered once the current sample or tool call "
-                    "finishes." if level < Urgency.PREEMPT else
-                    f"Flushing {steers}: delivered now; the current sample or command wait "
-                    "is cancelled where possible.")
+        level = max(Urgency(level), self.preemption.level)
+        steers, them = (f"{count} steers", "them") if count > 1 else ("1 steer", "it")
+        if level < Urgency.IMMEDIATE:
+            self.notice(f"{steers} queued for the next sample, after the current tool batch; "
+                        f"/steer! or /steer!! delivers {them} sooner.")
+        elif level < Urgency.PREEMPT:
+            self.notice(f"Flushing {steers}: delivered once the current sample or tool call "
+                        "finishes.")
+        else:
+            self.notice(f"Flushing {steers}: delivered now; the current sample or command wait "
+                        "is cancelled where possible.")
 
 
 def _build_model(args: argparse.Namespace, trace: Optional[DebugTrace]) -> Model:
@@ -913,7 +938,13 @@ class _CliHost(TurnHost):
         self.phase(f"tool: {call.name}")
 
     def should_stop(self) -> bool:
-        return self._state.closing
+        # A stop at IMMEDIATE or above: start no new sample or tool call.
+        level = self._state.preemption.stop_level
+        return level is not None and level >= Urgency.IMMEDIATE
+
+    def stop_requested(self) -> bool:
+        # A stop at any level: sample no more (/exit lets the batch finish).
+        return self._state.closing or self._state.preemption.stop_level is not None
 
     def should_steer(self) -> bool:
         return self._steering and self._state.preemption.due()
@@ -1392,10 +1423,9 @@ async def _run_headless(model, environment, args, path, *, trace=None):
 
     def interrupt(signum, frame):
         nonlocal interrupted
-        # The first signal stops; a later one also cancels (request_preempt).
-        stage = state.request_preempt if interrupted else state.request_exit
         interrupted = True
-        loop.call_soon_threadsafe(stage)
+        # Like Ctrl-C: the first signal is /exit!, a later one /exit!!.
+        loop.call_soon_threadsafe(state.escalate_stop)
 
     if threading.current_thread() is threading.main_thread():
         # asyncio.run on older Python versions cancels *all* tasks on SIGINT.
@@ -1410,7 +1440,7 @@ async def _run_headless(model, environment, args, path, *, trace=None):
         worker.result()
     finally:
         try:
-            state.request_exit()
+            state.request_stop(Urgency.IMMEDIATE)  # never lowers a stop
             # Cancellation/SIGINT must not close command resources before an
             # in-flight request/tool has finished and checkpointed its outcome.
             await asyncio.shield(worker)
@@ -1439,9 +1469,10 @@ async def _run(
         trace=trace,
     )
     state.notice(
-        "pythia.interaction — /retry, /continue, /steer[!] [text], /compact [focus], /config, "
-        "/config.json, /login, /quota; /quit or /exit; Ctrl-C/Ctrl-D exit. A second "
-        "Ctrl-C, or /exit!, cancels the current operation."
+        "pythia.interaction — /retry, /continue, /steer [text], /compact [focus], /config, "
+        "/config.json, /login, /quota, /exit or /quit. /steer and /exit wait for the current "
+        "tool batch; with ! they wait only for the current operation, and with !! they "
+        "cancel it. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
     )
     _startup_notices(state, args, path)
     worker = None
@@ -1457,9 +1488,9 @@ async def _run(
             while True:
                 for key in terminal.read_keys():
                     state.handle_key(key.key, key.data or "")
-                if terminal.closed and not state.preempting:
+                if terminal.closed and state.stop_level != Urgency.PREEMPT:
                     # No one is left to press again: stop and cancel at once.
-                    state.request_preempt()
+                    state.request_stop(Urgency.PREEMPT)
                 while True:
                     try:
                         call_id, text = state.transient.get_nowait()
@@ -1468,13 +1499,8 @@ async def _run(
                     if call_id == state.active_user_call:
                         state.notice(text)
                 busy = state.phase not in {"idle", "failed", "auth needed"}
-                if state.preempting:
-                    status = "closing — cancelling current operation"
-                elif state.closing:
-                    status = ("closing — waiting for current operation; "
-                              "Ctrl-C again or /exit! cancels it")
-                else:
-                    status = state.phase
+                status = (state.phase if state.stop_level is None
+                          else _CLOSING_STATUS[state.stop_level])
                 if busy:
                     status += f" {int(time.monotonic() - state.phase_started)}s"
                 steers = _steer_count(state)
@@ -1498,7 +1524,7 @@ async def _run(
                 frame += 1
                 await asyncio.sleep(FRAME_INTERVAL)
         finally:
-            state.request_exit()
+            state.request_stop(Urgency.IMMEDIATE)  # never lowers a stop
             if worker is not None:
                 # Do not cancel a thread-backed effect or close its environment early.
                 await asyncio.shield(worker)

@@ -16,7 +16,7 @@ from pythia.interaction.environment import current_cancel
 from pythia.interaction.items import ModelFailure, ModelSampleBoundary, SampleMetadata, TurnSummary
 from pythia.interaction.loop import Interrupt, MissingFinalText, Preemption, SampleLimitExceeded, Steer
 from pythia.interaction.loop import TurnHost, TurnResult, run_turn
-from pythia.interaction.loop import Urgency
+from pythia.interaction.loop import Urgency, command_urgency, escalated_stop
 from pythia.interaction.loop import kernel
 from pythia.interaction.model import ModelContinuationExpired, ModelContextWindowError, ModelTransportError
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
@@ -634,7 +634,7 @@ class SteeringTests(unittest.TestCase):
 
         def waiting(arguments, *, timeout_seconds=None):
             host.stop = True
-            host.preemption.preempt_stop()
+            host.preemption.stop(Urgency.PREEMPT)
             woke = select.select([current_cancel().fileno()], [], [], 5)[0]
             return ToolOutcome("cut short" if woke else "waited")
         model = _Model(host, _calls(_call("a", "t0"), _call("b", "t0")))
@@ -642,6 +642,128 @@ class SteeringTests(unittest.TestCase):
                          "stopped")
         self.assertEqual(_results(context), [("a", "cut short", True)])
         self.assertEqual([c.call_id for c in context.pending_tool_calls()], ["b"])
+
+
+class _LevelHost(_SteeringHost):
+    """A host whose stops have levels, as the apps' hosts do: both stop
+    checks read the Preemption, and a stop drops the queued steers."""
+
+    def request_stop(self, level):
+        self.queued = []
+        self.preemption.stop(level)
+
+    def should_stop(self):
+        level = self.preemption.stop_level
+        return level is not None and level >= Urgency.IMMEDIATE
+
+    def stop_requested(self):
+        return self.preemption.stop_level is not None
+
+
+def _compaction_due_after_the_first_sample(host):
+    """Compaction that is due at every interrupt point but the first."""
+    stack = _fake_compaction(host, due=False)
+    stack.enter_context(mock.patch.object(kernel, "auto_compaction_due",
+                                          side_effect=[False] + [True] * 10))
+    return stack
+
+
+class StopLevelTests(unittest.TestCase):
+    """Stops at the three levels in run_turn, and with flushed steers."""
+
+    def test_a_gentle_stop_lets_the_whole_batch_run_then_stops_before_compacting(self):
+        host, context = _LevelHost(), _context()
+
+        def sample():
+            host.request_stop(Urgency.QUEUED)  # /exit during the sample
+            return _calls(_call("a", "t0"), _call("b", "t1"))
+
+        def stopping(arguments, *, timeout_seconds=None):
+            host.request_stop(Urgency.QUEUED)  # and again during a call
+            return ToolOutcome("ran")
+        model = _Model(host, sample, _answer("never"))
+        with _compaction_due_after_the_first_sample(host):
+            result = run_turn(context, model, _tools(stopping, _ok), _config(), host)
+        self.assertEqual(result.kind, "stopped")
+        self.assertEqual(_results(context), [("a", "ran", True), ("b", "ok", True)])
+        self.assertEqual(context.pending_tool_calls(), ())
+        self.assertEqual([e[0] for e in host.events if e[0] in ("sample", "compacted")],
+                         ["sample"])  # no compaction and no sample after the stop
+        self.assertFalse(any(isinstance(item, TurnSummary) for item in context.items))
+
+    def test_a_gentle_stop_lets_a_final_answer_end_the_turn(self):
+        host, context = _LevelHost(), _context()
+
+        def sample():
+            host.request_stop(Urgency.QUEUED)
+            return _answer("done")
+        result = run_turn(context, _Model(host, sample), _environment(host), _config(), host)
+        self.assertEqual((result.kind, result.final_text), ("ended", "done"))
+        self.assertIsInstance(context.items[-1], TurnSummary)
+
+    def test_a_gentle_stop_after_a_failed_sample_neither_retries_nor_recovers(self):
+        for failure in (ModelTransportError("lost"), _expired()):
+            with self.subTest(failure=type(failure).__name__):
+                host, context = _LevelHost(), _context()
+
+                def sample():
+                    host.request_stop(Urgency.QUEUED)
+                    return failure
+                model = _Model(host, sample, _answer("never"))
+                result = run_turn(context, model, _environment(host), _config(), host)
+                self.assertEqual(result.kind, "stopped")
+                self.assertEqual(len([e for e in host.events if e[0] == "sample"]), 1)
+                self.assertEqual((host.retryable, host.notices), (0, []))
+
+    def test_a_stop_after_the_last_allowed_batch_is_not_a_sample_limit_failure(self):
+        for level in Urgency:
+            with self.subTest(level=level.name):
+                host, context = _LevelHost(), _context()
+
+                def stopping(arguments, *, timeout_seconds=None):
+                    host.request_stop(level)
+                    return ToolOutcome("ran")
+                model = _Model(host, _calls(_call("a", "t0")))
+                result = run_turn(context, model, _tools(stopping), _config(max_samples=1),
+                                  host)
+                self.assertEqual(result.kind, "stopped")
+                self.assertEqual(_results(context), [("a", "ran", True)])
+        host = _LevelHost()  # without a stop, the limit is still a failure
+        with self.assertRaises(SampleLimitExceeded):
+            run_turn(_context(), _Model(host, _calls(_call("a", "t0"))), _tools(_ok),
+                     _config(max_samples=1), host)
+
+    def test_a_stop_drops_a_flushed_steer_but_keeps_its_calls_from_starting(self):
+        host, context = _LevelHost(), _context()
+
+        def sample():
+            host.steer("change of plan")  # /steer!, then /exit
+            host.request_stop(Urgency.QUEUED)
+            return _calls(_call("a", "t0"), _call("b", "t0"))
+        tool = mock.Mock(return_value=ToolOutcome("ran"))
+        model = _Model(host, sample, _answer("never"))
+        result = run_turn(context, model, _tools(tool), _config(), host)
+        self.assertEqual(result.kind, "stopped")
+        tool.assert_not_called()
+        # Not closed as skipped "because the user sent a message": the stop
+        # dropped the message. They stay unanswered, as at any level-2 stop.
+        self.assertEqual(_results(context), [])
+        self.assertEqual([c.call_id for c in context.pending_tool_calls()], ["a", "b"])
+        self.assertEqual(host.preemption.stop_level, Urgency.IMMEDIATE)
+        texts = [item.content for item in context.items if isinstance(item, Message)]
+        self.assertEqual(texts, ["task"])
+
+    def test_a_stop_after_a_flushed_steer_lets_a_final_answer_stand(self):
+        host, context = _LevelHost(), _context()
+
+        def sample():
+            host.steer("one more thing")
+            host.request_stop(Urgency.IMMEDIATE)  # a first Ctrl-C
+            return _answer("first")
+        model = _Model(host, sample, _answer("never"))
+        result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual((result.kind, result.final_text), ("ended", "first"))
+        self.assertEqual(len([e for e in host.events if e[0] == "sample"]), 1)
 
 
 class PreemptionTests(unittest.TestCase):
@@ -653,14 +775,56 @@ class PreemptionTests(unittest.TestCase):
             self.assertFalse(operation.cancelled)
             preemption.flush(Urgency.PREEMPT)
             preemption.flush(Urgency.PREEMPT)
-            preemption.preempt_stop()
+            self.assertEqual(preemption.level, Urgency.PREEMPT)
+            preemption.stop(Urgency.PREEMPT)
         self.assertTrue(operation.cancelled)
         self.assertEqual(cancels, [1])  # done before the operation ended
-        self.assertEqual(preemption.take(), Urgency.PREEMPT)
-        self.assertEqual(preemption.level, Urgency.QUEUED)
+        self.assertEqual(preemption.level, Urgency.QUEUED)  # the stop dropped the steers
+        self.assertEqual(preemption.stop_level, Urgency.PREEMPT)
         with preemption.operation(lambda: cancels.append(2)) as later:
             self.assertTrue(later.skipped)  # after a preempting stop, nothing starts
         self.assertEqual(cancels, [1])
+
+    def test_a_stop_only_rises_and_skips_operations_from_level_2(self):
+        preemption, cancels = Preemption(), []
+        preemption.stop(Urgency.QUEUED)  # /exit
+        with preemption.operation(lambda: cancels.append(1)) as operation:
+            self.assertFalse(operation.skipped)  # the batch may finish
+            preemption.flush(Urgency.PREEMPT)  # a stop dropped the steers
+            self.assertFalse(preemption.due())
+            self.assertEqual(preemption.level, Urgency.QUEUED)
+            preemption.stop(Urgency.IMMEDIATE)  # Ctrl-C
+            preemption.stop(Urgency.QUEUED)
+        self.assertEqual((cancels, preemption.stop_level), ([], Urgency.IMMEDIATE))
+        with preemption.operation() as later:
+            self.assertTrue(later.skipped)
+
+    def test_steers_flushed_before_a_stop_raise_it_to_level_2_but_never_3(self):
+        for flushed in (Urgency.QUEUED, Urgency.IMMEDIATE, Urgency.PREEMPT):
+            with self.subTest(flushed=flushed.name):
+                preemption, cancels = Preemption(), []
+                with preemption.operation(lambda: cancels.append(1)):
+                    preemption.flush(flushed)
+                    preemption.stop(Urgency.QUEUED)
+                    self.assertFalse(preemption.due())
+                expected = Urgency.QUEUED if flushed == Urgency.QUEUED else Urgency.IMMEDIATE
+                self.assertEqual(preemption.stop_level, expected)
+                # Only the preempting steer cancelled; the stop cancels nothing.
+                self.assertEqual(cancels, [1] if flushed == Urgency.PREEMPT else [])
+
+    def test_the_notation_and_ctrl_c(self):
+        names = ("/exit", "/quit")
+        for word, expected in (("/exit", Urgency.QUEUED), ("/quit!", Urgency.IMMEDIATE),
+                               ("/exit!!", Urgency.PREEMPT), ("/quit!!!!", Urgency.PREEMPT)):
+            with self.subTest(word=word):
+                self.assertIs(command_urgency(word, *names), expected)
+        for word in ("/exits", "/exit!x", "exit", "!", "", "/steer"):
+            with self.subTest(word=word):
+                self.assertIsNone(command_urgency(word, *names))
+        self.assertIs(command_urgency("/steer!", "/steer"), Urgency.IMMEDIATE)
+        self.assertEqual([escalated_stop(level) for level in (None, *Urgency)],
+                         [Urgency.IMMEDIATE, Urgency.IMMEDIATE, Urgency.PREEMPT,
+                          Urgency.PREEMPT])
 
     def test_leaving_waits_for_a_slow_cancel_so_it_never_reaches_the_next_operation(self):
         preemption, events = Preemption(), []

@@ -56,7 +56,7 @@ class RetryInputTests(unittest.TestCase):
         submit(state)
         self.assertEqual(tuple(state.pending), (ticket,))
         self.assertTrue(any("already queued" in item.text for item in state.displays))
-        state.request_exit()
+        state.request_stop()
         self.assertIsNone(state.retry)
         self.assertFalse(state.pending)
 

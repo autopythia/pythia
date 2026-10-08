@@ -94,6 +94,8 @@ from .loop import turn_tail
 from .loop import unfinished_turn
 from .loop import Preemption
 from .loop import Urgency
+from .loop import command_urgency
+from .loop import escalated_stop
 from .messages import DEFAULT_ANTHROPIC_VERSION
 from .messages import MESSAGES_COMPACTION_BETA
 from .messages import MessagesEndpoint
@@ -183,6 +185,8 @@ __all__ = [
     "unfinished_turn",
     "Preemption",
     "Urgency",
+    "command_urgency",
+    "escalated_stop",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
     "CompactionContextWindowError",

@@ -238,7 +238,7 @@ class CliSteeringTests(unittest.IsolatedAsyncioTestCase):
                 seen.append([item.content for item in context.items
                              if isinstance(item, Message) and item.role == "user"])
                 if Model.calls == 1:
-                    asyncio.run_coroutine_threadsafe(enter("/steer! stop that"), loop).result()
+                    asyncio.run_coroutine_threadsafe(enter("/steer!! stop that"), loop).result()
                     if not retired.wait(5):
                         raise AssertionError("the steer did not retire the model")
                     raise ModelTransportError("Claude Relay continuation retired")
@@ -268,23 +268,51 @@ class CliSteerInputTests(unittest.TestCase):
         self.assertEqual(state.preemption.level, Urgency.QUEUED)
         self._enter(state, "first")
         self._enter(state, "second")
-        self._enter(state, "/steer")
-        self.assertEqual(state.preemption.level, Urgency.IMMEDIATE)
         self._enter(state, "/steer!")
+        self.assertEqual(state.preemption.level, Urgency.IMMEDIATE)
+        self._enter(state, "/steer!!!")  # more than two ! read as two
         self.assertEqual(state.preemption.level, Urgency.PREEMPT)
         self.assertEqual([entry.text for entry in state.pending], ["first", "second"])
         self.assertEqual(state.editor.text, "")
         self.assertEqual(cli._take_steers(state)[-1].text, "second")
         self.assertEqual(state.preemption.level, Urgency.QUEUED)  # delivered: reset
 
+    def test_bare_steer_flushes_nothing_and_reports_when_the_steers_arrive(self):
+        state = cli._UIState(ready=True, turn_active=True)
+        self._enter(state, "first")
+        self._enter(state, "/steer")
+        self.assertEqual(state.preemption.level, Urgency.QUEUED)
+        self._enter(state, "second")
+        self._enter(state, "/steer")
+        self._enter(state, "/steer!")
+        self._enter(state, "/steer")  # the urgency only rises: it stays immediate
+        self.assertEqual(state.preemption.level, Urgency.IMMEDIATE)
+        self.assertEqual(self._notices(state), [
+            "1 steer queued for the next sample, after the current tool batch; "
+            "/steer! or /steer!! delivers it sooner.",
+            "2 steers queued for the next sample, after the current tool batch; "
+            "/steer! or /steer!! delivers them sooner.",
+            "Flushing 2 steers: delivered once the current sample or tool call finishes.",
+            "Flushing 2 steers: delivered once the current sample or tool call finishes."])
+
     def test_steer_with_text_queues_it_and_flushes_with_the_earlier_steers(self):
         state = cli._UIState(ready=True, turn_active=True)
         self._enter(state, "earlier")
-        self._enter(state, "/steer! and now")
+        self._enter(state, "/steer!! and now")
         self.assertEqual([entry.text for entry in state.pending], ["earlier", "and now"])
         self.assertEqual(state.pending[1].message, Message("user", "and now"))
         self.assertEqual(state.preemption.level, Urgency.PREEMPT)
         self.assertEqual(state.editor.text, "")
+
+    def test_steer_with_text_and_no_bang_is_plain_text(self):
+        state = cli._UIState(ready=True, turn_active=True)
+        self._enter(state, "/steer /tmp/notes.md has the details")  # text starting with /
+        self.assertEqual([entry.text for entry in state.pending],
+                         ["/tmp/notes.md has the details"])
+        self.assertEqual(state.preemption.level, Urgency.QUEUED)
+        self.assertEqual(self._notices(state), [
+            "1 steer queued for the next sample, after the current tool batch; "
+            "/steer! or /steer!! delivers it sooner."])
 
     def test_steer_text_that_cannot_steer_queues_as_the_next_query(self):
         for turn_active, ahead in ((False, None), (True, cli._RetryIntent())):
@@ -305,8 +333,8 @@ class CliSteerInputTests(unittest.TestCase):
         def read(text):
             raise cli.AttachmentError("cannot read attachment: missing.png")
         state.read_query = read
-        self._enter(state, "/steer! @missing.png look")
-        self.assertEqual(state.editor.text, "/steer! @missing.png look")
+        self._enter(state, "/steer!! @missing.png look")
+        self.assertEqual(state.editor.text, "/steer!! @missing.png look")
         self.assertEqual([entry.text for entry in state.pending], ["queued steer"])
         self.assertEqual(state.preemption.level, Urgency.QUEUED)
         self.assertEqual(self._notices(state), ["cannot read attachment: missing.png"])

@@ -1049,6 +1049,33 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(closing.success)
         self.assertIn("Result unavailable after restart", closing.output)
 
+    def test_a_gentle_exit_mid_batch_lets_the_batch_finish_and_close_keeps_it_gentle(self):
+        holder, ran = {}, []
+
+        def probe(args, **kwargs):
+            ran.append(len(ran) + 1)
+            holder["session"].request_stop(auto.Urgency.QUEUED)  # /exit
+            return ToolOutcome(f"call {len(ran)} done")
+        batch = ModelSample((ToolCall(name="probe", call_id="one", arguments_json="{}"),
+                             ToolCall(name="probe", call_id="two", arguments_json="{}")))
+        session = self.session({1: [batch, answer("never")]}, worker_board=False,
+                               extra_tools=(Tool(ToolSpec("probe", "Probe.", {}), probe),))
+        holder["session"] = session
+        submitted = session.submit("two calls")
+        self.assertFalse(self.settled(session, submitted))
+        session.close()
+        self.assertEqual(session.stop_level, auto.Urgency.QUEUED)  # close() kept it
+        self.assertFalse(session.preempting)
+        self.assertEqual(ran, [1, 2])
+        self.assertEqual(len(self.calls[1]), 1)  # no sample after the batch
+        saved = load_interaction_save(self.path / "contexts" / "1.jsonl")
+        self.assertEqual(saved.pending_tool_calls(), ())
+        self.assertEqual([item.call_id for item in saved.items if isinstance(item, ToolResult)],
+                         ["one", "two"])
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertTrue(any("Stopped before further effects" in text for text in texts), texts)
+        self.assertFalse(session._fatal)  # nothing was left unanswered
+
     def test_a_stop_cancels_nothing_and_a_preempting_stop_retires_every_model(self):
         entered, release = threading.Event(), threading.Event()
 
@@ -1065,20 +1092,22 @@ class RuntimeTests(unittest.TestCase):
         try:
             session.request_stop()
             self.assertFalse(session.preempting)
-            self.assertFalse(any(p.stopped for p in session._preemption.values()))
+            self.assertEqual({p.stop_level for p in session._preemption.values()},
+                             {auto.Urgency.IMMEDIATE})
             time.sleep(0.05)
             self.assertFalse(any(retire.called for retire in retires.values()))
             session.preempt()
             session.preempt()
             self.assertTrue(session.preempting)
-            self.assertTrue(all(p.stopped for p in session._preemption.values()))
+            self.assertEqual({p.stop_level for p in session._preemption.values()},
+                             {auto.Urgency.PREEMPT})
             wait_for(lambda: all(retire.called for retire in retires.values()))
         finally:
             release.set()
         # Main's model may be retired twice (its sample's cancel, then every
         # model's); retiring is idempotent.
 
-    def test_interactive_second_ctrl_c_preempts_and_the_editor_works_while_stopping(self):
+    def test_interactive_exit_then_ctrl_c_escalates_and_the_editor_works_while_stopping(self):
         entered, release = threading.Event(), threading.Event()
 
         def first_sample(context):
@@ -1087,9 +1116,12 @@ class RuntimeTests(unittest.TestCase):
             return answer("done")
         session = self.session({1: [first_sample], -1: [answer("Complete.")]},
                                worker_board=False)
-        waiting = "closing - waiting for current work... (Ctrl-C again or /exit! cancels it)"
-        stopping = "Stopping; only /exit! or Ctrl-C is accepted."
-        already = "Already stopping; /exit! or Ctrl-C cancels the current work."
+        gentle = "closing - stopping before the next sample... (Ctrl-C or /exit! stops sooner)"
+        waiting = "closing - waiting for current work... (Ctrl-C or /exit!! cancels it)"
+        hint = " Ctrl-C or /exit! stops sooner; /exit!! also cancels the current work."
+        stopping = "Stopping; input is not accepted." + hint
+        already = "Already stopping." + hint
+        already_waiting = "Already stopping. Ctrl-C or /exit!! cancels the current work."
 
         class Terminal:
             closed = False
@@ -1119,36 +1151,48 @@ class RuntimeTests(unittest.TestCase):
                     self.submit("task")
                     self.stage = 1
                 elif self.stage == 1 and entered.is_set():
-                    self.keys.append(SimpleNamespace(key="c-c", data=""))
+                    self.submit("/exit")  # level 1: the sample may finish
                     self.stage = 2
-                elif self.stage == 2 and status == waiting:
+                elif self.stage == 2 and status == gentle:
                     self.submit("more work")
-                    self.submit("/exit")
+                    self.submit("/quit")
                     self.stage = 3
                 elif self.stage == 3 and stopping in self.seen and already in self.seen:
-                    self.submit("/exit!")
+                    self.keys.append(SimpleNamespace(key="c-c", data=""))  # level 2
                     self.stage = 4
-                elif self.stage == 4 and status == "closing - cancelling current work...":
-                    release.set()  # this test's model can't be cancelled
+                elif self.stage == 4 and status == waiting:
+                    self.submit("/exit!")
                     self.stage = 5
+                elif self.stage == 5 and already_waiting in self.seen:
+                    self.keys.append(SimpleNamespace(key="c-c", data=""))  # level 3
+                    self.stage = 6
+                elif self.stage == 6 and status == "closing - cancelling current work...":
+                    release.set()  # this test's model can't be cancelled
+                    self.stage = 7
         terminal = Terminal()
         try:
             asyncio.run(asyncio.wait_for(auto._interactive(session, terminal), timeout=8))
         finally:
             release.set()
             session.close()
-        self.assertEqual(terminal.stage, 5)
+        self.assertEqual(terminal.stage, 7)
         self.assertTrue(session.preempting)
 
     def test_slash_exit_bang_stops_and_preempts_at_once(self):
         session = self.session({}, worker_board=False)
-        self.assertEqual(auto._local_command("/exit!", 1, session)[2], "preempt")
-        self.assertEqual(auto._local_command("/quit", 1, session)[2], "stop")
+        for text, level in (("/exit", auto.Urgency.QUEUED), ("/quit!", auto.Urgency.IMMEDIATE),
+                            ("/exit!!", auto.Urgency.PREEMPT),
+                            ("/quit!!!", auto.Urgency.PREEMPT)):
+            with self.subTest(text=text):
+                self.assertIs(auto._local_command(text, 1, session)[2], level)
+        self.assertIsNone(auto._local_command("/contexts", 1, session)[2])
+        with self.assertRaisesRegex(ValueError, "take ! or !!"):
+            auto._local_command("/exit!x", 1, session)
 
         class Terminal:
             closed = False
             keys = deque(SimpleNamespace(key=key, data=data) for key, data in (
-                ("<bracketed-paste>", "/quit!"), ("c-m", "\r")))
+                ("<bracketed-paste>", "/quit!!"), ("c-m", "\r")))
 
             def __enter__(self):
                 return self
@@ -1466,7 +1510,9 @@ class RuntimeTests(unittest.TestCase):
         def probe(args, **kwargs):
             session = holder["session"]
             holder["plain"] = session.submit("Also cover the CLI.")
-            holder["flushed"] = session.flush_steers(auto.Urgency.IMMEDIATE)  # a bare /steer
+            holder["queued"] = session.flush_steers(auto.Urgency.QUEUED)  # a bare /steer
+            holder["queued_status"] = session.status(1)
+            holder["flushed"] = session.flush_steers(auto.Urgency.IMMEDIATE)  # a bare /steer!
             holder["status"] = session.status(1)
             return ToolOutcome("probed")
         session = self.session({
@@ -1478,6 +1524,12 @@ class RuntimeTests(unittest.TestCase):
         holder["session"] = session
         self.assertTrue(self.settled(session, session.submit("review it")))
         later.assert_not_called()
+        self.assertEqual(holder["queued"], {"count": 1, "record_id": "1", "level": 0,
+                                            "awaiting": False})
+        self.assertEqual(auto._flush_notice(session, holder["queued"]),
+                         "1 steer for task 1 of #1 (main) queued for its next sample, after "
+                         "the current tool batch; /steer! or /steer!! delivers it sooner.")
+        self.assertNotIn("steer pending", holder["queued_status"])
         self.assertEqual(holder["flushed"], {"count": 1, "record_id": "1", "level": 1,
                                              "awaiting": False})
         self.assertEqual(auto._flush_notice(session, holder["flushed"]),
@@ -1590,7 +1642,7 @@ class RuntimeTests(unittest.TestCase):
                     self.submit("Also cover the CLI.")
                     self.stage = 2
                 elif self.stage == 2 and steered in self.seen:
-                    self.submit("/steer")
+                    self.submit("/steer!")
                     self.stage = 3
                 elif self.stage == 3 and flushing in self.seen:
                     release.set()

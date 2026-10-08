@@ -10,11 +10,15 @@ Right before each sample the loop resumes the host's *interrupt*, the logical
 coroutine that stands for the user's top-level input. Its blocking case is
 the caller's quiescent wait between tasks; here it answers at once.
 
-Steers enter a turn only there. Flushed steers (``/steer``) get the turn there
+Steers enter a turn only there. Flushed steers (``/steer!``) get the turn there
 sooner: the loop starts no new sample or tool call before it delivers them,
 and closes the calls they kept from starting. Each sample and tool call is
 *preemptible*: a preempting steer or stop can cancel it from another thread
 (see ``preemption``), where the model or tool supports that.
+
+A stop ends the turn at one of three levels (``Urgency``): at the next
+interrupt point, after the tool batch (``stop_requested``); once the operation
+in flight ends (``should_stop``); or by also cancelling it.
 """
 
 from __future__ import annotations
@@ -144,8 +148,22 @@ class TurnHost:
         self.phase("executing tools")
 
     def should_stop(self) -> bool:
-        """True once the turn must start no new effects. May raise."""
+        """True once the turn must start no new effects. May raise.
+
+        That is a stop that waits only for the operation in flight, or also
+        cancels it (levels 2 and 3). The loop checks it before each tool call.
+        """
         return False
+
+    def stop_requested(self) -> bool:
+        """True once a stop at any level is requested. May raise.
+
+        The turn then samples no more: it ends at its next interrupt point,
+        though it may finish the tool batch in flight first (level 1, unless
+        :meth:`should_stop` is true too). The default is :meth:`should_stop`,
+        for a host whose every stop is at level 2 or above.
+        """
+        return self.should_stop()
 
     def interrupt(self):
         """Resume the interrupt right before a sample.
@@ -156,14 +174,15 @@ class TurnHost:
         demo). A host with flushed steers resets their urgency here
         (``Preemption.take``), since :meth:`should_steer` must turn false.
         """
-        return Interrupt.STOP if self.should_stop() else Interrupt.CONTINUE
+        return Interrupt.STOP if self.stop_requested() else Interrupt.CONTINUE
 
     def should_steer(self) -> bool:
         """True while flushed steers wait for the interrupt point.
 
         The turn then starts no new sample or tool call, closes the calls
         that have not started, and goes to the interrupt point. The default
-        host has no steers.
+        host has no steers. It must be false once a stop is requested, which
+        drops the steers.
         """
         return False
 
@@ -220,7 +239,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
     continuation_recovered = False
     recovery_pending = False
     while config.max_samples is None or samples < config.max_samples:
-        if host.should_stop():
+        if host.stop_requested():
             return STOPPED
         if auto_compaction_due(model, context, config):
             try:
@@ -246,8 +265,9 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                     )
         except ModelError as exc:
             record_sample_failure(context, exc, host)
-            if host.should_stop():
-                # The stop caused the failure (e.g. it retired the model).
+            if host.stop_requested():
+                # The stop caused the failure (e.g. it retired the model), or
+                # the turn may sample no more: no retry or recovery.
                 return STOPPED
             if operation.cancelled:
                 # A preempting steer cancelled it: not a failure, and not
@@ -327,6 +347,10 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             # A handoff takes effect only now, with the whole batch saved.
             _save_summary(context, host, started)
             return TurnResult("yielded", note=note)
+    if host.stop_requested():
+        # The last allowed sample's batch finished under a stop: that is the
+        # stop the user asked for, not a failure.
+        return STOPPED
     raise SampleLimitExceeded(
         f"Model did not produce a final answer within {config.max_samples} samples.")
 
@@ -353,7 +377,7 @@ def compact(context, model, environment, config, host, sample_params) -> bool:
     except NothingToCompact:
         return False
     except Exception:
-        if host.should_stop():
+        if host.stop_requested():
             raise _CompactionStopped() from None
         raise
     if not isinstance(result, CompactionResult):
@@ -390,8 +414,9 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
     cancel token (``cancel_scope``) that a preempting steer or stop can set.
     Flushed steers close the calls that have not started (``skip_calls``).
     User messages that tools inject wait until every call has a result. On a
-    stop, calls that have not started stay unanswered; the next use of the
-    context closes them.
+    stop at level 2 or 3 (``should_stop``), calls that have not started stay
+    unanswered; the next use of the context closes them. A stop at level 1
+    lets the batch finish.
     """
     calls = tuple(calls)
     held: list[Message] = []
@@ -407,7 +432,7 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
                         result = environment.execute_tool_calls((call,))
         if operation.skipped:
             if host.should_stop():
-                return False  # a preempting stop
+                return False  # a stop, not a steer
             skip_calls(context, calls[index:], host)
             break
         host.append(context, result.items)

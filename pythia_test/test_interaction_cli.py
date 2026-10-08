@@ -48,6 +48,7 @@ from pythia.interaction import TurnSummary
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import UserToolCall
 from pythia.interaction import UserToolResult
+from pythia.interaction import Urgency
 from pythia.interaction import cli
 from pythia.interaction.loop import kernel
 from pythia.interaction import demo
@@ -1221,7 +1222,7 @@ class CLIControllerTests(_ControllerTestCase):
                 t.submit("Also check the tests.")
                 step = 1
             elif step == 1 and "steers=1" in status:
-                t.submit("/steer")  # flush the steer typed above
+                t.submit("/steer!")  # flush the steer typed above
                 step = 2
             elif step == 2 and "steers=1 (immediate)" in status:
                 release.set()
@@ -1277,7 +1278,7 @@ class CLIControllerTests(_ControllerTestCase):
 
     async def test_one_ctrl_c_lets_the_sample_finish_and_saves_it(self):
         entered, release, retires = threading.Event(), threading.Event(), []
-        waiting = "closing — waiting for current operation; Ctrl-C again or /exit! cancels it"
+        waiting = "closing — waiting for current operation; Ctrl-C or /exit!! cancels it"
 
         def sample(context):
             entered.set()
@@ -1340,27 +1341,99 @@ class CLIControllerTests(_ControllerTestCase):
         state.editor = Editor("/exit", 5)
         state.handle_key("c-m", "\r")
         self.assertTrue(state.closing)
-        self.assertFalse(state.preempting)
-        for key, data in (("c-u", ""), ("<bracketed-paste>", "/exit")):
+        self.assertEqual(state.stop_level, Urgency.QUEUED)
+        self.assertEqual(state.editor.text, "")
+        for key, data in (("c-u", ""), ("<bracketed-paste>", "/quit")):
             state.handle_key(key, data)  # the editor stays usable
-        self.assertEqual(state.editor.text, "/exit")
+        self.assertEqual(state.editor.text, "/quit")
         state.handle_key("c-m", "\r")
+        self.assertEqual(state.editor.text, "/quit")  # it changed nothing: the draft stays
         state.editor = Editor("more work", 9)
         state.handle_key("c-m", "\r")
         self.assertEqual(state.editor.text, "more work")
-        self.assertEqual([item.text for item in state.displays], [
-            "[cli] Already stopping; /exit! or Ctrl-C cancels the current operation.",
-            "[cli] Stopping; only /exit! or Ctrl-C is accepted."])
         self.assertFalse(state.pending)
         state.editor = Editor("/exit!", 6)
         state.handle_key("c-m", "\r")
-        self.assertTrue(state.preempting)
-        self.assertTrue(state.preemption.stopped)
+        self.assertEqual(state.stop_level, Urgency.IMMEDIATE)
         self.assertEqual(state.editor.text, "")
+        state.editor = Editor("/exit!", 6)
+        state.handle_key("c-m", "\r")
+        state.editor = Editor("/exit!!", 7)
+        state.handle_key("c-m", "\r")
+        self.assertEqual(state.stop_level, Urgency.PREEMPT)
+        self.assertEqual(state.preemption.stop_level, Urgency.PREEMPT)
+        state.editor = Editor("more", 4)
+        state.handle_key("c-m", "\r")
+        self.assertEqual([item.text for item in state.displays], [
+            "[cli] Already stopping. Ctrl-C or /exit! stops sooner; /exit!! also cancels "
+            "the current operation.",
+            "[cli] Stopping; input is not accepted. Ctrl-C or /exit! stops sooner; /exit!! "
+            "also cancels the current operation.",
+            "[cli] Already stopping. Ctrl-C or /exit!! cancels the current operation.",
+            "[cli] Stopping; input is not accepted."])
         fresh = cli._UIState(ready=True)
-        fresh.editor = Editor("/quit!", 6)
+        fresh.editor = Editor("/quit!!!", 8)  # more than two ! read as two
         fresh.handle_key("c-m", "\r")
-        self.assertTrue(fresh.closing and fresh.preempting)  # both stages at once
+        self.assertTrue(fresh.closing)
+        self.assertEqual(fresh.stop_level, Urgency.PREEMPT)  # at once
+
+    def test_ctrl_c_is_exit_bang_then_exit_bang_bang(self):
+        state = cli._UIState(ready=True)
+        state.editor = Editor("/exit", 5)
+        state.handle_key("c-m", "\r")
+        levels = [state.stop_level]
+        for key in ("c-c", "c-d", "c-c"):
+            state.handle_key(key, "")
+            levels.append(state.stop_level)
+        self.assertEqual(levels, [Urgency.QUEUED, Urgency.IMMEDIATE, Urgency.PREEMPT,
+                                  Urgency.PREEMPT])
+        fresh = cli._UIState()  # even before the editor is ready
+        fresh.handle_key("c-c", "")
+        self.assertEqual(fresh.stop_level, Urgency.IMMEDIATE)
+
+    def test_a_steer_flushed_before_exit_keeps_the_turn_from_starting_anything(self):
+        state = cli._UIState(ready=True, turn_active=True)
+        for text in ("look again", "/steer!", "/exit"):
+            state.editor = Editor(text, len(text))
+            state.handle_key("c-m", "\r")
+        self.assertFalse(state.pending)  # the stop dropped the steer
+        self.assertFalse(state.preemption.due())
+        self.assertEqual(state.stop_level, Urgency.IMMEDIATE)
+        self.assertTrue(state.closing)
+
+    async def test_exit_during_a_tool_lets_the_batch_finish_and_leaves_nothing_unanswered(self):
+        entered, release, executions = threading.Event(), threading.Event(), []
+        gentle = "closing — stopping before the next sample; Ctrl-C or /exit! stops sooner"
+
+        def record(arguments, *, timeout_seconds=None):
+            executions.append(True)
+            if len(executions) == 1:
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("test did not release tool")
+            return ToolOutcome(f"run {len(executions)}")
+        typed = []
+
+        def frame(t, editor, status):
+            if entered.is_set() and not typed:
+                t.submit("/exit")
+                typed.append(True)
+            if status.startswith(gentle):  # then the elapsed time
+                release.set()
+
+        calls = (ToolCall("record", "one", "{}"), ToolCall("record", "two", "{}"))
+        environment = Environment((Tool(ToolSpec("record", "", {}), record),))
+        model = _Model(self.path, ModelSample(items=calls), _answer("never"))
+        try:
+            self.assertEqual(await self._run(
+                model, _Terminal(frame), ["--prompt", "hello"], environment), 0)
+        finally:
+            release.set()
+        self.assertEqual(len(executions), 2)
+        self.assertEqual(len(model.calls), 1)  # no sample after the batch
+        saved = load_interaction_save(self.path)
+        self.assertEqual(saved.pending_tool_calls(), ())
+        self.assertEqual(saved.items[-1], ToolResult("two", "run 2"))
 
     async def test_quit_during_tool_checkpoints_its_result_and_skips_remaining_calls(self):
         entered, release = threading.Event(), threading.Event()

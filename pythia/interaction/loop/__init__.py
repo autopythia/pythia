@@ -22,6 +22,8 @@ from .kernel import TurnResult
 from .kernel import run_turn
 from .preemption import Preemption
 from .preemption import Urgency
+from .preemption import command_urgency
+from .preemption import escalated_stop
 from .tail import TurnTail
 from .tail import turn_tail
 from .tail import unfinished_turn
@@ -42,6 +44,8 @@ __all__ = [
     "Yield",
     "YieldChannel",
     "YieldTool",
+    "command_urgency",
+    "escalated_stop",
     "run_supervised_task",
     "run_turn",
     "supervise",
