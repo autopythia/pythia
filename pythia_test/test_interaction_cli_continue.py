@@ -98,7 +98,8 @@ class ContinueControllerTests(_ControllerTestCase):
         self.assertEqual(_users(saved), ["old query"])
         self.assertEqual(sum(isinstance(item, UserInteractionBoundary) for item in saved), 1)
         self.assertIsInstance(saved[-1], TurnSummary)
-        (notice,) = [i.text for i in terminal.items if i.text.startswith("[cli] Resumed save")]
+        (notice,) = [i.text for i in terminal.items
+                     if i.text.startswith("[cli] Note: resumed save")]
         self.assertIn("ends with tool results", notice)
         self.assertIn("enter /continue to sample from here, or a query to continue with a "
                       "new message.", notice)

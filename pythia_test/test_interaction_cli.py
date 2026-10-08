@@ -573,7 +573,8 @@ class CLIDisabledToolsTests(_ControllerTestCase):
         self.assertFalse(saved.pending_tool_calls())
         self.assertFalse(marker.exists())
         notices = "\n".join(item.text for item in terminal.items)
-        self.assertIn("Default model tools disabled; user commands remain available.", notices)
+        self.assertIn("[cli] Note: default model tools are disabled; user commands remain "
+                      "available.", notices)
         self.assertNotIn("runs without a sandbox", notices)
         self.assertNotIn("workspace path restrictions are disabled", notices)
 
@@ -602,6 +603,9 @@ class CLIDisabledToolsTests(_ControllerTestCase):
         self.assertIn("was not rerun", recovered.output)
         self.assertEqual(model.calls[0][1], ())
         self.assertFalse(saved.pending_tool_calls())
+        self.assertIn("[cli] Note: command sessions and plan state were not restored. Old "
+                      "command session IDs are not resumable; use only IDs from this run.",
+                      [item.text for item in terminal.items])
 
     async def test_config_and_both_compaction_paths_keep_empty_model_tools(self):
         save_interaction_save(self.path, InteractionContext((

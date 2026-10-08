@@ -100,6 +100,8 @@ class CLIRecoveryTests(_ControllerTestCase):
                 )
                 notices = "\n".join(i.text for i in terminal.items if i.text.startswith("[cli]"))
                 self.assertEqual("No model request was started" in notices, notice is not None)
+                self.assertEqual("[cli] Note: resumed save ends with " in notices,
+                                 notice is not None)
                 if notice:
                     self.assertIn(notice, notices)
                 self.assertEqual("enter /continue" in notices, continuable)

@@ -564,7 +564,8 @@ class ModelTests(unittest.TestCase):
                 self.assertIn('relay-host-session-ok', output)
                 if frontend == 'cli':
                     self.assertIn('exec_command runs without a sandbox', result.stderr)
-                    self.assertIn('host tools run as the Pythia user, outside the Claude sandbox', result.stderr)
+                    self.assertIn('[cli] Warning: Claude Relay host tools run as the Pythia user, '
+                                  'outside the Claude sandbox.', result.stderr)
 
     def test_headless_second_interrupt_retires_a_live_model_before_generation_deadline(self):
         # The first SIGINT stops without cancelling the sample in flight; the

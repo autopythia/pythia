@@ -912,8 +912,8 @@ class RuntimeTests(unittest.TestCase):
             -1: {"name": "observer custom"},
         })
         events = session.drain_events()
-        self.assertEqual(len(events), 2)
-        self.assertTrue(all(event.index is None for event in events))
+        # Two global events, then the tools of each role that runs a model.
+        self.assertEqual([event.index for event in events], [None, None, 1, 2])
         self.assertEqual([item.text for item in events[0].items], [
             f"Save directory: {self.path}",
             "Warning: local tools are unsandboxed; use a trusted model and workspace.",
@@ -928,8 +928,27 @@ class RuntimeTests(unittest.TestCase):
         ])
         self.assertEqual(len(summary.split("\n")), 3)
         self.assertFalse(summary.endswith("\n"))
-        self.assertEqual(auto._display_events(session, events)[-1], events[1].items[0])
+        self.assertEqual(auto._display_events(session, events[:2])[-1], events[1].items[0])
         self.assertFalse((self.path / "model-bindings.json").exists())
+
+    def test_startup_shows_the_tools_of_each_role_that_runs_a_model(self):
+        for mode, kwargs, expected in (
+                ("default", {"worker_board": False},
+                 ["[#1 (main) - tools] yield", "[#-1 (watcher) - tools] resume, read_context"]),
+                ("observe-only", {"worker_board": False, "watcher_observe_only": True},
+                 ["[#1 (main) - tools] (none)"]),
+                ("board", {}, ["[#1 (main) - tools] board_read_thread, board_post_plan",
+                               "[#2 (worker) - tools] board_read_thread"])):
+            self.path = Path(self.temp.name) / mode
+            for resume in (False, True):  # Auto replays no history: shown on every start.
+                with self.subTest(mode=mode, resume=resume):
+                    session = self.session({}, resume=resume, **kwargs)
+                    texts = [item.text for item in
+                             auto._display_events(session, session.drain_events())]
+                    session.close()
+                    # Right after the role summaries; a watcher without a model has none.
+                    self.assertTrue(texts[-len(expected) - 1].startswith("#1 (main): "))
+                    self.assertEqual(texts[-len(expected):], expected)
 
     def test_debug_model_binding_snapshot_is_opt_in(self):
         self.session({}, debug_save_model_binding=True)
@@ -1227,8 +1246,8 @@ class RuntimeTests(unittest.TestCase):
         holder["session"] = session
         self.assertTrue(self.settled(session, session.submit("review it")))
         self.assertEqual(holder["posted"], {"record_id": "1", "steer": True})
-        self.assertIn("| Enter steers task 1", holder["status"])
-        self.assertNotIn("Enter steers", session.status(1))
+        # No steering hint on the status line while the steer waits.
+        self.assertRegex(holder["status"], r"^#1 \(main\) - executing tools\.\.\. \d+s$")
         self.assertEqual(auto._posted_notice(session, holder["posted"]),
                          "Steer for task 1 of #1 (main), delivered before its next sample.")
         self.assertEqual(self.last_user(self.calls[1][1]).content, "Also cover the CLI.")
@@ -1394,7 +1413,7 @@ class RuntimeTests(unittest.TestCase):
                 if self.stage == 0:
                     self.submit("first task")
                     self.stage = 1
-                elif self.stage == 1 and entered.is_set() and "| Enter steers task 1" in status:
+                elif self.stage == 1 and entered.is_set():  # in main's first sample
                     self.submit("Also cover the CLI.")
                     self.stage = 2
                 elif self.stage == 2 and STEER in self.seen:
@@ -1421,6 +1440,7 @@ class RuntimeTests(unittest.TestCase):
             release.set()
             session.close()
         self.assertEqual(terminal.stage, 6)
+        self.assertFalse(any("Enter" in status for status in terminal.statuses))
         self.assertIn("Queued user task 1 for #1 (main).", terminal.seen)
         self.assertTrue(session.task_result({"record_id": "1"}))
         self.assertTrue(session.task_result({"record_id": "2"}))
@@ -1463,7 +1483,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(auto._flush_notice(session, holder["flushed"]),
                          "Flushing 1 steer for task 1 of #1 (main): delivered once the current "
                          "sample or tool call finishes.")
-        self.assertIn("| Enter steers task 1 | steer pending (immediate)", holder["status"])
+        self.assertRegex(holder["status"],
+                         r"^#1 \(main\) - executing tools\.\.\. \d+s \| steer pending \(immediate\)$")
         sampled = self.calls[1][1]
         results = [(i.call_id, i.output) for i in sampled if isinstance(i, ToolResult)]
         self.assertEqual(results, [("p1", "probed"), ("p2", kernel.SKIPPED_OUTPUT)])
@@ -1565,7 +1586,7 @@ class RuntimeTests(unittest.TestCase):
                 if self.stage == 0:
                     self.submit("first task")
                     self.stage = 1
-                elif self.stage == 1 and entered.is_set() and "| Enter steers task 1" in status:
+                elif self.stage == 1 and entered.is_set():  # in main's first sample
                     self.submit("Also cover the CLI.")
                     self.stage = 2
                 elif self.stage == 2 and steered in self.seen:
@@ -1594,9 +1615,12 @@ class RuntimeTests(unittest.TestCase):
                               ToolCall("probe", "p1", "{}"), ModelSampleBoundary())
         session = self.session({1: [answer("B done")], -1: [answer("Complete.")]},
                                worker_board=False, resume=True)
-        texts = [item.text for event in session.drain_events() for item in event.items]
-        self.assertIn("Main's log ends inside a turn (tool results); /continue resumes it "
-                      "without a new message.", texts)
+        texts = [item.text for item in auto._display_events(session, session.drain_events())]
+        # The startup line to act on comes last, after each role's tools.
+        self.assertEqual(texts[-3:], [
+            "[#1 (main) - tools] yield", "[#-1 (watcher) - tools] resume, read_context",
+            "Note: main's log ends inside a turn (tool results); /continue resumes it "
+            "without a new message."])
         self.assertEqual(session.status(1), "#1 (main) - quiescent | /continue resumes its turn")
         posted = session.continue_main()
         self.assertEqual(posted, {"record_id": "1", "continued": True})
@@ -2663,7 +2687,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(set(json.loads((self.path / "config.json").read_text())),
                          {"version", "main", "watcher"})
         events = session.drain_events()
-        self.assertEqual(events[-1].items[0].text.splitlines(), [
+        self.assertEqual([event.index for event in events], [None, None, 1, -1])
+        self.assertEqual(events[1].items[0].text.splitlines(), [
             "#1 (main): chat-completions / (server default) at 127.0.0.1:8000 (built-in default)",
             "#-1 (watcher): chat-completions / (server default) at 127.0.0.1:8000 (same as main)",
         ])
@@ -2788,6 +2813,9 @@ class RuntimeTests(unittest.TestCase):
 
         resumed = self.session({1: [answer("new main")], -1: [answer("Complete.")]},
                                worker_board=False, resume=True)
+        self.assertIn("Note: resumed saved history without replaying old work; command-session "
+                      "IDs and runtime state were not restored.",
+                      [item.text for event in resumed.drain_events() for item in event.items])
         restored = {index: load_interaction_save(self.path / "contexts" / f"{index}.jsonl")
                     for index in (1, -1)}
         for index, context in restored.items():
@@ -3540,6 +3568,9 @@ class EntryPointTests(unittest.TestCase):
                             self.fail(f"PTY closed early: {bytes(output)!r}")
             try:
                 expect(b"#1 (main) - quiescent")
+                # Startup lists each role's real tools.
+                expect(b"exec_command, write_stdin, update_plan, apply_patch, yield")
+                expect(b"resume, read_context")
                 start = len(output)
                 os.write(master, b"/contexts\r")
                 expect(b"#-1 (watcher) - quiescent", start)

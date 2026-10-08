@@ -489,6 +489,9 @@ class _Session:
         # Whether /continue applies to main's log; main's owner records it
         # after startup and after each task (a _MainTail, guarded by _changed).
         self._main_tail = None
+        # Each role's tool snapshot, recorded by its owner at startup; start()
+        # shows those of the roles that run a model (guarded by _changed).
+        self._tool_snapshots = {}
         # Each context's flushed steers (main only) and preempting stops.
         self._preemption = {i: Preemption() for i in self.roles}
         self._preempting = False
@@ -625,22 +628,27 @@ class _Session:
                               DisplayItem("Warning: local tools are unsandboxed; use a trusted model and workspace.")))
             if self._resumed:
                 self._emit(None, (DisplayItem(
-                    "Resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
+                    "Note: resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
                 ),))
                 if self.save_warnings:
                     self._emit(None, tuple(DisplayItem(w) for w in self.save_warnings))
-                with self._changed:
-                    tail = self._main_tail
-                if tail is not None and tail.refusal is None:
-                    self._emit(None, (DisplayItem(
-                        f"Main's log ends inside a turn ({tail.description}); /continue "
-                        "resumes it without a new message."),))
             summaries = "\n".join(
                 _role_summary(i, self.settings[i], self.bindings[i], self.sources.get(i),
                               i != -1 or self._supervising)
                 for i in self.roles
             )
             self._emit(None, (DisplayItem(summaries),))
+            # Like the CLI, show each role's tools; a watcher without a model has none.
+            with self._changed:
+                snapshots, tail = dict(self._tool_snapshots), self._main_tail
+            for i in self.roles:
+                if (i != -1 or self._supervising) and i in snapshots:
+                    self._emit(i, render_interaction_items((snapshots[i],)))
+            # Last, as the one startup line to act on.
+            if self._resumed and tail is not None and tail.refusal is None:
+                self._emit(None, (DisplayItem(
+                    f"Note: main's log ends inside a turn ({tail.description}); /continue "
+                    "resumes it without a new message."),))
             return self
         except BaseException:
             self.close()
@@ -709,8 +717,6 @@ class _Session:
         text = f"#{index} ({self.names[index]}) - {phase}"
         if phase in _TIMED_PHASES:
             text += f"... {int(time.monotonic() - started)}s"
-        if task is not None:
-            text += f" | Enter steers task {task.record_id}"
         if urgency >= Urgency.IMMEDIATE:
             text += (" | steer pending (preempting)" if urgency >= Urgency.PREEMPT
                      else " | steer pending (immediate)")
@@ -791,6 +797,8 @@ class _Session:
                                     None if service is None else service.base_url,
                                     supervisor=self._supervising)
             tools_snapshot = Tools(environment.tool_specs)
+            with self._changed:
+                self._tool_snapshots[index] = tools_snapshot
             if self._resumed:
                 context = self._contexts[index]
                 recovered = []

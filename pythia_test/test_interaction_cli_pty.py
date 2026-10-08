@@ -445,7 +445,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.start("--enable-default-tools=False", "--enable-workspace=False",
                    "--endpoint-api", "codex", "--model", "test", "--endpoint-auth-file",
                    str(self.root / "auth.json"), failure="auth")
-        await self.wait_output(b"Default model tools disabled")
+        await self.wait_output(b"Note: default model tools are disabled")
         await self.wait_output(b"auth needed")
         os.write(self.master, b"/config enable_default_tools True\r")
         await self.wait_output(b"Unknown config key")

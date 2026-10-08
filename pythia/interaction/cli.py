@@ -1048,7 +1048,7 @@ def _resume_notice(context: InteractionContext) -> Optional[str]:
                      "with a new message" if turn_tail(context.items).unfinished
                      else "enter a query to continue")
         return (
-            f"Resumed save ends with {describe_tail(item)}, without recorded turn completion. "
+            f"Note: resumed save ends with {describe_tail(item)}, without recorded turn completion. "
             "The model stop reason is not saved. No model request was started; "
             f"{next_step}."
         )
@@ -1086,7 +1086,7 @@ async def _drive_interaction_body(
         if incomplete_line is not None:
             state.notice(incomplete_line.warning(path.name))
         state.notice(
-            "Command sessions and plan state were not restored. "
+            "Note: command sessions and plan state were not restored. "
             "Old command session IDs are not resumable; use only IDs from this run."
         )
         if any(
@@ -1095,7 +1095,7 @@ async def _drive_interaction_body(
             for item in context.items
         ):
             state.notice(
-                "In-memory configuration was reset from the current launch "
+                "Note: in-memory configuration was reset from the current launch "
                 "arguments; saved config commands were not replayed."
             )
     else:
@@ -1361,7 +1361,8 @@ def _startup_notices(state, args, path):
             "Warning: exec_command runs without a sandbox; use a trusted model and workspace."
         )
         if args.model_api == "claude-relay":
-            state.notice("Claude Relay host tools run as the Pythia user, outside the Claude sandbox.")
+            state.notice("Warning: Claude Relay host tools run as the Pythia user, "
+                         "outside the Claude sandbox.")
         if not args.enable_workspace:
             state.notice(
                 "Warning: workspace path restrictions are disabled; "
@@ -1369,8 +1370,8 @@ def _startup_notices(state, args, path):
                 "outside --cwd."
             )
     else:
-        state.notice("Default model tools disabled; user commands remain available."
-                     if not state.headless else "Default model tools disabled.")
+        state.notice("Note: default model tools are disabled; user commands remain available."
+                     if not state.headless else "Note: default model tools are disabled.")
 
 
 async def _run_headless(model, environment, args, path, *, trace=None):
