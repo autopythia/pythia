@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import unittest
 
 INSTALLER = Path(__file__).resolve().parents[1] / "install.py"
 COMMANDS = {"ipythia": "cli", "autopythia": "auto"}
+HAS_SAFE_PATH = sys.version_info >= (3, 11)  # python3 -P
 
 
 class InstallerTests(unittest.TestCase):
@@ -21,9 +23,23 @@ class InstallerTests(unittest.TestCase):
         self.home = self.root / "home with 'quotes'"
         self.home.mkdir()
         self.env = {**os.environ, "HOME": str(self.home), "PYTHONPATH": "ignored"}
+        self.use_python3(safe_path=HAS_SAFE_PATH)
         self.checkout = self.make_checkout("checkout one")
         self.bin = self.home / ".local" / "bin"
         self.link = self.home / ".pythia" / "lib" / "pythia-dev"
+
+    def use_python3(self, safe_path):
+        """Make the wrappers' python3 this interpreter; without safe_path, reject -P like Python < 3.11."""
+        shim_dir = self.root / f"python3 safe_path={safe_path}"
+        shim_dir.mkdir(exist_ok=True)
+        reject = "" if safe_path else (
+            'for arg do case $arg in -P) echo "Unknown option: -P" >&2; exit 2;; -[cm]) break;; esac; done\n'
+        )
+        shim = shim_dir / "python3"
+        shim.write_text(f'#!/bin/sh\n{reject}exec {shlex.quote(sys.executable)} "$@"\n')
+        shim.chmod(0o755)
+        self.safe_path = safe_path
+        self.env["PATH"] = f"{shim_dir}{os.pathsep}{os.environ.get('PATH', os.defpath)}"
 
     def make_checkout(self, name):
         checkout = self.root / name
@@ -34,7 +50,7 @@ class InstallerTests(unittest.TestCase):
         for module in COMMANDS.values():
             (package / f"{module}.py").write_text(
                 "import json, sys\n"
-                f"print(json.dumps([{name!r}, {module!r}, sys.argv[1:]]))\n"
+                f"print(json.dumps([{name!r}, {module!r}, sys.argv[1:], getattr(sys, 'orig_argv', None)]))\n"
             )
         return checkout
 
@@ -50,7 +66,7 @@ class InstallerTests(unittest.TestCase):
         launch = self.root / "launch"
         launch.mkdir(exist_ok=True)
         # Neither a local pythia module nor a local stdlib module may shadow imports.
-        for module in ("pythia", "json"):
+        for module in ("pythia", "json", "runpy"):
             (launch / f"{module}.py").write_text("raise AssertionError('shadowed')\n")
         args = ["--help", "spaces and 'quotes'", "", "$HOME"]
         for command, module in COMMANDS.items():
@@ -58,9 +74,18 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o755)
             result = subprocess.run(
                 [str(path), *args], cwd=launch, env=self.env,
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True,
             )
-            self.assertEqual(json.loads(result.stdout), [checkout_name, module, args])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            *ran, orig_argv = json.loads(result.stdout)
+            self.assertEqual(ran, [checkout_name, module, args])
+            if orig_argv is None:  # Python < 3.10
+                continue
+            # The interpreter's command line, as `ps` lists it after argv[0].
+            if self.safe_path:
+                self.assertEqual(orig_argv[1:], ["-P", "-m", f"pythia.interaction.{module}", *args])
+            else:
+                self.assertEqual([orig_argv[1], *orig_argv[3:]], ["-c", *args])
 
     def test_both_commands_and_checkout_switch(self):
         result = self.install("-e")
@@ -75,6 +100,11 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.link.resolve(), other)
         self.assertEqual(before, {name: (self.bin / name).read_bytes() for name in COMMANDS})
         self.assert_launchers(self.bin, "checkout two")
+
+    def test_python_without_safe_path_option_runs_equivalent_c_code(self):
+        self.use_python3(safe_path=False)
+        self.install("-e")
+        self.assert_launchers(self.bin, "checkout one")
 
     def test_custom_prefix_replaces_legacy_wrapper_or_symlink(self):
         prefix = self.root / "prefix with 'quotes'"
