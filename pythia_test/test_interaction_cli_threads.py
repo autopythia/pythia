@@ -249,8 +249,9 @@ class CliSteeringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Model.retires, 2)  # the cancel, then the turn's end
         self.assertIsNone(state.retry)  # a cancelled sample is not a failure
         self.assertEqual(state.preemption.level, Urgency.QUEUED)
-        self.assertIn("[cli] Flushing 1 steer: delivered now; the current sample or command "
-                      "wait is cancelled where possible.", [item.text for item in state.displays])
+        self.assertIn("[cli] Flushing 1 steer: delivered as soon as the current sample or tool "
+                      "call ends; a sample or command wait is cancelled where possible.",
+                      [item.text for item in state.displays])
 
 
 class CliSteerInputTests(unittest.TestCase):
@@ -325,6 +326,22 @@ class CliSteerInputTests(unittest.TestCase):
                 self.assertEqual(state.preemption.level, Urgency.QUEUED)
                 self.assertIn("No running turn can take a steer now; queued as the next query.",
                               self._notices(state))
+
+    def test_steers_during_compaction_say_they_come_right_after_it(self):
+        # Compaction is neither skipped nor cancelled, whatever the level; the
+        # flush still applies, in case the compaction has just ended.
+        state = cli._UIState(ready=True, turn_active=True)
+        state.set_phase("compacting")
+        self._enter(state, "first")
+        self._enter(state, "/steer")
+        self._enter(state, "/steer!! second")
+        self.assertEqual(state.preemption.level, Urgency.PREEMPT)
+        self.assertEqual([entry.text for entry in state.pending], ["first", "second"])
+        self.assertEqual(self._notices(state), [
+            "1 steer queued for the next sample, right after the compaction in progress; "
+            "steers never cancel compaction.",
+            "2 steers queued for the next sample, right after the compaction in progress; "
+            "steers never cancel compaction."])
 
     def test_a_steer_with_a_bad_attachment_flushes_nothing(self):
         state = cli._UIState(ready=True, turn_active=True)

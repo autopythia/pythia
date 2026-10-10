@@ -16,6 +16,13 @@ and closes the calls they kept from starting. Each sample and tool call is
 *preemptible*: a preempting steer or stop can cancel it from another thread
 (see ``preemption``), where the model or tool supports that.
 
+Compaction is not preemptible. A steer waits for it, since the interrupt point
+comes right after it and the sample the steer goes to needs it; a steer never
+skips or cancels it. A preempting stop reaches it through the model instead:
+the apps close their models, which cancels the request in flight and refuses
+the next one, and a compaction that fails during a stop ends the turn as
+stopped.
+
 A stop ends the turn at one of three levels (``Urgency``): at the next
 interrupt point, after the tool batch (``stop_requested``); once the operation
 in flight ends (``should_stop``); or by also cancelling it.
@@ -364,9 +371,10 @@ def _save_summary(context, host, started) -> None:
 def compact(context, model, environment, config, host, sample_params) -> bool:
     """Install one automatic compaction; False when there is nothing to compact.
 
-    A compaction that fails while the host is stopping (as when a stop retires
-    the model) raises ``_CompactionStopped``, which the turn loop treats as a
-    stop, not a failure.
+    It is not a preemptible operation (see the module docstring). A compaction
+    that fails while the host is stopping (as when a preempting stop closes the
+    model) raises ``_CompactionStopped``, which the turn loop treats as a stop,
+    not a failure.
     """
     host.phase("compacting")
     compactor = create_default_compactor(model, config.compaction_settings())
@@ -455,7 +463,10 @@ def skip_calls(context, calls: Iterable[ToolCall], host: TurnHost) -> None:
 
 
 def _retirer(model):
-    """A sample's cancel: retire the model's live continuation, if it has one."""
+    """A sample's cancel: retire the model's work in flight, if it can be retired.
+
+    That is a Claude relay continuation, or an HTTP model's request.
+    """
     if callable(getattr(model, "retire", None)):
         return lambda: retire_model(model)
     return None

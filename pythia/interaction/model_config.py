@@ -7,9 +7,9 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
-import urllib.request
 
 from ._prompt import add_prompt_arguments
+from ._request_gate import cancellable_urlopen
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
 from .compaction import COMPACTION_MODES
@@ -312,7 +312,9 @@ def build_model(
     )
     if trace is not None:
         from ._account_http import default_account_opener
-        opener = trace.opener(opener if opener is not None else urllib.request.urlopen)
+        # The adapters' default underneath, so that traced requests stay
+        # cancellable (see _request_gate).
+        opener = trace.opener(opener if opener is not None else cancellable_urlopen)
         auth_opener = trace.opener(auth_opener if auth_opener is not None else default_account_opener(),
                                    op="auth_refresh")
 

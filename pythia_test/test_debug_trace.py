@@ -28,6 +28,7 @@ from pythia.interaction import (
 from pythia.interaction import InteractionSaveWriter
 from pythia.interaction import _debug_trace
 from pythia.interaction._account_http import AccountServiceError
+from pythia.interaction._request_gate import cancellable_urlopen
 from pythia.interaction._debug_trace import (
     DebugTrace, TracingOpener, debug_trace_paths, trace_operation,
 )
@@ -787,7 +788,8 @@ class CLITraceTests(unittest.TestCase):
             model_config.build_model(codex_args, trace=trace)
         auth_opener = build.call_args.kwargs['auth_opener']
         self.assertIsInstance(opener, TracingOpener)
-        self.assertIs(opener.inner, urllib.request.urlopen)
+        # The adapters' cancellable default underneath (see _request_gate).
+        self.assertIs(opener.inner, cancellable_urlopen)
         self.assertIsNone(opener.op)
         self.assertEqual(auth_opener.op, "auth_refresh")
         # Account requests keep their non-redirecting opener underneath.

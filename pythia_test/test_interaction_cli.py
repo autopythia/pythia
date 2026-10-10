@@ -1278,7 +1278,8 @@ class CLIControllerTests(_ControllerTestCase):
 
     async def test_one_ctrl_c_lets_the_sample_finish_and_saves_it(self):
         entered, release, retires = threading.Event(), threading.Event(), []
-        waiting = "closing — waiting for current operation; Ctrl-C or /exit!! cancels it"
+        waiting = ("closing — waiting for current operation; Ctrl-C or /exit!! cancels it where "
+                   "possible")
 
         def sample(context):
             entered.set()
@@ -1333,7 +1334,7 @@ class CLIControllerTests(_ControllerTestCase):
                 self.assertEqual(await self._run(
                     model, terminal, ["--prompt", "hello", "--resume=False"]), 0)
                 self.assertTrue(retired.is_set())
-                self.assertTrue(any(status.startswith("closing — cancelling current operation")
+                self.assertTrue(any(status.startswith("closing — cancelling current operation where possible")
                                     for _editor, status, _prompt in terminal.frames))
 
     def test_exit_commands_and_the_editor_while_stopping(self):
@@ -1366,10 +1367,11 @@ class CLIControllerTests(_ControllerTestCase):
         state.handle_key("c-m", "\r")
         self.assertEqual([item.text for item in state.displays], [
             "[cli] Already stopping. Ctrl-C or /exit! stops sooner; /exit!! also cancels "
-            "the current operation.",
+            "the current operation where possible.",
             "[cli] Stopping; input is not accepted. Ctrl-C or /exit! stops sooner; /exit!! "
-            "also cancels the current operation.",
-            "[cli] Already stopping. Ctrl-C or /exit!! cancels the current operation.",
+            "also cancels the current operation where possible.",
+            "[cli] Already stopping. Ctrl-C or /exit!! cancels the current operation where "
+            "possible.",
             "[cli] Stopping; input is not accepted."])
         fresh = cli._UIState(ready=True)
         fresh.editor = Editor("/quit!!!", 8)  # more than two ! read as two

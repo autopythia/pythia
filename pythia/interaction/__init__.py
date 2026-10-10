@@ -111,6 +111,7 @@ from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
+from .model import ModelCancelled
 from .model import ModelContinuationExpired
 from .model import SampleParams
 from .model import TokenUsage
@@ -239,6 +240,7 @@ __all__ = [
     "ModelTimeoutError",
     "ModelTimeouts",
     "ModelTransportError",
+    "ModelCancelled",
     "ModelContinuationExpired",
     "NothingToCompact",
     "OpaqueCompaction",

@@ -85,7 +85,7 @@ from .model import ModelAuthenticationError
 from .model import ModelError
 from .model import ModelTimeoutError
 from .model import SampleParams
-from .model import close_model, retire_model
+from .model import close_model
 from .model_config import DEFAULT_SAVE_PATH
 from .model_config import _boolean_argument
 from .model_config import build_model
@@ -111,8 +111,9 @@ _MAX_PENDING_QUERIES = 8
 # The status line while closing, by the stop's level.
 _CLOSING_STATUS = {
     Urgency.QUEUED: "closing — stopping before the next sample; Ctrl-C or /exit! stops sooner",
-    Urgency.IMMEDIATE: "closing — waiting for current operation; Ctrl-C or /exit!! cancels it",
-    Urgency.PREEMPT: "closing — cancelling current operation",
+    Urgency.IMMEDIATE: ("closing — waiting for current operation; Ctrl-C or /exit!! cancels it "
+                        "where possible"),
+    Urgency.PREEMPT: "closing — cancelling current operation where possible",
 }
 
 
@@ -211,8 +212,12 @@ class _UIState:
         sample or tool call in flight finishes and is saved, for every model,
         and nothing new starts. PREEMPT (/exit!!, a later Ctrl-C): that
         operation is also cancelled where possible (a Claude relay sample, a
-        command's wait), and the model is retired, which also cancels model
-        work outside a turn, such as /compact. Outcomes are still saved.
+        command's wait), and the model is closed. Closing cancels the model's
+        work in flight, also outside the turn's operations, such as a
+        compaction (automatic or /compact), and the model then refuses every
+        request, so a compaction between its summary requests stops too.
+        Retiring would not do: it cancels only a request in flight. Nothing
+        uses the model after a stop. Outcomes are still saved.
         """
         level = Urgency(level)
         if self.stop_level is not None and level <= self.stop_level:
@@ -226,14 +231,15 @@ class _UIState:
         self.login_cancel.set()
         self.changed.set()
         if self.stop_level >= Urgency.PREEMPT and callable(
-                getattr(self.active_model, "retire", None)):
+                getattr(self.active_model, "close", None)):
             model = self.active_model
-            def retire():
+
+            def close():
                 try:
-                    retire_model(model)
+                    close_model(model)
                 except Exception:
-                    self.notice("Model retirement failed; final cleanup will run.")
-            threading.Thread(target=retire, name="interaction-model-retire", daemon=True).start()
+                    self.notice("Closing the model failed; final cleanup will run.")
+            threading.Thread(target=close, name="interaction-model-close", daemon=True).start()
 
     def escalate_stop(self) -> None:
         """Ctrl-C, Ctrl-D, or SIGINT: /exit! the first time, then /exit!!."""
@@ -242,9 +248,10 @@ class _UIState:
     def _stop_hint(self) -> str:
         """What a stronger exit would do now, as a sentence (or nothing)."""
         if self.stop_level is None or self.stop_level < Urgency.IMMEDIATE:
-            return " Ctrl-C or /exit! stops sooner; /exit!! also cancels the current operation."
+            return (" Ctrl-C or /exit! stops sooner; /exit!! also cancels the current operation "
+                    "where possible.")
         if self.stop_level < Urgency.PREEMPT:
-            return " Ctrl-C or /exit!! cancels the current operation."
+            return " Ctrl-C or /exit!! cancels the current operation where possible."
         return ""
 
     def handle_key(self, key: str, data: str) -> None:
@@ -415,7 +422,12 @@ class _UIState:
     def _flush_steers(self, level: Urgency) -> None:
         """Have the running turn take the queued steers at ``level`` (see
         Preemption), and say when they arrive: the urgency only rises, so that
-        may be sooner than ``level`` (and at QUEUED nothing changes)."""
+        may be sooner than ``level`` (and at QUEUED nothing changes).
+
+        During a compaction they arrive right after it, whatever the level: a
+        steer never skips or cancels compaction, since the sample it goes to
+        needs it. The flush still applies, in case the compaction just ended.
+        """
         count = _steer_count(self)
         if not count:
             self.notice("No queued steers to flush.")
@@ -423,15 +435,18 @@ class _UIState:
         self.preemption.flush(level)
         level = max(Urgency(level), self.preemption.level)
         steers, them = (f"{count} steers", "them") if count > 1 else ("1 steer", "it")
-        if level < Urgency.IMMEDIATE:
+        if self.phase == "compacting":
+            self.notice(f"{steers} queued for the next sample, right after the compaction in "
+                        "progress; steers never cancel compaction.")
+        elif level < Urgency.IMMEDIATE:
             self.notice(f"{steers} queued for the next sample, after the current tool batch; "
                         f"/steer! or /steer!! delivers {them} sooner.")
         elif level < Urgency.PREEMPT:
             self.notice(f"Flushing {steers}: delivered once the current sample or tool call "
                         "finishes.")
         else:
-            self.notice(f"Flushing {steers}: delivered now; the current sample or command wait "
-                        "is cancelled where possible.")
+            self.notice(f"Flushing {steers}: delivered as soon as the current sample or tool "
+                        "call ends; a sample or command wait is cancelled where possible.")
 
 
 def _build_model(args: argparse.Namespace, trace: Optional[DebugTrace]) -> Model:
@@ -694,10 +709,17 @@ async def _compact_user_tool(
                 if isinstance(exc, ModelAuthenticationError):
                     _mark_auth_required(state, exc)
                     model = None
+                # A preempting stop closes the model, which fails the
+                # compaction: that is a cancel, not a failure. A stop at a
+                # lower level cancels nothing, so its failures are real.
+                cancelled = (state.stop_level is not None
+                             and state.stop_level >= Urgency.PREEMPT)
                 result_item = UserToolResult(
                     ToolResult(
                         call.call.call_id,
-                        _compaction_failure_output(exc),
+                        ("Compaction cancelled during execution by the stop; no compaction "
+                         "checkpoint was installed." if cancelled
+                         else _compaction_failure_output(exc)),
                         success=False,
                     )
                 )
@@ -1471,8 +1493,8 @@ async def _run(
     state.notice(
         "pythia.interaction — /retry, /continue, /steer [text], /compact [focus], /config, "
         "/config.json, /login, /quota, /exit or /quit. /steer and /exit wait for the current "
-        "tool batch; with ! they wait only for the current operation, and with !! they "
-        "cancel it. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
+        "tool batch; with ! they wait only for the current operation, and with !! they also "
+        "cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
     )
     _startup_notices(state, args, path)
     worker = None

@@ -3,7 +3,6 @@ from __future__ import annotations
 import http.client
 import json
 import socket
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -20,6 +19,9 @@ from typing import Optional
 from typing import Tuple
 
 from ._http import USER_AGENT
+from ._request_gate import RequestCall
+from ._request_gate import RequestGate
+from ._request_gate import cancellable_urlopen
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
@@ -852,8 +854,18 @@ class MessagesModel:
             raise TypeError("retry_sleep must be callable or None")
         self.endpoint = endpoint
         self.binding = endpoint.binding
-        self._opener = opener or urllib.request.urlopen
-        self._retry_sleep = time.sleep if retry_sleep is None else retry_sleep
+        self._opener = opener or cancellable_urlopen
+        # None: a backoff that a cancel ends at once (RequestCall.wait).
+        self._retry_sleep = retry_sleep
+        self._gate = RequestGate(provider="messages", label="Messages", model=endpoint.model)
+
+    def retire(self) -> None:
+        """Cancel the request in flight, if any, from any thread; the model stays usable."""
+        self._gate.retire()
+
+    def close(self) -> None:
+        """Cancel the request in flight, and refuse every later one."""
+        self._gate.close()
 
     @property
     def auto_compaction_owner(self) -> str:
@@ -966,6 +978,16 @@ class MessagesModel:
         tools: Sequence[Any] = (),
         sample_params: Optional[SampleParams] = None,
     ) -> ModelSample:
+        with self._gate.call() as call:
+            return self._sample(call, context, tools, sample_params)
+
+    def _sample(
+        self,
+        call: RequestCall,
+        context: InteractionContext,
+        tools: Sequence[Any],
+        sample_params: Optional[SampleParams],
+    ) -> ModelSample:
         if sample_params is not None and not isinstance(sample_params, SampleParams):
             raise TypeError("sample_params must be SampleParams or None")
         payload = self._build_request_payload(context, tools, sample_params)
@@ -992,6 +1014,7 @@ class MessagesModel:
         retries = 0
         recovery: List[str] = []
         while True:
+            call.check()
             attempts += 1
             request = urllib.request.Request(
                 self.endpoint.url,
@@ -1018,9 +1041,8 @@ class MessagesModel:
                     ):
                         retries += 1
                         recovery.append(f"http_{status}_retry")
-                        self._retry_sleep(
-                            retry_delay_seconds(retries, response_headers)
-                        )
+                        call.wait(retry_delay_seconds(retries, response_headers),
+                                  self._retry_sleep, cause=exc)
                         continue
                     raise _messages_http_failure(
                         status,
@@ -1046,9 +1068,8 @@ class MessagesModel:
                         recovery.append(f"http_{status}_retry")
                         _close_response(response)
                         response = None
-                        self._retry_sleep(
-                            retry_delay_seconds(retries, response_headers)
-                        )
+                        call.wait(retry_delay_seconds(retries, response_headers),
+                                  self._retry_sleep)
                         continue
                     raise _messages_http_failure(
                         status,
@@ -1092,7 +1113,7 @@ class MessagesModel:
                     )
                     _close_response(response)
                     response = None
-                    self._retry_sleep(retry_delay_seconds(retries))
+                    call.wait(retry_delay_seconds(retries), self._retry_sleep, cause=exc)
                     continue
                 raise _messages_transport_failure(
                     timeout=timeout,
@@ -1107,7 +1128,7 @@ class MessagesModel:
                     recovery.append("request_timeout_retry")
                     _close_response(response)
                     response = None
-                    self._retry_sleep(retry_delay_seconds(retries))
+                    call.wait(retry_delay_seconds(retries), self._retry_sleep, cause=exc)
                     continue
                 raise _messages_transport_failure(
                     timeout=True,
@@ -1122,7 +1143,7 @@ class MessagesModel:
                     recovery.append("connection_retry")
                     _close_response(response)
                     response = None
-                    self._retry_sleep(retry_delay_seconds(retries))
+                    call.wait(retry_delay_seconds(retries), self._retry_sleep, cause=exc)
                     continue
                 raise _messages_transport_failure(
                     timeout=False,

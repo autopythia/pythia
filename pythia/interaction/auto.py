@@ -52,7 +52,7 @@ from .items import Init, Instructions, Message, ToolResult, Tools, UserInteracti
 from .items import UserToolResult
 from .model_config import build_model
 from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
-from .model import close_model, retire_model
+from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .runtime_config import InteractionConfig
@@ -1179,20 +1179,25 @@ class _Session:
         sample or tool call before it takes them; at PREEMPT it also cancels
         the one in flight where possible. While main awaits the watcher it is
         not in a turn, so this changes nothing: the steers wait for the
-        watcher's decision, as today. The returned level is the urgency in
-        effect, which only rises until the steers are delivered.
+        watcher's decision, as today. While main compacts, the steers arrive
+        right after the compaction, whatever the level: a steer never skips
+        or cancels compaction, since the sample it goes to needs it (the
+        flush still applies, in case the compaction just ended). The returned
+        level is the urgency in effect, which only rises until the steers are
+        delivered.
         """
         level = Urgency(level)
         count = sum(not delivered for _, delivered in self._steers)
         task = self._open_task
         if task is None or not count:
             return {"count": 0}
-        awaiting = self._states[1][0] == "awaiting watcher"
+        phase = self._states[1][0]
+        awaiting = phase == "awaiting watcher"
         if not awaiting:
             self._preemption[1].flush(level)
             level = max(level, self._preemption[1].level)
         return {"count": count, "record_id": task.record_id, "level": int(level),
-                "awaiting": awaiting}
+                "awaiting": awaiting, "compacting": phase == "compacting"}
 
     def continue_main(self):
         """Queue a task that continues main's unfinished turn without a new message.
@@ -1274,9 +1279,9 @@ class _Session:
         for every model, and nothing new starts. PREEMPT (/exit!!, a later
         Ctrl-C; see preempt): those operations are also cancelled where
         possible (a Claude relay sample, a command's wait), and every model is
-        retired, which also cancels model work outside a turn, such as
-        compaction. Outcomes are still saved. Never blocks: the cancels and
-        retirements run on helper threads.
+        closed (see _close_models), which also cancels model work outside
+        those operations, such as compaction. Outcomes are still saved. Never
+        blocks: the cancels and closes run on helper threads.
         """
         level = Urgency(level)
         with self._changed:
@@ -1298,7 +1303,7 @@ class _Session:
                 self.service.board.accepting = False
                 self.service.board.changed.notify_all()
         if level >= Urgency.PREEMPT:
-            threading.Thread(target=self._retire_models, name="auto-retire-models",
+            threading.Thread(target=self._close_models, name="auto-close-models",
                              daemon=True).start()
 
     @property
@@ -1318,17 +1323,22 @@ class _Session:
         closed terminal, a fatal error, or a failed board."""
         self.request_stop(Urgency.PREEMPT)
 
-    def _retire_models(self):
-        # Model-only cancellation wakes a parked sampler. Host-side effects still
-        # finish/checkpoint under their owners before environment cleanup.
+    def _close_models(self):
+        # Model-only cancellation: closing cancels each model's work in flight
+        # (it wakes a parked sampler) and makes it refuse every later request,
+        # so a compaction between its summary requests stops too; retiring
+        # cancels only a request in flight. A stop at PREEMPT ends the session,
+        # so no model is needed again. Host-side effects still finish and
+        # checkpoint under their owners before environment cleanup; each owner
+        # closes its model again as it exits (closing is idempotent).
         with self._model_lock:
             models = tuple(self._models.values())
         for model in models:
             try:
-                retire_model(model)
+                close_model(model)
             except Exception:
                 self._fatal = True
-                self._emit(None, (DisplayItem("Model retirement failed; final cleanup will run."),), "error")
+                self._emit(None, (DisplayItem("Closing a model failed; final cleanup will run."),), "error")
 
     def close(self):
         with self._close_lock:
@@ -1461,17 +1471,19 @@ def _exit_level(words):
 # The status line while closing, by the stop's level.
 _CLOSING_STATUS = {
     Urgency.QUEUED: "closing - stopping before the next sample... (Ctrl-C or /exit! stops sooner)",
-    Urgency.IMMEDIATE: "closing - waiting for current work... (Ctrl-C or /exit!! cancels it)",
-    Urgency.PREEMPT: "closing - cancelling current work...",
+    Urgency.IMMEDIATE: ("closing - waiting for current work... (Ctrl-C or /exit!! cancels it "
+                        "where possible)"),
+    Urgency.PREEMPT: "closing - cancelling current work where possible...",
 }
 
 
 def _stop_hint(level):
     """What a stronger exit would do at ``level``, as a sentence (or nothing)."""
     if level is None or level < Urgency.IMMEDIATE:
-        return " Ctrl-C or /exit! stops sooner; /exit!! also cancels the current work."
+        return (" Ctrl-C or /exit! stops sooner; /exit!! also cancels the current work where "
+                "possible.")
     if level < Urgency.PREEMPT:
-        return " Ctrl-C or /exit!! cancels the current work."
+        return " Ctrl-C or /exit!! cancels the current work where possible."
     return ""
 
 
@@ -1532,13 +1544,16 @@ def _flush_notice(session, flushed):
                 "if the watcher resumes it, and as a new task otherwise.")
     count = flushed["count"]
     steers = f"{count} steer{'s' if count > 1 else ''} for task {task} of {name}"
+    if flushed["compacting"]:
+        return (f"{steers} queued for its next sample, right after the compaction in progress; "
+                "steers never cancel compaction.")
     if flushed["level"] < Urgency.IMMEDIATE:
         them = "them" if count > 1 else "it"
         return (f"{steers} queued for its next sample, after the current tool batch; "
                 f"/steer! or /steer!! delivers {them} sooner.")
     if flushed["level"] >= Urgency.PREEMPT:
-        return (f"Flushing {steers}: delivered now; the current sample or command wait is "
-                "cancelled where possible.")
+        return (f"Flushing {steers}: delivered as soon as the current sample or tool call ends; "
+                "a sample or command wait is cancelled where possible.")
     return f"Flushing {steers}: delivered once the current sample or tool call finishes."
 
 

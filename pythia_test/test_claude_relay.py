@@ -119,8 +119,8 @@ class RelayTests(unittest.TestCase):
                     def live(pid):
                         try:
                             return 'Z (zombie)' not in next(x for x in Path(f'/proc/{pid}/status').read_text().splitlines() if x.startswith('State:'))
-                        except FileNotFoundError:
-                            return False
+                        except (FileNotFoundError, ProcessLookupError):
+                            return False  # reaped before the open, or between it and the read (ESRCH)
                     while any(live(pid) for pid in children) and time.monotonic() < end:
                         time.sleep(.02)
                     self.assertFalse(any(live(pid) for pid in children), children)
@@ -174,8 +174,8 @@ time.sleep(60)
                     try:
                         text = Path(f'/proc/{pid}/status').read_text()
                         return 'Z (zombie)' not in next(line for line in text.splitlines() if line.startswith('State:'))
-                    except FileNotFoundError:
-                        return False
+                    except (FileNotFoundError, ProcessLookupError):
+                        return False  # reaped before the open, or between it and the read (ESRCH)
                 while any(live(pid) for pid in ids) and time.monotonic() < deadline:
                     time.sleep(.02)
                 self.assertFalse(any(live(pid) for pid in ids))

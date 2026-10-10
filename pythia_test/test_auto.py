@@ -27,7 +27,9 @@ from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingTo
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import load_interaction_save, save_interaction_save
 from pythia.interaction import auto
-from pythia_test.interaction_helpers import patch_saves, real_save
+from pythia.interaction import ClaudeRelayModel
+from pythia.interaction import compaction
+from pythia_test.interaction_helpers import fake_relay_runtime, patch_saves, real_save
 from pythia.interaction.loop import kernel
 from pythia.interaction import SampleParams
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -1076,7 +1078,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any("Stopped before further effects" in text for text in texts), texts)
         self.assertFalse(session._fatal)  # nothing was left unanswered
 
-    def test_a_stop_cancels_nothing_and_a_preempting_stop_retires_every_model(self):
+    def test_a_stop_cancels_nothing_and_a_preempting_stop_closes_every_model(self):
         entered, release = threading.Event(), threading.Event()
 
         def busy(context):
@@ -1084,9 +1086,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(release.wait(5))
             return answer("done")
         session = self.session({1: [busy]}, worker_board=False)
-        retires = {index: mock.Mock() for index in session._models}
-        for index, retire in retires.items():
-            session._models[index].retire = retire
+        closes = {index: mock.Mock() for index in session._models}
+        for index, close in closes.items():
+            session._models[index].close = close
         session.submit("task")
         self.assertTrue(entered.wait(5))
         try:
@@ -1095,17 +1097,63 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual({p.stop_level for p in session._preemption.values()},
                              {auto.Urgency.IMMEDIATE})
             time.sleep(0.05)
-            self.assertFalse(any(retire.called for retire in retires.values()))
+            self.assertFalse(any(close.called for close in closes.values()))
             session.preempt()
             session.preempt()
             self.assertTrue(session.preempting)
             self.assertEqual({p.stop_level for p in session._preemption.values()},
                              {auto.Urgency.PREEMPT})
-            wait_for(lambda: all(retire.called for retire in retires.values()))
+            # Closed, not only retired: a closed model starts no later request,
+            # such as a compaction's next summary request.
+            wait_for(lambda: all(close.called for close in closes.values()))
         finally:
             release.set()
-        # Main's model may be retired twice (its sample's cancel, then every
-        # model's); retiring is idempotent.
+        # Each owner closes its model again when it exits; closing is idempotent.
+
+    def test_a_preempting_stop_cancels_main_s_relay_compaction_before_its_request(self):
+        # preempt() while main's compaction builds its summary request: none is
+        # in flight, so only closing main's model keeps it from starting.
+        catalog = parse_model_catalog(
+            "[catalog]\nversion = 4\n"
+            "[model.relay]\nendpoint.api = claude-relay\nendpoint.model = fixture-model\n"
+            "[model.plain]\nendpoint.api = chat-completions\n"
+            "endpoint.url = http://127.0.0.1:9/v1/chat/completions\n"
+            "endpoint.model = plain\nendpoint.auth = none\n")
+        settings = resolve_config(overrides={"cwd": self.temp.name}, catalog=catalog,
+                                  role_models={1: "relay", -1: "plain"})
+        settings[1].update(auto_compact_tokens=1, compaction_keep_recent_tokens=1)
+        settings.relay_options = dict(TimeoutConfigTests.RELAY_OPTIONS)
+        models = {}
+
+        class Watcher:
+            def sample(self, context, **params):
+                return answer("Complete.")
+
+        def model_factory(index, args):
+            models[index] = (ClaudeRelayModel(relay_endpoint(args, args.model_binding))
+                             if index == 1 else Watcher())
+            return models[index]
+        original = compaction._history_prompt
+
+        def prompt(*args, **kwargs):
+            epoch = models[1]._epoch
+            session.preempt()
+            wait_for(lambda: models[1]._epoch != epoch)  # the stop reached main's model
+            return original(*args, **kwargs)
+        with fake_relay_runtime() as launches:
+            session = auto._Session(
+                self.path, settings, model_factory=model_factory,
+                environment_factory=lambda index, args, tools: Environment(tools)).start()
+            self.addCleanup(session.close)
+            # The first task has nothing to compact yet; the second has the first.
+            self.assertTrue(self.settled(session, session.submit("first task")))
+            with mock.patch.object(compaction, "_history_prompt", side_effect=prompt):
+                self.assertFalse(self.settled(session, session.submit("second task")))
+            session.close()
+        self.assertEqual([run.summary for run in launches.all], [False])  # no summary request
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        self.assertTrue(any("Stopped before further effects" in text for text in texts), texts)
+        self.assertFalse(any("Task failed" in text for text in texts), texts)
 
     def test_interactive_exit_then_ctrl_c_escalates_and_the_editor_works_while_stopping(self):
         entered, release = threading.Event(), threading.Event()
@@ -1117,11 +1165,14 @@ class RuntimeTests(unittest.TestCase):
         session = self.session({1: [first_sample], -1: [answer("Complete.")]},
                                worker_board=False)
         gentle = "closing - stopping before the next sample... (Ctrl-C or /exit! stops sooner)"
-        waiting = "closing - waiting for current work... (Ctrl-C or /exit!! cancels it)"
-        hint = " Ctrl-C or /exit! stops sooner; /exit!! also cancels the current work."
+        waiting = ("closing - waiting for current work... (Ctrl-C or /exit!! cancels it where "
+                   "possible)")
+        hint = (" Ctrl-C or /exit! stops sooner; /exit!! also cancels the current work where "
+                "possible.")
         stopping = "Stopping; input is not accepted." + hint
         already = "Already stopping." + hint
-        already_waiting = "Already stopping. Ctrl-C or /exit!! cancels the current work."
+        already_waiting = ("Already stopping. Ctrl-C or /exit!! cancels the current work where "
+                           "possible.")
 
         class Terminal:
             closed = False
@@ -1166,7 +1217,7 @@ class RuntimeTests(unittest.TestCase):
                 elif self.stage == 5 and already_waiting in self.seen:
                     self.keys.append(SimpleNamespace(key="c-c", data=""))  # level 3
                     self.stage = 6
-                elif self.stage == 6 and status == "closing - cancelling current work...":
+                elif self.stage == 6 and status == "closing - cancelling current work where possible...":
                     release.set()  # this test's model can't be cancelled
                     self.stage = 7
         terminal = Terminal()
@@ -1525,13 +1576,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(self.settled(session, session.submit("review it")))
         later.assert_not_called()
         self.assertEqual(holder["queued"], {"count": 1, "record_id": "1", "level": 0,
-                                            "awaiting": False})
+                                            "awaiting": False, "compacting": False})
         self.assertEqual(auto._flush_notice(session, holder["queued"]),
                          "1 steer for task 1 of #1 (main) queued for its next sample, after "
                          "the current tool batch; /steer! or /steer!! delivers it sooner.")
         self.assertNotIn("steer pending", holder["queued_status"])
         self.assertEqual(holder["flushed"], {"count": 1, "record_id": "1", "level": 1,
-                                             "awaiting": False})
+                                             "awaiting": False, "compacting": False})
         self.assertEqual(auto._flush_notice(session, holder["flushed"]),
                          "Flushing 1 steer for task 1 of #1 (main): delivered once the current "
                          "sample or tool call finishes.")
@@ -1563,8 +1614,9 @@ class RuntimeTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertEqual(holder["posted"]["flush"]["level"], 2)
         self.assertEqual(auto._posted_notice(session, holder["posted"]),
-                         "Flushing 1 steer for task 1 of #1 (main): delivered now; the current "
-                         "sample or command wait is cancelled where possible.")
+                         "Flushing 1 steer for task 1 of #1 (main): delivered as soon as the "
+                         "current sample or tool call ends; a sample or command wait is "
+                         "cancelled where possible.")
         self.assertEqual(self.last_user(self.calls[1][1]).content, "now")
         # With no open task, the text is a new task.
         posted = session.submit("later", flush=auto.Urgency.IMMEDIATE)
@@ -1595,6 +1647,33 @@ class RuntimeTests(unittest.TestCase):
                  if isinstance(item, Message) and item.role == "user"]
         self.assertEqual(users[-2:], [auto._FOLLOW_UP_HEADER + "Add a summary.",
                                       "Mention the tests too."])
+
+    def test_a_steer_during_compaction_waits_for_it_and_comes_next(self):
+        holder = {}
+
+        class Compactor:
+            def compact(self, context, *, tools=(), sample_params=None):
+                holder["posted"] = holder["session"].submit("Go left.",
+                                                            flush=auto.Urgency.PREEMPT)
+                return CompactionResult((ContextPrefix((Message("user", "summary"),)),))
+
+        def due(model, context, config):  # main's first interrupt point only
+            return (getattr(model, "index", None) == 1
+                    and not any(isinstance(item, ContextPrefix) for item in context))
+        session = self.session({1: [answer("done")], -1: [answer("Complete.")]},
+                               worker_board=False)
+        holder["session"] = session
+        with mock.patch.object(kernel, "auto_compaction_due", side_effect=due), \
+                mock.patch.object(kernel, "create_default_compactor", return_value=Compactor()):
+            self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertEqual(holder["posted"]["flush"], {"count": 1, "record_id": "1", "level": 2,
+                                                     "awaiting": False, "compacting": True})
+        self.assertEqual(auto._posted_notice(session, holder["posted"]),
+                         "1 steer for task 1 of #1 (main) queued for its next sample, right "
+                         "after the compaction in progress; steers never cancel compaction.")
+        [sampled] = self.calls[1]
+        self.assertTrue(any(isinstance(item, ContextPrefix) for item in sampled))
+        self.assertEqual(self.last_user(sampled).content, "Go left.")
 
     def test_interactive_steer_flushes_a_typed_steer(self):
         entered, release = threading.Event(), threading.Event()

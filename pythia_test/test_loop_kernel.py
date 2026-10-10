@@ -585,6 +585,27 @@ class SteeringTests(unittest.TestCase):
                                              ("b", kernel.SKIPPED_OUTPUT, False)])
         self.assertEqual(model.retired, 1)  # a tool's cancel never retires the model
 
+    def test_a_preempting_steer_during_compaction_cancels_and_skips_nothing(self):
+        # Compaction is not a preemptible operation: the steer waits for it and
+        # comes at the interrupt point right after it, before the next sample.
+        host, context = _SteeringHost(), _context()
+
+        class Compactor:
+            def compact(self, context, *, tools=(), sample_params=None):
+                host.steer("after compacting", Urgency.PREEMPT)
+                host.events.append(("compacted",))
+                return _FakeCompaction(host)
+        model = _Model(host, _answer("done"))
+        with _fake_compaction(host, due=True), \
+                mock.patch.object(kernel, "create_default_compactor", return_value=Compactor()):
+            result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(model.retired, 1)  # only the turn's end: nothing was cancelled
+        self.assertEqual([e[0] for e in host.events if e[0] in ("compacted", "interrupt", "sample")],
+                         ["compacted", "interrupt", "sample"])
+        texts = [item.content for item in context.items if isinstance(item, Message)]
+        self.assertEqual(texts, ["task", "after compacting", "done"])
+
     def test_input_after_the_interrupt_point_skips_the_sample(self):
         class Late(_SteeringHost):
             def interrupt(self):

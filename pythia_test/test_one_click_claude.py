@@ -448,8 +448,8 @@ time.sleep(60)
         def live(pid):
             try:
                 text = Path(f'/proc/{pid}/status').read_text()
-            except FileNotFoundError:
-                return False
+            except (FileNotFoundError, ProcessLookupError):
+                return False  # reaped before the open, or between it and the read (ESRCH)
             state = next(line for line in text.splitlines() if line.startswith('State:'))
             return 'Z (zombie)' not in state
 

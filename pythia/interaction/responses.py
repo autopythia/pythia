@@ -5,7 +5,6 @@ import http.client
 import json
 import os
 import socket
-import time
 import urllib.error
 import urllib.request
 import uuid
@@ -25,6 +24,10 @@ from typing import Optional
 from typing import Tuple
 
 from ._http import USER_AGENT
+from ._request_gate import RequestCall
+from ._request_gate import RequestGate
+from ._request_gate import cancellable_urlopen
+from ._request_gate import uncancellable
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import retry_delay_seconds
 from .codex_auth import CodexAuth
@@ -1769,13 +1772,32 @@ class _ResponsesModelBase:
             raise TypeError("retry_sleep must be callable or None")
         self.endpoint = resolved_endpoint
         self.binding = resolved_endpoint.binding
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or cancellable_urlopen
         self._auth_opener = auth_opener
         self._identifier_factory = identifier_factory or uuid.uuid4
-        self._retry_sleep = time.sleep if retry_sleep is None else retry_sleep
+        # None: a backoff that a cancel ends at once (RequestCall.wait).
+        self._retry_sleep = retry_sleep
         self._credential_source = credential_source
         self._expected_account_id = resolved_endpoint.account_id
         self._credential_lock = Lock()
+        # Its own lock, never _credential_lock: a cancel must not wait for the
+        # call that holds it.
+        self._gate = RequestGate(
+            provider=resolved_endpoint.api_provider,
+            label="Codex Responses" if resolved_endpoint.api_provider == "codex" else "Responses",
+            model=resolved_endpoint.model,
+        )
+
+    def retire(self) -> None:
+        """Cancel the request in flight, if any, from any thread; the model stays usable.
+
+        An OAuth token refresh in flight is not cancelled (see ``uncancellable``).
+        """
+        self._gate.retire()
+
+    def close(self) -> None:
+        """Cancel the request in flight, and refuse every later one."""
+        self._gate.close()
 
     @property
     def auto_compact_context_tokens(self) -> Optional[int]:
@@ -1995,11 +2017,12 @@ class _ResponsesModelBase:
     ) -> ModelSample:
         if sample_params is not None and not isinstance(sample_params, SampleParams):
             raise TypeError("sample_params must be SampleParams or None")
-        with self._credential_lock:
-            return self._sample_locked(context, tools, sample_params)
+        with self._gate.call() as call, self._credential_lock:
+            return self._sample_locked(call, context, tools, sample_params)
 
     def _sample_locked(
         self,
+        call: RequestCall,
         context: InteractionContext,
         tools: Sequence[Any],
         sample_params: Optional[SampleParams],
@@ -2008,6 +2031,7 @@ class _ResponsesModelBase:
             context, tools, sample_params,
         )
         return self._execute_request_locked(
+            call,
             payload,
             provider_state,
             collector=_collect_sample,
@@ -2020,7 +2044,7 @@ class _ResponsesModelBase:
         tools: Sequence[Any],
         sample_params: Optional[SampleParams] = None,
     ) -> _RemoteCompactionResponse:
-        with self._credential_lock:
+        with self._gate.call() as call, self._credential_lock:
             payload, provider_state = self._build_request_payload(
                 context,
                 tools,
@@ -2028,6 +2052,7 @@ class _ResponsesModelBase:
             )
             payload["input"].append({"type": "compaction_trigger"})
             return self._execute_request_locked(
+                call,
                 payload,
                 provider_state,
                 collector=_collect_remote_compaction_v2,
@@ -2037,6 +2062,7 @@ class _ResponsesModelBase:
 
     def _execute_request_locked(
         self,
+        call: RequestCall,
         payload: Mapping[str, Any],
         provider_state: _ProviderState,
         *,
@@ -2064,6 +2090,7 @@ class _ResponsesModelBase:
         refreshed = False
 
         while True:
+            call.check()
             attempts += 1
             request = urllib.request.Request(
                 self.endpoint.url,
@@ -2146,15 +2173,18 @@ class _ResponsesModelBase:
                         if not unauthorized_retried:
                             unauthorized_retried = True
                             recovery.append("http_401_retry")
-                            self._retry_sleep(
-                                retry_delay_seconds(1, headers)
-                            )
+                            call.wait(retry_delay_seconds(1, headers), self._retry_sleep)
                             continue
                         if not refreshed and self._credential_source.kind == "codex_file":
                             refreshed = True
-                            loaded = self._refresh_after_unauthorized(
-                                snapshot, timeout_seconds=timeout_seconds,
-                            )
+                            # A cancel must not cut a refresh off after the
+                            # provider rotated the refresh token: check before,
+                            # and the next attempt checks after.
+                            call.check()
+                            with uncancellable():
+                                loaded = self._refresh_after_unauthorized(
+                                    snapshot, timeout_seconds=timeout_seconds,
+                                )
                             if loaded is not None:
                                 snapshot = loaded
                                 recovery.append("oauth_refresh")
@@ -2167,12 +2197,8 @@ class _ResponsesModelBase:
                     ):
                         transient_retries += 1
                         recovery.append(f"http_{status}_retry")
-                        self._retry_sleep(
-                            retry_delay_seconds(
-                                transient_retries,
-                                headers,
-                            )
-                        )
+                        call.wait(retry_delay_seconds(transient_retries, headers),
+                                  self._retry_sleep)
                         continue
                     raise _http_failure(
                         status,
@@ -2226,12 +2252,8 @@ class _ResponsesModelBase:
                         recovery.append(retry_label)
                         _close_response(response)
                         response = None
-                        self._retry_sleep(
-                            retry_delay_seconds(
-                                transient_retries,
-                                headers,
-                            )
-                        )
+                        call.wait(retry_delay_seconds(transient_retries, headers),
+                                  self._retry_sleep, cause=exc)
                         continue
                     raise
                 except (TimeoutError, socket.timeout) as exc:
@@ -2240,12 +2262,8 @@ class _ResponsesModelBase:
                         recovery.append("stream_timeout_retry")
                         _close_response(response)
                         response = None
-                        self._retry_sleep(
-                            retry_delay_seconds(
-                                transient_retries,
-                                headers,
-                            )
-                        )
+                        call.wait(retry_delay_seconds(transient_retries, headers),
+                                  self._retry_sleep, cause=exc)
                         continue
                     raise _request_transport_failure(
                         timeout=True,
@@ -2262,12 +2280,8 @@ class _ResponsesModelBase:
                         recovery.append("stream_transport_retry")
                         _close_response(response)
                         response = None
-                        self._retry_sleep(
-                            retry_delay_seconds(
-                                transient_retries,
-                                headers,
-                            )
-                        )
+                        call.wait(retry_delay_seconds(transient_retries, headers),
+                                  self._retry_sleep, cause=exc)
                         continue
                     raise _request_transport_failure(
                         timeout=False,
@@ -2289,9 +2303,8 @@ class _ResponsesModelBase:
                     )
                     _close_response(response)
                     response = None
-                    self._retry_sleep(
-                        retry_delay_seconds(transient_retries)
-                    )
+                    call.wait(retry_delay_seconds(transient_retries), self._retry_sleep,
+                              cause=exc)
                     continue
                 raise _request_transport_failure(
                     timeout=timeout,
@@ -2308,9 +2321,8 @@ class _ResponsesModelBase:
                     recovery.append("request_timeout_retry")
                     _close_response(response)
                     response = None
-                    self._retry_sleep(
-                        retry_delay_seconds(transient_retries)
-                    )
+                    call.wait(retry_delay_seconds(transient_retries), self._retry_sleep,
+                              cause=exc)
                     continue
                 raise _request_transport_failure(
                     timeout=True,
@@ -2327,9 +2339,8 @@ class _ResponsesModelBase:
                     recovery.append("connection_retry")
                     _close_response(response)
                     response = None
-                    self._retry_sleep(
-                        retry_delay_seconds(transient_retries)
-                    )
+                    call.wait(retry_delay_seconds(transient_retries), self._retry_sleep,
+                              cause=exc)
                     continue
                 raise _request_transport_failure(
                     timeout=False,

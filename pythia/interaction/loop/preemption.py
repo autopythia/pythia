@@ -15,6 +15,10 @@ at its next interrupt point, after its tool batch; at ``IMMEDIATE``
 ``PREEMPT`` (``/exit!!``, a later Ctrl-C) the operation in flight is cancelled
 too. A stop drops the steers, but steers flushed before it still keep the turn
 from starting anything new.
+
+Only samples and tool calls are operations here. Compaction is not, so a flush
+never skips or cancels it; a preempting stop reaches it through the model,
+which the apps close (see ``kernel``).
 """
 
 from __future__ import annotations

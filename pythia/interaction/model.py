@@ -66,6 +66,17 @@ class ModelTransportError(ModelError):
     pass
 
 
+class ModelCancelled(ModelTransportError):
+    """A request that ``retire_model`` or ``close_model`` cancelled; not a failure.
+
+    ``completed_items`` holds output that completed before the cancel (from a
+    stream), and ``failure`` describes the cancelled request (category
+    ``request_cancelled``). Neither is set when a closed model refused a call
+    that sent nothing. The turn loop treats it like any failure caused by a
+    preempting steer or stop: it is saved, never retried.
+    """
+
+
 class ModelContinuationExpired(ModelTransportError):
     """A retired continuation can be replaced from checkpointed host history.
 
@@ -379,14 +390,28 @@ class Model(Protocol):
 
 
 def retire_model(model) -> None:
-    """Optional, idempotent cancellation of a resource-owning continuation."""
+    """Optional, idempotent cancellation of the model's work in flight.
+
+    That is a Claude relay continuation, or an HTTP model's request in flight.
+    Any thread may call it, also while a sample runs; that sample then fails
+    soon. The model stays usable: its next sample starts a new continuation or
+    request. The turn loop retires at each turn's end, and to cancel the
+    sample in flight for a preempting steer or stop; a preempting stop also
+    closes the model (see ``close_model``).
+    """
     retire = getattr(model, "retire", None)
     if callable(retire):
         retire()
 
 
 def close_model(model) -> None:
-    """Optional, idempotent final cleanup; stateless models need no new methods."""
+    """Optional, idempotent final cleanup; stateless models need no new methods.
+
+    A preempting stop (/exit!!) closes models early, from another thread,
+    possibly while a sample or a compaction's request runs. A model with work
+    to cancel therefore cancels it as ``retire_model`` does, and fails every
+    later sample at once, so that a compaction between its requests stops too.
+    """
     close = getattr(model, "close", None)
     if callable(close):
         close()
@@ -396,6 +421,7 @@ __all__ = [
     "retire_model", "close_model",
     "Model",
     "ModelAuthenticationError",
+    "ModelCancelled",
     "ModelConfigurationError",
     "ModelContextWindowError",
     "ModelContinuationExpired",
