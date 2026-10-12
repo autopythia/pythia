@@ -25,6 +25,7 @@ from ..display import render_interaction_items
 from ..environment import Tool, ToolOutcome, ToolSpec
 from ..items import InteractionItem, Message, ModelFailure, ToolCall, ToolResult
 from ..items import UserInteractionBoundary
+from ..media import split_leading_references
 from ..model import ModelError
 from ..save import SaveError
 from ..user import UserInteraction
@@ -64,11 +65,15 @@ class Yield:
     # first turn had no new user message, and job_text is the request that
     # turn belongs to.
     continued: bool = False
+    # The user's texts here (job_text, steers, steer target) are quoted as
+    # typed, and their leading @ references named attachments, which the
+    # supervised context received in their place (--enable-experimental-media).
+    attachments: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in YIELD_KINDS:
             raise ValueError(f"Yield kind must be one of {YIELD_KINDS}.")
-        for name in ("resumable", "continued"):
+        for name in ("resumable", "continued", "attachments"):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be a bool.")
         for name in ("revision", "resumes"):
@@ -384,6 +389,11 @@ def report_text(yield_: Yield, *, supervised: str = "Main") -> str:
         lines += ["", "User steers during this task:"]
         lines += [f"{number}. {'' if delivered else '(not yet delivered) '}{text}"
                   for number, (text, delivered) in enumerate(yield_.steers, 1)]
+    if yield_.attachments and any(split_leading_references(text)[0] for text in (
+            yield_.job_text, target or "", *(text for text, _ in yield_.steers))):
+        lines += ["", f"The leading @ references above are attachments: {supervised} received "
+                      "each file's text, or the image, in their place (read_context shows what "
+                      "it received)."]
     lines += ["", f"Outcome: {outcome}"]
     if yield_.failure is not None:
         lines.append(f"Failure: {yield_.failure.category}: {yield_.failure.message}")
@@ -511,26 +521,34 @@ def supervised_turn(text: str, resumes: int, context, model, environment, config
                     steers: Optional[Callable[[], Sequence[Tuple[str, bool]]]] = None,
                     first_user_text: Optional[str] = None,
                     steer_target_text: Optional[str] = None,
-                    continued: bool = False) -> Yield:
+                    continued: bool = False, message: Optional[Message] = None,
+                    attachments: bool = False) -> Yield:
     """Run one supervised turn on ``text`` and describe how its loop stopped.
 
     The first turn of a task (``resumes == 0``) gets ``text`` verbatim; a
-    resumed turn gets ``follow_up(text)``. The first turn of a ``continued``
+    resumed turn gets ``follow_up(text)``. ``message``, if given, replaces the
+    first turn's user message (its attachments read on submission), while
+    ``job_text`` stays the request as typed. The first turn of a ``continued``
     task gets no user message: it continues the saved turn where it stopped
     (``/continue``), and ``text`` only names its request. ``control`` (the context's
     :class:`YieldTool`) is opened for this turn only. ``steers`` returns the
     task's steers as (text, delivered) pairs once the turn has stopped.
-    ``first_user_text`` and ``steer_target_text`` are copied into the Yield for
-    the report. Any failure becomes a ``failed`` Yield, resumable unless the log
-    is unsafe to continue (unsaved state or unanswered tool calls).
+    ``first_user_text``, ``steer_target_text``, and ``attachments`` are copied
+    into the Yield for the report. Any failure becomes a ``failed`` Yield,
+    resumable unless the log is unsafe to continue (unsaved state or
+    unanswered tool calls).
     """
     fields = {"context": context_id, "job_id": job_id, "job_text": job_text,
               "resumes": resumes, "first_user_text": first_user_text,
-              "steer_target_text": steer_target_text, "continued": continued}
+              "steer_target_text": steer_target_text, "continued": continued,
+              "attachments": attachments}
     try:
         if not (continued and resumes == 0):
-            content = text if resumes == 0 or follow_up is None else follow_up(text)
-            user = UserInteraction((Message("user", content),))
+            if resumes == 0 and message is not None:
+                user = UserInteraction((message,))
+            else:
+                content = text if resumes == 0 or follow_up is None else follow_up(text)
+                user = UserInteraction((Message("user", content),))
             host.append(context, user.context_items())
             host.show(user.display_items())
         if control is not None:
@@ -567,7 +585,8 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
                         waiting_phase: str = "awaiting supervisor",
                         first_user_text: Optional[str] = None,
                         steer_target_text: Optional[str] = None,
-                        continued: bool = False) -> Optional[Yield]:
+                        continued: bool = False, message: Optional[Message] = None,
+                        attachments: bool = False) -> Optional[Yield]:
     """Run one task's turns until the supervisor releases it; return the last Yield.
 
     Runs on the supervised context's thread. Each turn ends in a handoff: its
@@ -587,7 +606,7 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
                 job_text=job_text, job_id=job_id, context_id=context_id,
                 control=control, follow_up=follow_up, steers=steers,
                 first_user_text=first_user_text, steer_target_text=steer_target_text,
-                continued=continued)
+                continued=continued, message=message, attachments=attachments)
             if not yield_.resumable and on_fault is not None:
                 on_fault(yield_)
             host.phase(waiting_phase)

@@ -58,6 +58,10 @@ DEFAULT_MAX_TEXT_BYTES = 1024 * 1024
 # Local files with these suffixes are pasted as text. They are compared
 # case-insensitively with the suffix of the file actually read.
 DEFAULT_TEXT_SUFFIXES = frozenset({".md", ".txt"})
+
+# The model APIs whose requests can carry images (``MediaPart``); text pastes
+# work with every API.
+MEDIA_APIS = frozenset({"codex", "responses", "chat-completions"})
 # Joins neighbouring text: pasted files and the trailing typed text.
 TEXT_PASTE_SEPARATOR = "\n\n"
 
@@ -349,6 +353,16 @@ def _merge_text_runs(parts: Sequence[ContentPart]) -> Tuple[ContentPart, ...]:
     return tuple(merged)
 
 
+def _user_message(parts: Sequence[ContentPart]) -> Message:
+    """A user message of merged parts: a plain string without images."""
+    merged = _merge_text_runs(parts)
+    if not any(isinstance(part, MediaPart) for part in merged):
+        # Every part was text, so merging left exactly one.
+        (only,) = merged
+        return Message(role="user", content=only.text)
+    return Message(role="user", content=merged)
+
+
 def parse_user_prompt(
     prompt: str,
     *,
@@ -387,12 +401,31 @@ def parse_user_prompt(
     )
     if text:
         parts.append(TextPart(text))
-    merged = _merge_text_runs(parts)
-    if not any(isinstance(part, MediaPart) for part in merged):
-        # Every part was text, so merging left exactly one.
-        (only,) = merged
-        return Message(role="user", content=only.text)
-    return Message(role="user", content=merged)
+    return _user_message(parts)
+
+
+def require_media_api(message: Message, api: Optional[str], *,
+                      subject: Optional[str] = None) -> None:
+    """Raise :class:`AttachmentError` if ``message`` has images and ``api``
+    can't send them (see ``MEDIA_APIS``); ``subject`` names the API in the
+    error, by default ``api`` itself."""
+    if message.has_media and api not in MEDIA_APIS:
+        raise AttachmentError(
+            f"{subject or api} does not support media prompts; "
+            "use codex, responses, or chat-completions"
+        )
+
+
+def join_user_messages(messages: Iterable[Message]) -> Message:
+    """One user message with the parts of ``messages`` in order.
+
+    Neighbouring text is joined with ``TEXT_PASTE_SEPARATOR``, as within one
+    prompt, so messages without images join into a plain-string message.
+    """
+    parts = [part for message in messages for part in message.parts]
+    if not parts:
+        raise ValueError("join_user_messages requires at least one message")
+    return _user_message(parts)
 
 
 def content_item_to_responses(part: ContentPart, role: str) -> dict:
@@ -418,9 +451,12 @@ __all__ = [
     "DEFAULT_MAX_TEXT_BYTES",
     "DEFAULT_MAX_TOTAL_BYTES",
     "DEFAULT_TEXT_SUFFIXES",
+    "MEDIA_APIS",
     "TEXT_PASTE_SEPARATOR",
     "content_item_to_responses",
+    "join_user_messages",
     "parse_user_prompt",
+    "require_media_api",
     "resolve_content",
     "split_leading_references",
 ]

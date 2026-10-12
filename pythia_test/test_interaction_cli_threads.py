@@ -149,6 +149,23 @@ class CliSteeringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [["task"], ["task"]])
         self.assertEqual([entry.text for entry in state.pending], ["older query", "typed later"])
 
+    async def test_task_during_a_turn_waits_for_the_turn_to_end(self):
+        loop, state, seen = asyncio.get_running_loop(), cli._UIState(ready=True), []
+
+        async def enter(text):
+            state.editor = Editor(text, len(text))
+            state.handle_key("c-m", "\r")
+
+        def handler(arguments, *, timeout_seconds=None):
+            asyncio.run_coroutine_threadsafe(enter("/task check the tests later"), loop).result()
+            return ToolOutcome(output="ok")
+        environment = Environment((Tool(ToolSpec("probe", "Probe.", {"type": "object"}), handler),))
+        result = await self._turn(state, self._model(seen), environment)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(seen, [["task"], ["task"]])  # it never steered the turn
+        self.assertEqual([(entry.text, entry.steers) for entry in state.pending],
+                         [("check the tests later", False)])  # the next query
+
     async def test_a_bad_attachment_rejects_only_its_own_draft(self):
         # Enter reads a draft's @ files; a bad one keeps that draft, and the
         # submissions after it steer as usual.
@@ -261,6 +278,29 @@ class CliSteerInputTests(unittest.TestCase):
 
     def _notices(self, state):
         return [item.text.removeprefix("[cli] ") for item in state.displays]
+
+    def test_task_queues_the_next_query_and_never_steers(self):
+        state = cli._UIState(ready=True, turn_active=True)
+        state.set_phase("sampling")
+        self._enter(state, "/task")
+        self.assertEqual(state.editor.text, "/task")  # a usage notice keeps the draft
+        self._enter(state, "/task check the tests later")
+        self._enter(state, "and this")  # behind it: a steer never overtakes it
+        self.assertEqual([(entry.text, entry.steers) for entry in state.pending],
+                         [("check the tests later", False), ("and this", True)])
+        self.assertEqual(state.pending[0].message, Message("user", "check the tests later"))
+        self.assertEqual(cli._steer_count(state), 0)
+        self.assertEqual(cli._take_steers(state), ())
+        self.assertEqual(len(state.pending), 2)
+        self.assertEqual(self._notices(state), [
+            "Usage: /task <text> queues the text as the next query instead of steering the "
+            "running turn.",
+            "Queued as the next query; it waits for the current turn to end."])
+        idle = cli._UIState(ready=True)  # no turn: plain text, and no notice
+        idle.set_phase("idle")
+        self._enter(idle, "/task now")
+        self.assertEqual([(entry.text, entry.steers) for entry in idle.pending], [("now", False)])
+        self.assertEqual(self._notices(idle), [])
 
     def test_steer_without_text_flushes_the_queued_steers(self):
         state = cli._UIState(ready=True, turn_active=True)

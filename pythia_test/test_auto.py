@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
 import io
 import json
 import os
@@ -29,6 +30,7 @@ from pythia.interaction import load_interaction_save, save_interaction_save
 from pythia.interaction import auto
 from pythia.interaction import ClaudeRelayModel
 from pythia.interaction import compaction
+from pythia.interaction.media import AttachmentError, join_user_messages, parse_user_prompt
 from pythia_test.interaction_helpers import fake_relay_runtime, patch_saves, real_save
 from pythia.interaction.loop import kernel
 from pythia.interaction import SampleParams
@@ -43,6 +45,13 @@ from pythia.interaction.runtime_config import InteractionConfig
 
 def answer(text="done"):
     return ModelSample((Message("assistant", text),))
+
+
+# A 1x1 PNG, for @ attachments.
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 def resume(content, call_id="resume"):
@@ -323,6 +332,43 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parser.parse_args(["--headless", value])
+
+    def test_resume_takes_a_boolean_and_is_frontend_only(self):
+        parser = build_parser()
+        for argv, expected in (((), False), (("--resume",), True), (("--resume=True",), True),
+                               (("--resume", "tRuE"), True), (("--resume", "False"), False),
+                               (("--resume=false",), False),
+                               (("--resume", "--headless"), True)):  # bare, before an option
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertIs(args.resume, expected)
+                settings = resolve_config(overrides={
+                    key: value for key, value in vars(args).items() if key in auto.DEFAULTS
+                })
+                self.assertTrue(all("resume" not in value for value in settings.values()))
+        for value in ("yes", "1"):
+            with self.subTest(value=value), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["--resume", value])
+
+    def test_default_tools_and_media_flags_are_frontend_only(self):
+        parser = build_parser()
+        for flag, default in (("--enable-default-tools", True),
+                              ("--enable-experimental-media", False)):
+            name = flag[2:].replace("-", "_")
+            for argv, expected in (((), default), ((flag,), True), ((flag, "False"), False),
+                                   ((f"{flag}=TRUE",), True)):
+                with self.subTest(argv=argv):
+                    args = parser.parse_args(argv)
+                    self.assertIs(getattr(args, name), expected)
+                    # Launch-only, like the CLI's: never a setting, never saved.
+                    settings = resolve_config(overrides={
+                        key: value for key, value in vars(args).items() if key in auto.DEFAULTS
+                    })
+                    self.assertTrue(all(name not in value for value in settings.values()))
+            with self.subTest(flag=flag), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args([flag, "yes"])
 
     def test_default_limits_are_unset(self):
         args = build_parser().parse_args([])
@@ -1675,6 +1721,260 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(isinstance(item, ContextPrefix) for item in sampled))
         self.assertEqual(self.last_user(sampled).content, "Go left.")
 
+    # --enable-experimental-media: main's tasks and steers read their leading
+    # @ references as the CLI does; reports quote the texts as typed.
+
+    ATTACHMENTS_NOTE = ("The leading @ references above are attachments: Main received each "
+                        "file's text, or the image, in their place (read_context shows what "
+                        "it received).")
+
+    def media_files(self):
+        root = Path(self.temp.name)
+        (root / "shot.png").write_bytes(_PNG)
+        (root / "notes.md").write_text("Notes body.\n", encoding="utf-8")
+
+    def parsed(self, text):
+        """The message the CLI builds for text, in the session's cwd."""
+        return parse_user_prompt(text, cwd=Path(self.temp.name).resolve(), enabled=True,
+                                 enable_workspace=True)
+
+    def test_media_tasks_reach_main_as_the_cli_builds_them_and_reports_quote_them_as_typed(self):
+        self.media_files()
+        session = self.session({1: [answer("seen"), answer("pasted")],
+                                -1: [answer("Complete."), answer("Complete.")]},
+                               worker_board=False, enable_experimental_media=True)
+        image_task = "@shot.png @notes.md compare them"
+        self.assertTrue(self.settled(session, session.submit(image_task)))
+        self.assertTrue(self.settled(session, session.submit("@notes.md go ahead")))
+        first, second = (self.last_user(context) for context in self.calls[1])
+        self.assertEqual(first, self.parsed(image_task))
+        self.assertTrue(first.has_media)
+        self.assertEqual(second, Message("user", "Notes body.\n\ngo ahead"))  # a paste: plain text
+        reports = [self.last_user(context).content for context in self.calls[-1]]
+        self.assertIn(f"User request:\n{image_task}\n\n{self.ATTACHMENTS_NOTE}\n\nOutcome: ended",
+                      reports[0])
+        self.assertNotIn("Notes body.", reports[0])  # never the files' content
+        self.assertNotIn("base64", reports[0])
+        self.assertIn("User request:\n@notes.md go ahead\n", reports[1])
+        # The first message of the session comes from main's log, which keeps
+        # the attachments, not their names: the image by its label.
+        self.assertIn("First user message of the session (for context):\n"
+                      f"[image] image/png {len(_PNG)} B\nNotes body.\n\ncompare them\n",
+                      reports[1])
+
+    def test_a_media_steer_reaches_main_s_next_sample_and_reports_quote_it_as_typed(self):
+        self.media_files()
+        holder = {}
+
+        def first(context):
+            holder["posted"] = holder["session"].submit("@shot.png look at this")
+            return ModelSample((ToolCall("probe", "p1", "{}"),))
+        probe = Tool(ToolSpec("probe", "Probe.", {}), lambda args, **kwargs: ToolOutcome("ok"))
+        session = self.session({1: [first, answer("done")], -1: [answer("Complete.")]},
+                               worker_board=False, enable_experimental_media=True,
+                               extra_tools=(probe,))
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertTrue(holder["posted"]["steer"])
+        self.assertEqual(self.last_user(self.calls[1][1]), self.parsed("@shot.png look at this"))
+        report = self.last_user(self.calls[-1][0]).content
+        self.assertIn("User request:\ntask\n\nUser steers during this task:\n"
+                      f"1. @shot.png look at this\n\n{self.ATTACHMENTS_NOTE}", report)
+
+    def test_undelivered_media_steers_are_requeued_together_with_their_images(self):
+        self.media_files()
+        holder = {}
+
+        def first(context):
+            for text in ("@shot.png first look", "@notes.md and the notes"):
+                holder["session"].submit(text)  # after main's last sample: never delivered
+            return answer("first")
+        session = self.session({1: [first, answer("second")]}, worker_board=False,
+                               enable_experimental_media=True, watcher_observe_only=True)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertTrue(self.settled(session, {"record_id": "2"}))  # the requeued steers
+        self.assertEqual(session._tasks[1].content,
+                         "@shot.png first look\n\n@notes.md and the notes")
+        joined = self.last_user(self.calls[1][1])
+        self.assertEqual(joined, join_user_messages((self.parsed("@shot.png first look"),
+                                                     self.parsed("@notes.md and the notes"))))
+        self.assertEqual(joined.content[1].text, "first look\n\nNotes body.\n\nand the notes")
+
+    def test_images_need_main_s_api_but_text_pastes_work_with_any(self):
+        self.media_files()
+        session = self.session({}, worker_board=False, enable_experimental_media=True,
+                               settings_overrides={"model_api": "messages",
+                                                   "model": "claude-test",
+                                                   "max_output_tokens": 100})
+        with self.assertRaises(AttachmentError) as raised:
+            session.submit("@shot.png look")
+        self.assertEqual(str(raised.exception), "#1 (main) uses messages, which does not "
+                         "support media prompts; use codex, responses, or chat-completions")
+        self.assertEqual(session._tasks, [])
+        self.assertEqual(session.read_submission("@notes.md go"),
+                         Message("user", "Notes body.\n\ngo"))
+
+    def test_a_bad_reference_queues_and_flushes_nothing(self):
+        holder = {}
+
+        def first(context):
+            session = holder["session"]
+            with self.assertRaises(AttachmentError):
+                session.submit("@missing.png look", flush=auto.Urgency.PREEMPT)
+            holder["after"] = (session._steer_snapshot(), session._preemption[1].level)
+            return answer("done")
+        session = self.session({1: [first], -1: [answer("Complete.")]}, worker_board=False,
+                               enable_experimental_media=True)
+        holder["session"] = session
+        self.assertTrue(self.settled(session, session.submit("task")))
+        self.assertEqual(holder["after"], ((), auto.Urgency.QUEUED))
+        with self.assertRaises(AttachmentError):
+            session.submit("@missing.png later")  # no open task: no new task either
+        self.assertEqual(len(session._tasks), 1)
+
+    def test_without_the_flag_references_are_text_and_a_media_save_still_resumes(self):
+        self.media_files()
+        session = self.session({1: [answer("seen")], -1: [answer("Complete.")]},
+                               worker_board=False, enable_experimental_media=True)
+        self.assertTrue(self.settled(session, session.submit("@shot.png look")))
+        session.close()
+        session = self.session({1: [answer("again")], -1: [answer("Complete.")]},
+                               worker_board=False, resume=True)
+        self.assertTrue(self.settled(session, session.submit("@shot.png literal")))
+        context = self.calls[1][-1]
+        self.assertEqual(self.last_user(context), Message("user", "@shot.png literal"))
+        self.assertTrue(any(isinstance(item, Message) and item.has_media for item in context))
+        report = self.last_user(self.calls[-1][-1]).content
+        self.assertNotIn(self.ATTACHMENTS_NOTE, report)  # the flag was off: literal text
+
+    def test_last_request_quotes_images_by_label(self):
+        self.media_files()
+        items = (self.parsed("@shot.png look"), UserInteractionBoundary(),
+                 Message("assistant", "ok"))
+        self.assertEqual(auto._last_request(items), f"[image] image/png {len(_PNG)} B\nlook")
+
+    def test_interactive_shows_an_attachment_error_and_keeps_the_draft(self):
+        session = self.session({}, worker_board=False, enable_experimental_media=True)
+        draft = "@missing.png look"
+        prefix = "Task was not queued: cannot read attachment 'missing.png'"
+
+        class Terminal:
+            closed = False
+
+            def __init__(self):
+                self.keys, self.seen, self.stage, self.draft = deque(), [], 0, None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read_keys(self):
+                keys = tuple(self.keys)
+                self.keys.clear()
+                return keys
+
+            def render(self, editor, status, items, prompt=":> "):
+                self.seen.extend(item.text for item in items)
+                if self.stage == 0:
+                    self.keys.extend(SimpleNamespace(key=key, data=data) for key, data in (
+                        ("<bracketed-paste>", draft), ("c-m", "\r")))
+                    self.stage = 1
+                elif self.stage == 1 and any(text.startswith(prefix) for text in self.seen):
+                    self.draft = editor.text
+                    self.keys.append(SimpleNamespace(key="c-d", data=""))
+                    self.stage = 2
+        terminal = Terminal()
+        self.assertEqual(asyncio.run(asyncio.wait_for(
+            auto._interactive(session, terminal), timeout=6)), 0)
+        self.assertEqual(terminal.seen[0], auto._shell_help(session))  # the shell's first line
+        [notice] = [text for text in terminal.seen if text.startswith(prefix)]
+        self.assertTrue(notice.endswith(". Draft preserved."), notice)
+        self.assertEqual(terminal.draft, draft)
+        self.assertEqual(session._tasks, [])
+
+    def test_shell_help_names_the_commands_of_each_mode(self):
+        plain = auto._shell_help(SimpleNamespace(worker_board=False))
+        board = auto._shell_help(SimpleNamespace(worker_board=True))
+        for command in ("/task <text>", "/steer [text]", "/continue", "/contexts"):
+            self.assertIn(command, plain)
+        self.assertIn("plain text or /task <text> posts a new user board thread", board)
+        self.assertNotIn("/steer", board)
+        self.assertNotIn("/continue", board)
+
+    def start_with_real_environments(self, path, **options):
+        settings = resolve_config(overrides={"cwd": self.temp.name})
+        session = auto._Session(path, settings, model_factory=lambda index, args: mock.Mock(),
+                                **options).start()
+        self.addCleanup(session.close)
+        texts = [item.text for event in session.drain_events() for item in event.items]
+        session.close()
+        tools = [item for item in load_interaction_save(path / "contexts" / "1.jsonl")
+                 if isinstance(item, Tools)]
+        return texts, tools
+
+    def test_default_tools_off_leaves_main_only_its_bound_tools(self):
+        path = Path(self.temp.name) / "run"
+        texts, tools = self.start_with_real_environments(path)
+        self.assertEqual({spec.name for spec in tools[-1].specs},
+                         {"exec_command", "write_stdin", "update_plan", "apply_patch", "yield"})
+        self.assertIn("Warning: local tools are unsandboxed; use a trusted model and workspace.",
+                      texts)
+        # Launch-only: a resume with the other setting records the new tools.
+        texts, tools = self.start_with_real_environments(path, resume=True,
+                                                         enable_default_tools=False)
+        self.assertEqual(len(tools), 2)
+        self.assertEqual([spec.name for spec in tools[-1].specs], ["yield"])
+        self.assertIn("Note: default model tools are disabled.", texts)
+        self.assertFalse(any("unsandboxed" in text for text in texts))
+
+    def test_startup_warns_like_the_cli_about_the_workspace_and_relay_host_tools(self):
+        catalog = parse_model_catalog(
+            "[catalog]\nversion = 4\n"
+            "[model.relay]\nendpoint.api = claude-relay\nendpoint.model = fixture-model\n"
+            "[model.plain]\nendpoint.api = chat-completions\n"
+            "endpoint.url = http://127.0.0.1:9/v1/chat/completions\n"
+            "endpoint.model = plain\nendpoint.auth = none\n")
+
+        def notices(role_models, *, enable_workspace=True, **options):
+            settings = resolve_config(
+                overrides={"cwd": self.temp.name, "enable_workspace": enable_workspace},
+                catalog=catalog, role_models=role_models, roles=options.pop("roles", None))
+            return auto._Session(self.path, settings, **options)._tool_notices()
+        unsandboxed = "Warning: local tools are unsandboxed; use a trusted model and workspace."
+        workspace = ("Warning: workspace path restrictions are disabled for {}; exec_command "
+                     "workdir and apply_patch paths may resolve outside {} cwd.")
+        relay = ("Warning: {} Claude Relay host tools as the Pythia user, outside the Claude "
+                 "sandbox.")
+        self.assertEqual(notices({1: "relay", -1: "plain"}, enable_workspace=False), (
+            unsandboxed, workspace.format("#1 (main)", "its"), relay.format("#1 (main) runs")))
+        # The watcher never has the default tools.
+        self.assertEqual(notices({1: "plain", -1: "relay"}), (unsandboxed,))
+        self.assertEqual(notices({1: "relay", 2: "relay"}, enable_workspace=False,
+                                 roles=(1, 2, -1), enable_experimental_worker_board=True), (
+            unsandboxed, workspace.format("#1 (main) and #2 (worker)", "their"),
+            relay.format("#1 (main) and #2 (worker) run")))
+        self.assertEqual(notices({1: "relay"}, enable_workspace=False,
+                                 enable_default_tools=False),
+                         ("Note: default model tools are disabled.",))
+
+    def test_headless_one_prompt_prints_notices_and_errors_on_stderr_only(self):
+        failure = ModelTransportError("SECRET", failure=ModelFailure("transport", "safe summary"))
+        session = self.session({1: [failure]}, worker_board=False, watcher_observe_only=True)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(auto._one_prompt(session, "failing task", display=False), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(lines[0], f"Save directory: {self.path}")
+        self.assertIn("[#1 (main)] Task failed (ModelTransportError); effects may have occurred. "
+                      "Details withheld.", lines)
+        # Not the transcript: the task, the model failure, the tools.
+        self.assertFalse(any("failing task" in line or "safe summary" in line
+                             or "SECRET" in line or "tools]" in line for line in lines), lines)
+
     def test_interactive_steer_flushes_a_typed_steer(self):
         entered, release = threading.Event(), threading.Event()
 
@@ -1949,10 +2249,13 @@ class RuntimeTests(unittest.TestCase):
 
     def test_quiet_one_prompt_success_has_no_context_display(self):
         session = self.session({1: [answer("quiet answer")]})
-        output = io.StringIO()
-        with redirect_stdout(output):
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
             self.assertEqual(auto._one_prompt(session, "quiet task", display=False), 0)
         self.assertEqual(output.getvalue(), "")
+        # Host notices only, on stderr: no transcript.
+        self.assertIn(f"Save directory: {self.path}", errors.getvalue())
+        self.assertNotIn("quiet", errors.getvalue())
         records = session.service.board.records()
         self.assertEqual([record.kind for record in records], ["user", "answer"])
         saved = load_interaction_save(self.path / "contexts" / "1.jsonl")
@@ -1962,10 +2265,13 @@ class RuntimeTests(unittest.TestCase):
     def test_quiet_one_prompt_failure_has_no_context_display(self):
         failure = ModelTransportError("SECRET", failure=ModelFailure("transport", "safe"))
         session = self.session({1: [failure]})
-        output = io.StringIO()
-        with redirect_stdout(output):
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
             self.assertEqual(auto._one_prompt(session, "failing task", display=False), 1)
         self.assertEqual(output.getvalue(), "")
+        self.assertIn("[#1 (main)] Task failed (ModelTransportError); effects may have "
+                      "occurred. Details withheld.", errors.getvalue())
+        self.assertNotIn("SECRET", errors.getvalue())
         self.assertEqual([record.kind for record in session.service.board.records()],
                          ["user", "answer"])
         self.assertFalse(session.service.board.records()[-1].success)
@@ -3338,6 +3644,40 @@ class EntryPointTests(unittest.TestCase):
                 session.assert_not_called()
                 self.assertIn(message, stderr.getvalue())
 
+    def test_media_with_the_board_is_rejected_before_any_session(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (mock.patch.object(auto, "_Session") as session,
+              redirect_stdout(stdout), redirect_stderr(stderr)):
+            self.assertEqual(auto.main([
+                "--enable-experimental-worker-board", "--enable-experimental-media",
+                "--no-user-model-catalog", "--prompt", "task", "--save", "unused"]), 1)
+        session.assert_not_called()
+        self.assertIn("auto failed: --enable-experimental-media does not apply with "
+                      "--enable-experimental-worker-board.", stderr.getvalue())
+        with self.assertRaisesRegex(ValueError, "only without the experimental worker/board"):
+            auto._Session("unused", resolve_config(), enable_experimental_worker_board=True,
+                          enable_experimental_media=True)
+
+    def test_prompt_attachments_are_read_before_the_save_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.md").write_text("Notes body.\n", encoding="utf-8")
+            save = root / "run"
+            argv = ["--no-user-model-catalog", "--enable-experimental-media",
+                    "--watcher-observe-only", "--cwd", tmp, "--save", str(save), "--prompt"]
+            stderr = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                self.assertEqual(auto.main([*argv, "@missing.png hi"]), 1)
+            # A corrected command can run without --resume.
+            self.assertFalse(save.exists())
+            self.assertIn("auto failed: cannot read attachment 'missing.png'", stderr.getvalue())
+            # A good reference is read once, before startup, and passed on.
+            with (mock.patch.object(auto, "_one_prompt", return_value=0) as run,
+                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())):
+                self.assertEqual(auto.main([*argv, "@notes.md hi"]), 0)
+            self.assertEqual(run.call_args.args[1], "@notes.md hi")
+            self.assertEqual(run.call_args.kwargs["message"], Message("user", "Notes body.\n\nhi"))
+
     def stub_main(self, argv, *, environ=None, start_error=None):
         """Run auto.main with a recording stub session: (code, stdout, stderr, settings)."""
         created = []
@@ -3736,6 +4076,8 @@ class EntryPointTests(unittest.TestCase):
                 return self
             def close(self):
                 pass
+            def drain_events(self):
+                return ()  # headless runs print notices from here on exit
 
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "guaranteed-missing-save"
@@ -3834,7 +4176,8 @@ class EntryPointTests(unittest.TestCase):
             service = SimpleNamespace(base_url="http://127.0.0.1:43210")
 
             def __init__(self, *args, **kwargs):
-                pass
+                # The real session emits its startup notices, this one included.
+                self.events = [auto._Event(None, (DisplayItem(warning),), "notice")]
 
             def start(self):
                 return self
@@ -3843,9 +4186,10 @@ class EntryPointTests(unittest.TestCase):
                 pass
 
             def drain_events(self):
-                return ()
+                events, self.events = self.events, []
+                return events
 
-        # Without --headless the warning is a session event, which the run displays.
+        # A notice: headless runs print it on stderr, other runs display it.
         for headless in (True, False):
             with self.subTest(headless=headless):
                 stdout, stderr = io.StringIO(), io.StringIO()
@@ -3857,6 +4201,7 @@ class EntryPointTests(unittest.TestCase):
                         f"--headless={headless}", "--prompt", "task", "--save", "unused",
                     ]), 0)
                 self.assertEqual(stderr.getvalue(), warning + "\n" if headless else "")
+                self.assertEqual(warning in stdout.getvalue(), not headless)
 
     def test_headless_false_keeps_non_tty_validation(self):
         for argv in ([], ["--headless", "False"]):
@@ -3897,7 +4242,7 @@ class EntryPointTests(unittest.TestCase):
             def drain_events(self):
                 return []
 
-        def one_prompt(session, prompt, *, display=True):
+        def one_prompt(session, prompt, *, display=True, message=None):
             for expected in (["stop"], ["stop", "preempt"]):
                 os.kill(os.getpid(), signal.SIGINT)  # handled here, not raised
                 wait_for(lambda: calls == expected)
@@ -3925,6 +4270,9 @@ class EntryPointTests(unittest.TestCase):
 
             def close(self):
                 pass
+
+            def drain_events(self):
+                return ()  # headless runs print only notices, on stderr
 
         for failure, expected, board in ((RuntimeError("runtime"), 1, True),
                                          (KeyboardInterrupt(), 130, True)):

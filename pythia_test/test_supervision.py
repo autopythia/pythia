@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pythia.interaction import Message, ModelFailure
+from pythia.interaction import MediaPart, Message, ModelFailure, TextPart
 from pythia.interaction.loop.supervision import Fault, SupervisedHandle, Yield, YieldChannel, supervise
 from pythia.interaction.loop.supervision import YIELD_MAX_CHARS, YieldTool, report_text
 from pythia.interaction.loop.supervision import run_supervised_task
@@ -259,6 +259,25 @@ class HandoffTests(unittest.TestCase):
         same = report_text(self._yield(job_text=long_first, first_user_text=long_first))
         self.assertNotIn("First user message", same)
 
+    def test_report_text_notes_attachments_only_where_a_quoted_text_names_one(self):
+        note = ("The leading @ references above are attachments: Main received each file's "
+                "text, or the image, in their place (read_context shows what it received).")
+        for fields, noted in (
+                ({"job_text": "@notes.md go", "attachments": True}, True),
+                ({"steers": (("@shot.png look", False),), "attachments": True}, True),
+                ({"steer_target_text": "@notes.md first", "attachments": True}, True),
+                ({"job_text": "@@literal at", "attachments": True}, False),  # escaped
+                ({"job_text": "no references", "attachments": True}, False),
+                ({"job_text": "@notes.md go"}, False)):  # the flag was off: literal text
+            with self.subTest(fields=fields):
+                self.assertEqual(note in report_text(self._yield(**fields)), noted)
+        text = report_text(self._yield(job_text="@notes.md go", attachments=True,
+                                       steers=(("@shot.png look", True),)))
+        self.assertIn("User request:\n@notes.md go\n\nUser steers during this task:\n"
+                      f"1. @shot.png look\n\n{note}\n\nOutcome: yielded", text)
+        with self.assertRaises(TypeError):
+            self._yield(attachments=1)
+
     def test_yield_tool_records_one_valid_note_per_turn(self):
         binding = YieldTool()
         (tool,) = binding.tools()
@@ -363,6 +382,19 @@ class SupervisedTaskLoopTests(unittest.TestCase):
                  if isinstance(i, Message) and i.role == "user"]
         self.assertEqual(users, ["Trace it.", "Follow-up: Checked; go on."])
         self.assertEqual(context.pending_tool_calls(), ())
+
+    def test_a_prepared_message_is_the_first_turn_s_only(self):
+        # The task's attachments were read on submission; job_text stays as typed.
+        image = Message("user", (MediaPart("https://example.com/a.png"), TextPart("look")))
+        model = self.Model(ModelSample((Message("assistant", "first"),)),
+                           ModelSample((Message("assistant", "second"),)))
+        channel = self.Channel("Check again.", None)
+        result, _, context = self._run(model, channel, message=image, attachments=True)
+        users = [item for item in context if isinstance(item, Message) and item.role == "user"]
+        self.assertEqual(users, [image, Message("user", "Follow-up: Check again.")])
+        self.assertEqual([y.job_text for y in channel.yields], ["Trace it.", "Trace it."])
+        self.assertTrue(all(y.attachments for y in channel.yields))
+        self.assertIs(result, channel.yields[-1])
 
     def test_a_non_resumable_failure_is_published_once_then_settled(self):
         faults = []

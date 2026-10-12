@@ -69,6 +69,7 @@ from .items import UserToolCall
 from .items import UserToolResult
 from .media import AttachmentError
 from .media import parse_user_prompt
+from .media import require_media_api
 from .media import split_leading_references
 from .loop import Interrupt
 from .loop import Preemption
@@ -129,10 +130,16 @@ class _ContinueIntent:
 
 @dataclass(frozen=True, eq=False)
 class _Submission:
-    """Submitted text and its user message, read when Enter accepted the text."""
+    """Submitted text and its user message, read when Enter accepted the text.
+
+    ``steers`` is false for ``/task <text>``: a running turn never takes it as
+    a steer, so it becomes the next query, and text typed after it queues
+    behind it (a steer never overtakes input queued before it).
+    """
 
     text: str
     message: Message
+    steers: bool = True
 
 
 def _plain_message(text: str) -> Message:
@@ -322,6 +329,18 @@ class _UIState:
                     self.editor = Editor()
                     return
                 intent = _ContinueIntent()
+            elif head == "/task":
+                # The next query, never a steer: it waits for the running turn
+                # to end, as plain text does when no turn can take a steer.
+                parts = text.split(maxsplit=1)
+                if len(parts) == 1:
+                    self.notice("Usage: /task <text> queues the text as the next query "
+                                "instead of steering the running turn.")
+                elif self.auth_required:
+                    self.notice(f"{self.auth_notice} Draft was not submitted.")
+                else:
+                    self._submit_text(parts[1], draft=text, steers=False)
+                return
             elif steer is not None:
                 # Queue the text (if any) like plain text, then flush every
                 # queued steer at the command's level: /steer waits for the
@@ -360,15 +379,16 @@ class _UIState:
                 self.changed.set()
 
     def _submit_text(self, text: str, *, draft: Optional[str] = None,
-                     flush: Optional[Urgency] = None) -> None:
+                     flush: Optional[Urgency] = None, steers: bool = True) -> None:
         """Read a draft's attachments now, then queue its message.
 
         A bad reference rejects only this draft: it stays in the editor with
         the error, and nothing is queued. A draft with files to read is read
         on a helper thread, as auto submits tasks; meanwhile it stays in the
         editor, and Enter queues nothing else, so the queue keeps its order.
-        ``draft`` is the editor text (``/steer <text>``), and ``flush`` the
-        urgency to flush the queued steers with once the text is queued.
+        ``draft`` is the editor text (``/steer <text>``, ``/task <text>``),
+        ``flush`` the urgency to flush the queued steers with once the text is
+        queued, and ``steers`` false for ``/task <text>`` (see _Submission).
         """
         draft = text if draft is None else draft
         if len(self.pending) >= _MAX_PENDING_QUERIES:
@@ -377,16 +397,18 @@ class _UIState:
         if self.reads_files(text):
             self.reading = draft
             future = asyncio.get_running_loop().run_in_executor(None, self.read_query, text)
-            future.add_done_callback(functools.partial(self._read_done, text, draft, flush))
+            future.add_done_callback(
+                functools.partial(self._read_done, text, draft, flush, steers))
             return
         try:
             message = self.read_query(text)
         except AttachmentError as exc:
             self.notice(str(exc))
             return
-        self._queue_submission(_Submission(text, message), draft, flush)
+        self._queue_submission(_Submission(text, message, steers), draft, flush)
 
-    def _read_done(self, text: str, draft: str, flush: Optional[Urgency], future) -> None:
+    def _read_done(self, text: str, draft: str, flush: Optional[Urgency], steers: bool,
+                   future) -> None:
         self.reading = None
         if future.cancelled() or self.closing:
             return
@@ -398,7 +420,7 @@ class _UIState:
             self.notice(f"Reading attachments failed ({type(error).__name__}); "
                         "the draft has not been submitted.")
         else:
-            self._queue_submission(_Submission(text, future.result()), draft, flush)
+            self._queue_submission(_Submission(text, future.result(), steers), draft, flush)
 
     def _queue_submission(self, submission: _Submission, draft: str,
                           flush: Optional[Urgency] = None) -> None:
@@ -409,6 +431,8 @@ class _UIState:
         if self.editor.text == draft:
             self.editor = Editor()
         self.changed.set()
+        if not submission.steers and self.phase not in {"idle", "failed", "auth needed"}:
+            self.notice("Queued as the next query; it waits for the current turn to end.")
         if flush is not None:
             steered = _steer_count(self) == len(self.pending)
             if not steered:
@@ -847,19 +871,21 @@ def _bind_account(state: _UIState, account_id: str) -> None:
         state.bound_account_id = account_id
 
 
-def _query_message(query: str, args, cwd: Path) -> Message:
-    """The user message for submitted text; raises AttachmentError."""
+def _query_message(query: str, args, cwd: Path,
+                   config: Optional[InteractionConfig] = None) -> Message:
+    """The user message for submitted text; raises AttachmentError.
+
+    Local paths follow ``config``'s current enable_workspace, which /config
+    changes, as the tools do; without ``config``, the launch option.
+    """
     message = parse_user_prompt(
         query,
         cwd=cwd,
         enabled=args.enable_experimental_media,
-        enable_workspace=args.enable_workspace,
+        enable_workspace=(args.enable_workspace if config is None
+                          else config.get("enable_workspace")),
     )
-    if message.has_media and args.model_api not in {"codex", "responses", "chat-completions"}:
-        raise AttachmentError(
-            f"--endpoint-api {args.model_api} does not support "
-            "media prompts; use codex, responses, or chat-completions"
-        )
+    require_media_api(message, args.model_api, subject=f"--endpoint-api {args.model_api}")
     return message
 
 
@@ -869,22 +895,27 @@ def _reads_files(text: str, args) -> bool:
 
 
 def _steer_count(state: _UIState) -> int:
-    """Leading text submissions in the queue: a running turn takes them as steers."""
+    """Leading steering submissions in the queue: a running turn takes them as
+    steers. A command, or a /task submission, ends the run (see _Submission)."""
     if not state.turn_active:
         return 0
     count = 0
     for entry in state.pending:
-        if not isinstance(entry, _Submission):
+        if not _steers(entry):
             break
         count += 1
     return count
+
+
+def _steers(entry) -> bool:
+    return isinstance(entry, _Submission) and entry.steers
 
 
 def _take_steers(state: _UIState) -> tuple:
     """The steers a running turn takes at its interrupt point; this also resets
     their urgency (flushed steers are delivered now)."""
     submissions = []
-    while state.turn_active and state.pending and isinstance(state.pending[0], _Submission):
+    while state.turn_active and state.pending and _steers(state.pending[0]):
         submissions.append(state.pending.popleft())
     state.preemption.take()
     return tuple(submissions)
@@ -1127,7 +1158,8 @@ async def _drive_interaction_body(
 ) -> None:
     attachment_cwd = Path(args.cwd).expanduser().resolve()
     # Enter reads each submission's attachments (see _UIState._submit_text).
-    state.read_query = functools.partial(_query_message, args=args, cwd=attachment_cwd)
+    state.read_query = functools.partial(_query_message, args=args, cwd=attachment_cwd,
+                                         config=config)
     state.reads_files = functools.partial(_reads_files, args=args)
     tools_snapshot = Tools(environment.tool_specs)
     existing = args.resume and await _on_context_thread(state, path.exists)
@@ -1307,7 +1339,7 @@ async def _drive_interaction_body(
                     message = query.message  # read when Enter accepted it
                 else:  # the startup prompt
                     try:
-                        message = _query_message(query, args, attachment_cwd)
+                        message = _query_message(query, args, attachment_cwd, config)
                     except AttachmentError as exc:
                         state.notice(str(exc))
                         if state.headless:
@@ -1491,10 +1523,10 @@ async def _run(
         trace=trace,
     )
     state.notice(
-        "pythia.interaction — /retry, /continue, /steer [text], /compact [focus], /config, "
-        "/config.json, /login, /quota, /exit or /quit. /steer and /exit wait for the current "
-        "tool batch; with ! they wait only for the current operation, and with !! they also "
-        "cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
+        "pythia.interaction — /retry, /continue, /steer [text], /task <text>, /compact [focus], "
+        "/config, /config.json, /login, /quota, /exit or /quit. /steer and /exit wait for the "
+        "current tool batch; with ! they wait only for the current operation, and with !! they "
+        "also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
     )
     _startup_notices(state, args, path)
     worker = None

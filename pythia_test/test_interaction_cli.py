@@ -325,16 +325,14 @@ for module in (cli, demo):
                 cli._build_parser().parse_args(["--experimental-user-message-injection"])
         self.assertEqual(raised.exception.code, 2)
 
-    def test_default_tools_flag_is_cli_only(self):
-        from pythia.interaction._auto_config import build_parser as auto_parser
-        for factory in (demo._build_parser, auto_parser):
-            with self.subTest(factory=factory.__module__):
-                parser = factory()
-                self.assertFalse(hasattr(parser.parse_args([]), "enable_default_tools"))
-                with mock.patch("sys.stderr", new=io.StringIO()):
-                    with self.assertRaises(SystemExit) as raised:
-                        parser.parse_args(["--enable-default-tools=False"])
-                self.assertEqual(raised.exception.code, 2)
+    def test_default_tools_flag_is_not_a_demo_option(self):
+        # The CLI and auto have it (auto's is tested in test_auto); the demo doesn't.
+        parser = demo._build_parser()
+        self.assertFalse(hasattr(parser.parse_args([]), "enable_default_tools"))
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["--enable-default-tools=False"])
+        self.assertEqual(raised.exception.code, 2)
 
     def test_non_tty_fails_before_model_environment_or_session_effects(self):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):

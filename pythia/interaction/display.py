@@ -412,6 +412,21 @@ def _render_message(item: Message) -> Tuple[str, ...]:
     return tuple(blocks)
 
 
+def message_summary(message: Message) -> str:
+    """A message's text with each image as its payload-free label, in order.
+
+    For example ``[image] image/png 12.0 KiB``, as the transcript shows it
+    (without role tags). A plain-string message is just its text.
+    """
+    if not message.has_media:
+        return message.content_text
+    return "\n".join(
+        part.text if isinstance(part, TextPart)
+        else f"[image] {_describe_non_text_source(part.source_uri)}"
+        for part in message.parts
+    )
+
+
 def _render_instructions(item: Instructions) -> Tuple[str, ...]:
     # Unlike Message, empty/whitespace-only instructions are still shown
     # so the audit trail preserves presence vs absence.
@@ -912,5 +927,6 @@ def _looks_like_env_assignment(token: str) -> bool:
 __all__ = [
     "DisplayItem",
     "InteractionItemRenderer",
+    "message_summary",
     "render_interaction_items",
 ]

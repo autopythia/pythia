@@ -450,9 +450,11 @@ def build_parser():
                      "experimental worker/board); run without a TTY."),
     )
     parser.add_argument(
-        "--resume", action="store_true",
+        "--resume", nargs="?", const=True, default=False,
+        type=_boolean_argument, metavar="{False,True}",
         help=("resume the auto save selected by --save; a missing directory starts fresh, "
-              "and historical work is not replayed (default: %(default)s)"),
+              "and historical work is not replayed. A bare flag means True "
+              "(default: %(default)s)"),
     )
     parser.add_argument(
         "--headless", nargs="?", const=True, default=False,
@@ -507,6 +509,23 @@ def build_parser():
     parser.add_argument("--debug-trace", action="store_true",
                         help=("append private per-context HTTP/native/MCP trace sidecars, including "
                               "sensitive payloads and credentials; launch-only, repeat on resume"))
+    parser.add_argument(
+        "--enable-default-tools", nargs="?", const=True, default=True,
+        type=_boolean_argument, metavar="{False,True}",
+        help=("enable the default model tools (exec_command, write_stdin, apply_patch, "
+              "update_plan) of main, and of the worker with the experimental worker/board; "
+              "the watcher never has them. Launch-only: repeat when resuming. A bare flag "
+              "means True (default: %(default)s)"),
+    )
+    parser.add_argument(
+        "--enable-experimental-media", nargs="?", const=True, default=False,
+        type=_boolean_argument, metavar="{False,True}",
+        help=("experimental: expand leading @path-or-uri tokens in main's tasks and steers "
+              "(--prompt, typed text, /task, /steer); images become media message content "
+              "and local .txt/.md files are pasted as text, with main's cwd and workspace "
+              "setting. Launch-only; not with --enable-experimental-worker-board "
+              "(default: %(default)s)"),
+    )
     parser.add_argument("--instructions", default=argparse.SUPPRESS,
                         help="main's instructions; other roles keep their own")
     parser.add_argument(

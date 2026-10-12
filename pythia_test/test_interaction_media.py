@@ -9,6 +9,7 @@ import io
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,17 +29,21 @@ from pythia.interaction import (
     load_interaction_save,
 )
 from pythia.interaction.chat_completions import _encode_context_messages
+from pythia.interaction.display import message_summary
 from pythia.interaction.messages import _encode_context
 from pythia.interaction.media import (
     AttachmentError,
     ContentLimits,
     DEFAULT_TEXT_SUFFIXES,
     content_item_to_responses,
+    join_user_messages,
     parse_user_prompt,
+    require_media_api,
     resolve_content,
     split_leading_references,
 )
 from pythia.interaction.responses import _encode_context_items
+from pythia.interaction.runtime_config import InteractionConfig, InteractionConfigSnapshot
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
 
 
@@ -462,6 +467,74 @@ class TextPasteParseTests(unittest.TestCase):
             self.parse("@missing.txt", enabled=False),
             Message(role="user", content="@missing.txt"),
         )
+
+
+class SharedHelperTests(unittest.TestCase):
+    """What the CLI and auto share: the API check, joining, and summaries."""
+
+    A = "alpha"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.cwd = self.root / "work"
+        self.cwd.mkdir()
+        (self.cwd / "a.txt").write_text(self.A + "\n", encoding="utf-8")
+        _write_png(self.cwd / "p.png")
+        (self.root / "outside.md").write_text("outside\n", encoding="utf-8")
+
+    def parse(self, prompt):
+        return parse_user_prompt(prompt, cwd=self.cwd, enabled=True, enable_workspace=True)
+
+    def test_images_need_an_api_that_sends_them(self):
+        image = self.parse("@p.png look")
+        for api in ("codex", "responses", "chat-completions"):
+            require_media_api(image, api)
+        for api in ("messages", "claude-relay", None):
+            with self.subTest(api=api), self.assertRaisesRegex(AttachmentError, "media prompts"):
+                require_media_api(image, api)
+        require_media_api(self.parse("@a.txt go"), "messages")  # a text paste: any API
+        with self.assertRaises(AttachmentError) as raised:
+            require_media_api(image, "messages", subject="#1 (main) uses messages, which")
+        self.assertEqual(str(raised.exception), "#1 (main) uses messages, which does not "
+                         "support media prompts; use codex, responses, or chat-completions")
+        # The CLI keeps its wording.
+        args = SimpleNamespace(enable_experimental_media=True, enable_workspace=True,
+                               model_api="messages")
+        with self.assertRaisesRegex(AttachmentError,
+                                    "^--endpoint-api messages does not support media prompts"):
+            cli._query_message("@p.png look", args, self.cwd)
+
+    def test_join_user_messages_joins_text_as_one_prompt_does(self):
+        self.assertEqual(join_user_messages((Message("user", "one"), Message("user", "two"))),
+                         Message("user", "one\n\ntwo"))
+        image, rest, text = join_user_messages((self.parse("@p.png look"),
+                                                Message("user", "and this"),
+                                                self.parse("@a.txt @p.png q"))).content[:3]
+        self.assertIsInstance(image, MediaPart)
+        self.assertEqual(rest, TextPart("look\n\nand this\n\n" + self.A))
+        self.assertIsInstance(text, MediaPart)
+        with self.assertRaises(ValueError):
+            join_user_messages(())
+
+    def test_message_summary_labels_images_in_order(self):
+        self.assertEqual(message_summary(Message("user", "hi")), "hi")
+        self.assertEqual(message_summary(self.parse("@p.png @a.txt q")),
+                         f"[image] image/png {len(_PNG)} B\n{self.A}\n\nq")
+
+    def test_cli_attachments_follow_the_current_workspace_setting(self):
+        # As the tools do: /config enable_workspace False lets them read outside --cwd.
+        args = SimpleNamespace(enable_experimental_media=True, enable_workspace=True,
+                               model_api="responses")
+        config = InteractionConfig(InteractionConfigSnapshot())
+        with self.assertRaisesRegex(AttachmentError, "outside"):
+            cli._query_message("@../outside.md hi", args, self.cwd, config)
+        config.set("enable_workspace", False)
+        self.assertEqual(cli._query_message("@../outside.md hi", args, self.cwd, config),
+                         Message("user", "outside\n\nhi"))
+        with self.assertRaisesRegex(AttachmentError, "outside"):
+            cli._query_message("@../outside.md hi", args, self.cwd)  # no config: the launch value
 
 
 class MessageModelTests(unittest.TestCase):

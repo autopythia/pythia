@@ -538,6 +538,19 @@ class ModelTests(unittest.TestCase):
         self.assertIn('cold:text-only', [item.content for item in context.items if isinstance(item, Message)])
         catalog = next(item for item in context.items if isinstance(item, Tools))
         self.assertEqual({tool.name for tool in catalog.specs}, DEFAULT_TOOLS)
+        # Auto's opt-out, as the CLI's: main keeps only its bound tools (none
+        # with an observe-only watcher), and headless stderr says so.
+        path = self.root / 'auto-no-tools'
+        result = subprocess.run(['/usr/bin/python3', '-m', 'pythia.interaction.auto', *self.launch_options(),
+                                 '--headless', '--prompt', 'text-only', '--watcher-observe-only',
+                                 '--enable-default-tools', 'False',
+                                 '--save', str(path), '--cwd', str(self.root)],
+                                cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = load_interaction_save(path / 'contexts/1.jsonl')
+        self.assertFalse(any(item.specs for item in context if isinstance(item, Tools)))
+        self.assertIn('Note: default model tools are disabled.', result.stderr)
+        self.assertNotIn('unsandboxed', result.stderr)
 
     def test_cli_and_auto_execute_host_command_sessions_through_mcp(self):
         for frontend in ('cli', 'auto'):
@@ -566,6 +579,10 @@ class ModelTests(unittest.TestCase):
                     self.assertIn('exec_command runs without a sandbox', result.stderr)
                     self.assertIn('[cli] Warning: Claude Relay host tools run as the Pythia user, '
                                   'outside the Claude sandbox.', result.stderr)
+                else:  # headless auto prints its notices on stderr too
+                    self.assertIn('Warning: local tools are unsandboxed', result.stderr)
+                    self.assertIn('Warning: #1 (main) runs Claude Relay host tools as the Pythia '
+                                  'user, outside the Claude sandbox.', result.stderr)
 
     def test_headless_second_interrupt_retires_a_live_model_before_generation_deadline(self):
         # The first SIGINT stops without cancelling the sample in flight; the

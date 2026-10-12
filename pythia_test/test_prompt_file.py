@@ -133,13 +133,16 @@ class PromptFileTests(unittest.TestCase):
                         mock.patch.object(auto, "_headless") as wait, \
                         mock.patch.object(auto, "_interactive") as interactive, \
                         mock.patch.object(auto, "PosixTerminal") as terminal, \
-                        mock.patch.object(auto, "_print_events"), redirect_stdout(output):
+                        mock.patch.object(auto, "_print_events"), \
+                        mock.patch.object(auto, "_print_notices"), redirect_stdout(output):
                     self.assertEqual(auto.main([
                         "--enable-experimental-worker-board",
                         f"--headless={headless}", "--prompt-file", str(source),
                         "--save", str(self.root / "run"),
                     ]), 0)
-                run.assert_called_once_with(session, text.rstrip(), display=not headless)
+                # Without --enable-experimental-media, nothing was read ahead.
+                run.assert_called_once_with(session, text.rstrip(), display=not headless,
+                                            message=None)
                 wait.assert_not_called()
                 interactive.assert_not_called()
                 terminal.assert_not_called()

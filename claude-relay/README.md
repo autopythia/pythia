@@ -95,8 +95,9 @@ by these short tests.
   OS argv limits; conversation input streams on stdin. If native compatibility
   requires files, implement the staging extension before enabling those options.
 - CLI and auto main/worker use the ordinary host-tool catalog: `exec_command`,
-  `write_stdin`, `update_plan`, `apply_patch`, plus any bound role tools. CLI's
-  default-tools opt-out and auto's watcher-only tool boundary remain unchanged;
+  `write_stdin`, `update_plan`, `apply_patch`, plus any bound role tools. The
+  default-tools opt-out (`--enable-default-tools False`, in the CLI and auto)
+  and auto's watcher-only tool boundary remain unchanged;
   choosing Claude Relay does not restrict other auto roles. Handlers use stdlib,
   but command payloads can run ordinary external programs **under A, outside
   Claude's sandbox**. Claude's own built-in tools remain disabled.

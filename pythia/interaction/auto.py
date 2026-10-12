@@ -47,9 +47,11 @@ from .loop import turn_tail
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem, render_interaction_items  # noqa: F401 (re-exported)
+from .display import message_summary
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
 from .items import Init, Instructions, Message, ToolResult, Tools, UserInteractionBoundary
 from .items import UserToolResult
+from .media import AttachmentError, join_user_messages, parse_user_prompt, require_media_api
 from .model_config import build_model
 from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
 from .model import close_model
@@ -189,6 +191,10 @@ def _instructions(index, settings, base_url, *, supervisor=False):
 class _Event:
     index: Optional[int]
     items: tuple[DisplayItem, ...]
+    # "output" (the transcript: model output, tool calls and results, user
+    # messages), "notice" (host lines such as startup and task outcomes),
+    # "error", or "debug". Headless runs print only notices and errors, on
+    # stderr (_print_notices); the other displays show every kind.
     kind: str = "output"
 
 
@@ -203,6 +209,8 @@ class _Task:
     """One in-process user task for main when the experimental board is off."""
     sequence: int
     record_id: str
+    # The request as the user typed it, leading @ references included: the
+    # watcher's reports quote it.
     content: str
     # For a task queued from a steer main never received: the content of the
     # task that steer was sent to.
@@ -210,6 +218,9 @@ class _Task:
     # A task queued by /continue: main's first turn adds no user message and
     # continues its saved, unfinished turn; content is that turn's request.
     continued: bool = False
+    # Main's user message, as read on submission (see _Session.read_submission);
+    # None: the content itself.
+    message: Optional[Message] = None
 
 
 @dataclass(frozen=True)
@@ -228,7 +239,9 @@ def _last_request(items):
         if (isinstance(item, Message) and item.role == "user"
                 and isinstance(items[index + 1], UserInteractionBoundary)
                 and not item.content_text.startswith(_FOLLOW_UP_HEADER)):
-            return item.content_text
+            # The log keeps attachments' content, not their names: a pasted
+            # file is its text, and an image its label.
+            return message_summary(item)
     return None
 
 
@@ -358,8 +371,10 @@ def _yield_debug(yield_):
 
 
 def _environment_factory(index, args, tools):
-    if index == -1:
-        return Environment(tools)  # Only bound watcher tools; no workspace tools.
+    if index == -1 or not getattr(args, "enable_default_tools", True):
+        # Only the bound role tools: always for the watcher, and for main and
+        # the worker with --enable-default-tools False.
+        return Environment(tools)
     return DefaultEnvironment(cwd=args.cwd, enable_workspace=args.enable_workspace,
                               extra_tools=tools)
 
@@ -402,8 +417,8 @@ class _AutoHost(TurnHost):
         answer = super().interrupt()
         if answer is Interrupt.STOP or self._index != 1:
             return answer
-        texts = self._session._take_steers()
-        return Steer(tuple(Message("user", text) for text in texts)) if texts else answer
+        messages = self._session._take_steers()
+        return Steer(messages) if messages else answer
 
     def should_steer(self):
         return self._index == 1 and self._session._preemption[1].due()
@@ -426,7 +441,8 @@ class _Session:
                  resume=False, enable_board_auth=True,
                  debug_save_model_binding=False, debug_trace=False,
                  enable_experimental_worker_board=False,
-                 watcher_observe_only=False):
+                 watcher_observe_only=False, enable_default_tools=True,
+                 enable_experimental_media=False):
         if type(enable_board_auth) is not bool:
             raise TypeError("enable_board_auth must be a bool.")
         if type(debug_save_model_binding) is not bool:
@@ -437,9 +453,21 @@ class _Session:
             raise TypeError("enable_experimental_worker_board must be a bool.")
         if type(watcher_observe_only) is not bool:
             raise TypeError("watcher_observe_only must be a bool.")
+        if type(enable_default_tools) is not bool:
+            raise TypeError("enable_default_tools must be a bool.")
+        if type(enable_experimental_media) is not bool:
+            raise TypeError("enable_experimental_media must be a bool.")
         if watcher_observe_only and enable_experimental_worker_board:
             raise ValueError("watcher_observe_only applies only without the experimental worker/board.")
+        if enable_experimental_media and enable_experimental_worker_board:
+            # Board threads are text, and other local clients post tasks over
+            # HTTP: the host never reads files that their text names.
+            raise ValueError("enable_experimental_media applies only without the experimental "
+                             "worker/board.")
         self.worker_board = enable_experimental_worker_board
+        # Launch-only, like the CLI's options: never saved in config.json.
+        self._enable_default_tools = enable_default_tools
+        self._enable_experimental_media = enable_experimental_media
         # Resumes per task are not capped. An observe-only watcher only observes
         # main's handoffs and needs no model.
         self._supervising = not self.worker_board and not watcher_observe_only
@@ -493,7 +521,8 @@ class _Session:
         self._tasks = []
         self._accepting = False
         # Main's open task without the board: from leaving quiescence with it
-        # until _settle. Submissions meanwhile steer it ([text, delivered]).
+        # until _settle. Submissions meanwhile steer it ([text, delivered,
+        # message]: the text as typed, and main's user message for it).
         self._open_task = None
         self._steers = []
         # Whether /continue applies to main's log; main's owner records it
@@ -630,7 +659,7 @@ class _Session:
                     {str(i): binding for i, binding in self.bindings.items()},
                 )
                 if warning is not None:
-                    self._emit(None, (DisplayItem(warning),))
+                    self._emit(None, (DisplayItem(warning),), "notice")
             if self.service is not None:
                 with self.service.board.changed:
                     self.service.board.accepting = True
@@ -638,19 +667,19 @@ class _Session:
                 with self._changed:
                     self._accepting = True
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
-                              DisplayItem("Warning: local tools are unsandboxed; use a trusted model and workspace.")))
+                              *(DisplayItem(line) for line in self._tool_notices())), "notice")
             if self._resumed:
                 self._emit(None, (DisplayItem(
                     "Note: resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
-                ),))
+                ),), "notice")
                 if self.save_warnings:
-                    self._emit(None, tuple(DisplayItem(w) for w in self.save_warnings))
+                    self._emit(None, tuple(DisplayItem(w) for w in self.save_warnings), "notice")
             summaries = "\n".join(
                 _role_summary(i, self.settings[i], self.bindings[i], self.sources.get(i),
                               i != -1 or self._supervising)
                 for i in self.roles
             )
-            self._emit(None, (DisplayItem(summaries),))
+            self._emit(None, (DisplayItem(summaries),), "notice")
             # Like the CLI, show each role's tools; a watcher without a model has none.
             with self._changed:
                 snapshots, tail = dict(self._tool_snapshots), self._main_tail
@@ -661,11 +690,37 @@ class _Session:
             if self._resumed and tail is not None and tail.refusal is None:
                 self._emit(None, (DisplayItem(
                     f"Note: main's log ends inside a turn ({tail.description}); /continue "
-                    "resumes it without a new message."),))
+                    "resumes it without a new message."),), "notice")
             return self
         except BaseException:
             self.close()
             raise
+
+    def _tool_notices(self):
+        """The startup lines about the roles' default tools, like the CLI's.
+
+        Main has them, and the worker with the experimental worker/board; the
+        watcher never does.
+        """
+        if not self._enable_default_tools:
+            return ("Note: default model tools are disabled.",)
+        tooled = [i for i in self.roles if i != -1]
+        lines = ["Warning: local tools are unsandboxed; use a trusted model and workspace."]
+        unrestricted = [i for i in tooled if self.settings[i]["enable_workspace"] is False]
+        if unrestricted:
+            lines.append(f"Warning: workspace path restrictions are disabled for "
+                         f"{self._role_list(unrestricted)}; exec_command workdir and "
+                         f"apply_patch paths may resolve outside "
+                         f"{'its' if len(unrestricted) == 1 else 'their'} cwd.")
+        relay = [i for i in tooled if self.bindings[i].api == "claude-relay"]
+        if relay:
+            lines.append(f"Warning: {self._role_list(relay)} "
+                         f"{'runs' if len(relay) == 1 else 'run'} Claude Relay host tools as "
+                         "the Pythia user, outside the Claude sandbox.")
+        return tuple(lines)
+
+    def _role_list(self, indices):
+        return " and ".join(f"#{i} ({self.names[i]})" for i in indices)
 
     def _trace_warning(self, index):
         trace = self._traces.get(index)
@@ -702,7 +757,8 @@ class _Session:
             self._events.clear()
             if self._dropped:
                 events.insert(0, _Event(None, (DisplayItem(
-                    f"{self._dropped} display events omitted; consult the saved context/board logs."),)))
+                    f"{self._dropped} display events omitted; consult the saved context/board logs."),),
+                    "notice"))
                 self._dropped = 0
             if self.service is not None:
                 if self.service.board.failed and not self._board_failure_shown:
@@ -712,7 +768,7 @@ class _Session:
                 if stale and not self._view_stale_shown:
                     events.append(_Event(None, (DisplayItem(
                         "Board derived views are stale; index.jsonl remains authoritative."
-                    ),)))
+                    ),), "notice"))
                 self._view_stale_shown = stale
             return events
 
@@ -784,6 +840,7 @@ class _Session:
             vars(args).update(self._relay_options)
             if index in self._traces:
                 args._debug_trace = self._traces[index]  # invocation only, never saved settings
+            args.enable_default_tools = self._enable_default_tools  # launch-only, likewise
             config = InteractionConfig.from_namespace(args).snapshot()
             service = self.service
             binding = None if service is None else _Binding(index, service.client(str(index)))
@@ -990,10 +1047,10 @@ class _Session:
 
         if source.continued:
             self._emit(1, (DisplayItem(f"Task {source.record_id} continues main's unfinished "
-                                       "turn, without a new message."),))
+                                       "turn, without a new message."),), "notice")
         # The chronologically first user message: the raw log keeps it across
         # compaction and restarts; before main's first task, it is this one.
-        first = next((item.content_text for item in context
+        first = next((message_summary(item) for item in context
                       if isinstance(item, Message) and item.role == "user"), source.content)
         run_supervised_task(
             source.content, context, model, environment, config, _AutoHost(self, 1),
@@ -1004,7 +1061,8 @@ class _Session:
             settle=lambda yield_: self._settle(source, yield_, context),
             waiting_phase="awaiting watcher",
             first_user_text=first, steer_target_text=source.steer_target,
-            continued=source.continued)
+            continued=source.continued, message=source.message,
+            attachments=self._enable_experimental_media)
 
     def _settle(self, source, yield_, context):
         """Record a task's outcome from main's last yield; recovery counts as success."""
@@ -1016,7 +1074,7 @@ class _Session:
             self._emit(1, (DisplayItem("Task incomplete: main handed off with yield and "
                                        "was released without a final answer. Enter a message "
                                        "to reply to main's handoff note (quoted in the "
-                                       "watcher's report)."),))
+                                       "watcher's report)."),), "notice")
         elif not success:
             if yield_ is not None and yield_.kind == "stopped":
                 message = "Stopped before further effects; prior effects may have occurred."
@@ -1033,15 +1091,18 @@ class _Session:
             # Steers main never received: on a release they become one new task
             # (they were additions to one request), in the same locked step, so
             # none is pending once main is quiescent.
-            undelivered = [text for text, delivered in self._steers if not delivered]
+            undelivered = [entry for entry in self._steers if not entry[1]]
             self._open_task, self._steers = None, []
             self._preemption[1].take()
             requeued = None
             if undelivered and self._accepting and not self._stop.is_set():
                 sequence = len(self._tasks) + 1
                 requeued = str(sequence)
-                self._tasks.append(_Task(sequence, requeued, "\n\n".join(undelivered),
-                                         source.content))
+                # The texts as typed, for reports; main gets their messages,
+                # joined as one prompt's parts are.
+                self._tasks.append(_Task(
+                    sequence, requeued, "\n\n".join(entry[0] for entry in undelivered),
+                    source.content, message=join_user_messages(entry[2] for entry in undelivered)))
             self._changed.notify_all()
         if undelivered:
             many = len(undelivered) > 1
@@ -1050,7 +1111,7 @@ class _Session:
                 f"Queued {count} that task {source.record_id} never received "
                 f"{'together ' if many else ''}as new task {requeued}."
                 if requeued is not None else
-                f"Dropped {count} that task {source.record_id} never received."),))
+                f"Dropped {count} that task {source.record_id} never received."),), "notice")
 
     def _job(self, index, source, model, environment, config, context, binding):
         """Board-mode job for main or worker (one turn; outcome posted to the board)."""
@@ -1102,22 +1163,41 @@ class _Session:
             raise _Stopping()
 
     def _take_steers(self):
-        """Main's undelivered steers, now marked delivered (main's owner thread).
+        """Main's undelivered steers' user messages, now marked delivered
+        (main's owner thread).
 
         Their urgency resets in the same step: flushed steers are delivered now.
         """
         with self._changed:
-            texts = [entry[0] for entry in self._steers if not entry[1]]
+            messages = tuple(entry[2] for entry in self._steers if not entry[1])
             for entry in self._steers:
                 entry[1] = True
             self._preemption[1].take()
-            return texts
+            return messages
 
     def _steer_snapshot(self):
+        """The open task's steers as typed, for reports: (text, delivered) pairs."""
         with self._changed:
-            return tuple((text, delivered) for text, delivered in self._steers)
+            return tuple((text, delivered) for text, delivered, _ in self._steers)
 
-    def submit(self, text, *, request_id=None, new_task=False, flush=None):
+    def read_submission(self, text):
+        """Main's user message for submitted text.
+
+        With --enable-experimental-media, its leading @ references are read
+        now, as the CLI reads them, with main's cwd, workspace setting, and
+        API; this raises AttachmentError for a bad one. Otherwise, and for
+        text without references, it is the text as typed.
+        """
+        if not self._enable_experimental_media:
+            return Message("user", text)
+        settings, api = self.settings[1], self.bindings[1].api
+        message = parse_user_prompt(
+            text, cwd=Path(settings["cwd"]).expanduser().resolve(), enabled=True,
+            enable_workspace=settings["enable_workspace"])
+        require_media_api(message, api, subject=f"#1 ({self.names[1]}) uses {api}, which")
+        return message
+
+    def submit(self, text, *, request_id=None, new_task=False, flush=None, message=None):
         """Submit one user task for main; returns its handle for task_result().
 
         With the board this posts a fresh user thread (request_id makes an
@@ -1129,6 +1209,11 @@ class _Session:
         task's queued steers (see flush_steers); without an open task it
         queues a new task, as plain text does, and the handle says so
         (``unsteered``).
+
+        ``message`` is main's user message for the text, if read already;
+        otherwise its attachments are read here (read_submission), before
+        anything is queued or flushed, so a bad reference raises
+        AttachmentError and changes nothing. Reports quote the text as typed.
         """
         if self._stop.is_set():
             raise BoardError("Auto is not accepting new work.", 503)
@@ -1144,22 +1229,24 @@ class _Session:
         except UnicodeError:
             # Unencodable text would only fail later, as a fatal checkpoint.
             raise BoardError("Content must be valid UTF-8.") from None
+        if message is None:
+            message = self.read_submission(text)  # host file reads: not under the lock
         with self._changed:
             if self._stop.is_set() or not self._accepting:
                 raise BoardError("Auto is not accepting new work.", 503)
             pending = (sum(task.record_id not in self._done for task in self._tasks)
-                       + sum(not delivered for _, delivered in self._steers))
+                       + sum(not entry[1] for entry in self._steers))
             if pending >= _MAX_PENDING_TASKS:
                 raise BoardError("Pending work limit reached; request was not accepted.", 429)
             if not new_task and self._open_task is not None:
                 # Steer main's open task: delivered right before its next sample.
-                self._steers.append([text, False])
+                self._steers.append([text, False, message])
                 posted = {"record_id": self._open_task.record_id, "steer": True}
                 if flush is not None:
                     posted["flush"] = self._flush_locked(flush)
                 return posted
             sequence = len(self._tasks) + 1
-            self._tasks.append(_Task(sequence, str(sequence), text))
+            self._tasks.append(_Task(sequence, str(sequence), text, message=message))
             self._changed.notify_all()
         return {"record_id": str(sequence), **({"unsteered": True} if flush is not None else {})}
 
@@ -1187,7 +1274,7 @@ class _Session:
         delivered.
         """
         level = Urgency(level)
-        count = sum(not delivered for _, delivered in self._steers)
+        count = sum(not entry[1] for entry in self._steers)
         task = self._open_task
         if task is None or not count:
             return {"count": 0}
@@ -1364,7 +1451,8 @@ class _Session:
                                   for r in self.service.board.records())
                     if pending:
                         self._emit(None, (DisplayItem(
-                            f"Stopped with {pending} queued/unresolved tasks in the saved board; they were not executed or replayed."),))
+                            f"Stopped with {pending} queued/unresolved tasks in the saved board; they were not executed or replayed."),),
+                            "notice")
                     self.service.close()
                 else:
                     # Owners have exited, so every task without an outcome never started.
@@ -1373,7 +1461,8 @@ class _Session:
                     if queued:
                         self._emit(None, (DisplayItem(
                             f"Stopped with {queued} queued user tasks that were not executed; "
-                            "without the board, queued tasks are not saved or replayed."),))
+                            "without the board, queued tasks are not saved or replayed."),),
+                            "notice")
             finally:
                 for index, trace in self._traces.items():
                     trace.close()
@@ -1406,10 +1495,28 @@ def _print_events(session):
         print(DisplayItem(safe_text(item.text), is_diff=item.is_diff), flush=True)
 
 
-def _one_prompt(session, prompt, *, display=True):
-    output = _print_events if display else lambda value: value.drain_events()
+# The event kinds that headless runs print, on stderr.
+_NOTICE_KINDS = frozenset({"notice", "error"})
+
+
+def _print_notices(session):
+    """Headless runs: print host notices and errors on stderr, one line each
+    with its context, as the CLI's headless mode does; drop the rest (the
+    transcript is in the save)."""
+    for event in session.drain_events():
+        if event.kind not in _NOTICE_KINDS:
+            continue
+        prefix = "" if event.index is None else f"[#{event.index} ({session.names[event.index]})] "
+        for item in event.items:
+            print(safe_text(prefix + item.text), file=sys.stderr, flush=True)
+
+
+def _one_prompt(session, prompt, *, display=True, message=None):
+    """Submit one task and wait for its outcome; ``message`` is its user
+    message, if read already (see _Session.read_submission)."""
+    output = _print_events if display else _print_notices
     output(session)
-    submitted = session.submit(prompt)
+    submitted = session.submit(prompt, message=message)
     while True:
         output(session)
         result = session.task_result(submitted)
@@ -1422,11 +1529,11 @@ def _one_prompt(session, prompt, *, display=True):
 def _headless(session):
     board = session.service.board
     while not session._stop.is_set() and not board.failed:
-        session.drain_events()
+        _print_notices(session)
         with board.changed:
             if not session._stop.is_set() and not board.failed:
                 board.changed.wait()
-    session.drain_events()
+    _print_notices(session)
     return 1 if session.has_errors else 0
 
 
@@ -1557,6 +1664,21 @@ def _flush_notice(session, flushed):
     return f"Flushing {steers}: delivered once the current sample or tool call finishes."
 
 
+def _shell_help(session):
+    """The interactive shell's first line: its commands, as the CLI shows its own."""
+    if session.worker_board:
+        return ("pythia.interaction.auto — plain text or /task <text> posts a new user board "
+                "thread for main; /contexts, /context N, /exit or /quit. /exit waits for the "
+                "current tool batch; with ! it waits only for the current operation, and with "
+                "!! it also cancels it where possible. Ctrl-C/Ctrl-D is /exit!, and a second "
+                "press /exit!!.")
+    return ("pythia.interaction.auto — plain text steers main's open task, or else queues a "
+            "new one; /task <text>, /steer [text], /continue, /contexts, /context N, /exit or "
+            "/quit. /steer and /exit wait for the current tool batch; with ! they wait only "
+            "for the current operation, and with !! they also cancel it where possible. "
+            "Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!.")
+
+
 async def _interactive(session, terminal):
     editor, selected = Editor(), 1
     frame = 0
@@ -1564,7 +1686,7 @@ async def _interactive(session, terminal):
     submitted_text = None
     retry = None
     closing = None
-    notices = []
+    notices = [DisplayItem(_shell_help(session))]
     board_failure_shown = False
     try:
         with terminal:
@@ -1681,9 +1803,11 @@ async def _interactive(session, terminal):
                         if session.worker_board:
                             notice = "Board submission failed or is uncertain. Retry the unchanged draft to reuse its request ID."
                         else:
-                            # An in-process rejection is certain; its reason is host text.
-                            reason = str(exc) if isinstance(exc, BoardError) else "Submission failed."
-                            notice = f"Task was not queued: {reason} Draft preserved."
+                            # An in-process rejection is certain; its reason is host
+                            # text (an attachment's names the reference, never content).
+                            reason = (str(exc) if isinstance(exc, (BoardError, AttachmentError))
+                                      else "Submission failed.")
+                            notice = f"Task was not queued: {reason.rstrip('.')}. Draft preserved."
                         notices.append(DisplayItem(notice))
                     pending = None
                 notices.extend(_display_events(session, session.drain_events()))
@@ -1743,6 +1867,11 @@ def main(argv=None):
         if args.watcher_observe_only and args.enable_experimental_worker_board:
             raise ValueError("--watcher-observe-only does not apply with "
                              "--enable-experimental-worker-board.")
+        if args.enable_experimental_media and args.enable_experimental_worker_board:
+            # Board threads are text, and other local clients post tasks over
+            # HTTP: the host never reads files that their text names.
+            raise ValueError("--enable-experimental-media does not apply with "
+                             "--enable-experimental-worker-board.")
         board = args.enable_experimental_worker_board
         if args.worker_model is not None and not board:
             raise ValueError("--worker-model requires --enable-experimental-worker-board.")
@@ -1793,12 +1922,15 @@ def main(argv=None):
                            debug_save_model_binding=args.debug_save_model_binding,
                            debug_trace=args.debug_trace,
                            enable_experimental_worker_board=args.enable_experimental_worker_board,
-                           watcher_observe_only=args.watcher_observe_only)
+                           watcher_observe_only=args.watcher_observe_only,
+                           enable_default_tools=args.enable_default_tools,
+                           enable_experimental_media=args.enable_experimental_media)
+        # The prompt's attachments, before start() creates the save: a bad @
+        # reference fails here and leaves no save directory behind, which a
+        # corrected command would then refuse without --resume.
+        prepared = (session.read_submission(args.prompt)
+                    if args.prompt is not None and args.enable_experimental_media else None)
         session.start()
-        if args.headless:
-            # Headless runs drop session events; repairs must still be reported.
-            for warning in session.save_warnings:
-                print(warning, file=sys.stderr, flush=True)
         session._trace_to_events = not args.headless and args.prompt is None
         if args.enable_experimental_worker_board:
             if not args.enable_board_auth:
@@ -1808,7 +1940,8 @@ def main(argv=None):
         if args.prompt is not None or args.headless:
             interrupts = _InterruptStages(session).install()
         if args.prompt is not None:
-            exit_code = _one_prompt(session, args.prompt, display=not args.headless)
+            exit_code = _one_prompt(session, args.prompt, display=not args.headless,
+                                    message=prepared)
         elif args.headless:
             exit_code = _headless(session)
         else:
@@ -1825,11 +1958,11 @@ def main(argv=None):
         try:
             if session is not None:
                 session.close()
-                if not args.headless:
-                    try:
-                        _print_events(session)
-                    except (OSError, ValueError):
-                        exit_code = 1 if exit_code == 0 else exit_code
+                try:
+                    # Headless runs print only notices and errors, on stderr.
+                    (_print_notices if args.headless else _print_events)(session)
+                except (OSError, ValueError):
+                    exit_code = 1 if exit_code == 0 else exit_code
         finally:
             if interrupts is not None:
                 interrupts.restore()

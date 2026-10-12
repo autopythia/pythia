@@ -227,10 +227,10 @@ smokes pass, test supervising watcher use by omitting `--watcher-max-resumes 0` 
 using another fresh save. Each role gets its own continuation and relay connection.
 
 This backend uses the ordinary default tools: `exec_command`, `write_stdin`,
-`update_plan`, `apply_patch` (plus bound auto-role tools). CLI's
-`--enable-default-tools False` still disables them; auto's watcher still receives
-only its watcher tools. Selecting Claude Relay does not narrow another role's
-catalog. **Commands execute as A, outside B's Claude sandbox**, with the same
+`update_plan`, `apply_patch` (plus bound auto-role tools).
+`--enable-default-tools False` still disables them, in the CLI and auto; auto's
+watcher still receives only its watcher tools. Selecting Claude Relay does not
+narrow another role's catalog. **Commands execute as A, outside B's Claude sandbox**, with the same
 host authority as for other backends. `enable_workspace` restricts command cwd
 and patch paths, not the filesystem authority of a shell command.
 
