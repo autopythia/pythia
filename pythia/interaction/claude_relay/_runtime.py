@@ -13,7 +13,7 @@ import threading
 
 from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelTimeoutError
 from ..model import ModelAuthenticationError, ModelContextWindowError
-from ._cli_protocol import Assembler, MAX_RECORD, NativeRefusal, PROFILE, decode
+from ._cli_protocol import Assembler, MAX_RECORD, NativeRefusal, NativeStreamInterrupted, PROFILE, decode
 from ._mcp import Mailbox, MCPServer
 from ._sampling import ResolvedSampling
 from ._diagnostics import Diagnostics
@@ -252,6 +252,8 @@ class Runtime:
                 self.diagnostics.error_code = NATIVE_MCP_TIMEOUT
             elif isinstance(error, NativeRefusal):
                 self.diagnostics.error_code = NativeRefusal.error_code
+            elif isinstance(error, NativeStreamInterrupted):
+                self.diagnostics.error_code = NativeStreamInterrupted.error_code
             diagnostic = self.diagnostics.snapshot(freeze=True)
             self.error = error
             scope = self.trace.scope()
@@ -332,6 +334,14 @@ class Runtime:
 
     async def _stdout(self):
         assembler = Assembler()
+        interruptions = 0
+
+        def after_interruption(message):
+            """The run's end, named by the interrupted message the CLI did not replace."""
+            count = assembler.consecutive_interruptions
+            return NativeStreamInterrupted(
+                f'{message} after {count} interrupted native message{"" if count == 1 else "s"} '
+                '(its stream ended without a stop reason or final usage)')
         try:
             async for line in self._records():
                 try:
@@ -390,6 +400,15 @@ class Runtime:
                             and value['event'].get('type') == 'message_start'):
                         self.diagnostics.set_phase('message_stream')
                     message = assembler.feed(value)
+                    if assembler.interruptions != interruptions:
+                        interruptions = assembler.interruptions
+                        # Discarded; the CLI may still complete the response.
+                        self.diagnostics.set_phase('awaiting_model_message')
+                        info = assembler.last_interruption
+                        self.trace.emit('native_message_interrupted', native_message_id=info['native_message_id'],
+                                        block_types=list(info['block_types']), open_blocks=info['open_blocks'],
+                                        unsigned_thinking_blocks=info['unsigned_thinking_blocks'],
+                                        consecutive=info['consecutive'])
                     if message is not None:
                         self.diagnostics.completed()
                         if not self.mailbox.all_returned() or self.final_message is not None:
@@ -407,8 +426,13 @@ class Runtime:
                     self.mailbox.validate_native_results(content)
                 elif kind == 'result':
                     if value.get('is_error') is not False or value.get('subtype') != 'success':
+                        if assembler.consecutive_interruptions and assembler.current is None:
+                            raise after_interruption('Native run failed')
                         raise ModelResponseError('Native run failed; inspect explicit private diagnostics for details')
                     if not self.initialized or assembler.current is not None or self.final_message is None or not self.mailbox.all_returned():
+                        if (assembler.consecutive_interruptions and assembler.current is None
+                                and self.final_message is None):
+                            raise after_interruption('Native run ended without a complete message')
                         raise ModelResponseError('Native run ended with incomplete message/handoff state')
                     self.result_seen = True
                     self.diagnostics.set_phase('awaiting_exit')
@@ -426,6 +450,8 @@ class Runtime:
                 else:
                     raise ModelResponseError('Unsupported native record type')
             if not self.result_seen:
+                if assembler.consecutive_interruptions and assembler.current is None:
+                    raise after_interruption('Native CLI exited without a run result')
                 raise ModelTransportError('Native CLI exited without a successful run result')
             rc = await asyncio.wait_for(self.proc.wait(), self.endpoint.stop_timeout_seconds)
             self.trace.exit(rc)

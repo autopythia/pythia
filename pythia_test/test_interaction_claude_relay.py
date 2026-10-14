@@ -413,6 +413,53 @@ class ModelTests(unittest.TestCase):
                 self.assertTrue(failure.message.startswith(expected + ' (phase='), failure.message)
                 self.assertIsNone(self.model._runtime)
 
+    def test_a_cut_native_message_is_discarded_and_the_clis_retry_adopted(self):
+        # The fixture cuts a message the observed way (no message_delta), then
+        # streams a new one, or gives a complete record as a non-streaming retry.
+        for prompt in ('stream-cut-retry', 'stream-cut-fallback'):
+            with self.subTest(prompt=prompt):
+                sample = self.model.sample(InteractionContext((Message('user', prompt),)))
+                self.assertEqual(sample.last_assistant_text, 'cold:' + prompt)
+                self.assertNotIn('cut thinking', repr(sample.items))  # nothing from the cut message
+                self.assertEqual(sample.usage.total_tokens, 9)
+                self.assertIsNone(self.model._runtime)
+
+    def test_a_cut_after_a_tool_handoff_keeps_the_warm_continuation(self):
+        context = InteractionContext((Instructions(''), Message('user', 'stream-cut-after-tools')))
+        sample = self.model.sample(context, tools=TOOLS)
+        pid = self.fixture_state(self.model._runtime)['pid']
+        context.extend(sample.context_items())
+        context.extend([ToolResult(sample.tool_calls[0].call_id, 'one'), ToolResult(sample.tool_calls[1].call_id, 'two')])
+        self.assertEqual(self.model.sample(context, tools=TOOLS).last_assistant_text, 'one|two')
+        self.assertEqual(self.fixture_state()['pid'], pid)  # the same native process completed it
+
+    def test_a_cut_the_cli_does_not_replace_fails_clearly(self):
+        cases = {'stream-cut-error': 'Native run failed after 1 interrupted native message',
+                 'stream-cut-ended': 'Native run ended without a complete message after 1 interrupted native message',
+                 'stream-cut-tools': 'Native message with tool calls ended without its final delta',
+                 'stream-cut-repeated': 'Native stream ended 4 messages in a row without a final delta'}
+        for prompt, expected in cases.items():
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(ModelError) as caught:
+                    self.model.sample(InteractionContext((Message('user', prompt),)),
+                                      tools=TOOLS if prompt == 'stream-cut-tools' else ())
+                failure = caught.exception.failure
+                self.assertEqual((failure.category, failure.error_code),
+                                 ('NativeStreamInterrupted', 'native_stream_interrupted'))
+                self.assertTrue(failure.message.startswith(expected), failure.message)
+                self.assertIsNone(self.model._runtime)
+
+    def test_pi_summary_survives_a_cut_native_message(self):
+        # The reported failure: a Pi summary request whose native stream was cut.
+        context = InteractionContext((Message('user', 'stream-cut-summary ' * 50), Message('assistant', 'old answer'),
+                                      ModelSampleBoundary(), Message('user', 'recent request')))
+        compacted = PiCompactor(self.model, keep_recent_tokens=0).compact(context)
+        prefix = compacted.items[0]
+        self.assertIsInstance(prefix, ContextPrefix)
+        self.assertTrue(any('fixture summary' in item.content_text
+                            for item in prefix.prefix_items if isinstance(item, Message)))
+        self.assertIsNone(self.model._runtime)
+
     def test_two_long_waits_in_one_batch_are_answered_before_the_native_deadline(self):
         # Scaled down: the native client gives up 3 s after sending a call, so
         # results are due 2 s after the first was sent. Each call asks to wait

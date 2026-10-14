@@ -3,6 +3,8 @@
 Only message_stop completes a stream. Null-stop assistant records are shadow
 block snapshots, not new messages or authoritative usage. They must match their
 stream, but must never split a tool batch or overwrite final token accounting.
+A message_stop without the message's final message_delta marks an interrupted
+message, which is discarded (MAX_CONSECUTIVE_INTERRUPTIONS).
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -11,7 +13,7 @@ import json
 import re
 
 from ..items import Message, Reasoning, ToolCall
-from ..model import ModelRefusal, ModelResponseError
+from ..model import ModelRefusal, ModelResponseError, ModelTransportError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
@@ -27,6 +29,14 @@ PROFILE = 'claude-stream-json-v6'  # stream authority, keepalives, nonterminal A
 # version (doc/claude-relay-tool-deadline-plan.md).
 DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS = 75
 MAX_RECORD = 8 * 1024 * 1024
+# A message the CLI closes without its final message_delta (no stop reason, no
+# final usage) is interrupted: seen on 2.1.289, untraced, after a long thinking
+# block was cut short. Its block had no signature and no per-block assistant
+# record, and content_block_stop and message_stop followed at once, so the CLI
+# closed it itself. Nothing from it is adopted. The relay keeps reading, so the
+# CLI can still complete the response, as it owns its API retries; more than
+# this many interruptions in a row fail the run.
+MAX_CONSECUTIVE_INTERRUPTIONS = 3
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))
 USAGE_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
@@ -46,6 +56,18 @@ class NativeRefusal(ModelRefusal):
     """A refusal in the native stream (see ModelRefusal); its reason is the
     stream's stop_details. The class name is the relay's saved failure category.
     """
+
+
+class NativeStreamInterrupted(ModelTransportError):
+    """The CLI ended a message's stream before its final message_delta, and did
+    not then complete the response (see MAX_CONSECUTIVE_INTERRUPTIONS).
+
+    Nothing from the interrupted message was adopted, and none of its tool
+    calls ran. Sampling the same context again is safe. The class name is the
+    saved failure category.
+    """
+
+    error_code = 'native_stream_interrupted'
 
 
 @dataclass(frozen=True)
@@ -153,6 +175,40 @@ class Assembler:
         self.hints = []
         self.hint_size = 0
         self.size = 0
+        self.delta_seen = False  # the current message's final message_delta arrived
+        self.interrupted_ids = set()  # never adopt a later record for these
+        self.interruptions = 0  # in this process, for tracing
+        self.consecutive_interruptions = 0  # since the last completed message
+        self.last_interruption = None
+
+    def _interrupted(self):
+        """Discard the current message: its stream ended without a final delta."""
+        blocks = [self.blocks[index] for index in sorted(self.blocks)]
+        kinds = tuple(block.get('type') for block in blocks)
+        if 'tool_use' in kinds:
+            # Its calls may already have reached the MCP endpoint, so this
+            # process cannot safely go on. None is registered, so none runs.
+            raise NativeStreamInterrupted('Native message with tool calls ended without its final delta; '
+                                          'no tool calls may execute')
+        self.interruptions += 1
+        self.consecutive_interruptions += 1
+        self.interrupted_ids.add(self.current)
+        self.last_interruption = {
+            'native_message_id': self.current, 'block_types': kinds,
+            'open_blocks': len(set(self.blocks) - self.closed),
+            'unsigned_thinking_blocks': sum(1 for block in blocks
+                                            if block.get('type') == 'thinking' and not block.get('signature')),
+            'consecutive': self.consecutive_interruptions,
+        }
+        if self.consecutive_interruptions > MAX_CONSECUTIVE_INTERRUPTIONS:
+            raise NativeStreamInterrupted(
+                f'Native stream ended {self.consecutive_interruptions} messages in a row without a final delta')
+        self.current = None
+        self.blocks, self.closed, self.hints = {}, set(), []
+        self.usage, self.stop_reason, self.stop_details = {}, None, None
+        self.size = self.hint_size = 0
+        self.delta_seen = False
+        return None
 
     def emit(self, ident, blocks, usage, stop, *, stop_details=None, streamed=False):
         if not isinstance(ident, str) or not 0 < len(ident) <= 256 or any(ord(c) < 32 for c in ident):
@@ -178,6 +234,7 @@ class Assembler:
         self.seen[ident] = (parts, reason, {k: usage[k] for k in USAGE_FIELDS if k in usage}, streamed)
         if len(self.seen) > 4096:
             raise ModelResponseError('Native message limit exceeded')
+        self.consecutive_interruptions = 0
         return NativeMessage(ident, tuple(blocks), parsed_usage, reason, stop_details)
 
     def feed(self, value):
@@ -185,6 +242,12 @@ class Assembler:
             msg = value.get('message', {})
             if not isinstance(msg, dict):
                 raise ModelResponseError('Invalid assistant envelope')
+            if msg.get('id') in self.interrupted_ids:
+                # A late block snapshot of an interrupted message is ignored, as
+                # its message was; a completion for it contradicts the stream.
+                if msg.get('stop_reason') is not None:
+                    raise ModelResponseError('Native completion for an interrupted message')
+                return None
             if self.current is not None and self.current == msg.get('id'):
                 parts = block_fingerprints(msg.get('content'))
                 reason = normalized_stop_reason(msg.get('stop_reason'), allow_missing=True)
@@ -218,10 +281,12 @@ class Assembler:
                 raise ModelResponseError('Invalid streamed message')
             self.current = msg.get('id')
             if (not isinstance(self.current, str) or not 0 < len(self.current) <= 256
-                    or any(ord(c) < 32 for c in self.current) or self.current in self.seen):
+                    or any(ord(c) < 32 for c in self.current) or self.current in self.seen
+                    or self.current in self.interrupted_ids):
                 raise ModelResponseError('Invalid streamed message ID')
             self.blocks, self.closed, self.hints = {}, set(), []
             self.size = self.hint_size = 0
+            self.delta_seen = False
             token_usage(msg.get('usage', {}))
             # message_start's output count is provisional too. Require a final
             # delta (or an explicit full completion) rather than using it as a
@@ -283,6 +348,7 @@ class Assembler:
         elif kind == 'message_delta':
             if self.current is None:
                 raise ModelResponseError('Message delta without start')
+            self.delta_seen = True
             token_usage(event.get('usage', {}))
             self.usage.update({k: v for k, v in event.get('usage', {}).items() if k in USAGE_FIELDS})
             delta = event.get('delta', {})
@@ -303,6 +369,10 @@ class Assembler:
                 # Refused before any content, or mid-block: report the refusal,
                 # not the incomplete stream it explains.
                 raise NativeRefusal(self.stop_details)
+            if not self.delta_seen and all(hint_reason is None for _, hint_reason, _ in self.hints):
+                # No final delta, and no complete assistant record in its
+                # place: the stream was cut, whatever the blocks look like.
+                return self._interrupted()
             if set(self.blocks) != self.closed or set(self.blocks) != set(range(len(self.blocks))):
                 raise ModelResponseError('Incomplete native message at stop')
             blocks = [self.blocks[i] for i in range(len(self.blocks))]

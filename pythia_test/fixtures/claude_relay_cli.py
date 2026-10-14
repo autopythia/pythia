@@ -68,6 +68,33 @@ def stream_message(ident, blocks, usage, reason, details=None):
     ping()
 
 
+def cut_message(ident, *, tool=False):
+    """Observed 2.1.289 shape (untraced), synthetic contents: a long thinking
+    block cut short, with no signature or per-block assistant record, then the
+    CLI's own content_block_stop and message_stop. No message_delta follows.
+    With ``tool``, a complete tool block precedes the cut instead."""
+    def event(kind, **fields):
+        emit({'type': 'stream_event', 'event': {'type': kind, **fields}})
+    emit({'type': 'system', 'subtype': 'status', 'status': 'requesting'})
+    event('message_start', message={'id': ident, 'usage': {'input_tokens': 5, 'output_tokens': 1}})
+    event('content_block_start', index=0, content_block={'type': 'thinking', 'thinking': '', 'signature': ''})
+    for _ in range(3):
+        emit({'type': 'system', 'subtype': 'thinking_tokens', 'estimated_tokens': 50, 'estimated_tokens_delta': 50})
+        event('content_block_delta', index=0, delta={'type': 'thinking_delta', 'thinking': 'cut thinking '})
+    if tool:
+        event('content_block_delta', index=0, delta={'type': 'signature_delta', 'signature': 'synthetic'})
+        event('content_block_stop', index=0)
+        block = {'type': 'tool_use', 'id': 'toolu_cut', 'name': names[0], 'input': {'value': 1}}
+        event('content_block_start', index=1, content_block={**block, 'input': {}})
+        event('content_block_delta', index=1, delta={'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])})
+        emit({'type': 'assistant', 'message': {'id': ident, 'content': [block], 'stop_reason': None,
+                                               'usage': {'input_tokens': 5, 'output_tokens': 1}}})
+        event('content_block_stop', index=1)
+    else:
+        event('content_block_stop', index=0)
+    event('message_stop')
+
+
 initial = json.loads(sys.stdin.readline())
 history = json.loads(initial['message']['content'])['history']
 text = next((row['text'] for row in reversed(history) if row.get('role') == 'user'), '')
@@ -192,6 +219,10 @@ if text in ('refused', 'refused-without-details'):
     raise SystemExit(0)
 if text == 'park':
     time.sleep(60)
+if text == 'stream-cut-tools':
+    cut_message('m-cut-0', tool=True)  # the relay must fail closed: its call may have been sent
+    sys.stdin.read()
+    raise SystemExit(0)
 if text in ('early-callback', 'early-callback-invalid'):
     def event(kind, **fields):
         emit({'type': 'stream_event', 'event': {'type': kind, **fields}})
@@ -316,6 +347,24 @@ else:
 reason = text.removeprefix('limited:') if text.startswith('limited:') else 'end_turn'
 if summary and 'limit-summary' in text:
     reason = 'max_tokens'
+if 'stream-cut-' in text:
+    for n in range(4 if 'stream-cut-repeated' in text else 1):
+        cut_message(f'm-cut-{n}')
+    if 'stream-cut-fallback' in text:
+        # A complete record in place of a new stream, as a non-streaming retry might give.
+        emit({'type': 'assistant', 'message': {'id': 'm-fallback', 'content': [{'type': 'text', 'text': answer}],
+                                               'stop_reason': 'end_turn', 'usage': {'input_tokens': 5, 'output_tokens': 4}}})
+        emit({'type': 'result', 'subtype': 'success', 'is_error': False})
+        sys.stdin.read()
+        raise SystemExit(0)
+    if 'stream-cut-error' in text:
+        emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True})
+    elif 'stream-cut-ended' in text:
+        emit({'type': 'result', 'subtype': 'success', 'is_error': False})
+    if any(marker in text for marker in ('stream-cut-error', 'stream-cut-ended', 'stream-cut-repeated')):
+        sys.stdin.read()
+        raise SystemExit(0)
+    # Otherwise the CLI retries: the complete message follows.
 stream_message('m2', [{'type': 'thinking', 'thinking': '', 'signature': 'synthetic'}, {'type': 'text', 'text': answer}],
                {'input_tokens': 5, 'output_tokens': 4}, reason)
 if text == 'conflicting-final-stop':

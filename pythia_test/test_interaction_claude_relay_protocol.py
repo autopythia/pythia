@@ -2,7 +2,8 @@
 import unittest
 from unittest import mock
 
-from pythia.interaction.claude_relay._cli_protocol import Assembler, NativeRefusal
+from pythia.interaction.claude_relay._cli_protocol import Assembler, MAX_CONSECUTIVE_INTERRUPTIONS
+from pythia.interaction.claude_relay._cli_protocol import NativeRefusal, NativeStreamInterrupted
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.model import ModelRefusal, ModelResponseError
 
@@ -66,6 +67,27 @@ def outcome(records):
     for value in records:
         message = assembler.feed(value)
     return message, message.sample_items('generation', {'mcp__pythia__echo': 'echo'})
+
+
+def cut_records(ident='cut', *, closed=True):
+    """The observed cut message (2.1.289, untraced): thinking deltas without a
+    signature or block snapshot, then content_block_stop and message_stop, and
+    no message_delta."""
+    return [
+        stream_event('message_start', message={'id': ident, 'usage': {'input_tokens': 2, 'output_tokens': 5}}),
+        stream_event('content_block_start', index=0, content_block={'type': 'thinking', 'thinking': '', 'signature': ''}),
+        *(stream_event('content_block_delta', index=0, delta={'type': 'thinking_delta', 'thinking': 'cut '})
+          for _ in range(3)),
+        *((stream_event('content_block_stop', index=0),) if closed else ()),
+        stream_event('message_stop'),
+    ]
+
+
+def feed_all(assembler, records):
+    """Feed records; return what the last one completed."""
+    for value in records[:-1]:
+        assert assembler.feed(value) is None, value
+    return assembler.feed(records[-1])
 
 
 class NativeStreamTests(unittest.TestCase):
@@ -260,6 +282,77 @@ class RefusalTests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(NativeRefusal) as caught:
                 outcome(shape)
             self.assertEqual(caught.exception.category, 'cyber')
+
+
+class InterruptedMessageTests(unittest.TestCase):
+    def test_the_observed_cut_message_is_discarded_and_a_retry_adopted(self):
+        assembler = Assembler()
+        self.assertIsNone(feed_all(assembler, cut_records()))
+        self.assertIsNone(assembler.current)
+        self.assertEqual((assembler.interruptions, assembler.consecutive_interruptions), (1, 1))
+        self.assertEqual(assembler.last_interruption, {
+            'native_message_id': 'cut', 'block_types': ('thinking',), 'open_blocks': 0,
+            'unsigned_thinking_blocks': 1, 'consecutive': 1})
+        message = feed_all(assembler, observed_records())  # the CLI's retry, a new stream
+        self.assertEqual((message.id, message.blocks, message.usage.output_tokens), ('m', (THINKING, TEXT), 546))
+        self.assertEqual(assembler.consecutive_interruptions, 0)
+        self.assertEqual(assembler.interruptions, 1)
+
+    def test_a_complete_record_in_place_of_a_new_stream_is_adopted(self):
+        assembler = Assembler()
+        feed_all(assembler, cut_records())
+        message = assembler.feed(snapshot([TEXT], ident='fallback', reason='end_turn',
+                                          usage={'input_tokens': 5, 'output_tokens': 4}))
+        self.assertEqual((message.id, message.stop_reason, message.usage.total_tokens), ('fallback', 'end_turn', 9))
+
+    def test_a_cut_with_an_open_block_is_discarded_too(self):
+        assembler = Assembler()
+        self.assertIsNone(feed_all(assembler, cut_records(closed=False)))
+        self.assertEqual(assembler.last_interruption['open_blocks'], 1)
+
+    def test_no_later_record_for_a_cut_message_is_adopted(self):
+        assembler = Assembler()
+        feed_all(assembler, cut_records())
+        self.assertIsNone(assembler.feed(snapshot([THINKING], ident='cut')))  # a late block snapshot
+        with self.assertRaisesRegex(ModelResponseError, 'interrupted message'):
+            assembler.feed(snapshot([THINKING], ident='cut', reason='end_turn',
+                                    usage={'input_tokens': 2, 'output_tokens': 9}))
+        with self.assertRaisesRegex(ModelResponseError, 'message ID'):
+            assembler.feed(cut_records()[0])  # a new stream reusing its ID
+
+    def test_a_cut_message_with_tool_calls_fails_closed(self):
+        tool = {'type': 'tool_use', 'id': 'toolu_x', 'name': 'mcp__pythia__echo', 'input': {'value': 1}}
+        records = [stream_event('message_start', message={'id': 'cut', 'usage': {'input_tokens': 2}}),
+                   stream_event('content_block_start', index=0, content_block={**tool, 'input': {}}),
+                   stream_event('content_block_delta', index=0, delta={'type': 'input_json_delta', 'partial_json': '{"value":1}'}),
+                   snapshot([tool], ident='cut'),
+                   stream_event('content_block_stop', index=0),
+                   stream_event('message_stop')]
+        with self.assertRaises(NativeStreamInterrupted) as caught:
+            feed_all(Assembler(), records)
+        self.assertEqual(caught.exception.error_code, 'native_stream_interrupted')
+        self.assertIn('no tool calls may execute', str(caught.exception))
+
+    def test_only_repeated_cuts_in_a_row_fail(self):
+        self.assertEqual(MAX_CONSECUTIVE_INTERRUPTIONS, 3)
+        assembler = Assembler()
+        for n in range(3):
+            feed_all(assembler, cut_records(f'cut-{n}'))
+        feed_all(assembler, observed_records())  # a completed message resets the count
+        for n in range(3, 6):
+            feed_all(assembler, cut_records(f'cut-{n}'))
+        with self.assertRaisesRegex(NativeStreamInterrupted, '4 messages in a row'):
+            feed_all(assembler, cut_records('cut-6'))
+        self.assertEqual(assembler.interruptions, 7)
+
+    def test_a_delta_without_stop_or_usage_is_still_a_protocol_error(self):
+        # Only a missing message_delta means a cut; an incomplete one is drift.
+        for delta, usage in (({}, {'output_tokens': 546}), ({'stop_reason': 'end_turn'}, {})):
+            records = observed_records()
+            records[-2] = stream_event('message_delta', delta=delta, usage=usage)
+            with self.subTest(delta=delta, usage=usage), self.assertRaises(ModelResponseError) as caught:
+                feed_all(Assembler(), records)
+            self.assertNotIsInstance(caught.exception, NativeStreamInterrupted)
 
 
 class SystemEventTests(unittest.TestCase):

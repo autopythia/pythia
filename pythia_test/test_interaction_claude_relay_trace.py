@@ -180,6 +180,18 @@ class RelayTraceTests(unittest.TestCase):
         self.assertTrue(65 < ends[0]['results_due_in_seconds'] <= 70, ends[0])
         self.assertIsNone(ends[1]['results_due_in_seconds'])
 
+    def test_a_cut_native_message_is_traced(self):
+        trace = self.traced()
+        with trace.operation('sample'):
+            sample = self.model.sample(InteractionContext((Message('user', 'stream-cut-retry'),)))
+        self.assertEqual(sample.last_assistant_text, 'cold:stream-cut-retry')
+        trace.close()
+        cuts = [r for r in rows(trace.event_path) if r['type'] == 'native_message_interrupted']
+        self.assertEqual([(r['native_message_id'], r['block_types'], r['open_blocks'],
+                           r['unsigned_thinking_blocks'], r['consecutive']) for r in cuts],
+                         [('m-cut-0', ['thinking'], 0, 1, 1)])
+        self.assertEqual(cuts[0]['op'], 'sample')
+
     def test_frontend_failures_save_metadata_and_keep_payload_only_in_trace(self):
         for frontend in ('cli', 'auto'):
             save = self.root / (frontend + ('.jsonl' if frontend == 'cli' else ''))

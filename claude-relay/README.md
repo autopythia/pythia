@@ -48,6 +48,19 @@ by these short tests.
   generation deadline; no extra Pythia retry loop or retry-field validation is
   added. Genuine terminal failures still fail. See the
   [API-retry handling notes](../doc/claude-relay-api-retry-plan.md).
+- A message whose stream ends without its final `message_delta` (no stop reason,
+  no final usage) is interrupted. On 2.1.289 this was seen twice, untraced,
+  after about 200 s of thinking (once in a Pi summary): the thinking block had no
+  signature, and the CLI sent `content_block_stop` and `message_stop` itself.
+  The relay used to fail there with "Native stream lacks final output usage". It
+  now discards the message, traces `native_message_interrupted`, and keeps
+  reading, so the CLI can still complete the response. If the cut message had
+  tool calls, which may already have reached the MCP endpoint, or more than three
+  messages in a row are cut, or the run ends without a complete message, it fails
+  as `NativeStreamInterrupted`, error code `native_stream_interrupted`. Nothing
+  from a cut message is adopted, and its tokens are not counted. A
+  `message_delta` present but missing its stop reason or usage still fails as
+  before.
 - Native `stream_event/ping` keepalives are no-ops. Early MCP callbacks get a
   registration grace derived from the existing generation timeout instead of a
   separate ten-second cap; full-message validation still precedes tool execution.
