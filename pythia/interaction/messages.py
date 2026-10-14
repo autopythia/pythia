@@ -45,6 +45,7 @@ from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
 from .model import ModelError
+from .model import ModelRefusal
 from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
@@ -731,6 +732,26 @@ def _decode_usage(value: Any) -> TokenUsage:
     )
 
 
+def _refusal_left_answer_text(content: Any) -> bool:
+    """Whether a refused response kept answer text, and no tool calls.
+
+    Otherwise nothing from it is adopted (``ModelRefusal``): there is no
+    answer to show (thinking alone is not one), or a tool batch that must
+    never run.
+    """
+    if not isinstance(content, Sequence) or isinstance(
+        content, (str, bytes, bytearray)
+    ):
+        return False
+    blocks = [block for block in content if isinstance(block, Mapping)]
+    return not any(block.get("type") == "tool_use" for block in blocks) and any(
+        block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        and block["text"].strip()
+        for block in blocks
+    )
+
+
 def _decode_response(payload: Any) -> ModelSample:
     if not isinstance(payload, Mapping):
         raise ModelResponseError("Messages response must be an object")
@@ -742,13 +763,19 @@ def _decode_response(payload: Any) -> ModelSample:
         raise ModelResponseError(
             f"Messages response has unsupported role: {payload.get('role')!r}"
         )
+    stop_reason = (
+        None
+        if payload.get("stop_reason") is None
+        else _require_string(payload.get("stop_reason"), "stop_reason")
+    )
+    if stop_reason == "refusal" and not _refusal_left_answer_text(
+        payload.get("content")
+    ):
+        # The reason, as sent: stop_details' type, category and explanation.
+        raise ModelRefusal(payload.get("stop_details"))
     return ModelSample(
         items=_decode_content(payload.get("content")),
-        stop_reason=(
-            None
-            if payload.get("stop_reason") is None
-            else _require_string(payload.get("stop_reason"), "stop_reason")
-        ),
+        stop_reason=stop_reason,
         usage=_decode_usage(payload.get("usage")),
     )
 
@@ -1088,6 +1115,17 @@ class MessagesModel:
                     raise ModelResponseError("response is not valid JSON") from exc
                 try:
                     sample = _decode_response(decoded)
+                except ModelRefusal as exc:
+                    exc.failure = ModelFailure(
+                        category="refusal",
+                        message=str(exc),
+                        provider="messages",
+                        model=self.endpoint.model,
+                        error_code=ModelRefusal.error_code,
+                        attempt_count=attempts,
+                        recovery=tuple(recovery),
+                    )
+                    raise
                 except ContextValidationError as exc:
                     raise ModelResponseError(str(exc)) from exc
                 except ModelResponseError:

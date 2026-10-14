@@ -100,11 +100,12 @@ by these short tests.
   temperature/top-p/seed/stop remain rejected. HTTP timeout is not a model deadline.
 - Known native completion reasons are preserved (`length` becomes `max_tokens`).
   Missing/conflicting reasons and incomplete tool batches fail closed; Pi rejects
-  truncated/refused/paused summaries. A `refusal` stop with no usable text (such
-  as an API classifier block after thinking) or with tool calls fails as
-  `NativeRefusal`, error code `refusal`. Its message gives the category and
-  explanation from the stream's `stop_details` exactly as sent, for any category.
-  A refusal after usable text stays a stop reason. A tool call without arguments
+  truncated/refused/paused summaries. A `refusal` stop with no answer text
+  (thinking alone is not one, as in the observed API classifier blocks) or with
+  tool calls fails as `NativeRefusal`, a `ModelRefusal` shared with the Messages
+  adapter, error code `refusal`. Its message gives the category and explanation
+  from the stream's `stop_details` exactly as sent, for any category. A refusal
+  after answer text stays a stop reason. A tool call without arguments
   streams its input as one empty JSON delta, which counts as `{}`. Native capacity metadata is unchanged—there
   are no smaller relay-specific context/output ceilings or new model defaults.
 - No remote staging or client-side `CLAUDE_CONFIG_DIR`. Inline limits remain real

@@ -11,7 +11,7 @@ import json
 import re
 
 from ..items import Message, Reasoning, ToolCall
-from ..model import ModelResponseError
+from ..model import ModelRefusal, ModelResponseError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
@@ -42,39 +42,10 @@ def normalized_stop_reason(value, *, allow_missing=False):
     return value
 
 
-def _one_line(value, limit):
-    """An untrusted native string as one bounded line, or None."""
-    if not isinstance(value, str):
-        return None
-    text = ' '.join(''.join(c if c.isprintable() else ' ' for c in value).split())
-    if len(text) > limit:
-        text = text[:limit - 3] + '...'
-    return text or None
-
-
-class NativeRefusal(ModelResponseError):
-    """A response stopped with a refusal, with nothing usable to adopt.
-
-    Its reason is the stream's stop_details, as the API sends it (on 2.1.289:
-    type "refusal", a category such as "cyber", and an explanation). Any type
-    or category is reported as given, never matched against a list.
+class NativeRefusal(ModelRefusal):
+    """A refusal in the native stream (see ModelRefusal); its reason is the
+    stream's stop_details. The class name is the relay's saved failure category.
     """
-
-    error_code = 'refusal'
-
-    def __init__(self, details=None):
-        details = details if isinstance(details, dict) else {}
-        self.kind = _one_line(details.get('type'), 64)
-        self.category = _one_line(details.get('category'), 64)
-        self.explanation = _one_line(details.get('explanation'), 400)
-        tags = [f'{name}={value}' for name, value in (
-            ('type', None if self.kind == 'refusal' else self.kind), ('category', self.category)) if value]
-        message = 'Request refused' + (f' ({", ".join(tags)})' if tags else '')
-        if self.explanation:
-            message += ': ' + self.explanation
-        elif not tags:
-            message += ' (no reason given)'
-        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -88,8 +59,12 @@ class NativeMessage:
     def sample_items(self, generation, names):
         reason = normalized_stop_reason(self.stop_reason)
         has_tools = any(block.get('type') == 'tool_use' for block in self.blocks)
-        if has_tools and reason == 'refusal':
-            raise NativeRefusal(self.stop_details)  # a refused tool batch never executes
+        if reason == 'refusal' and (has_tools or not any(
+                block.get('type') == 'text' and isinstance(block.get('text'), str) and block['text'].strip()
+                for block in self.blocks)):
+            # No answer text (thinking alone is not one), or a tool batch that
+            # must never run: adopt nothing, and report the refusal's reason.
+            raise NativeRefusal(self.stop_details)
         if has_tools and reason != 'tool_use':
             raise ModelResponseError('Incomplete or contradictory native tool batch; no tool calls may execute')
         if not has_tools and reason == 'tool_use':
@@ -120,10 +95,8 @@ class NativeMessage:
             else:
                 raise ModelResponseError('Unsupported native content block')
         if not items:
-            if reason == 'refusal':
-                raise NativeRefusal(self.stop_details)
             raise ModelResponseError('Native assistant message has no supported content')
-        # A refusal after usable text stays a stop reason, as for the other
+        # A refusal after answer text stays a stop reason, as for the other
         # adapters: the caller sees the text is incomplete (Pi rejects it).
         return tuple(items), calls
 

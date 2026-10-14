@@ -29,6 +29,8 @@ from pythia.interaction import MessagesServerCompaction
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelContextWindowError
+from pythia.interaction import ModelFailure
+from pythia.interaction import ModelRefusal
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
@@ -40,7 +42,9 @@ from pythia.interaction import SampleMetadata
 from pythia.interaction import SampleParams
 from pythia.interaction import SUMMARIZATION_SYSTEM_PROMPT
 from pythia.interaction import TokenUsage
+from pythia.interaction import Tool
 from pythia.interaction import ToolCall
+from pythia.interaction import ToolOutcome
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
 from pythia.interaction import UserInteractionBoundary
@@ -51,6 +55,9 @@ from pythia.interaction.demo import _build_model
 from pythia.interaction.demo import _build_parser
 from pythia.interaction.demo import run
 from pythia.interaction.experimental_tools import create_inject_user_message_tool
+from pythia.interaction.loop import TurnHost, run_turn
+from pythia.interaction.loop.tail import turn_tail
+from pythia.interaction.runtime_config import InteractionConfigSnapshot
 
 
 class _FakeResponse:
@@ -1131,6 +1138,117 @@ class ReasoningSignatureTests(unittest.TestCase):
         self.assertNotIn("signature-value", repr(reasoning))
         with self.assertRaisesRegex(ValueError, "content_signature"):
             Reasoning(content="thought", content_signature="")
+
+
+_REFUSAL_DETAILS = {
+    "type": "refusal",
+    "category": "cyber",
+    "explanation": "Synthetic refusal explanation.",
+}
+_REFUSAL_MESSAGE = "Request refused (category=cyber): Synthetic refusal explanation."
+_MISSING = object()
+
+
+def _refused(content, details=_REFUSAL_DETAILS):
+    """A refused response, shaped like the observed one (stop_details last)."""
+    payload = {
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+        "stop_reason": "refusal",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 2, "output_tokens": 11},
+    }
+    if details is not _MISSING:
+        payload["stop_details"] = details
+    return _FakeResponse(payload)
+
+
+class MessagesRefusalTests(unittest.TestCase):
+    def model(self, *responses):
+        return MessagesModel(
+            _endpoint(api_url="http://localhost:8000", model="model"),
+            opener=_ScriptedOpener(*responses),
+        )
+
+    def test_a_refusal_without_answer_text_fails_with_its_reason(self):
+        thinking = {"type": "thinking", "thinking": "", "signature": "signature"}
+        tool = {"type": "tool_use", "id": "toolu_1", "name": "probe", "input": {}}
+        cases = {
+            "thinking only (observed)": [thinking],
+            "no content": [],
+            "visible thinking only": [{**thinking, "thinking": "Visible reasoning."}],
+            "blank text": [thinking, {"type": "text", "text": " \n"}],
+            "text and tool calls": [{"type": "text", "text": "I'll run it."}, tool],
+        }
+        for case, content in cases.items():
+            with self.subTest(case=case), self.assertRaises(ModelRefusal) as caught:
+                self.model(_refused(content)).sample(
+                    InteractionContext((Message("user", "Inspect."),))
+                )
+            refusal = caught.exception
+            self.assertIsInstance(refusal, ModelResponseError)
+            self.assertEqual(str(refusal), _REFUSAL_MESSAGE)
+            self.assertEqual((refusal.category, refusal.explanation),
+                             ("cyber", "Synthetic refusal explanation."))
+            self.assertEqual(refusal.failure, ModelFailure(
+                category="refusal", message=_REFUSAL_MESSAGE, provider="messages",
+                model="model", error_code="refusal", attempt_count=1,
+            ))
+            self.assertEqual(refusal.completed_items, ())
+        for details in (_MISSING, None, "not an object"):
+            with self.subTest(details=details), self.assertRaises(ModelRefusal) as caught:
+                self.model(_refused([], details)).sample(
+                    InteractionContext((Message("user", "Inspect."),))
+                )
+            self.assertEqual(caught.exception.failure.message,
+                             "Request refused (no reason given)")
+
+    def test_a_refusal_after_answer_text_stays_a_stop_reason(self):
+        sample = self.model(_refused([{"type": "text", "text": "Partial answer"}])).sample(
+            InteractionContext((Message("user", "Inspect."),))
+        )
+        self.assertEqual(sample.stop_reason, "refusal")
+        self.assertEqual(sample.items, (Message("assistant", "Partial answer"),))
+
+    def test_the_turn_loop_saves_the_refusal_and_runs_none_of_its_tools(self):
+        ran = []
+
+        def probe(arguments, *, timeout_seconds=None):
+            ran.append(arguments)
+            return ToolOutcome("ran")
+
+        class Host(TurnHost):
+            retryable = 0
+
+            def append(self, context, items):
+                context.extend(items)
+
+            def show(self, items):
+                pass
+
+            def retryable_failure(self):
+                self.retryable += 1
+
+        environment = Environment((Tool(ToolSpec("probe", "Probe.", {"type": "object"}), probe),))
+        model = self.model(_refused([
+            {"type": "text", "text": "I'll run it."},
+            {"type": "tool_use", "id": "toolu_1", "name": "probe", "input": {}},
+        ]))
+        context = InteractionContext((Init(model="model"), Message("user", "Inspect.")))
+        host = Host()
+        with self.assertRaises(ModelRefusal):
+            run_turn(context, model, environment,
+                     InteractionConfigSnapshot(enable_auto_compaction=False), host)
+        self.assertEqual(ran, [])
+        # Nothing from the refused response is adopted: only the failure is saved.
+        self.assertEqual([type(item).__name__ for item in context.items],
+                         ["Init", "Message", "ModelFailure", "ModelSampleBoundary"])
+        failures = [item for item in context.items if isinstance(item, ModelFailure)]
+        self.assertEqual([(item.category, item.error_code, item.message) for item in failures],
+                         [("refusal", "refusal", _REFUSAL_MESSAGE)])
+        self.assertEqual(host.retryable, 1)
+        self.assertTrue(turn_tail(context.items).unfinished)  # /retry or /continue samples again
 
 
 class MessagesDemoTests(unittest.TestCase):

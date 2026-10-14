@@ -4,7 +4,7 @@ from unittest import mock
 
 from pythia.interaction.claude_relay._cli_protocol import Assembler, NativeRefusal
 from pythia.interaction.claude_relay._runtime import Runtime
-from pythia.interaction.model import ModelResponseError
+from pythia.interaction.model import ModelRefusal, ModelResponseError
 
 
 def stream_event(kind, **data):
@@ -193,6 +193,7 @@ class RefusalTests(unittest.TestCase):
         with self.assertRaises(NativeRefusal) as caught:
             outcome(refused_records())
         refusal = caught.exception
+        self.assertIsInstance(refusal, ModelRefusal)  # shared with the Messages adapter
         self.assertIsInstance(refusal, ModelResponseError)
         self.assertEqual((refusal.error_code, refusal.kind, refusal.category), ('refusal', 'refusal', 'cyber'))
         self.assertEqual(refusal.explanation, REFUSAL_DETAILS['explanation'])
@@ -241,6 +242,24 @@ class RefusalTests(unittest.TestCase):
         message, (items, calls) = outcome(records)
         self.assertEqual((message.stop_reason, message.stop_details), ('refusal', REFUSAL_DETAILS))
         self.assertEqual([item.content_text for item in items], ['346'])
+
+    def test_thinking_or_blank_text_without_an_answer_is_still_a_refusal(self):
+        # Visible thinking alone is not an answer: the turn would otherwise end
+        # as "no final assistant text", without the refusal's reason.
+        visible = {**THINKING, 'thinking': 'Visible reasoning.'}
+        records = refused_records()
+        records[2] = stream_event('content_block_delta', index=0,
+                                  delta={'type': 'thinking_delta', 'thinking': visible['thinking']})
+        records[4] = snapshot([visible])
+        blank = {'type': 'text', 'text': ' \n'}
+        blank_text = refused_records()
+        blank_text[-2:-2] = [stream_event('content_block_start', index=1, content_block={'type': 'text', 'text': ''}),
+                             stream_event('content_block_delta', index=1, delta={'type': 'text_delta', 'text': blank['text']}),
+                             snapshot([blank]), stream_event('content_block_stop', index=1)]
+        for case, shape in (('visible thinking', records), ('blank text', blank_text)):
+            with self.subTest(case=case), self.assertRaises(NativeRefusal) as caught:
+                outcome(shape)
+            self.assertEqual(caught.exception.category, 'cyber')
 
 
 class SystemEventTests(unittest.TestCase):

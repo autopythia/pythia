@@ -109,6 +109,49 @@ class ModelContextWindowError(ModelResponseError):
     pass
 
 
+def _one_line(value: object, limit: int) -> Optional[str]:
+    """An untrusted provider string as one bounded line, or None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(c if c.isprintable() else " " for c in value).split())
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text or None
+
+
+class ModelRefusal(ModelResponseError):
+    """A provider stopped a response with a refusal, leaving no answer to adopt.
+
+    The reason is the provider's stop details, as sent: on Anthropic's APIs,
+    ``stop_details`` with a type ("refusal"), a category such as "cyber", and
+    an explanation. Any type or category is reported as given, never matched
+    against a list. Adapters raise it when the refused response has no answer
+    text (thinking alone is not one) or has tool calls, which must never run;
+    nothing from that response is adopted. A refusal after answer text is not
+    this error: the adapter returns the text with ``stop_reason`` "refusal".
+    The failure's ``error_code`` is ``refusal``. The turn loop saves it like
+    any failure, and a retry samples the same context again.
+    """
+
+    error_code = "refusal"
+
+    def __init__(self, details: object = None, *,
+                 failure: Optional[ModelFailure] = None) -> None:
+        details = details if isinstance(details, Mapping) else {}
+        self.kind = _one_line(details.get("type"), 64)
+        self.category = _one_line(details.get("category"), 64)
+        self.explanation = _one_line(details.get("explanation"), 400)
+        tags = [f"{name}={value}" for name, value in (
+            ("type", None if self.kind == "refusal" else self.kind),
+            ("category", self.category)) if value]
+        message = "Request refused" + (f" ({', '.join(tags)})" if tags else "")
+        if self.explanation:
+            message += ": " + self.explanation
+        elif not tags:
+            message += " (no reason given)"
+        super().__init__(message, failure=failure)
+
+
 def _validate_optional_finite_number(
     value: object,
     field_name: str,
@@ -442,6 +485,7 @@ __all__ = [
     "ModelContextWindowError",
     "ModelContinuationExpired",
     "ModelError",
+    "ModelRefusal",
     "ModelResponseError",
     "ModelSample",
     "ModelTimeoutError",
