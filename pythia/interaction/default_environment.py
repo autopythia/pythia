@@ -20,7 +20,8 @@ from .local_tools._workspace import WorkspacePolicy
 
 # Command tools stop waiting for output after this, whatever wait the call asked
 # for (up to their 60 s maximum). Claude Code 2.1.289 gives up on an MCP tool
-# call 60 s after sending it; see doc/claude-relay-tool-deadline-plan.md.
+# call 60 s after sending it unless told otherwise. The Claude relay raises that
+# deadline, so this is a backstop; see doc/claude-relay-tool-deadline-plan.md.
 COMMAND_WAIT_CAP_SECONDS = 59.0
 
 

@@ -228,6 +228,16 @@ class RelayTimeoutConfigTests(unittest.TestCase):
                                  '--claude-relay-parked-timeout', value)
                 relay_endpoint(args, args.model_binding)
 
+    def test_native_tool_timeout_is_whole_seconds_with_a_default_near_the_clis_own(self):
+        endpoint = ClaudeRelayEndpoint('fixture-model', '/a', '/b', 1000, '2.1.0')
+        self.assertEqual(endpoint.native_tool_timeout_seconds, 75)  # the CLI's own is 60
+        args = self.args('relay-test', catalog=parse_model_catalog(self.CATALOG))
+        self.assertEqual(relay_endpoint(args, args.model_binding).native_tool_timeout_seconds, 75)
+        self.assertEqual(replace(endpoint, native_tool_timeout_seconds=20).native_tool_timeout_seconds, 20)
+        for value in (0, -1, 1.5, 75.0, True, '75', int(MAX_TIMEOUT_SECONDS) + 1):
+            with self.subTest(value=value), self.assertRaises(ModelConfigurationError):
+                replace(endpoint, native_tool_timeout_seconds=value)
+
     def test_http_request_timeouts_do_not_apply(self):
         args = self.args('relay-test', '--request-timeout-seconds', '60',
                          catalog=parse_model_catalog(self.CATALOG))
@@ -300,6 +310,18 @@ class MCPTransportTests(unittest.TestCase):
             self.server.close()
             self.assertFalse(self.server.workers)
 
+    def test_a_cancel_notice_is_acknowledged_and_ends_nothing(self):
+        self.test_auth_origin_initialization_and_json_response_subset()
+        headers = {'MCP-Protocol-Version': '2025-03-26'}
+        notice = {'jsonrpc': '2.0', 'method': 'notifications/cancelled',
+                  'params': {'requestId': 7, 'reason': 'SdkError: Request timed out'}}
+        self.assertEqual(self.post(notice, extra=headers), (202, None))
+        self.assertFalse(self.box.closed)
+        # With an ID it is a request, and no supported method.
+        _, result = self.post({**notice, 'id': 8}, extra=headers)
+        self.assertEqual(result['error']['code'], -32601)
+        self.assertTrue(self.box.closed)
+
 
 @unittest.skipIf(os.getuid() == 0, 'non-root fixture process required')
 class ModelTests(unittest.TestCase):
@@ -346,17 +368,50 @@ class ModelTests(unittest.TestCase):
         before = time.monotonic()
         sample = self.model.sample(context, tools=TOOLS)
         after = time.monotonic()
-        margin = relay_model.NATIVE_MCP_DEADLINE_SECONDS - relay_model.RESULTS_MARGIN_SECONDS
-        self.assertEqual(margin, 55)
+        # The relay gave the native client its tool timeout, 75 s by default.
+        self.assertEqual(self.fixture_state(self.model._runtime)['mcp_tool_timeout'], '75000')
+        budget = self.endpoint.native_tool_timeout_seconds - relay_model.RESULTS_MARGIN_SECONDS
+        self.assertEqual(budget, 70)
         # The fixture calls back after its message: the clock started in between.
-        self.assertGreaterEqual(sample.results_due, before + margin)
-        self.assertLessEqual(sample.results_due, after + margin)
+        self.assertGreaterEqual(sample.results_due, before + budget)
+        self.assertLessEqual(sample.results_due, after + budget)
         saved = json.dumps([interaction_item_to_dict(item) for item in sample.context_items()])
         self.assertNotIn('results_due', saved)
         context.extend(sample.context_items())
         context.extend(ToolResult(call.call_id, 'done') for call in sample.tool_calls)
         final = self.model.sample(context, tools=TOOLS)
         self.assertIsNone(final.results_due)
+        # A shorter parked wait bounds the batch too; a run without tools sets no timeout.
+        self.model.close()
+        self.model = ClaudeRelayModel(replace(self.endpoint, parked_timeout_seconds=50))
+        self.addCleanup(self.model.close)
+        before = time.monotonic()
+        sample = self.model.sample(InteractionContext((Instructions(''), Message('user', 'two'))), tools=TOOLS)
+        self.assertGreaterEqual(sample.results_due, before + 45)
+        self.assertLessEqual(sample.results_due, time.monotonic() + 45)
+        self.model.sample(InteractionContext((Message('user', 'text-only'),)))
+        self.assertIsNone(self.fixture_state()['mcp_tool_timeout'])
+
+    def test_tool_calls_without_arguments_are_handed_off(self):
+        # The fixture streams their input as 2.1.289 does: one empty JSON delta.
+        context = InteractionContext((Instructions(''), Message('user', 'empty-arguments')))
+        sample = self.model.sample(context, tools=TOOLS)
+        self.assertEqual([call.arguments_json for call in sample.tool_calls], ['{}', '{}'])
+        context.extend(sample.context_items())
+        context.extend([ToolResult(sample.tool_calls[0].call_id, 'one'), ToolResult(sample.tool_calls[1].call_id, 'two')])
+        self.assertEqual(self.model.sample(context, tools=TOOLS).last_assistant_text, 'one|two')
+        self.assertIsNone(self.model._runtime)
+
+    def test_a_refusal_fails_with_its_reason(self):
+        for prompt, expected in (('refused', 'Request refused (category=cyber): Synthetic refusal explanation.'),
+                                 ('refused-without-details', 'Request refused (no reason given)')):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(ModelError) as caught:
+                    self.model.sample(InteractionContext((Message('user', prompt),)))
+                failure = caught.exception.failure
+                self.assertEqual((failure.category, failure.error_code), ('NativeRefusal', 'refusal'))
+                self.assertTrue(failure.message.startswith(expected + ' (phase='), failure.message)
+                self.assertIsNone(self.model._runtime)
 
     def test_two_long_waits_in_one_batch_are_answered_before_the_native_deadline(self):
         # Scaled down: the native client gives up 3 s after sending a call, so
@@ -368,9 +423,11 @@ class ModelTests(unittest.TestCase):
 
             def show(self, items):
                 pass
+        self.model.close()
+        self.model = ClaudeRelayModel(replace(self.endpoint, native_tool_timeout_seconds=3))
+        self.addCleanup(self.model.close)
         context = InteractionContext((Instructions(''), Message('user', 'host-command-deadline')))
-        with mock.patch.object(relay_model, 'NATIVE_MCP_DEADLINE_SECONDS', 3.0), \
-                mock.patch.object(relay_model, 'RESULTS_MARGIN_SECONDS', 1.0), \
+        with mock.patch.object(relay_model, 'RESULTS_MARGIN_SECONDS', 1.0), \
                 DefaultEnvironment(cwd=self.root) as environment:
             result = run_turn(context, self.model, environment,
                               InteractionConfigSnapshot(enable_auto_compaction=False), Host())

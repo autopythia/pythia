@@ -13,12 +13,12 @@ import threading
 
 from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelTimeoutError
 from ..model import ModelAuthenticationError, ModelContextWindowError
-from ._cli_protocol import Assembler, MAX_RECORD, PROFILE, decode
+from ._cli_protocol import Assembler, MAX_RECORD, NativeRefusal, PROFILE, decode
 from ._mcp import Mailbox, MCPServer
 from ._sampling import ResolvedSampling
 from ._diagnostics import Diagnostics
 from ._trace import RelayTrace
-from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
+from ._recovery import MCP_SERVER_NAME, NativeMCPTimeout, NATIVE_MCP_TIMEOUT
 
 
 class Runtime:
@@ -32,7 +32,8 @@ class Runtime:
         if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', t.name) for t in tools):
             raise ModelResponseError('MCP tool names must be simple identifiers')
         self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds,
-                               registration_seconds=endpoint.generation_timeout_seconds, trace=self.trace)
+                               registration_seconds=endpoint.generation_timeout_seconds,
+                               tool_timeout_seconds=endpoint.native_tool_timeout_seconds, trace=self.trace)
         self.mcp = MCPServer(self.mailbox, tool_id_pointer=endpoint.tool_id_pointer) if tools else None
         self.events = queue.Queue(maxsize=32)
         self.loop = asyncio.new_event_loop()
@@ -124,7 +125,8 @@ class Runtime:
                               generation_timeout_seconds=self.endpoint.generation_timeout_seconds,
                               parked_timeout_seconds=self.endpoint.parked_timeout_seconds,
                               startup_timeout_seconds=self.endpoint.startup_timeout_seconds,
-                              stop_timeout_seconds=self.endpoint.stop_timeout_seconds)
+                              stop_timeout_seconds=self.endpoint.stop_timeout_seconds,
+                              native_tool_timeout_seconds=self.endpoint.native_tool_timeout_seconds)
         self.proc = await asyncio.create_subprocess_exec(
             '/usr/bin/python3', '-I', '-S', str(launcher), *argv, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -174,7 +176,7 @@ class Runtime:
                 # authentication check for every deployment/version. The bearer
                 # is never in argv, ordinary logs/history, or binding snapshots.
                 # Opt-in raw native traces can still contain sensitive diagnostics.
-                config['mcpServers']['pythia'] = {
+                config['mcpServers'][MCP_SERVER_NAME] = {
                     'type': 'http', 'url': self.mcp.url,
                     'headers': {'Authorization': 'Bearer ${PYTHIA_CLAUDE_MCP_TOKEN}'},
                 }
@@ -187,6 +189,12 @@ class Runtime:
                     '--system-prompt', system, '--tools', '', '--permission-mode', 'dontAsk',
                     '--strict-mcp-config', '--mcp-config', json.dumps(config, separators=(',', ':')),
                     '--setting-sources', '', '--disable-slash-commands', '--no-session-persistence']
+            if self.mcp:
+                # The CLI's deadline for each MCP call; unset, it is 60 s. This one
+                # setting goes through argv (flag settings, which --setting-sources
+                # leaves on) because the relay forwards no environment for it.
+                timeout_ms = str(self.endpoint.native_tool_timeout_seconds * 1000)
+                argv += ['--settings', json.dumps({'env': {'MCP_TOOL_TIMEOUT': timeout_ms}}, separators=(',', ':'))]
             argv += self.sampling.cli_args()
             if self.names:
                 argv += ['--allowedTools', ','.join(self.names)]
@@ -242,6 +250,8 @@ class Runtime:
                 return
             if isinstance(error, NativeMCPTimeout):
                 self.diagnostics.error_code = NATIVE_MCP_TIMEOUT
+            elif isinstance(error, NativeRefusal):
+                self.diagnostics.error_code = NativeRefusal.error_code
             diagnostic = self.diagnostics.snapshot(freeze=True)
             self.error = error
             scope = self.trace.scope()

@@ -19,7 +19,7 @@ from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
 from ._context import Snapshot, record, handoff
-from ._cli_protocol import NATIVE_MCP_DEADLINE_SECONDS, PROFILE
+from ._cli_protocol import DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS, PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
 from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
@@ -31,8 +31,9 @@ from ..timeouts import DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
 from ..timeouts import validate_timeout_seconds
 
 # A batch's results are due this long before the native client gives up on its
-# first call: room for their release, a wait's overshoot and delivery (each well
-# under a second in traces). See doc/claude-relay-tool-deadline-plan.md.
+# first call, or the relay on its parked wait: room for their release, a wait's
+# overshoot and delivery (each well under a second in traces). See
+# doc/claude-relay-tool-deadline-plan.md.
 RESULTS_MARGIN_SECONDS = 5.0
 
 
@@ -44,6 +45,9 @@ class ClaudeRelayEndpoint:
     native message (streamed chunks and tool heartbeats do not extend it);
     ``parked_timeout_seconds`` bounds a parked continuation's wait for tool
     results; ``startup``/``stop`` bound the native process lifecycle.
+    ``native_tool_timeout_seconds`` is the native client's own deadline for each
+    MCP call (its MCP_TOOL_TIMEOUT), a whole number of seconds; the client times
+    each call from sending it. It is not a launch or catalog option yet.
     """
 
     model: str
@@ -56,6 +60,7 @@ class ClaudeRelayEndpoint:
     parked_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
     startup_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
     stop_timeout_seconds: float = DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
+    native_tool_timeout_seconds: int = DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS
     binding: ModelBinding | None = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -84,6 +89,13 @@ class ClaudeRelayEndpoint:
                 validate_timeout_seconds(getattr(self, name), name)
             except ValueError as error:
                 raise ModelConfigurationError(str(error)) from None
+        try:
+            validate_timeout_seconds(self.native_tool_timeout_seconds, 'native_tool_timeout_seconds')
+        except ValueError as error:
+            raise ModelConfigurationError(str(error)) from None
+        if type(self.native_tool_timeout_seconds) is not int:
+            # The native timeout result names it in whole seconds (_recovery).
+            raise ModelConfigurationError('native_tool_timeout_seconds must be a whole number of seconds')
         if self.binding is None:
             object.__setattr__(self, 'binding', ModelBinding(self.model, EndpointSpec('claude-relay', None, self.model, 'runtime')))
         if self.binding.api != 'claude-relay' or self.binding.endpoint.model != self.model:
@@ -194,7 +206,8 @@ class ClaudeRelayModel:
                 if calls:
                     started_at = runtime.mailbox.batch_started([ident for ident, _, _ in calls])
                     if started_at is not None:
-                        results_due = started_at + NATIVE_MCP_DEADLINE_SECONDS - RESULTS_MARGIN_SECONDS
+                        budget = min(self.endpoint.native_tool_timeout_seconds, self.endpoint.parked_timeout_seconds)
+                        results_due = started_at + budget - RESULTS_MARGIN_SECONDS
                 sample = ModelSample(items, stop_reason=message.stop_reason, usage=message.usage,
                                      provider_turn_id=message.id, results_due=results_due)
                 if not calls:

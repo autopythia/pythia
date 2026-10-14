@@ -16,12 +16,16 @@ from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
 PROFILE = 'claude-stream-json-v6'  # stream authority, keepalives, nonterminal API retry telemetry
-# CLI 2.1.289 answers an MCP tools/call itself ("The operation timed out.") 60 s
-# after sending it, as measured in relay traces; its controlling setting is
-# unverified. It sends one call at a time and gets no answer before the host has
-# run the whole batch, so the first call's clock covers the batch. Re-measure
-# after changing the pinned version (doc/claude-relay-tool-deadline-plan.md).
-NATIVE_MCP_DEADLINE_SECONDS = 60.0
+# CLI 2.1.289 gives up on an MCP tools/call MCP_TOOL_TIMEOUT milliseconds after
+# sending it, and answers the call itself (_recovery.native_timeout_texts).
+# Unset, it aborts the call's HTTP request after 60 s instead. The relay sets it
+# with --settings env, from ClaudeRelayEndpoint.native_tool_timeout_seconds,
+# this by default: near the CLI's own 60 s, with room for a full 59 s command
+# wait. The CLI sends one call at a time and gets no answer before the host has
+# run the whole batch, so the first call's clock covers the batch. Measured
+# through the relay from 20 to 240 s; re-measure after changing the pinned
+# version (doc/claude-relay-tool-deadline-plan.md).
+DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS = 75
 MAX_RECORD = 8 * 1024 * 1024
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))
@@ -38,16 +42,54 @@ def normalized_stop_reason(value, *, allow_missing=False):
     return value
 
 
+def _one_line(value, limit):
+    """An untrusted native string as one bounded line, or None."""
+    if not isinstance(value, str):
+        return None
+    text = ' '.join(''.join(c if c.isprintable() else ' ' for c in value).split())
+    if len(text) > limit:
+        text = text[:limit - 3] + '...'
+    return text or None
+
+
+class NativeRefusal(ModelResponseError):
+    """A response stopped with a refusal, with nothing usable to adopt.
+
+    Its reason is the stream's stop_details, as the API sends it (on 2.1.289:
+    type "refusal", a category such as "cyber", and an explanation). Any type
+    or category is reported as given, never matched against a list.
+    """
+
+    error_code = 'refusal'
+
+    def __init__(self, details=None):
+        details = details if isinstance(details, dict) else {}
+        self.kind = _one_line(details.get('type'), 64)
+        self.category = _one_line(details.get('category'), 64)
+        self.explanation = _one_line(details.get('explanation'), 400)
+        tags = [f'{name}={value}' for name, value in (
+            ('type', None if self.kind == 'refusal' else self.kind), ('category', self.category)) if value]
+        message = 'Request refused' + (f' ({", ".join(tags)})' if tags else '')
+        if self.explanation:
+            message += ': ' + self.explanation
+        elif not tags:
+            message += ' (no reason given)'
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class NativeMessage:
     id: str
     blocks: tuple
     usage: TokenUsage
     stop_reason: str | None
+    stop_details: dict | None = None  # a refusal's reason (NativeRefusal), as streamed
 
     def sample_items(self, generation, names):
         reason = normalized_stop_reason(self.stop_reason)
         has_tools = any(block.get('type') == 'tool_use' for block in self.blocks)
+        if has_tools and reason == 'refusal':
+            raise NativeRefusal(self.stop_details)  # a refused tool batch never executes
         if has_tools and reason != 'tool_use':
             raise ModelResponseError('Incomplete or contradictory native tool batch; no tool calls may execute')
         if not has_tools and reason == 'tool_use':
@@ -78,7 +120,11 @@ class NativeMessage:
             else:
                 raise ModelResponseError('Unsupported native content block')
         if not items:
+            if reason == 'refusal':
+                raise NativeRefusal(self.stop_details)
             raise ModelResponseError('Native assistant message has no supported content')
+        # A refusal after usable text stays a stop reason, as for the other
+        # adapters: the caller sees the text is incomplete (Pi rejects it).
         return tuple(items), calls
 
 
@@ -129,14 +175,17 @@ class Assembler:
         self.closed = set()
         self.usage = {}
         self.stop_reason = None
+        self.stop_details = None
         self.seen = {}
         self.hints = []
         self.hint_size = 0
         self.size = 0
 
-    def emit(self, ident, blocks, usage, stop, *, streamed=False):
+    def emit(self, ident, blocks, usage, stop, *, stop_details=None, streamed=False):
         if not isinstance(ident, str) or not 0 < len(ident) <= 256 or any(ord(c) < 32 for c in ident):
             raise ModelResponseError('Native assistant ID is missing')
+        if stop == 'refusal' and not blocks:
+            raise NativeRefusal(stop_details)  # refused before any content: nothing to assemble
         parts = block_fingerprints(blocks)
         parsed_usage = token_usage(usage)
         reason = normalized_stop_reason(stop, allow_missing=ident in self.seen)
@@ -156,7 +205,7 @@ class Assembler:
         self.seen[ident] = (parts, reason, {k: usage[k] for k in USAGE_FIELDS if k in usage}, streamed)
         if len(self.seen) > 4096:
             raise ModelResponseError('Native message limit exceeded')
-        return NativeMessage(ident, tuple(blocks), parsed_usage, reason)
+        return NativeMessage(ident, tuple(blocks), parsed_usage, reason, stop_details)
 
     def feed(self, value):
         if value['type'] == 'assistant':
@@ -175,7 +224,8 @@ class Assembler:
                 return None
             if self.current is not None and msg.get('id') not in self.seen:
                 raise ModelResponseError('Assistant record overlaps another native stream')
-            return self.emit(msg.get('id'), msg.get('content'), msg.get('usage', {}), msg.get('stop_reason'))
+            return self.emit(msg.get('id'), msg.get('content'), msg.get('usage', {}), msg.get('stop_reason'),
+                             stop_details=msg.get('stop_details'))
         if value['type'] != 'stream_event':
             return None
         event = value.get('event', {})
@@ -206,6 +256,7 @@ class Assembler:
             self.usage = {k: v for k, v in msg.get('usage', {}).items()
                           if k in USAGE_FIELDS and k != 'output_tokens'}
             self.stop_reason = None
+            self.stop_details = None
         elif kind in ('content_block_start', 'content_block_delta', 'content_block_stop'):
             index = event.get('index')
             if self.current is None or type(index) is not int or not 0 <= index < 1024:
@@ -222,10 +273,15 @@ class Assembler:
                 self.closed.add(index)
                 block = self.blocks[index]
                 if '_json' in block:
-                    try:
-                        block['input'] = parse_json_value(block.pop('_json'))
-                    except ValueError:
-                        raise ModelResponseError('Incomplete or invalid native tool JSON') from None
+                    raw = block.pop('_json')
+                    # 2.1.289 streams a call without arguments as one empty
+                    # partial_json: no JSON at all, so the block keeps its start
+                    # input ({}), as when no delta came.
+                    if raw:
+                        try:
+                            block['input'] = parse_json_value(raw)
+                        except ValueError:
+                            raise ModelResponseError('Incomplete or invalid native tool JSON') from None
             else:
                 block, delta = self.blocks[index], event.get('delta', {})
                 if not isinstance(delta, dict):
@@ -265,8 +321,16 @@ class Assembler:
                 if self.stop_reason is not None and self.stop_reason != next_reason:
                     raise ModelResponseError('Conflicting streamed stop reasons')
                 self.stop_reason = next_reason
+            if isinstance(delta.get('stop_details'), dict):
+                self.stop_details = delta['stop_details']  # informational: a refusal's reason
         elif kind == 'message_stop':
-            if self.current is None or set(self.blocks) != self.closed or set(self.blocks) != set(range(len(self.blocks))):
+            if self.current is None:
+                raise ModelResponseError('Incomplete native message at stop')
+            if self.stop_reason == 'refusal' and (not self.blocks or set(self.blocks) != self.closed):
+                # Refused before any content, or mid-block: report the refusal,
+                # not the incomplete stream it explains.
+                raise NativeRefusal(self.stop_details)
+            if set(self.blocks) != self.closed or set(self.blocks) != set(range(len(self.blocks))):
                 raise ModelResponseError('Incomplete native message at stop')
             blocks = [self.blocks[i] for i in range(len(self.blocks))]
             complete = block_fingerprints(blocks)
@@ -285,7 +349,8 @@ class Assembler:
                     self.usage[key] = value
             if 'output_tokens' not in self.usage:
                 raise ModelResponseError('Native stream lacks final output usage')
-            result = self.emit(self.current, blocks, self.usage, self.stop_reason, streamed=True)
+            result = self.emit(self.current, blocks, self.usage, self.stop_reason,
+                               stop_details=self.stop_details, streamed=True)
             self.current = None
             self.blocks, self.hints = {}, []  # do not retain text/signatures after completion
             return result

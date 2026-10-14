@@ -12,7 +12,7 @@ from pythia.interaction._debug_trace import DebugTrace
 from pythia.interaction.claude_relay import ClaudeRelayModel
 from pythia.interaction.claude_relay._context import Snapshot
 from pythia.interaction.claude_relay._mcp import Mailbox, MCPError
-from pythia.interaction.claude_relay._recovery import NativeMCPTimeout, NATIVE_TIMEOUT_TEXT
+from pythia.interaction.claude_relay._recovery import NativeMCPTimeout, NATIVE_TIMEOUT_TEXT, native_timeout_texts
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.environment import Environment, Tool, ToolOutcome
@@ -31,7 +31,7 @@ def timed_out(ident='a', **values):
 
 class NativeResultTests(unittest.TestCase):
     def box(self, *, claimed=True):
-        box = Mailbox(fixture.TOOLS)
+        box = Mailbox(fixture.TOOLS, tool_timeout_seconds=240)
         box.register([('a', 'echo', {'value': 1})])
         # Unit state injection; integration tests below exercise the real callback.
         box.slots['a']['claimed'] = claimed
@@ -91,6 +91,27 @@ class NativeResultTests(unittest.TestCase):
             box.validate_native_results([timed_out(), {'type': 'tool_result', 'tool_use_id': 'b', 'content': 'ok'}])
         self.assertNotIsInstance(box.failure, NativeMCPTimeout)
 
+    def test_the_clients_own_tool_timeout_is_recognized_for_its_call_only(self):
+        text = native_timeout_texts('echo', 240)[1]
+        self.assertEqual(text, 'MCP server "pythia" tool "echo" timed out after 240s')
+        with self.assertRaises(NativeMCPTimeout):
+            self.box().validate_native_results([timed_out(content=text)])
+        for other in (native_timeout_texts('other', 240)[1], native_timeout_texts('echo', 60)[1], text + '.'):
+            with self.subTest(other=other), self.assertRaises(MCPError):
+                self.box().validate_native_results([timed_out(content=other)])
+        # Unless the relay set the timeout, only the HTTP abort is the client's.
+        box = Mailbox(fixture.TOOLS)
+        box.register([('a', 'echo', {'value': 1})])
+        box.slots['a']['claimed'] = True
+        with self.assertRaises(MCPError):
+            box.validate_native_results([timed_out(content=text)])
+        # The host's own error with that text, echoed, is an ordinary result.
+        box = self.box(claimed=False)
+        box.release({'a': (text, False)})
+        box.call('a', 'echo', {'value': 1})
+        box.validate_native_results([timed_out(content=text)])
+        self.assertFalse(box.closed)
+
 
 class SavingHost(TurnHost):
     def __init__(self, path, trace=None):
@@ -113,8 +134,8 @@ class RecoveryIntegrationTests(unittest.TestCase):
     setUp = fixture.ModelTests.setUp
     stop_broker = fixture.ModelTests.stop_broker
 
-    def parked(self):
-        context = InteractionContext((Message('user', 'native-timeout'),))
+    def parked(self, prompt='native-timeout'):
+        context = InteractionContext((Message('user', prompt),))
         sample = self.model.sample(context, tools=fixture.TOOLS)
         context.extend(sample.context_items())
         runtime = self.model._runtime
@@ -157,6 +178,16 @@ class RecoveryIntegrationTests(unittest.TestCase):
         final = self.model.sample(context, tools=fixture.TOOLS)
         self.assertEqual(final.last_assistant_text, 'recovered:host-1|host-2')
         self.assertFalse(final.tool_calls)
+
+    def test_the_clients_tool_timeout_recovers_though_its_cancel_notice_came_first(self):
+        context, sample, old = self.parked('native-tool-timeout')
+        self.expire(old)  # a cancel notice, then the timeout result naming the configured 75 s
+        self.complete(context, sample)
+        with self.assertRaises(ModelContinuationExpired) as caught:
+            self.model.sample(context, tools=fixture.TOOLS)
+        self.assertEqual(caught.exception.failure.error_code, 'native_mcp_timeout')
+        final = self.model.sample(context, tools=fixture.TOOLS)
+        self.assertEqual(final.last_assistant_text, 'recovered:host-1|host-2')
 
     def test_shared_loop_finishes_batch_once_and_recovers_with_durable_outcomes(self):
         for tracing in (False, True):

@@ -260,7 +260,9 @@ tested `max` and `high` effort levels:
 `CLAUDE_RELAY_TEST_MODEL` selects only this test's explicit binding; it is not a
 backend model fallback. Without the opt-in flag, ordinary test discovery skips
 all live tests. The heartbeat check deliberately withholds a harmless result
-past the native heartbeat interval. These tests do not exercise native context ceilings
+past the native heartbeat interval. The native-tool-timeout check sets a 20 s
+native MCP tool timeout, withholds the result past it, and expects the relay to
+recognize the CLI's timeout result and recover with one cold restart. These tests do not exercise native context ceilings
 or prove auto-compaction suppression near them; see [SAMPLING.md](SAMPLING.md).
 
 ### Launch options
@@ -383,6 +385,7 @@ abandoning it and `close()` in `finally` on final shutdown.
 | Version mismatch | Review the reported native version and compatibility before deliberately changing the pin. Freeze the source version during a broker session. |
 | Native flags/records/inventory rejected | The initial profile may differ from the installed CLI or managed policy. Stop and inspect the difference; do not bypass the sandbox or required policy. |
 | MCP 401/initialization failure | Verify native `${PYTHIA_CLAUDE_MCP_TOKEN}` header expansion and the supported HTTP/MCP subset. No literal secret goes in argv and authentication is never disabled. |
+| `NativeRefusal` failure, error code `refusal` | The API stopped the response with a refusal, such as its cyber classifier. The message gives the category and explanation the API sent. No tool call from that response runs, and the turn loop does not retry it; retrying or rephrasing is up to the user or watcher. |
 | Missing native tool ID | Verify the raw native metadata path. The default was observed with CLI 2.1.289. Never substitute JSON-RPC IDs or match by arguments/order. |
 | File-backed config/system prompt required | Remote staging is not implemented. A cannot write B's 0700 home; do not share A's cwd or `/tmp` to work around it. |
 
@@ -431,13 +434,14 @@ its ordinary tool result. Unknown/ambiguous cases, missing outcomes, cleanup
 failure, cancellation and repeated expiry are not given automatic retry permission.
 
 This native MCP/tool deadline is separate from generation/parked deadlines;
-raising the generation timeout does not address it. On 2.1.289 it is 60 s from
-sending each call, and a batch's first call waits for the whole batch. Pythia
-keeps batches inside it on the A side: a relay tool batch's results are due 55 s
-after its first call arrived, so command waits end by then, and
-`DefaultEnvironment` caps any wait at 59 s. Native timeout configuration is still
-unverified and unchanged; re-measure the deadline after changing
-`CLAUDE_RELAY_CLI_VERSION`. See the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md)
+raising the generation timeout does not address it. It is the CLI's
+`MCP_TOOL_TIMEOUT`, timed from sending each call (unset, 60 s on 2.1.289), and a
+batch's first call waits for the whole batch. The adapter sets it to 75 s with
+`--settings` (no broker or wrapper change), recognizes the CLI's own timeout
+result for recovery, and makes a relay tool batch's results due 70 s after its
+first call arrived, so command waits end by then; `DefaultEnvironment` caps any
+wait at 59 s. After changing `CLAUDE_RELAY_CLI_VERSION`, run the live
+native-tool-timeout check above. See the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md)
 and the [continuation recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
 Direct library callers not using `run_turn` receive `ModelContinuationExpired`
 (a `ModelTransportError` subclass) and decide whether to call `sample()` again

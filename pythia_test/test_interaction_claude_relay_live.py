@@ -15,12 +15,13 @@ import unittest
 from unittest import mock
 
 from pythia.interaction.claude_relay import ClaudeRelayEndpoint, ClaudeRelayModel
+from pythia.interaction.claude_relay._recovery import NativeMCPTimeout
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.compaction import PiCompactor, auto_compaction_due
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.environment import Environment, Tool, ToolOutcome, ToolSpec
 from pythia.interaction.items import ContextPrefix, Instructions, Message, ModelSampleBoundary, ToolResult
-from pythia.interaction.model import SampleParams
+from pythia.interaction.model import ModelContinuationExpired, SampleParams
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.save import load_interaction_save, save_interaction_save
 
@@ -155,6 +156,45 @@ class LiveRelayTests(unittest.TestCase):
             self.assertEqual(starts.call_count, 1)
         self.assertTrue(old.closed.is_set())
         self.assertTrue(all(slot['result'] is None for slot in old.mailbox.slots.values()))
+
+    def test_a_tool_without_arguments(self):
+        # 2.1.289 streams such a call's input as one empty JSON delta.
+        calls = []
+        def receipt(arguments, **kwargs):
+            calls.append(arguments)
+            return ToolOutcome(self.receipt)
+        environment = Environment((Tool(ToolSpec(
+            'probe_receipt', 'Return a unique test receipt. Takes no arguments.',
+            {'type': 'object', 'properties': {}, 'additionalProperties': False}), receipt),))
+        context = InteractionContext((
+            Instructions('Use only supplied tools. Never fabricate a tool result or repeat a completed call.'),
+            Message('user', 'Call probe_receipt exactly once, with no arguments. After receiving its result, '
+                    'reply with the returned receipt exactly, with no other text.')))
+        sample = self.model.sample(context, tools=environment.tool_specs)
+        self.assertEqual([(call.name, call.arguments_json) for call in sample.tool_calls], [('probe_receipt', '{}')])
+        context.extend(sample.context_items())
+        context.extend(environment.execute_tool_calls(sample.tool_calls).context_items())
+        final = self.model.sample(context, tools=environment.tool_specs)
+        self.assertEqual(final.last_assistant_text.strip(), self.receipt)
+        self.assertEqual(calls, [{}])
+
+    def test_native_tool_timeout_is_recognized_and_recovers(self):
+        # The relay sets the native client's MCP tool timeout, here 20 s. The
+        # receipt is checkpointed but withheld past it: the client gives up with
+        # its own result, and the next samples restart cold from the receipt.
+        self.model.close()
+        self.model = ClaudeRelayModel(replace(self.model.endpoint, native_tool_timeout_seconds=20))
+        self.addCleanup(self.model.close)
+        context, old = self.parked()
+        deadline = time.monotonic() + 40
+        while old.error is None and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertIsInstance(old.error, NativeMCPTimeout)
+        with self.assertRaises(ModelContinuationExpired):
+            self.model.sample(context, tools=self.environment.tool_specs)
+        with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=Runtime) as starts:
+            self.final(context)
+            self.assertEqual(starts.call_count, 1)
 
     def test_pi_summary_and_fresh_post_compaction_continuation(self):
         context, old = self.parked(older_history=True)

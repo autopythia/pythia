@@ -38,7 +38,7 @@ def option(name):
     return args[args.index(name) + 1]
 
 
-def stream_message(ident, blocks, usage, reason):
+def stream_message(ident, blocks, usage, reason, details=None):
     """Observed 2.1.289 ordering with wholly synthetic contents."""
     emit({'type': 'system', 'subtype': 'status', 'status': 'requesting'})
     def ping():
@@ -53,14 +53,17 @@ def stream_message(ident, blocks, usage, reason):
         emit({'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': i, 'content_block': start}})
         ping()
         if block['type'] == 'tool_use':
+            # 2.1.289 streams a call without arguments as one empty partial_json.
             emit({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': i,
-                  'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}}})
+                  'delta': {'type': 'input_json_delta',
+                            'partial_json': json.dumps(block['input']) if block['input'] else ''}}})
         if block['type'] == 'thinking':
             emit({'type': 'system', 'subtype': 'thinking_tokens', 'estimated_tokens': 50, 'estimated_tokens_delta': 50})
         emit({'type': 'assistant', 'message': {'id': ident, 'content': [block], 'stop_reason': None, 'usage': provisional}})
         emit({'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': i}})
         ping()
-    emit({'type': 'stream_event', 'event': {'type': 'message_delta', 'delta': {'stop_reason': reason}, 'usage': usage}})
+    delta = {'stop_reason': reason, **({'stop_details': details} if details is not None else {})}
+    emit({'type': 'stream_event', 'event': {'type': 'message_delta', 'delta': delta, 'usage': usage}})
     emit({'type': 'stream_event', 'event': {'type': 'message_stop'}})
     ping()
 
@@ -72,8 +75,11 @@ effort = option('--effort') if '--effort' in args else None
 assert effort in (None, 'low', 'medium', 'high', 'xhigh', 'max')
 summary = 'You are a context summarization assistant.' in option('--system-prompt')
 config = json.loads(option('--mcp-config'))['mcpServers']
+settings = json.loads(option('--settings')) if '--settings' in args else {}
+tool_timeout_ms = settings.get('env', {}).get('MCP_TOOL_TIMEOUT')
 print('fixture-state:' + json.dumps({'pid': os.getpid(), 'effort': effort, 'summary': summary,
                                    'tool_server_count': len(config),
+                                   'mcp_tool_timeout': tool_timeout_ms,
                                    'history_result_ids': [row['id'] for row in history if row['kind'] == 'result'],
                                    'disable_auto_compact': os.environ.get('DISABLE_AUTO_COMPACT')}),
       file=sys.stderr, flush=True)
@@ -175,6 +181,15 @@ if text in ('system-compacting', 'system-compact-boundary', 'system-hook'):
         record['status'] = 'compacting'
     emit(record)
     raise SystemExit(0)
+if text in ('refused', 'refused-without-details'):
+    # Observed 2.1.289 shape: a classifier refusal after thinking with no text,
+    # its reason only in message_delta's stop_details. Synthetic explanation.
+    details = ({'type': 'refusal', 'category': 'cyber', 'explanation': 'Synthetic refusal explanation.'}
+               if text == 'refused' else None)
+    stream_message('m-refused', [{'type': 'thinking', 'thinking': '', 'signature': 'synthetic'}],
+                   {'input_tokens': 5, 'output_tokens': 4}, 'refusal', details)
+    sys.stdin.read()
+    raise SystemExit(0)
 if text == 'park':
     time.sleep(60)
 if text in ('early-callback', 'early-callback-invalid'):
@@ -241,11 +256,12 @@ elif text == 'host-command-deadline':
     first = tool_result(blocks[0])
     answer = f'first-call-seconds={time.monotonic() - sent:.3f}|{first}|{tool_result(blocks[1])}'
 elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row in history):
-    blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': {'value': 1}} for ident in ('toolu_a', 'toolu_b')]
+    arguments = {} if text == 'empty-arguments' else {'value': 1}
+    blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': arguments} for ident in ('toolu_a', 'toolu_b')]
     batch_reason = 'max_tokens' if text == 'limited-tools' else 'tool_use'
     stream_message('m1', blocks, {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}, batch_reason)
     emit({'type': 'assistant', 'message': {'id': 'm1', 'content': blocks, 'usage': {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}, 'stop_reason': batch_reason}})
-    if text == 'native-timeout':
+    if text in ('native-timeout', 'native-tool-timeout'):
         # Synthetic-only gate: the test waits for callback claim / actual host
         # effects, then requests the native error. No wall-clock timeout sleeps.
         def pending_request():
@@ -256,8 +272,15 @@ elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row i
                 pass  # mailbox revocation is expected; never echo a fake result
         threading.Thread(target=pending_request, daemon=True).start()
         assert sys.stdin.readline().strip() == 'fixture-expire'
+        expired = 'The operation timed out.'
+        if text == 'native-tool-timeout':
+            # The client's own tool timeout (MCP_TOOL_TIMEOUT): its cancel notice
+            # may reach the server before the result record, as here.
+            rpc('notifications/cancelled', {'requestId': 99, 'reason': 'SdkError: Request timed out'}, notify=True)
+            expired = (f'MCP server "pythia" tool "{tools[0]["name"]}" '
+                       f'timed out after {int(tool_timeout_ms) // 1000}s')
         emit({'type': 'user', 'message': {'content': [{'type': 'tool_result',
-              'tool_use_id': blocks[0]['id'], 'is_error': True, 'content': 'The operation timed out.'}]}})
+              'tool_use_id': blocks[0]['id'], 'is_error': True, 'content': expired}]}})
         stream_message('speculative', [{'type': 'tool_use', 'id': 'must_not_execute',
                        'name': names[0], 'input': {'value': 999}}],
                        {'input_tokens': 3, 'output_tokens': 2}, 'tool_use')
@@ -288,7 +311,8 @@ elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row i
     answer = '|'.join(outputs)
 else:
     answer = ('recovered:' + '|'.join(row['output'] for row in history if row['kind'] == 'result')
-              if text == 'native-timeout' else 'fixture summary' if summary else 'cold:' + text)
+              if text in ('native-timeout', 'native-tool-timeout') else 'fixture summary' if summary
+              else 'cold:' + text)
 reason = text.removeprefix('limited:') if text.startswith('limited:') else 'end_turn'
 if summary and 'limit-summary' in text:
     reason = 'max_tokens'

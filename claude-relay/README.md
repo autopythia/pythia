@@ -66,14 +66,17 @@ by these short tests.
   cold inference recovery, without rerunning tool handlers. Generic transport,
   snapshot/parser and generation-timeout failures remain non-automatic. See the
   [recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
-- That native timeout fires 60 s after the CLI sends an MCP call (measured on
-  2.1.289; the controlling setting is unverified). The CLI sends a batch's calls
-  one at a time and none is answered before the whole batch has run, so the first
-  call's clock covers the batch. Each relay tool batch therefore carries
-  `ModelSample.results_due`, 55 s after its first call arrived. The turn loop
-  passes it to every call, and command waits end by then; `DefaultEnvironment`
-  also caps any wait at 59 s. This is A-side only. See the
-  [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md).
+- That native timeout is the CLI's `MCP_TOOL_TIMEOUT`, timed from sending each
+  MCP call; unset, a 60 s HTTP abort applies (measured on 2.1.289). The adapter
+  sets 75 s with `--settings` in argv, so no START env or allowlist change, and
+  also recognizes the CLI's `MCP server "pythia" tool "<name>" timed out after
+  75s` result. The `notifications/cancelled` the CLI sends with it is
+  acknowledged, not a failure; the result record decides. The CLI sends a
+  batch's calls one at a time and none is answered before the whole batch has
+  run, so the first call's clock covers the batch: each relay tool batch carries
+  `ModelSample.results_due`, 70 s after its first call arrived, and command
+  waits end by then. `DefaultEnvironment` also caps any wait at 59 s. A-side
+  only; see the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md).
 - The MCP endpoint implements stateless JSON-response Streamable HTTP with
   initialization, tools/list, tools/call and ping, using the explicitly supported
   protocol dates 2025-03-26, 2025-06-18 and 2025-11-25. GET/SSE and DELETE return
@@ -97,7 +100,12 @@ by these short tests.
   temperature/top-p/seed/stop remain rejected. HTTP timeout is not a model deadline.
 - Known native completion reasons are preserved (`length` becomes `max_tokens`).
   Missing/conflicting reasons and incomplete tool batches fail closed; Pi rejects
-  truncated/refused/paused summaries. Native capacity metadata is unchanged—there
+  truncated/refused/paused summaries. A `refusal` stop with no usable text (such
+  as an API classifier block after thinking) or with tool calls fails as
+  `NativeRefusal`, error code `refusal`. Its message gives the category and
+  explanation from the stream's `stop_details` exactly as sent, for any category.
+  A refusal after usable text stays a stop reason. A tool call without arguments
+  streams its input as one empty JSON delta, which counts as `{}`. Native capacity metadata is unchanged—there
   are no smaller relay-specific context/output ceilings or new model defaults.
 - No remote staging or client-side `CLAUDE_CONFIG_DIR`. Inline limits remain real
   OS argv limits; conversation input streams on stdin. If native compatibility

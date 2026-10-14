@@ -2,7 +2,7 @@
 import unittest
 from unittest import mock
 
-from pythia.interaction.claude_relay._cli_protocol import Assembler
+from pythia.interaction.claude_relay._cli_protocol import Assembler, NativeRefusal
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.model import ModelResponseError
 
@@ -36,6 +36,36 @@ def observed_records():
         stream_event('message_delta', delta={'stop_reason': 'end_turn'}, usage={'input_tokens': 468, 'output_tokens': 546}),
         stream_event('message_stop'),
     ]
+
+
+# Observed 2.1.289 refusal (Oct 14): its reason only in message_delta.
+REFUSAL_DETAILS = {'type': 'refusal', 'category': 'cyber', 'explanation': (
+    "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage "
+    "Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback.")}
+
+
+def refused_records(details=REFUSAL_DETAILS):
+    """The observed refused stream: thinking without text, then a refusal stop."""
+    return [
+        stream_event('message_start', message={'id': 'm', 'stop_details': None,
+                                               'usage': {'input_tokens': 2, 'output_tokens': 5}}),
+        stream_event('content_block_start', index=0, content_block={'type': 'thinking', 'thinking': '', 'signature': ''}),
+        stream_event('content_block_delta', index=0, delta={'type': 'thinking_delta', 'thinking': ''}),
+        stream_event('content_block_delta', index=0, delta={'type': 'signature_delta', 'signature': THINKING['signature']}),
+        snapshot([THINKING]),
+        stream_event('content_block_stop', index=0),
+        stream_event('message_delta', delta={'stop_reason': 'refusal', 'stop_sequence': None, 'stop_details': details},
+                     usage={'input_tokens': 2, 'output_tokens': 11152}),
+        stream_event('message_stop'),
+    ]
+
+
+def outcome(records):
+    """Feed every record; the completed message and its sample items."""
+    assembler, message = Assembler(), None
+    for value in records:
+        message = assembler.feed(value)
+    return message, message.sample_items('generation', {'mcp__pythia__echo': 'echo'})
 
 
 class NativeStreamTests(unittest.TestCase):
@@ -134,6 +164,83 @@ class NativeStreamTests(unittest.TestCase):
             else:
                 with self.assertRaises(ModelResponseError):
                     message.sample_items('g', {'mcp__pythia__echo': 'echo'})
+
+    def test_a_call_without_arguments_streams_its_input_as_empty_json(self):
+        # Observed 2.1.289 shape: start input {}, then one empty partial_json.
+        start = {'type': 'tool_use', 'id': 'toolu_x', 'name': 'mcp__pythia__echo', 'input': {}, 'caller': {'type': 'direct'}}
+        def records(partials, final_input):
+            return [stream_event('message_start', message={'id': 'tools', 'usage': {'input_tokens': 2}}),
+                    stream_event('content_block_start', index=0, content_block=start),
+                    *(stream_event('content_block_delta', index=0, delta={'type': 'input_json_delta', 'partial_json': text})
+                      for text in partials),
+                    snapshot([{**start, 'input': final_input}], ident='tools'),
+                    stream_event('content_block_stop', index=0),
+                    stream_event('message_delta', delta={'stop_reason': 'tool_use'}, usage={'output_tokens': 20}),
+                    stream_event('message_stop')]
+        for partials, final_input, encoded in ((('',), {}, '{}'), ((), {}, '{}'),
+                                               (('', '{"value":', '1}'), {'value': 1}, '{"value":1}')):
+            with self.subTest(partials=partials):
+                _, (items, calls) = outcome(records(partials, final_input))
+                self.assertEqual([(item.name, item.arguments_json) for item in items], [('echo', encoded)])
+                self.assertEqual(calls, [('toolu_x', 'echo', final_input)])
+        for partials in ((' ',), ('{',)):  # anything else still has to be complete JSON
+            with self.subTest(partials=partials), self.assertRaisesRegex(ModelResponseError, 'tool JSON'):
+                outcome(records(partials, {}))
+
+
+class RefusalTests(unittest.TestCase):
+    def test_the_observed_refusal_reports_its_category_and_explanation(self):
+        with self.assertRaises(NativeRefusal) as caught:
+            outcome(refused_records())
+        refusal = caught.exception
+        self.assertIsInstance(refusal, ModelResponseError)
+        self.assertEqual((refusal.error_code, refusal.kind, refusal.category), ('refusal', 'refusal', 'cyber'))
+        self.assertEqual(refusal.explanation, REFUSAL_DETAILS['explanation'])
+        self.assertEqual(str(refusal), 'Request refused (category=cyber): ' + REFUSAL_DETAILS['explanation'])
+
+    def test_any_reason_is_reported_as_given_on_one_bounded_line(self):
+        cases = (({'type': 'refusal', 'category': 'bio'}, 'Request refused (category=bio)'),
+                 ({'type': 'other_block', 'explanation': 'Two\nlines,\x00 one\tline.'},
+                  'Request refused (type=other_block): Two lines, one line.'),
+                 ({'category': 'x' * 100}, 'Request refused (category=' + 'x' * 61 + '...)'),
+                 (None, 'Request refused (no reason given)'),
+                 ('not an object', 'Request refused (no reason given)'))
+        for details, expected in cases:
+            with self.subTest(details=details), self.assertRaises(NativeRefusal) as caught:
+                outcome(refused_records(details))
+            self.assertEqual(str(caught.exception), expected)
+        with self.assertRaises(NativeRefusal) as caught:
+            outcome(refused_records({'explanation': 'y' * 1000}))
+        self.assertEqual(caught.exception.explanation, 'y' * 397 + '...')
+
+    def test_a_refusal_before_complete_content_or_with_tools_still_reports_it(self):
+        refusal = stream_event('message_delta', delta={'stop_reason': 'refusal', 'stop_details': REFUSAL_DETAILS},
+                               usage={'output_tokens': 1})
+        start = stream_event('message_start', message={'id': 'm', 'usage': {'input_tokens': 2}})
+        tool = {'type': 'tool_use', 'id': 'toolu_x', 'name': 'mcp__pythia__echo', 'input': {'value': 1}}
+        shapes = {
+            'no content': [start, refusal, stream_event('message_stop')],
+            'open block': [start, stream_event('content_block_start', index=0, content_block={'type': 'text', 'text': ''}),
+                           stream_event('content_block_delta', index=0, delta={'type': 'text_delta', 'text': 'partial'}),
+                           refusal, stream_event('message_stop')],
+            'tool batch': [start, stream_event('content_block_start', index=0, content_block=tool),
+                           stream_event('content_block_stop', index=0), refusal, stream_event('message_stop')],
+            'complete record': [{'type': 'assistant', 'message': {
+                'id': 'r', 'content': [], 'stop_reason': 'refusal', 'stop_details': REFUSAL_DETAILS,
+                'usage': {'input_tokens': 2, 'output_tokens': 1}}}],
+        }
+        for shape, records in shapes.items():
+            with self.subTest(shape=shape), self.assertRaises(NativeRefusal) as caught:
+                outcome(records)
+            self.assertEqual(caught.exception.category, 'cyber')
+
+    def test_a_refusal_after_usable_text_stays_a_stop_reason(self):
+        records = observed_records()
+        records[-2] = stream_event('message_delta', delta={'stop_reason': 'refusal', 'stop_details': REFUSAL_DETAILS},
+                                   usage={'input_tokens': 468, 'output_tokens': 546})
+        message, (items, calls) = outcome(records)
+        self.assertEqual((message.stop_reason, message.stop_details), ('refusal', REFUSAL_DETAILS))
+        self.assertEqual([item.content_text for item in items], ['346'])
 
 
 class SystemEventTests(unittest.TestCase):

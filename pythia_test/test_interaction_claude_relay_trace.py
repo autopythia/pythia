@@ -177,7 +177,7 @@ class RelayTraceTests(unittest.TestCase):
         trace.close()
         ends = [r for r in rows(trace.event_path) if r['type'] == 'sample_end']
         self.assertEqual(len(ends), 2)
-        self.assertTrue(50 < ends[0]['results_due_in_seconds'] <= 55, ends[0])
+        self.assertTrue(65 < ends[0]['results_due_in_seconds'] <= 70, ends[0])
         self.assertIsNone(ends[1]['results_due_in_seconds'])
 
     def test_frontend_failures_save_metadata_and_keep_payload_only_in_trace(self):

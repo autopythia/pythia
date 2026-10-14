@@ -13,7 +13,7 @@ import uuid
 from ..model import ModelError, ModelResponseError
 from ..model_catalog import parse_json_value, thaw_json
 from ._context import canonical
-from ._recovery import ExpiredCall, NativeMCPTimeout, is_native_timeout, is_host_timeout_echo
+from ._recovery import ExpiredCall, NativeMCPTimeout, is_host_echo, is_native_timeout, native_timeout_texts
 
 PROTOCOLS = ('2025-03-26', '2025-06-18', '2025-11-25')
 MAX_BODY = 4 * 1024 * 1024
@@ -36,7 +36,8 @@ def pointer(document, path):
 
 
 class Mailbox:
-    def __init__(self, tools, *, wait_seconds=1800, registration_seconds=None, trace=None):
+    def __init__(self, tools, *, wait_seconds=1800, registration_seconds=None, tool_timeout_seconds=None,
+                 trace=None):
         self.trace = trace
         self.tools = {t.name: t for t in tools}
         if len(self.tools) != len(tools):
@@ -45,6 +46,9 @@ class Mailbox:
         # Runtime supplies its configured generation budget, independently of
         # the parked-result wait. Standalone mailboxes retain a finite fallback.
         self.registration_seconds = wait_seconds if registration_seconds is None else registration_seconds
+        # The native client's MCP_TOOL_TIMEOUT, if the relay set it: it names
+        # one of the timeout results the client may report (native_timeout_texts).
+        self.tool_timeout_seconds = tool_timeout_seconds
         self.condition = threading.Condition()
         self.slots = {}
         self.closed = False
@@ -194,7 +198,8 @@ class Mailbox:
                     raise self.fail('Native tool result has an unknown or duplicate call ID')
                 seen.add(ident)
                 slot = self.slots[ident]
-                if is_native_timeout(block) and not (slot['returned'] and is_host_timeout_echo(slot['result'])):
+                texts = native_timeout_texts(slot['name'], self.tool_timeout_seconds)
+                if is_native_timeout(block, texts) and not (slot['returned'] and is_host_echo(slot['result'], block)):
                     if not slot['claimed']:
                         raise self.fail('Unclaimed native tool result appeared before a host reply')
                     expired = ExpiredCall(ident, slot['result'] is not None, slot['returned'])
@@ -404,8 +409,12 @@ class MCPServer:
                               for t in self.mailbox.tools.values()]}
         if method == 'tools/call' and 'id' in request:
             return self.mailbox.call(pointer(request, self.tool_id_pointer), params.get('name'), params.get('arguments', {}))
-        if method == 'notifications/cancelled':
-            raise self.mailbox.fail('Native MCP call cancelled')
+        if method == 'notifications/cancelled' and 'id' not in request:
+            # The CLI sends this after giving up on a call (its MCP_TOOL_TIMEOUT),
+            # which it also reports as that call's result. That record decides
+            # what it means (validate_native_results); this notice names only a
+            # JSON-RPC ID and may arrive first, so it grants and ends nothing.
+            return None
         raise self.mailbox.fail('Unsupported MCP method', -32601)
 
     def close(self):
