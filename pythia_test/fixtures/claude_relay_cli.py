@@ -229,6 +229,17 @@ elif text == 'host-command-tools':
              'input': {'session_id': int(session[1]), 'chars': 'relay-host-session-ok\n', 'yield_time_ms': 1000}}
     stream_message('m-stdin', [block], {'input_tokens': 20, 'output_tokens': 2}, 'tool_use')
     answer = output + '\n' + tool_result(block)
+elif text == 'host-command-deadline':
+    # Two long command waits in one batch. The native client times each call
+    # from sending it, one call at a time: report how long the first one
+    # waited. The test scales the relay's native deadline down to match.
+    blocks = [{'type': 'tool_use', 'id': ident, 'name': 'mcp__pythia__exec_command',
+               'input': {'cmd': 'sleep 30', 'login': False, 'yield_time_ms': 2500}}
+              for ident in ('toolu_wait_a', 'toolu_wait_b')]
+    stream_message('m-wait', blocks, {'input_tokens': 10, 'output_tokens': 2}, 'tool_use')
+    sent = time.monotonic()
+    first = tool_result(blocks[0])
+    answer = f'first-call-seconds={time.monotonic() - sent:.3f}|{first}|{tool_result(blocks[1])}'
 elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row in history):
     blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': {'value': 1}} for ident in ('toolu_a', 'toolu_b')]
     batch_reason = 'max_tokens' if text == 'limited-tools' else 'tool_use'

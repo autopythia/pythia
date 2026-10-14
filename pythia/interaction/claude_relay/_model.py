@@ -19,7 +19,7 @@ from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
 from ._context import Snapshot, record, handoff
-from ._cli_protocol import PROFILE
+from ._cli_protocol import NATIVE_MCP_DEADLINE_SECONDS, PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
 from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
@@ -29,6 +29,11 @@ from ..timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
 from ..timeouts import DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
 from ..timeouts import DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
 from ..timeouts import validate_timeout_seconds
+
+# A batch's results are due this long before the native client gives up on its
+# first call: room for their release, a wait's overshoot and delivery (each well
+# under a second in traces). See doc/claude-relay-tool-deadline-plan.md.
+RESULTS_MARGIN_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -185,13 +190,20 @@ class ClaudeRelayModel:
                         self._pending = {runtime.generation + ':' + ident: ident for ident, _, _ in calls}
                 if not calls and not any(isinstance(item, Message) and item.content_text.strip() for item in items):
                     raise ModelResponseError('Native run has no final assistant text')
+                results_due = None
+                if calls:
+                    started_at = runtime.mailbox.batch_started([ident for ident, _, _ in calls])
+                    if started_at is not None:
+                        results_due = started_at + NATIVE_MCP_DEADLINE_SECONDS - RESULTS_MARGIN_SECONDS
                 sample = ModelSample(items, stop_reason=message.stop_reason, usage=message.usage,
-                                     provider_turn_id=message.id)
+                                     provider_turn_id=message.id, results_due=results_due)
                 if not calls:
                     self.retire()
                 runtime.trace.emit('sample_end', scope={**runtime.trace.scope(), **scope},
                                    stop_reason=message.stop_reason,
-                                   input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens)
+                                   input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens,
+                                   results_due_in_seconds=(None if results_due is None
+                                                           else round(results_due - time.monotonic(), 3)))
                 if calls:
                     runtime.trace.parked()
                 return sample

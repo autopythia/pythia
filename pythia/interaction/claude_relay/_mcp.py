@@ -50,7 +50,7 @@ class Mailbox:
         self.closed = False
         self.failure = None
         self.on_failure = lambda error: None
-        self.early = set()
+        self.arrivals = {}  # native ID -> when its callback arrived (monotonic)
 
     def fail(self, message, rpc_code=-32602):
         return self._fail_error(MCPError(message, rpc_code))
@@ -72,13 +72,27 @@ class Mailbox:
             ids = [ident for ident, _, _ in calls]
             if len(set(ids)) != len(ids) or any(ident in self.slots for ident in ids):
                 raise self.fail('Duplicate native tool ID')
+            registered = time.monotonic()
             for ident, name, args in calls:
                 if name not in self.tools:
                     raise self.fail('Native tool is not in the current catalog')
-                self.slots[ident] = dict(name=name, args=canonical(args), claimed=False, returned=False, result=None)
+                self.slots[ident] = dict(name=name, args=canonical(args), claimed=False, returned=False,
+                                         result=None, registered=registered)
             if self.trace:
                 self.trace.register(calls)
             self.condition.notify_all()
+
+    def batch_started(self, idents):
+        """When the native client's clock for this batch started, as seen here.
+
+        It times each callback from sending it and sends them one at a time, so
+        the batch's clock is its first callback's: the earliest arrival. A
+        callback still to arrive is bounded by the batch's registration.
+        """
+        with self.condition:
+            times = [self.slots[i]['registered'] for i in idents if i in self.slots]
+            times += [self.arrivals[i] for i in idents if i in self.arrivals]
+            return min(times, default=None)
 
     def release(self, results):
         with self.condition:
@@ -105,6 +119,7 @@ class Mailbox:
             self.condition.notify_all()
 
     def call(self, ident, name, args):
+        arrived = time.monotonic()
         if not isinstance(ident, str) or not ident or len(ident) > 256:
             raise self.fail('MCP request lacks the configured native tool-use ID; JSON-RPC IDs are not substitutes')
         if name not in self.tools or not isinstance(args, dict):
@@ -114,9 +129,9 @@ class Mailbox:
         except (ValueError, TypeError):
             raise self.fail('MCP arguments must be finite JSON') from None
         with self.condition:
-            if ident in self.early:
+            if ident in self.arrivals:
                 raise self.fail('Duplicate MCP callback')
-            self.early.add(ident)
+            self.arrivals[ident] = arrived
             # A callback for a closed tool block may arrive while later blocks
             # are still streaming. Do not impose a separate ten-second cap.
             # The existing model deadline/retirement also closes this mailbox.

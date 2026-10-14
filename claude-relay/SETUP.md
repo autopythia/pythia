@@ -431,9 +431,14 @@ its ordinary tool result. Unknown/ambiguous cases, missing outcomes, cleanup
 failure, cancellation and repeated expiry are not given automatic retry permission.
 
 This native MCP/tool deadline is separate from generation/parked deadlines;
-raising the generation timeout does not necessarily address it. Native timeout
-configuration is still unverified and unchanged. See the
-[continuation recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
+raising the generation timeout does not address it. On 2.1.289 it is 60 s from
+sending each call, and a batch's first call waits for the whole batch. Pythia
+keeps batches inside it on the A side: a relay tool batch's results are due 55 s
+after its first call arrived, so command waits end by then, and
+`DefaultEnvironment` caps any wait at 59 s. Native timeout configuration is still
+unverified and unchanged; re-measure the deadline after changing
+`CLAUDE_RELAY_CLI_VERSION`. See the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md)
+and the [continuation recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
 Direct library callers not using `run_turn` receive `ModelContinuationExpired`
 (a `ModelTransportError` subclass) and decide whether to call `sample()` again
 with the same authoritative history. Relaunch the A-side frontend to load the

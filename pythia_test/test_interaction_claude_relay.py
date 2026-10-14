@@ -5,6 +5,7 @@ import json
 import http.client
 import socket
 import os
+import re
 import signal
 from pathlib import Path
 import subprocess
@@ -16,9 +17,12 @@ import unittest
 from unittest import mock
 
 from pythia.interaction.claude_relay import ClaudeRelayEndpoint, ClaudeRelayModel
+from pythia.interaction.claude_relay import _model as relay_model
 from pythia.interaction.context import InteractionContext
+from pythia.interaction.default_environment import DefaultEnvironment
 from pythia.interaction.environment import ToolSpec
 from pythia.interaction.items import Instructions, Message, ToolCall, ToolResult, Tools, SampleMetadata, ModelSampleBoundary, ContextPrefix
+from pythia.interaction.loop import TurnHost, run_turn
 from pythia.interaction.model import ModelError, ModelConfigurationError, SampleParams, TokenUsage
 from pythia.interaction.claude_relay._cli_protocol import Assembler, decode
 from pythia.interaction.claude_relay._context import Snapshot
@@ -28,7 +32,7 @@ from pythia.interaction.compaction import PiCompactor, CompactionError, auto_com
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.model_catalog import EndpointSpec, BUILTIN_MODEL_CATALOG
 from pythia.interaction.model_config import build_parser, build_model, prepare_namespace, relay_endpoint
-from pythia.interaction.save import load_interaction_save
+from pythia.interaction.save import interaction_item_to_dict, load_interaction_save
 from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.timeouts import (
     DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
@@ -133,6 +137,30 @@ class MailboxTests(unittest.TestCase):
         box.register([('a', 'echo', {'value': 1})])
         with self.assertRaisesRegex(ModelError, 'native tool-use ID'):
             box.call(None, 'echo', {'value': 1})
+
+    def test_a_batch_clock_starts_at_its_first_callback_or_its_registration(self):
+        box = Mailbox(TOOLS, wait_seconds=2)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(box.call, 'a', 'echo', {'value': 1})
+            deadline = time.monotonic() + 2
+            while 'a' not in box.arrivals and time.monotonic() < deadline:
+                time.sleep(.001)
+            time.sleep(.02)
+            box.register([('a', 'echo', {'value': 1}), ('b', 'echo', {'value': 2})])
+            arrived, registered = box.arrivals['a'], box.slots['a']['registered']
+            self.assertLess(arrived, registered)
+            self.assertEqual(box.batch_started(['a', 'b']), arrived)
+            box.release({'a': ('one', True), 'b': ('two', True)})
+            future.result(2)
+        # A callback still to come is bounded by the registration, also once it arrives.
+        late = Mailbox(TOOLS, wait_seconds=2)
+        late.register([('c', 'echo', {'value': 3})])
+        registered = late.slots['c']['registered']
+        self.assertEqual(late.batch_started(['c']), registered)
+        late.release({'c': ('three', True)})
+        late.call('c', 'echo', {'value': 3})
+        self.assertEqual(late.batch_started(['c']), registered)
+        self.assertIsNone(late.batch_started(['unknown']))
 
 
 class ProtocolTests(unittest.TestCase):
@@ -312,6 +340,49 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(final.last_assistant_text, 'one|two')
         self.assertEqual(final.usage.total_tokens, 9)
         self.assertIsNone(self.model._runtime)
+
+    def test_tool_batches_carry_results_due_but_never_save_it(self):
+        context = InteractionContext((Instructions(''), Message('user', 'two')))
+        before = time.monotonic()
+        sample = self.model.sample(context, tools=TOOLS)
+        after = time.monotonic()
+        margin = relay_model.NATIVE_MCP_DEADLINE_SECONDS - relay_model.RESULTS_MARGIN_SECONDS
+        self.assertEqual(margin, 55)
+        # The fixture calls back after its message: the clock started in between.
+        self.assertGreaterEqual(sample.results_due, before + margin)
+        self.assertLessEqual(sample.results_due, after + margin)
+        saved = json.dumps([interaction_item_to_dict(item) for item in sample.context_items()])
+        self.assertNotIn('results_due', saved)
+        context.extend(sample.context_items())
+        context.extend(ToolResult(call.call_id, 'done') for call in sample.tool_calls)
+        final = self.model.sample(context, tools=TOOLS)
+        self.assertIsNone(final.results_due)
+
+    def test_two_long_waits_in_one_batch_are_answered_before_the_native_deadline(self):
+        # Scaled down: the native client gives up 3 s after sending a call, so
+        # results are due 2 s after the first was sent. Each call asks to wait
+        # 2.5 s on a command that runs on, 5 s in all.
+        class Host(TurnHost):
+            def append(self, context, items):
+                context.extend(items)
+
+            def show(self, items):
+                pass
+        context = InteractionContext((Instructions(''), Message('user', 'host-command-deadline')))
+        with mock.patch.object(relay_model, 'NATIVE_MCP_DEADLINE_SECONDS', 3.0), \
+                mock.patch.object(relay_model, 'RESULTS_MARGIN_SECONDS', 1.0), \
+                DefaultEnvironment(cwd=self.root) as environment:
+            result = run_turn(context, self.model, environment,
+                              InteractionConfigSnapshot(enable_auto_compaction=False), Host())
+        self.assertEqual(result.kind, 'ended', result)
+        waited = float(re.search(r'first-call-seconds=([0-9.]+)', result.final_text)[1])
+        self.assertLess(waited, 3.0)
+        outputs = [item.output for item in context if isinstance(item, ToolResult)]
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all('Process running with session ID' in output for output in outputs), outputs)
+        walls = [float(re.search(r'Wall time: ([0-9.]+) seconds', output)[1]) for output in outputs]
+        self.assertLess(walls[0], 2.4)  # ended when the results were due, before its 2.5 s
+        self.assertLess(walls[1], 1.0)  # no time left: started its process, returned at once
 
     def test_missing_result_is_an_error_and_context_rewrite_retires(self):
         context = InteractionContext((Message('user', 'two'),))

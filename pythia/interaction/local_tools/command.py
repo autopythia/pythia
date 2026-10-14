@@ -16,10 +16,12 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
+from .._debug_trace import annotate_operation
 from ..environment import Tool
 from ..environment import ToolOutcome
 from ..environment import ToolSpec
 from ..environment import current_cancel
+from ..environment import current_results_due
 from ._workspace import WorkspacePolicy
 
 # After stdout reaches EOF, the shell may still be exiting. Wait at least this
@@ -35,6 +37,35 @@ class _CommandSession:
     cwd: Path
     cmd: str
     lock: Lock = field(default_factory=Lock)
+
+
+@dataclass(frozen=True)
+class _Wait:
+    """One command call's wait for output: what it asked for, after the tool's cap."""
+
+    requested_seconds: float
+    seconds: float
+    limited_by: str  # "request" or "tool_cap" (``Tool.timeout_seconds``)
+
+    def from_now(self) -> float:
+        """The wait, starting now, ending by the time the call's result is due.
+
+        Never below zero: past that time the call still starts its process or
+        writes its input, then returns at once (``current_results_due``). The
+        limits are added to the traced tool call, if any.
+        """
+        seconds, limited_by = self.seconds, self.limited_by
+        due = current_results_due()
+        if due is not None:
+            left = max(0.0, due - time.monotonic())
+            if left < seconds:
+                seconds, limited_by = left, "results_due"
+        annotate_operation(
+            wait_requested_seconds=round(self.requested_seconds, 3),
+            wait_seconds=round(seconds, 3),
+            wait_limited_by=limited_by,
+        )
+        return seconds
 
 
 def _require_nonnegative_integer(
@@ -237,13 +268,13 @@ class CommandRuntime:
             )
             return session_id
 
-    def _wait_seconds(
+    def _wait(
         self,
         arguments: Mapping[str, object],
         timeout_seconds: Optional[float],
         *,
         default_yield_time_ms: int,
-    ) -> float:
+    ) -> _Wait:
         raw_yield = arguments.get("yield_time_ms", default_yield_time_ms)
         yield_time_ms = _require_nonnegative_integer(
             raw_yield,
@@ -253,10 +284,10 @@ class CommandRuntime:
             raise ValueError(
                 f"yield_time_ms must not exceed {self.max_yield_time_ms}"
             )
-        wait_seconds = yield_time_ms / 1000.0
-        if timeout_seconds is not None:
-            wait_seconds = min(wait_seconds, timeout_seconds)
-        return wait_seconds
+        requested = yield_time_ms / 1000.0
+        if timeout_seconds is not None and timeout_seconds < requested:
+            return _Wait(requested, timeout_seconds, "tool_cap")
+        return _Wait(requested, requested, "request")
 
     def _max_output_tokens(
         self,
@@ -288,7 +319,7 @@ class CommandRuntime:
             raise ValueError("login must be a bool")
 
         workdir = self._resolve_workdir(arguments.get("workdir"))
-        wait_seconds = self._wait_seconds(
+        wait = self._wait(
             arguments,
             timeout_seconds,
             default_yield_time_ms=self.default_exec_yield_time_ms,
@@ -311,7 +342,7 @@ class CommandRuntime:
             if process.stdout is not None:
                 os.set_blocking(process.stdout.fileno(), False)
 
-            output, interrupted = self._read_process_output(process, wait_seconds)
+            output, interrupted = self._read_process_output(process, wait.from_now())
             exit_code = process.poll()
             if exit_code is None:
                 session_id = self._next_session(process, workdir, cmd)
@@ -360,7 +391,7 @@ class CommandRuntime:
         if not isinstance(chars, str):
             raise ValueError("chars must be a string")
 
-        wait_seconds = self._wait_seconds(
+        wait = self._wait(
             arguments,
             timeout_seconds,
             default_yield_time_ms=self.default_write_yield_time_ms,
@@ -383,7 +414,7 @@ class CommandRuntime:
                 except BrokenPipeError as exc:
                     raise ValueError("process stdin is closed") from exc
 
-            output, interrupted = self._read_process_output(process, wait_seconds)
+            output, interrupted = self._read_process_output(process, wait.from_now())
             exit_code = process.poll()
             session_id = raw_session_id
             if exit_code is not None:
@@ -555,6 +586,29 @@ class CommandRuntime:
         self.close()
 
 
+def _yield_time_description(
+    runtime: CommandRuntime,
+    default_ms: int,
+    timeout_seconds: Optional[float],
+) -> str:
+    """Describe ``yield_time_ms``: its maximum, default, and the tool's cap."""
+    text = (
+        f"How long to wait for output, at most {runtime.max_yield_time_ms}. "
+        f"Defaults to {default_ms}."
+    )
+    cap = timeout_seconds  # Tool validates it; describe only a real cap
+    if (
+        isinstance(cap, (int, float))
+        and not isinstance(cap, bool)
+        and 0 < cap * 1000 < runtime.max_yield_time_ms
+    ):
+        text += (
+            f" Waits end after {round(cap * 1000)} or sooner; poll a process "
+            "that is still running with write_stdin."
+        )
+    return text
+
+
 def create_exec_command_tool(
     runtime: CommandRuntime,
     *,
@@ -585,8 +639,10 @@ def create_exec_command_tool(
                     "yield_time_ms": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": (
-                            "How long to wait for output. Defaults to 10000."
+                        "description": _yield_time_description(
+                            runtime,
+                            runtime.default_exec_yield_time_ms,
+                            timeout_seconds,
                         ),
                     },
                     "max_output_tokens": {
@@ -644,8 +700,10 @@ def create_write_stdin_tool(
                     "yield_time_ms": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": (
-                            "How long to wait for output. Defaults to 250."
+                        "description": _yield_time_description(
+                            runtime,
+                            runtime.default_write_yield_time_ms,
+                            timeout_seconds,
                         ),
                     },
                     "max_output_tokens": {

@@ -12,7 +12,7 @@ from unittest import mock
 
 from pythia.interaction import Environment, Init, InteractionContext, Message
 from pythia.interaction import ModelSample, Tool, ToolCall, ToolOutcome, ToolResult, ToolSpec
-from pythia.interaction.environment import current_cancel
+from pythia.interaction.environment import current_cancel, current_results_due
 from pythia.interaction.items import ModelFailure, ModelSampleBoundary, SampleMetadata, TurnSummary
 from pythia.interaction.loop import Interrupt, MissingFinalText, Preemption, SampleLimitExceeded, Steer
 from pythia.interaction.loop import TurnHost, TurnResult, run_turn
@@ -100,6 +100,18 @@ class _Host(TurnHost):
 
     def retryable_failure(self):
         self.retryable += 1
+
+
+class _TracingHost(_Host):
+    """Also records each traced operation's tags."""
+
+    def __init__(self):
+        super().__init__()
+        self.traced = []
+
+    def trace(self, op, **tags):
+        self.traced.append((op, tags))
+        return super().trace(op, **tags)
 
 
 def _environment(host, *, inject=None):
@@ -222,6 +234,26 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual(context.pending_tool_calls(), ())
         self.assertEqual(model.retired, 1)
         self.assertEqual(model.threads | host.threads, {threading.get_ident()})
+
+    def test_each_call_runs_with_its_samples_results_due_and_is_traced(self):
+        host, context = _TracingHost(), _context()
+        due = time.monotonic() + 30
+        seen = []
+
+        def record(arguments, *, timeout_seconds=None):
+            seen.append(current_results_due())
+            return ToolOutcome("ok")
+        model = _Model(host, ModelSample((_call("a", "t0"), _call("b", "t0")), results_due=due),
+                       _calls(_call("c", "t0")), _answer("done"))
+        result = run_turn(context, model, _tools(record), _config(), host)
+        self.assertEqual(result, TurnResult("ended", "done"))
+        self.assertEqual(seen, [due, due, None])  # a sample without one, as from HTTP
+        self.assertIsNone(current_results_due())
+        calls = [tags for op, tags in host.traced if op == "tool_call"]
+        self.assertEqual([(tags["call_id"], tags["tool"]) for tags in calls],
+                         [("a", "t0"), ("b", "t0"), ("c", "t0")])
+        self.assertTrue(all(25 < tags["results_due_in_seconds"] <= 30 for tags in calls[:2]))
+        self.assertIsNone(calls[2]["results_due_in_seconds"])
 
     def test_injected_messages_wait_for_the_whole_batch(self):
         host, context = _Host(), _context()

@@ -16,6 +16,12 @@ from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
 PROFILE = 'claude-stream-json-v6'  # stream authority, keepalives, nonterminal API retry telemetry
+# CLI 2.1.289 answers an MCP tools/call itself ("The operation timed out.") 60 s
+# after sending it, as measured in relay traces; its controlling setting is
+# unverified. It sends one call at a time and gets no answer before the host has
+# run the whole batch, so the first call's clock covers the batch. Re-measure
+# after changing the pinned version (doc/claude-relay-tool-deadline-plan.md).
+NATIVE_MCP_DEADLINE_SECONDS = 60.0
 MAX_RECORD = 8 * 1024 * 1024
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))

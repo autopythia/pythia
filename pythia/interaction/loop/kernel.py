@@ -33,7 +33,7 @@ from __future__ import annotations
 import contextlib
 import enum
 from dataclasses import dataclass, replace
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Iterable, Optional, Sequence, Tuple
 
 from ..compaction import CompactionResult
@@ -44,6 +44,7 @@ from ..compaction import uses_host_auto_compaction
 from ..display import render_interaction_items
 from ..environment import CancelToken
 from ..environment import cancel_scope
+from ..environment import results_due_scope
 from ..items import InteractionItem
 from ..items import Message
 from ..items import ModelSampleBoundary
@@ -204,7 +205,7 @@ class TurnHost:
         return NOT_PREEMPTIBLE
 
     def trace(self, op: str, **tags):
-        """A context manager around each sample and compaction."""
+        """A context manager around each sample, tool call, and compaction."""
         return contextlib.nullcontext()
 
     def notice(self, text: str) -> None:
@@ -347,7 +348,8 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 raise MissingFinalText("Model returned no final assistant text.")
             _save_summary(context, host, started)
             return TurnResult("ended", text)
-        if not run_tool_calls(context, environment, sample.tool_calls, host):
+        if not run_tool_calls(context, environment, sample.tool_calls, host,
+                              results_due=sample.results_due):
             return STOPPED
         note = None if control is None else control.request()
         if note is not None:
@@ -415,11 +417,14 @@ def record_sample_failure(context, exc: ModelError, host: TurnHost) -> None:
 
 
 def run_tool_calls(context, environment, calls: Iterable[ToolCall],
-                   host: TurnHost) -> bool:
+                   host: TurnHost, *, results_due: Optional[float] = None) -> bool:
     """Run one batch, one call at a time; False if a stop came first.
 
     Each result is saved and shown as it arrives, and each call runs with a
     cancel token (``cancel_scope``) that a preempting steer or stop can set.
+    Each call also runs with the batch's ``results_due`` (``results_due_scope``),
+    when the sample's model needs the results (``ModelSample.results_due``),
+    and is traced as a ``tool_call`` operation.
     Flushed steers close the calls that have not started (``skip_calls``).
     User messages that tools inject wait until every call has a result. On a
     stop at level 2 or 3 (``should_stop``), calls that have not started stay
@@ -436,7 +441,10 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
             with operation:
                 if not operation.skipped:
                     host.tool_phase(call)
-                    with cancel_scope(token):
+                    with host.trace("tool_call", context_revision=len(context),
+                                    call_id=call.call_id, tool=call.name,
+                                    results_due_in_seconds=_seconds_until(results_due)), \
+                            cancel_scope(token), results_due_scope(results_due):
                         result = environment.execute_tool_calls((call,))
         if operation.skipped:
             if host.should_stop():
@@ -460,6 +468,11 @@ def skip_calls(context, calls: Iterable[ToolCall], host: TurnHost) -> None:
     results = tuple(ToolResult(call.call_id, SKIPPED_OUTPUT, success=False) for call in calls)
     host.append(context, results)
     host.show(render_interaction_items(results, source_calls=calls))
+
+
+def _seconds_until(due: Optional[float]) -> Optional[float]:
+    """A trace field: the seconds left before ``due`` (negative once past it)."""
+    return None if due is None else round(due - monotonic(), 3)
 
 
 def _retirer(model):

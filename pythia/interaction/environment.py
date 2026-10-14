@@ -109,6 +109,32 @@ def current_cancel() -> Optional[CancelToken]:
     return _CANCEL.get()
 
 
+_RESULTS_DUE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "pythia_interaction_results_due", default=None)
+
+
+@contextmanager
+def results_due_scope(due: Optional[float]) -> Iterator[Optional[float]]:
+    """Make ``due`` the running tool call's due time (see :func:`current_results_due`)."""
+    reset = _RESULTS_DUE.set(due)
+    try:
+        yield due
+    finally:
+        _RESULTS_DUE.reset(reset)
+
+
+def current_results_due() -> Optional[float]:
+    """When the running tool call's result is due, as a ``time.monotonic()`` value.
+
+    The turn loop sets it around each call (``results_due_scope``) from the
+    sample that proposed the call (``ModelSample.results_due``): a Claude
+    relay model stops waiting for the batch's results soon after. A tool that
+    waits for something optional, such as more command output, stops waiting
+    by then; it still does its work. None means no time is due.
+    """
+    return _RESULTS_DUE.get()
+
+
 def _validate_user_messages(messages: Iterable[Message]) -> Tuple[Message, ...]:
     messages = tuple(messages)
     for index, message in enumerate(messages):
@@ -353,4 +379,6 @@ __all__ = [
     "ToolSpec",
     "cancel_scope",
     "current_cancel",
+    "current_results_due",
+    "results_due_scope",
 ]

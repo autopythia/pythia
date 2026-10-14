@@ -256,6 +256,15 @@ def _apply_extra_sample_params(
 
 @dataclass(frozen=True)
 class ModelSample:
+    """One model response, with metadata for saving and for the turn loop.
+
+    ``results_due`` is a ``time.monotonic()`` value by which the model needs
+    the results of this sample's tool calls, or None. A Claude relay model sets
+    it (the native client gives up on its first MCP call after a fixed time);
+    the turn loop gives it to each call (``results_due_scope``). It is a
+    scheduling hint: not saved, and not part of equality.
+    """
+
     items: Tuple[InteractionItem, ...]
     stop_reason: Optional[str] = None
     usage: TokenUsage = field(default_factory=TokenUsage)
@@ -265,6 +274,7 @@ class ModelSample:
     elapsed_seconds: Optional[float] = None
     request_attempts: int = 1
     recovery: Tuple[str, ...] = ()
+    results_due: Optional[float] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -306,6 +316,12 @@ class ModelSample:
             if "\r" in value or "\n" in value:
                 raise ValueError(f"recovery[{index}] must not contain newlines")
         object.__setattr__(self, "recovery", recovery)
+        due = self.results_due
+        if due is not None:
+            if (isinstance(due, bool) or not isinstance(due, (int, float))
+                    or not math.isfinite(due)):
+                raise ValueError("results_due must be a finite monotonic time or None")
+            object.__setattr__(self, "results_due", float(due))
         for field_name in (
             "provider_session_id",
             "provider_turn_id",

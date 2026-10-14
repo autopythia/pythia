@@ -26,12 +26,14 @@ from pythia.interaction import (
     codex_quota, load_interaction_save,
 )
 from pythia.interaction import InteractionSaveWriter
+from pythia.interaction import CommandRuntime, create_exec_command_tool
 from pythia.interaction import _debug_trace
 from pythia.interaction._account_http import AccountServiceError
 from pythia.interaction._request_gate import cancellable_urlopen
 from pythia.interaction._debug_trace import (
     DebugTrace, TracingOpener, debug_trace_paths, trace_operation,
 )
+from pythia.interaction.loop import TurnHost, kernel
 from pythia.interaction.user_tools import UserToolIntent
 from pythia_test.interaction_helpers import (
     chat_endpoint, codex_model, messages_endpoint, responses_endpoint,
@@ -262,6 +264,39 @@ class EventTraceTests(unittest.TestCase):
             other.event('new_run'); other.close()
             self.assertTrue(trace.event_path.read_bytes().startswith(data))
             self.assertNotEqual(_rows(trace.event_path)[-1]['run_id'], rows[0]['run_id'])
+
+    def test_a_tool_call_operation_records_the_call_and_its_wait(self):
+        with tempfile.TemporaryDirectory() as root:
+            debug = DebugTrace.open(Path(root) / 'ctx.jsonl', events=True)
+
+            class Host(TurnHost):
+                def append(self, context, items):
+                    pass
+
+                def show(self, items):
+                    pass
+
+                def trace(self, op, **tags):
+                    return debug.operation(op, **tags)
+            call = ToolCall(name='exec_command', call_id='c1',
+                            arguments_json=json.dumps({'cmd': 'true', 'yield_time_ms': 20_000}))
+            try:
+                with CommandRuntime(root) as runtime:
+                    environment = Environment((create_exec_command_tool(runtime, timeout_seconds=5.0),))
+                    kernel.run_tool_calls([], environment, (call,), Host(),
+                                          results_due=time.monotonic() + 1.0)
+            finally:
+                debug.close()
+            rows = [r for r in _rows(debug.event_path) if r.get('op') == 'tool_call']
+            self.assertEqual([r['type'] for r in rows], ['operation_begin', 'operation_end'])
+            begin, end = rows
+            self.assertEqual((end['call_id'], end['tool']), ('c1', 'exec_command'))
+            self.assertTrue(0 < end['results_due_in_seconds'] <= 1.0, end)
+            self.assertNotIn('wait_seconds', begin)  # added while the call ran
+            self.assertEqual((end['wait_requested_seconds'], end['wait_limited_by']),
+                             (20.0, 'results_due'))
+            self.assertTrue(0 < end['wait_seconds'] <= 1.0, end)
+            self.assertIsNone(end['exception_type'])
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX private-file and symlink policy')
     def test_unsafe_existing_trace_files_are_not_chmodded_or_followed(self):

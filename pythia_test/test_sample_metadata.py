@@ -6,6 +6,7 @@ from pythia_test.interaction_helpers import responses_endpoint
 from pythia_test.interaction_helpers import codex_model
 
 from contextlib import ExitStack
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -108,6 +109,17 @@ class SampleMetadataTests(unittest.TestCase):
                              _USAGE, "session", "turn", "state")
         self.assertIsNone(metadata.elapsed_seconds)
         self.assertEqual(sample.context_items()[-2], metadata)
+
+    def test_results_due_is_a_validated_hint_never_saved_or_compared(self):
+        sample = ModelSample((Message("assistant", "Done."),), results_due=12)
+        self.assertEqual(sample.results_due, 12.0)
+        self.assertEqual(sample, ModelSample((Message("assistant", "Done."),)))
+        self.assertEqual(replace(sample, recovery=("restart",)).results_due, 12.0)
+        saved = json.dumps([interaction_item_to_dict(item) for item in sample.context_items()])
+        self.assertNotIn("results_due", saved)
+        for value in (True, "12", float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ModelSample((Message("assistant", "Done."),), results_due=value)
 
     def test_codec_reads_legacy_and_canonical_types_and_writes_canonical(self):
         for kind in ("turn_metadata", "sample_metadata"):

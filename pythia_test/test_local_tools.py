@@ -27,9 +27,12 @@ from pythia.interaction import create_apply_patch_tool
 from pythia.interaction import create_exec_command_tool
 from pythia.interaction import create_update_plan_tool
 from pythia.interaction import create_write_stdin_tool
+from pythia.interaction import default_environment
 from pythia.interaction.demo import DEFAULT_PROMPT
 from pythia.interaction.demo import run_repository_summary
+from pythia.interaction._debug_trace import capture_trace_scope, trace_operation
 from pythia.interaction.environment import CancelToken, cancel_scope, current_cancel
+from pythia.interaction.environment import results_due_scope
 
 
 def _execute(environment, name, call_id, arguments):
@@ -249,6 +252,93 @@ class CommandToolTests(unittest.TestCase):
                 result = _execute(environment, "exec_command", "one", {"cmd": "echo done"})
             self.assertIn("Process exited with code 0", result.output)
             self.assertNotIn("interrupted", result.output)
+
+    def test_the_tool_cap_shortens_a_wait_instead_of_rejecting_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
+            environment = Environment((
+                create_exec_command_tool(runtime, timeout_seconds=0.2),
+                create_write_stdin_tool(runtime, timeout_seconds=0.2),
+            ))
+            started = time.monotonic()
+            result = _execute(environment, "exec_command", "one",
+                              {"cmd": "sleep 30", "yield_time_ms": 60_000})
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertTrue(result.success, result.output)
+            match = re.search(r"Process running with session ID (\d+)\n", result.output)
+            self.assertIsNotNone(match, result.output)
+            self.assertNotIn("interrupted", result.output)
+            started = time.monotonic()
+            poll = _execute(environment, "write_stdin", "two",
+                            {"session_id": int(match.group(1)), "yield_time_ms": 60_000})
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertIn(f"Process running with session ID {match.group(1)}", poll.output)
+            # The maximum still holds: a longer request fails, as before.
+            over = _execute(environment, "exec_command", "three",
+                            {"cmd": "true", "yield_time_ms": 60_001})
+            self.assertFalse(over.success)
+            self.assertIn("yield_time_ms must not exceed 60000", over.output)
+
+    def test_a_wait_ends_when_the_calls_result_is_due(self):
+        with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
+            environment = Environment((create_exec_command_tool(runtime),
+                                       create_write_stdin_tool(runtime)))
+            started = time.monotonic()
+            with results_due_scope(started + 0.3):
+                result = _execute(environment, "exec_command", "one",
+                                  {"cmd": "echo before; sleep 30", "yield_time_ms": 30_000})
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertIn("before", result.output)
+            match = re.search(r"Process running with session ID (\d+)\n", result.output)
+            self.assertIsNotNone(match, result.output)
+            self.assertNotIn("interrupted", result.output)  # not a cancel
+            started = time.monotonic()
+            with results_due_scope(started + 0.3):
+                poll = _execute(environment, "write_stdin", "two",
+                                {"session_id": int(match.group(1)), "yield_time_ms": 30_000})
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertIn(f"Process running with session ID {match.group(1)}", poll.output)
+            self.assertNotIn("interrupted", poll.output)
+
+    def test_past_its_due_time_a_call_still_starts_its_process_and_writes(self):
+        with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
+            environment = Environment((create_exec_command_tool(runtime),
+                                       create_write_stdin_tool(runtime)))
+            started = time.monotonic()
+            with results_due_scope(started - 1):
+                first = _execute(environment, "exec_command", "one", {
+                    "cmd": "read line; echo got $line; sleep 1", "login": False,
+                    "yield_time_ms": 30_000})
+                match = re.search(r"Process running with session ID (\d+)\n", first.output)
+                self.assertIsNotNone(match, first.output)
+                second = _execute(environment, "write_stdin", "two", {
+                    "session_id": int(match.group(1)), "chars": "x\n", "yield_time_ms": 30_000})
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertTrue(second.success, second.output)
+            third = _execute(environment, "write_stdin", "three", {
+                "session_id": int(match.group(1)), "yield_time_ms": 10_000})
+            self.assertIn("got x", second.output + third.output)
+            self.assertIn("Process exited with code 0", third.output)
+
+    def test_the_wait_and_its_limits_go_on_the_traced_tool_call(self):
+        with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
+            environment = Environment((create_exec_command_tool(runtime, timeout_seconds=5.0),))
+            cases = (
+                (2_000, None, (2.0, 2.0, "request")),
+                (20_000, None, (20.0, 5.0, "tool_cap")),
+                (20_000, -1.0, (20.0, 0.0, "results_due")),
+            )
+            for yield_time_ms, due_in, expected in cases:
+                due = None if due_in is None else time.monotonic() + due_in
+                with self.subTest(yield_time_ms=yield_time_ms, due_in=due_in):
+                    with trace_operation("tool_call"), results_due_scope(due):
+                        _execute(environment, "exec_command", "one",
+                                 {"cmd": "true", "yield_time_ms": yield_time_ms})
+                        scope = capture_trace_scope()
+                    self.assertEqual((scope["wait_requested_seconds"], scope["wait_seconds"],
+                                      scope["wait_limited_by"]), expected)
+            # Outside a traced operation nothing is recorded, and nothing fails.
+            _execute(environment, "exec_command", "two", {"cmd": "true"})
+            self.assertEqual(capture_trace_scope(), {"op": None, "operation_id": None})
 
     def test_exec_failure_cleans_up_child_before_and_after_session_registration(self):
         for method in ("_read_process_output", "_format_response"):
@@ -1058,6 +1148,32 @@ class DefaultEnvironmentTests(unittest.TestCase):
 
             environment.close()
             self.assertEqual(environment.command_runtime.active_session_ids, ())
+
+    def test_command_waits_are_capped_under_the_relay_deadline(self):
+        self.assertEqual(default_environment.COMMAND_WAIT_CAP_SECONDS, 59.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with DefaultEnvironment(cwd=tmpdir) as environment:
+                descriptions = [
+                    spec.parameters["properties"]["yield_time_ms"]["description"]
+                    for spec in environment.tool_specs
+                    if spec.name in ("exec_command", "write_stdin")
+                ]
+            self.assertEqual(len(descriptions), 2)
+            for text in descriptions:
+                self.assertIn("at most 60000", text)
+                self.assertIn("Waits end after 59000 or sooner", text)
+            # Both command tools get the cap: a longer wait ends at it.
+            with mock.patch.object(default_environment, "COMMAND_WAIT_CAP_SECONDS", 0.2), \
+                    DefaultEnvironment(cwd=tmpdir) as environment:
+                started = time.monotonic()
+                result = _execute(environment, "exec_command", "one",
+                                  {"cmd": "sleep 30", "yield_time_ms": 60_000})
+                match = re.search(r"Process running with session ID (\d+)\n", result.output)
+                self.assertIsNotNone(match, result.output)
+                poll = _execute(environment, "write_stdin", "two",
+                                {"session_id": int(match.group(1)), "yield_time_ms": 60_000})
+                self.assertIn("Process running with session ID", poll.output)
+                self.assertLess(time.monotonic() - started, 10)
 
     def test_default_environment_enable_flags(self):
         with tempfile.TemporaryDirectory() as tmpdir:

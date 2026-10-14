@@ -118,6 +118,17 @@ def capture_trace_scope():
             {**scope.tags, "op": scope.op, "operation_id": scope.id})
 
 
+def annotate_operation(**fields) -> None:
+    """Add tags to the traced operation in progress, as for a tool call's wait.
+
+    Its later events carry them, including ``operation_end``. Outside a
+    traced operation (tracing off) this does nothing.
+    """
+    scope = _OPERATION.get()
+    if scope is not None:
+        scope.tags.update(fields)
+
+
 def _private_opener(path, flags):
     if Path(path).is_symlink():
         raise ValueError(f"debug trace destination must not be a symlink: {path}")

@@ -66,6 +66,14 @@ by these short tests.
   cold inference recovery, without rerunning tool handlers. Generic transport,
   snapshot/parser and generation-timeout failures remain non-automatic. See the
   [recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
+- That native timeout fires 60 s after the CLI sends an MCP call (measured on
+  2.1.289; the controlling setting is unverified). The CLI sends a batch's calls
+  one at a time and none is answered before the whole batch has run, so the first
+  call's clock covers the batch. Each relay tool batch therefore carries
+  `ModelSample.results_due`, 55 s after its first call arrived. The turn loop
+  passes it to every call, and command waits end by then; `DefaultEnvironment`
+  also caps any wait at 59 s. This is A-side only. See the
+  [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md).
 - The MCP endpoint implements stateless JSON-response Streamable HTTP with
   initialization, tools/list, tools/call and ping, using the explicitly supported
   protocol dates 2025-03-26, 2025-06-18 and 2025-11-25. GET/SSE and DELETE return

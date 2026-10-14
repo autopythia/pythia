@@ -123,7 +123,7 @@ class StreamLivenessTests(unittest.TestCase):
             rt = self.model._runtime
             if rt is not None:
                 with rt.mailbox.condition:
-                    if 'toolu_a' in rt.mailbox.early:
+                    if 'toolu_a' in rt.mailbox.arrivals:
                         return rt
             time.sleep(.005)
         self.fail('Fixture callback did not arrive')

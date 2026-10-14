@@ -165,6 +165,21 @@ class RelayTraceTests(unittest.TestCase):
         self.assertNotIn(token, trace.event_path.read_text())
         self.assertEqual(trace.request_path.read_text(), '')
 
+    def test_tool_batches_record_when_their_results_are_due(self):
+        trace = self.traced()
+        context = InteractionContext((Message('user', 'two'),))
+        with trace.operation('sample', context_revision=len(context)):
+            sample = self.model.sample(context, tools=fixtures.TOOLS)
+        context.extend(sample.context_items())
+        context.extend(ToolResult(call.call_id, 'done') for call in sample.tool_calls)
+        with trace.operation('sample', context_revision=len(context)):
+            self.model.sample(context, tools=fixtures.TOOLS)
+        trace.close()
+        ends = [r for r in rows(trace.event_path) if r['type'] == 'sample_end']
+        self.assertEqual(len(ends), 2)
+        self.assertTrue(50 < ends[0]['results_due_in_seconds'] <= 55, ends[0])
+        self.assertIsNone(ends[1]['results_due_in_seconds'])
+
     def test_frontend_failures_save_metadata_and_keep_payload_only_in_trace(self):
         for frontend in ('cli', 'auto'):
             save = self.root / (frontend + ('.jsonl' if frontend == 'cli' else ''))

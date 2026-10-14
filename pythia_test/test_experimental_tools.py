@@ -86,6 +86,10 @@ class ExperimentalToolTests(unittest.TestCase):
         for tools, exception in cases:
             with self.subTest(tools=tools):
                 with mock.patch.object(default_environment, "CommandRuntime", autospec=True) as runtime:
+                    # The command tools describe the runtime's wait limits.
+                    runtime.return_value.configure_mock(
+                        default_exec_yield_time_ms=10_000, default_write_yield_time_ms=250,
+                        max_yield_time_ms=60_000)
                     with self.assertRaises(exception):
                         DefaultEnvironment(extra_tools=tools)
                     runtime.return_value.close.assert_called_once_with()
