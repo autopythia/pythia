@@ -4,6 +4,7 @@ import contextlib
 import hmac
 import http.server
 import json
+import re
 import secrets
 import socket
 import threading
@@ -23,6 +24,28 @@ class MCPError(ModelResponseError):
     def __init__(self, message, rpc_code=-32602):
         super().__init__(message)
         self.rpc_code = rpc_code
+
+
+class NativeToolRejected(MCPError):
+    """The CLI rejected a streamed tool call itself, before calling it: the model
+    named a tool the CLI has not got (_recovery.native_tool_rejection).
+
+    Nothing from the response is published, and none of its calls runs, so
+    sampling the same context again is safe. The class name is the saved
+    failure category.
+    """
+
+    error_code = 'native_tool_name_rejected'
+
+    def __init__(self, name, callable_name=None):
+        # The name is model output: shown only as a plain tool identifier.
+        self.name = name if isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) else None
+        self.callable_name = callable_name if self.name else None
+        shown = self.name or 'an invalid tool name'
+        message = f'Native CLI rejected a call to {shown}: no such tool'
+        if self.callable_name:
+            message += f'; its callable name is {self.callable_name}'
+        super().__init__(message)
 
 
 def pointer(document, path):
@@ -176,6 +199,19 @@ class Mailbox:
     def all_returned(self):
         with self.condition:
             return all(v['returned'] for v in self.slots.values())
+
+    def reject_streamed_call(self, ident, error):
+        """Fail with ``error``: the CLI answered a call it never sent here.
+
+        Only for an ID this mailbox neither registered nor received a callback
+        for, which validate_native_results rejects anyway. Otherwise ordinary
+        validation decides: a host's own error result can carry the same text.
+        """
+        with self.condition:
+            if self.closed or ident in self.slots or ident in self.arrivals:
+                return
+            failure = self._fail_error(error)
+        raise failure
 
     def validate_native_results(self, blocks):
         """Validate the whole envelope before granting any result authority.

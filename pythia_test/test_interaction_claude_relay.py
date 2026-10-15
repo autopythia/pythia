@@ -27,7 +27,7 @@ from pythia.interaction.model import ModelError, ModelConfigurationError, Sample
 from pythia.interaction.claude_relay._cli_protocol import Assembler, decode
 from pythia.interaction.claude_relay._context import Snapshot
 from pythia.interaction.claude_relay._mcp import Mailbox, MCPServer
-from pythia.interaction.claude_relay._runtime import Runtime
+from pythia.interaction.claude_relay._runtime import PREAMBLE, Runtime, system_prompt
 from pythia.interaction.compaction import PiCompactor, CompactionError, auto_compaction_due
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.model_catalog import EndpointSpec, BUILTIN_MODEL_CATALOG
@@ -189,6 +189,31 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(binding.api, 'claude-relay')
         self.assertIsNone(binding.endpoint.url)
         self.assertEqual(binding.endpoint.auth, 'runtime')
+
+
+class ColdImportTests(unittest.TestCase):
+    def test_calls_to_listed_tools_show_their_callable_names(self):
+        context = InteractionContext((
+            Message('user', 'go'), ToolCall('echo', 'c1', '{"value":1}'), ToolCall('retired', 'c2', '{}'),
+            ToolResult('c1', 'one'), ToolResult('c2', 'two', False)))
+        snapshot = Snapshot.build(context, TOOLS)
+        prompt = json.loads(snapshot.prompt({'echo': 'mcp__pythia__echo'}))
+        self.assertEqual(prompt['format'], 'pythia.claude-relay.text.v2')
+        self.assertEqual([(row['id'], row['name']) for row in prompt['history'] if row['kind'] == 'call'],
+                         [('c1', 'mcp__pythia__echo'), ('c2', 'retired')])  # not listed: not callable
+        # The records, which the warm handoff compares, keep the Pythia names.
+        self.assertEqual([json.loads(row).get('name') for row in snapshot.records], [None, 'echo', 'retired', None, None])
+        self.assertEqual([row['name'] for row in json.loads(snapshot.prompt())['history'] if row['kind'] == 'call'],
+                         ['echo', 'retired'])
+
+    def test_the_preamble_gives_the_callable_names_only_with_tools(self):
+        preamble, instructions = system_prompt(
+            'Use echo.', {'echo': 'mcp__pythia__echo', 'other': 'mcp__pythia__other'}).split('\n\n', 1)
+        self.assertEqual(instructions, 'Use echo.')
+        self.assertTrue(preamble.startswith(PREAMBLE))
+        self.assertIn('Call tools only by their full names in your tool list, such as mcp__pythia__echo.', preamble)
+        self.assertIn('without the mcp__pythia__ prefix', preamble)
+        self.assertEqual(system_prompt(None, {}), PREAMBLE + '\n\n')  # as before: no tools, no names
 
 
 class RelayTimeoutConfigTests(unittest.TestCase):
@@ -411,6 +436,44 @@ class ModelTests(unittest.TestCase):
                 failure = caught.exception.failure
                 self.assertEqual((failure.category, failure.error_code), ('NativeRefusal', 'refusal'))
                 self.assertTrue(failure.message.startswith(expected + ' (phase='), failure.message)
+                self.assertIsNone(self.model._runtime)
+
+    def test_a_cold_import_shows_calls_under_their_callable_names(self):
+        context = InteractionContext((Instructions('Use echo.'), Message('user', 'two')))
+        sample = self.model.sample(context, tools=TOOLS)
+        context.extend(sample.context_items())
+        context.extend(ToolResult(call.call_id, 'done') for call in sample.tool_calls)
+        context.append(Message('user', 'after results'))  # a new message: a cold import
+        final = self.model.sample(context, tools=TOOLS)
+        self.assertEqual(final.last_assistant_text, 'cold:after results')
+        state = self.fixture_state()
+        self.assertEqual(state['history_call_names'], ['mcp__pythia__echo'] * 2)
+        self.assertIn('such as mcp__pythia__echo.', state['system_preamble'])
+        # Under a catalog without echo, its calls keep the Pythia name: not callable.
+        context.extend(final.context_items())
+        context.append(Message('user', 'other catalog'))
+        self.model.sample(context, tools=(ToolSpec('other', 'Other.', {'type': 'object', 'properties': {}}),))
+        state = self.fixture_state()
+        self.assertEqual(state['history_call_names'], ['echo'] * 2)
+        self.assertIn('such as mcp__pythia__other.', state['system_preamble'])
+
+    def test_a_native_tool_name_rejection_is_reported_as_such(self):
+        # The fixture rejects the call the observed way, before the message completes.
+        cases = {'bare-tool-name': ('NativeToolRejected', 'native_tool_name_rejected',
+                                    'Native CLI rejected a call to echo: no such tool; '
+                                    'its callable name is mcp__pythia__echo'),
+                 'unknown-tool-name': ('NativeToolRejected', 'native_tool_name_rejected',
+                                       'Native CLI rejected a call to Bash: no such tool'),
+                 # Any other rejection keeps the ordinary validation's error.
+                 'tool-input-rejected': ('MCPError', None, 'Native tool result has an unknown or duplicate call ID')}
+        for prompt, (category, code, message) in cases.items():
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(ModelError) as caught:
+                    self.model.sample(InteractionContext((Message('user', prompt),)), tools=TOOLS)
+                failure = caught.exception.failure
+                self.assertEqual((failure.category, failure.error_code), (category, code))
+                self.assertTrue(failure.message.startswith(message + ' (phase='), failure.message)
+                self.assertEqual(caught.exception.completed_items, ())  # nothing published, nothing run
                 self.assertIsNone(self.model._runtime)
 
     def test_a_cut_native_message_is_discarded_and_the_clis_retry_adopted(self):

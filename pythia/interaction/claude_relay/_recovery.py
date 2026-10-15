@@ -46,6 +46,33 @@ def is_host_echo(result, block):
             and result_text(result.get('content')) == text)
 
 
+def native_tool_rejection(record, streamed):
+    """The CLI's own rejection of a streamed call to a tool it has not got, or None.
+
+    Observed on CLI 2.1.289 (doc/claude-relay-tool-name-plan.md): right after a
+    tool block's snapshot, before its message completes, the CLI answers the
+    call with one error result naming the tool. ``record`` is a native ``user``
+    record; ``streamed`` maps the open message's tool_use IDs to their names.
+    Only that exact shape is recognized. It diagnoses a record that ordinary
+    validation rejects anyway, and never permits accepting anything. Returns
+    ``(native ID, tool name)``.
+    """
+    message = record.get('message')
+    blocks = message.get('content') if isinstance(message, dict) else None
+    if not isinstance(blocks, list) or len(blocks) != 1 or not isinstance(blocks[0], dict):
+        return None
+    block = blocks[0]
+    ident = block.get('tool_use_id')
+    name = streamed.get(ident) if isinstance(ident, str) else None
+    if not isinstance(name, str) or block.get('type') != 'tool_result' or block.get('is_error') is not True:
+        return None
+    text = f'Error: No such tool available: {name}'
+    if (result_text(block.get('content')) != f'<tool_use_error>{text}</tool_use_error>'
+            or record.get('tool_use_result') != text):
+        return None
+    return ident, name
+
+
 @dataclass(frozen=True)
 class ExpiredCall:
     native_id: str

@@ -8,7 +8,9 @@ from ..items import Instructions, Message, Reasoning, ToolCall, ToolResult, Opaq
 from ..model import ModelConfigurationError, ModelResponseError
 from ..model_catalog import parse_json_value, thaw_json
 
-CODEC = 'pythia.claude-relay.text.v1'
+# v2: a historical call to a tool in the current catalog is shown under the
+# native name the model calls it by (Snapshot.prompt).
+CODEC = 'pythia.claude-relay.text.v2'
 
 
 def canonical(value):
@@ -61,17 +63,29 @@ class Snapshot:
                              for t in tools])
         return cls(instructions, tuple(records), catalog)
 
-    def prompt(self):
+    def prompt(self, names=None):
+        """The cold-import input: the history as one JSON document.
+
+        ``names`` maps a Pythia tool name to the native name the model calls it
+        by. A historical call to such a tool is shown under that name, so the
+        history's calls match the tool list: right after a cold import, the
+        history holds the model's only examples of calls, and CLI 2.1.289
+        rejects a call by the bare Pythia name. Other calls keep their names.
+        ``records``, and so the warm-handoff comparison, never change.
+        """
         pending = set()
+        history = []
         for value in self.records:
             row = json.loads(value)
             if row['kind'] == 'call':
                 pending.add(row['id'])
+                row['name'] = (names or {}).get(row['name'], row['name'])
             elif row['kind'] == 'result':
                 pending.discard(row['id'])
+            history.append(row)
         if pending:
             raise ModelConfigurationError('Cannot cold-import unresolved historical tool calls')
-        return canonical({'format': CODEC, 'history': [json.loads(v) for v in self.records]})
+        return canonical({'format': CODEC, 'history': history})
 
 
 def handoff(snapshot, acknowledged, pending):

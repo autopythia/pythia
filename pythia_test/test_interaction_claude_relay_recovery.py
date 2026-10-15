@@ -11,8 +11,9 @@ from pythia.interaction import ModelContinuationExpired
 from pythia.interaction._debug_trace import DebugTrace
 from pythia.interaction.claude_relay import ClaudeRelayModel
 from pythia.interaction.claude_relay._context import Snapshot
-from pythia.interaction.claude_relay._mcp import Mailbox, MCPError
+from pythia.interaction.claude_relay._mcp import Mailbox, MCPError, NativeToolRejected
 from pythia.interaction.claude_relay._recovery import NativeMCPTimeout, NATIVE_TIMEOUT_TEXT, native_timeout_texts
+from pythia.interaction.claude_relay._recovery import native_tool_rejection
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.environment import Environment, Tool, ToolOutcome
@@ -111,6 +112,70 @@ class NativeResultTests(unittest.TestCase):
         box.call('a', 'echo', {'value': 1})
         box.validate_native_results([timed_out(content=text)])
         self.assertFalse(box.closed)
+
+
+# Observed 2.1.289 (auto-9, synthetic ID): one error block, and the envelope text.
+OBSERVED_REJECTION = {
+    'type': 'user', 'parent_tool_use_id': None,
+    'message': {'role': 'user', 'content': [{
+        'type': 'tool_result', 'is_error': True, 'tool_use_id': 'toolu_x',
+        'content': '<tool_use_error>Error: No such tool available: exec_command</tool_use_error>'}]},
+    'tool_use_result': 'Error: No such tool available: exec_command'}
+
+
+class NativeToolRejectionTests(unittest.TestCase):
+    def test_only_the_observed_rejection_of_a_streamed_call_is_recognized(self):
+        streamed = {'toolu_x': 'exec_command'}
+        self.assertEqual(native_tool_rejection(OBSERVED_REJECTION, streamed), ('toolu_x', 'exec_command'))
+
+        def variant(envelope=..., **changes):
+            value = deepcopy(OBSERVED_REJECTION)
+            value['message']['content'][0].update(changes)
+            if envelope is not ...:
+                value['tool_use_result'] = envelope
+            return value
+        block = OBSERVED_REJECTION['message']['content'][0]
+        cases = {
+            'not a streamed call': (OBSERVED_REJECTION, {}),
+            'another streamed call': (OBSERVED_REJECTION, {'toolu_y': 'exec_command'}),
+            'block named otherwise': (OBSERVED_REJECTION, {'toolu_x': 'mcp__pythia__exec_command'}),
+            'not an error': (variant(is_error=False), streamed),
+            'other rejection': (variant(content='<tool_use_error>InputValidationError: x</tool_use_error>'), streamed),
+            'no envelope': (variant(envelope=None), streamed),
+            'other envelope': (variant(envelope='Error: something else'), streamed),
+            'two blocks': ({**OBSERVED_REJECTION, 'message': {'content': [block, block]}}, streamed),
+            'malformed message': ({'type': 'user', 'message': 'text'}, streamed),
+        }
+        for case, (record, ids) in cases.items():
+            with self.subTest(case=case):
+                self.assertIsNone(native_tool_rejection(record, ids))
+
+    def test_the_mailbox_reports_it_only_for_a_call_it_never_saw(self):
+        box = Mailbox(fixture.TOOLS)
+        failure = mock.Mock(); box.on_failure = failure
+        error = NativeToolRejected('exec_command', 'mcp__pythia__exec_command')
+        self.assertEqual(str(error), 'Native CLI rejected a call to exec_command: no such tool; '
+                                     'its callable name is mcp__pythia__exec_command')
+        with self.assertRaises(NativeToolRejected) as caught:
+            box.reject_streamed_call('toolu_x', error)
+        self.assertIs(caught.exception, error)
+        self.assertIs(box.failure, error)
+        self.assertTrue(box.closed)
+        failure.assert_called_once_with(error)
+        # A registered call, a call the CLI did make, or a closed mailbox: the
+        # ordinary validation decides, and an earlier failure stays the cause.
+        registered = Mailbox(fixture.TOOLS)
+        registered.register([('a', 'echo', {'value': 1})])
+        called = Mailbox(fixture.TOOLS)
+        called.arrivals['a'] = time.monotonic()
+        closed = Mailbox(fixture.TOOLS)
+        earlier = closed.fail('earlier failure')
+        for name, mailbox in (('registered', registered), ('called', called), ('closed', closed)):
+            with self.subTest(mailbox=name):
+                self.assertIsNone(mailbox.reject_streamed_call('a', NativeToolRejected('echo')))
+        self.assertFalse(registered.closed or called.closed)
+        self.assertIs(closed.failure, earlier)
+        self.assertEqual(str(NativeToolRejected('two\nlines')), 'Native CLI rejected a call to an invalid tool name: no such tool')
 
 
 class SavingHost(TurnHost):

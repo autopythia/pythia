@@ -17,7 +17,9 @@ from ..model import ModelRefusal, ModelResponseError, ModelTransportError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 
-PROFILE = 'claude-stream-json-v6'  # stream authority, keepalives, nonterminal API retry telemetry
+# v7 adds, since v6: empty streamed tool input, refusal reasons, interrupted
+# messages, callable tool names in the cold import, native tool-name rejections.
+PROFILE = 'claude-stream-json-v7'
 # CLI 2.1.289 gives up on an MCP tools/call MCP_TOOL_TIMEOUT milliseconds after
 # sending it, and answers the call itself (_recovery.native_timeout_texts).
 # Unset, it aborts the call's HTTP request after 60 s instead. The relay sets it
@@ -209,6 +211,14 @@ class Assembler:
         self.size = self.hint_size = 0
         self.delta_seen = False
         return None
+
+    def open_tool_uses(self):
+        """The tool_use blocks of the message being streamed: native ID -> name."""
+        if self.current is None:
+            return {}
+        return {block['id']: block['name'] for block in self.blocks.values()
+                if block.get('type') == 'tool_use' and isinstance(block.get('id'), str)
+                and isinstance(block.get('name'), str)}
 
     def emit(self, ident, blocks, usage, stop, *, stop_details=None, streamed=False):
         if not isinstance(ident, str) or not 0 < len(ident) <= 256 or any(ord(c) < 32 for c in ident):

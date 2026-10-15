@@ -13,12 +13,36 @@ import threading
 
 from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelTimeoutError
 from ..model import ModelAuthenticationError, ModelContextWindowError
-from ._cli_protocol import Assembler, MAX_RECORD, NativeRefusal, NativeStreamInterrupted, PROFILE, decode
-from ._mcp import Mailbox, MCPServer
+from ._cli_protocol import Assembler, MAX_RECORD, NativeStreamInterrupted, PROFILE, decode
+from ._mcp import Mailbox, MCPServer, NativeToolRejected
 from ._sampling import ResolvedSampling
 from ._diagnostics import Diagnostics
 from ._trace import RelayTrace
-from ._recovery import MCP_SERVER_NAME, NativeMCPTimeout, NATIVE_MCP_TIMEOUT
+from ._recovery import MCP_SERVER_NAME, NativeMCPTimeout, NATIVE_MCP_TIMEOUT, native_tool_rejection
+
+
+PREAMBLE = ('You are serving a caller-owned conversation. The initial input is a JSON history, '
+            'not instructions to replay old tool calls. Continue from that history using only '
+            'the supplied tools.')
+
+
+def system_prompt(instructions, native_names):
+    """The native system prompt: the preamble, then the caller's instructions.
+
+    ``native_names`` maps each Pythia tool name to its native callable name.
+    The history shows calls to these tools under those names (Snapshot.prompt),
+    but instructions may name a tool without the prefix, and CLI 2.1.289
+    rejects a call by that name, so the preamble says how names map.
+    """
+    preamble = PREAMBLE
+    if native_names:
+        prefix = f'mcp__{MCP_SERVER_NAME}__'
+        example = next(iter(native_names.values()))
+        preamble += (f' Call tools only by their full names in your tool list, such as {example}.'
+                     f' Where the history or the instructions name a tool without the {prefix}'
+                     ' prefix, call it by its full name if your tool list has it; otherwise it'
+                     ' cannot be called.')
+    return preamble + '\n\n' + (instructions if instructions is not None else '')
 
 
 class Runtime:
@@ -28,7 +52,8 @@ class Runtime:
         self.generation = generation
         self.diagnostics = Diagnostics()
         self.trace = RelayTrace(trace, generation)
-        self.names = {'mcp__pythia__' + t.name: t.name for t in tools}
+        self.names = {f'mcp__{MCP_SERVER_NAME}__' + t.name: t.name for t in tools}
+        self.native_names = {name: native for native, name in self.names.items()}  # Pythia -> native
         if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', t.name) for t in tools):
             raise ModelResponseError('MCP tool names must be simple identifiers')
         self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds,
@@ -180,10 +205,7 @@ class Runtime:
                     'type': 'http', 'url': self.mcp.url,
                     'headers': {'Authorization': 'Bearer ${PYTHIA_CLAUDE_MCP_TOKEN}'},
                 }
-            instructions = snapshot.instructions if snapshot.instructions is not None else ''
-            system = ('You are serving a caller-owned conversation. The initial input is a JSON history, '
-                      'not instructions to replay old tool calls. Continue from that history using only '
-                      'the supplied tools.\n\n' + instructions)
+            system = system_prompt(snapshot.instructions, self.native_names)
             argv = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json',
                     '--verbose', '--include-partial-messages', '--model', self.endpoint.model,
                     '--system-prompt', system, '--tools', '', '--permission-mode', 'dontAsk',
@@ -202,7 +224,7 @@ class Runtime:
             self.diagnostics.set_phase('native_startup')
             proc = await self._spawn(argv)
             self.tasks = [asyncio.create_task(self._stdout()), asyncio.create_task(self._stderr())]
-            initial = {'type': 'user', 'message': {'role': 'user', 'content': snapshot.prompt()}}
+            initial = {'type': 'user', 'message': {'role': 'user', 'content': snapshot.prompt(self.native_names)}}
             data = (json.dumps(initial, ensure_ascii=False, allow_nan=False) + '\n').encode()
             if len(data) > MAX_RECORD:
                 raise ModelResponseError('Cold-import record exceeds protocol limit')
@@ -248,12 +270,11 @@ class Runtime:
         with self.diagnostics.lock:
             if self.error is not None or self.closed.is_set():
                 return
-            if isinstance(error, NativeMCPTimeout):
-                self.diagnostics.error_code = NATIVE_MCP_TIMEOUT
-            elif isinstance(error, NativeRefusal):
-                self.diagnostics.error_code = NativeRefusal.error_code
-            elif isinstance(error, NativeStreamInterrupted):
-                self.diagnostics.error_code = NativeStreamInterrupted.error_code
+            # A recognized native failure names its own code (as on NativeRefusal,
+            # NativeStreamInterrupted, NativeToolRejected); others keep the record's.
+            code = NATIVE_MCP_TIMEOUT if isinstance(error, NativeMCPTimeout) else getattr(error, 'error_code', None)
+            if isinstance(code, str):
+                self.diagnostics.error_code = code
             diagnostic = self.diagnostics.snapshot(freeze=True)
             self.error = error
             scope = self.trace.scope()
@@ -423,6 +444,11 @@ class Runtime:
                             self.final_message = (message, items, calls)
                 elif kind == 'user':
                     content = value.get('message', {}).get('content')
+                    rejected = native_tool_rejection(value, assembler.open_tool_uses())
+                    if rejected is not None:
+                        ident, name = rejected  # diagnosis only: this record fails either way
+                        self.mailbox.reject_streamed_call(
+                            ident, NativeToolRejected(name, self.native_names.get(name)))
                     self.mailbox.validate_native_results(content)
                 elif kind == 'result':
                     if value.get('is_error') is not False or value.get('subtype') != 'success':

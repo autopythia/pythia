@@ -39,7 +39,7 @@ by these short tests.
   parent PID, and the client installs a death guard before connecting. B's child
   guard independently covers broker death before the wrapper execs Bubblewrap.
 - An **explicit expected native CLI version** is required. The experimental
-  `claude-stream-json-v6` profile uses print/stream-json input/output, partial
+  `claude-stream-json-v7` profile uses print/stream-json input/output, partial
   events, strict MCP configuration, empty built-in tools/settings sources,
   `dontAsk` permissions, and no native session persistence. Unexpected control
   operations, built-in tools, compaction, or inventory differences fail closed.
@@ -61,6 +61,17 @@ by these short tests.
   from a cut message is adopted, and its tokens are not counted. A
   `message_delta` present but missing its stop reason or usage still fails as
   before.
+- Tool names: the CLI lists Pythia's tools as `mcp__pythia__<name>`, and rejects
+  a call by any other name itself, before the message completes. On 2.1.289 the
+  model did so three times, always with `exec_command` in its first message after
+  a cold import (2 of 166 traced calls there, none of 2,368 later). The cold-import
+  history therefore shows calls to listed tools under their full names, and the
+  system prompt says to call tools by those names. If the CLI still rejects a
+  name, the run fails as `NativeToolRejected` (error code
+  `native_tool_name_rejected`), naming the tool and its callable name, instead of
+  "Native tool result has an unknown or duplicate call ID". Nothing from that
+  response is published or run. See the
+  [tool-name notes](../doc/claude-relay-tool-name-plan.md).
 - Native `stream_event/ping` keepalives are no-ops. Early MCP callbacks get a
   registration grace derived from the existing generation timeout instead of a
   separate ten-second cap; full-message validation still precedes tool execution.

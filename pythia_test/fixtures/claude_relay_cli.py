@@ -108,6 +108,8 @@ print('fixture-state:' + json.dumps({'pid': os.getpid(), 'effort': effort, 'summ
                                    'tool_server_count': len(config),
                                    'mcp_tool_timeout': tool_timeout_ms,
                                    'history_result_ids': [row['id'] for row in history if row['kind'] == 'result'],
+                                   'history_call_names': [row['name'] for row in history if row['kind'] == 'call'],
+                                   'system_preamble': option('--system-prompt').split('\n\n', 1)[0],
                                    'disable_auto_compact': os.environ.get('DISABLE_AUTO_COMPACT')}),
       file=sys.stderr, flush=True)
 servers, tools = [], []
@@ -221,6 +223,31 @@ if text == 'park':
     time.sleep(60)
 if text == 'stream-cut-tools':
     cut_message('m-cut-0', tool=True)  # the relay must fail closed: its call may have been sent
+    sys.stdin.read()
+    raise SystemExit(0)
+if text in ('bare-tool-name', 'unknown-tool-name', 'tool-input-rejected'):
+    # Observed 2.1.289 order, synthetic contents: right after a tool block's
+    # snapshot, before the message completes, the CLI answers a call it will
+    # not make with one error result. Here: the bare Pythia name of a listed
+    # tool, a name it has not got, or (not recognized) another rejection.
+    name = 'Bash' if text == 'unknown-tool-name' else tools[0]['name'] if text == 'bare-tool-name' else names[0]
+    block = {'type': 'tool_use', 'id': 'toolu_rejected', 'name': name, 'input': {'value': 1}}
+    error = (f'Error: No such tool available: {name}' if text != 'tool-input-rejected'
+             else 'InputValidationError: synthetic')
+    def event(kind, **fields):
+        emit({'type': 'stream_event', 'event': {'type': kind, **fields}})
+    emit({'type': 'system', 'subtype': 'status', 'status': 'requesting'})
+    event('message_start', message={'id': 'm-rejected', 'usage': {'input_tokens': 5, 'output_tokens': 1}})
+    event('content_block_start', index=0, content_block={**block, 'input': {}})
+    event('content_block_delta', index=0, delta={'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])})
+    emit({'type': 'assistant', 'message': {'id': 'm-rejected', 'content': [block], 'stop_reason': None,
+                                           'usage': {'input_tokens': 5, 'output_tokens': 1}}})
+    emit({'type': 'user', 'message': {'role': 'user', 'content': [{
+          'type': 'tool_result', 'content': f'<tool_use_error>{error}</tool_use_error>', 'is_error': True,
+          'tool_use_id': block['id']}]}, 'tool_use_result': error})
+    event('content_block_stop', index=0)
+    event('message_delta', delta={'stop_reason': 'tool_use'}, usage={'output_tokens': 3})
+    event('message_stop')
     sys.stdin.read()
     raise SystemExit(0)
 if text in ('early-callback', 'early-callback-invalid'):
