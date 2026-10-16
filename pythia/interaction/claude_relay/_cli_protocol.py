@@ -2,7 +2,10 @@
 
 Only message_stop completes a stream. Null-stop assistant records are shadow
 block snapshots, not new messages or authoritative usage. They must match their
-stream, but must never split a tool batch or overwrite final token accounting.
+stream, except that a tool block may show the CLI's rewrite of its input
+(native_input_rewrite; any other difference there is NativeToolInputRewritten),
+and must never split a tool batch or overwrite final token accounting. Only
+streamed blocks are adopted, never the CLI's copies.
 A message_stop without the message's final message_delta marks an interrupted
 message, which is discarded (MAX_CONSECUTIVE_INTERRUPTIONS).
 """
@@ -16,10 +19,13 @@ from ..items import Message, Reasoning, ToolCall
 from ..model import ModelRefusal, ModelResponseError, ModelTransportError
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
+from ._diagnostics import identifier
 
 # v7 adds, since v6: empty streamed tool input, refusal reasons, interrupted
 # messages, callable tool names in the cold import, native tool-name rejections.
-PROFILE = 'claude-stream-json-v7'
+# v8 adds, since v7: the CLI's rewrite of \uXXXX text in tool input, accepted in
+# its snapshots and MCP calls but never executed (native_input_rewrite).
+PROFILE = 'claude-stream-json-v8'
 # CLI 2.1.289 gives up on an MCP tools/call MCP_TOOL_TIMEOUT milliseconds after
 # sending it, and answers the call itself (_recovery.native_timeout_texts).
 # Unset, it aborts the call's HTTP request after 60 s instead. The relay sets it
@@ -42,6 +48,13 @@ MAX_CONSECUTIVE_INTERRUPTIONS = 3
 STOP_REASONS = frozenset(('end_turn', 'stop_sequence', 'tool_use', 'max_tokens',
                           'refusal', 'pause_turn', 'model_context_window_exceeded'))
 USAGE_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')
+# CLI 2.1.289 rewrites a streamed tool input before it records or calls it
+# (doc/claude-relay-tool-input-rewrite-plan.md): in each string, it decodes
+# literal \uXXXX text (once the JSON is decoded: a backslash, u, four hex
+# digits) into that character. A backslash that is itself escaped, an even run
+# before the u, is left alone, as is all other text, such as \n or \x41.
+NATIVE_INPUT_REWRITE = 'native_input_rewrite'  # its trace label
+_UNICODE_ESCAPE = re.compile(r'(?<!\\)((?:\\\\)*)\\u([0-9A-Fa-f]{4})')
 
 
 def normalized_stop_reason(value, *, allow_missing=False):
@@ -72,6 +85,24 @@ class NativeStreamInterrupted(ModelTransportError):
     error_code = 'native_stream_interrupted'
 
 
+class NativeToolInputRewritten(ModelResponseError):
+    """The CLI's copy of a streamed tool call differs from the stream other than
+    by native_input_rewrite: in its block snapshot or complete record (then no
+    call from the message runs), or in its MCP call.
+
+    The message names the call and where its copy first differs (input_difference):
+    argument, line, column and kind of character, never the text itself. The
+    class name is the saved failure category.
+    """
+
+    error_code = 'native_tool_input_rewritten'
+
+    def __init__(self, ident, name, source, detail, *, adopted):
+        message = (f'Native CLI rewrote tool call {identifier(ident)} ({identifier(name)}) beyond its '
+                   f'known \\uXXXX decoding, in its {source}: {detail}')
+        super().__init__(message if adopted else message + '; no tool calls may execute')
+
+
 @dataclass(frozen=True)
 class NativeMessage:
     id: str
@@ -79,6 +110,9 @@ class NativeMessage:
     usage: TokenUsage
     stop_reason: str | None
     stop_details: dict | None = None  # a refusal's reason (NativeRefusal), as streamed
+    # Native IDs of the streamed tool blocks whose input native_input_rewrite
+    # changes: the CLI's copies of them, and so its history, differ from these.
+    rewritten_tool_ids: tuple = ()
 
     def sample_items(self, generation, names):
         reason = normalized_stop_reason(self.stop_reason)
@@ -158,11 +192,160 @@ def block_fingerprints(blocks):
                  for b in blocks)
 
 
-def check_shadow(parts, complete):
+def native_input_rewrite(value):
+    """A streamed tool input as CLI 2.1.289 records it, in its block snapshot,
+    its MCP call and presumably its own history; the model streamed ``value``.
+
+    Traced on 6 of 2,864 calls: each copy matched this rule exactly, and no
+    call showed any other difference. Seen: one backslash (decoded), two and
+    four (left alone), lowercase hex, top-level strings. Uppercase hex, longer
+    odd runs, nested strings and surrogate pairs (joined, as UTF-16 strings
+    are) follow the same reading, unobserved; where the CLI differs, the
+    comparison still fails closed. Keys and non-strings are left alone.
+    Returns ``value`` itself when nothing changes.
+    """
+    if isinstance(value, str):
+        if '\\u' not in value:
+            return value
+        text = _UNICODE_ESCAPE.sub(lambda match: match[1] + chr(int(match[2], 16)), value)
+        if text == value:
+            return value
+        return text.encode('utf-16-le', 'surrogatepass').decode('utf-16-le', 'surrogatepass')
+    if isinstance(value, list):
+        items = [native_input_rewrite(item) for item in value]
+        return value if all(new is old for new, old in zip(items, value)) else items
+    if isinstance(value, dict):
+        items = {key: native_input_rewrite(item) for key, item in value.items()}
+        return value if all(items[key] is item for key, item in value.items()) else items
+    return value
+
+
+def native_view(block):
+    """``block`` as the CLI records it: a tool block's input rewritten
+    (native_input_rewrite). Returns ``block`` itself when nothing changes."""
+    if block.get('type') == 'tool_use' and isinstance(block.get('input'), dict):
+        value = native_input_rewrite(block['input'])
+        if value is not block['input']:
+            return {**block, 'input': value}
+    return block
+
+
+def shadow_matches(parts, complete, native=None):
     # 2.1.289 emits one block per assistant record, before content_block_stop.
     # Also accept an exact full snapshot. Neither form supplies batch boundaries.
-    if parts != complete and not (len(parts) == 1 and parts[0] in complete):
-        raise ModelResponseError('Native assistant snapshot disagrees with its stream')
+    # ``native`` fingerprints the same blocks as the CLI records them (native_view).
+    return any(parts == expected or (len(parts) == 1 and parts[0] in expected)
+               for expected in (complete, native or complete))
+
+
+def _kind(value):
+    if value is None:
+        return 'null'
+    if isinstance(value, bool):
+        return 'a boolean'
+    if isinstance(value, (int, float)):
+        return 'a number'
+    return {str: 'a string', list: 'a list', dict: 'an object'}.get(type(value), 'a value')
+
+
+def _character(text, index):
+    """The kind of character at ``index``, never the character itself."""
+    if index >= len(text):
+        return None
+    char = text[index]
+    if char == '\\':
+        return 'a backslash'
+    if char in '\r\n':
+        return 'a line break'
+    if ord(char) > 127:
+        return 'a non-ASCII character'
+    if char.isspace():
+        return 'whitespace'
+    return 'a letter or digit' if char.isalnum() else 'an ASCII symbol'
+
+
+def _first_difference(expected, actual):
+    end, start = min(len(expected), len(actual)), 0
+    while start < end and expected[start:start + 4096] == actual[start:start + 4096]:
+        start += 4096
+    return next((i for i in range(start, min(start + 4096, end)) if expected[i] != actual[i]), end)
+
+
+def _count(number, noun):
+    return f'{number:,} {noun}' + ('' if number == 1 else 's')
+
+
+def _difference(path, expected, actual):
+    """Where JSON value ``actual`` first differs from ``expected``, or None."""
+    where = f'argument {path}' if path else 'its input'
+    if _kind(expected) != _kind(actual):
+        return f'{where} is {_kind(actual)} where {_kind(expected)} was expected'
+    if isinstance(expected, dict):
+        changes = [f'{verb} ' + ', '.join(identifier(key) for key in keys[:3]) + (
+                   f' and {len(keys) - 3} more' if len(keys) > 3 else '')
+                   for verb, keys in (('adds', [k for k in actual if k not in expected]),
+                                      ('lacks', [k for k in expected if k not in actual])) if keys]
+        if changes:
+            return f'{where} ' + ' and '.join(changes)
+        items = ((f'{path}.{identifier(key)}' if path else identifier(key), expected[key], actual[key])
+                 for key in sorted(expected))
+    elif isinstance(expected, list):
+        if len(expected) != len(actual):
+            return (f'{where} has {_count(len(actual), "item")} where {len(expected)} '
+                    f'{"was" if len(expected) == 1 else "were"} expected')
+        items = ((f'{path}[{index}]', want, got) for index, (want, got) in enumerate(zip(expected, actual)))
+    elif isinstance(expected, str):
+        if expected == actual:
+            return None
+        index = _first_difference(expected, actual)
+        at = f'line {actual.count(chr(10), 0, index) + 1}, column {index - actual.rfind(chr(10), 0, index)}'
+        got, want = _character(actual, index), _character(expected, index)
+        sizes = f'({_count(len(actual), "character")}, {len(expected):,} expected)'
+        if got is None:
+            return f'{where} ends at {at}, where {want} was expected {sizes}'
+        if want is None:
+            return f'{where} has {got} at {at}, past its expected end {sizes}'
+        if got == want:
+            want = 'other whitespace' if want == 'whitespace' else 'another ' + want.split(' ', 1)[1]
+        return f'{where} has {got} at {at}, where {want} was expected {sizes}'
+    else:
+        same = json.dumps(expected) == json.dumps(actual)
+        return None if same else f'{where} is a different {_kind(expected).removeprefix("a ")}'
+    return next((found for found in (_difference(*item) for item in items) if found), None)
+
+
+def input_difference(streamed, copy):
+    """Where a CLI copy of a tool input first differs from what the relay
+    accepts, the streamed input with native_input_rewrite applied: argument,
+    line, column and kind of character, for a failure message. Plain-identifier
+    names only; no model output is copied."""
+    return _difference('', native_input_rewrite(streamed), copy) or 'its input differs'
+
+
+def block_difference(streamed, copy):
+    """Where a CLI copy of a streamed tool block first differs (input_difference)."""
+    for key in sorted(set(streamed) | set(copy)):
+        if key != 'input' and streamed.get(key) != copy.get(key):
+            return f'its {identifier(key)} field differs'
+    return input_difference(streamed.get('input'), copy.get('input'))
+
+
+def copy_mismatch(parts, copies, blocks, accepted, source, generic):
+    """The error for a CLI record of the current message that matches neither
+    its streamed blocks nor their native views (fingerprints ``accepted``): a
+    differing tool block is named, and where it differs; others stay generic."""
+    tools = {block['id']: block for block in blocks
+             if block.get('type') == 'tool_use' and isinstance(block.get('id'), str)}
+    for part, copy in zip(parts, copies):
+        if part in accepted:
+            continue
+        kind = copy.get('type')
+        if kind == 'tool_use' and isinstance(copy.get('id'), str) and copy['id'] in tools:
+            return NativeToolInputRewritten(copy['id'], copy.get('name'), source,
+                                            block_difference(tools[copy['id']], copy), adopted=False)
+        return ModelResponseError(f'{generic} (a tool block it did not stream)' if kind == 'tool_use'
+                                  else f'{generic} (its {identifier(kind)} block)')
+    return ModelResponseError(generic)
 
 
 class Assembler:
@@ -220,7 +403,9 @@ class Assembler:
                 if block.get('type') == 'tool_use' and isinstance(block.get('id'), str)
                 and isinstance(block.get('name'), str)}
 
-    def emit(self, ident, blocks, usage, stop, *, stop_details=None, streamed=False):
+    def emit(self, ident, blocks, usage, stop, *, stop_details=None, streamed=False, native=None, rewritten=()):
+        """``native`` fingerprints a streamed message's blocks as the CLI records
+        them (native_view), and ``rewritten`` names its rewritten tool blocks."""
         if not isinstance(ident, str) or not 0 < len(ident) <= 256 or any(ord(c) < 32 for c in ident):
             raise ModelResponseError('Native assistant ID is missing')
         if stop == 'refusal' and not blocks:
@@ -229,23 +414,26 @@ class Assembler:
         parsed_usage = token_usage(usage)
         reason = normalized_stop_reason(stop, allow_missing=ident in self.seen)
         if ident in self.seen:
-            previous, previous_reason, raw_usage, was_streamed = self.seen[ident]
+            previous, previous_native, previous_reason, raw_usage, was_streamed = self.seen[ident]
             if was_streamed and reason is None:
-                check_shadow(parts, previous)
+                if not shadow_matches(parts, previous, previous_native):
+                    # Its streamed blocks are gone: no copy_mismatch detail.
+                    raise ModelResponseError('Native assistant snapshot disagrees with its stream')
                 # Null-stop snapshots retain provisional usage, even when late.
                 return None
-            if previous != parts:
+            if parts not in (previous, previous_native):
                 raise ModelResponseError('Inconsistent repeated native message; cannot infer batch boundaries')
             if reason is not None and reason != previous_reason:
                 raise ModelResponseError('Conflicting native stop reasons for the same message')
             if any(usage[k] != raw_usage.get(k, 0) for k in USAGE_FIELDS if k in usage):
                 raise ModelResponseError('Conflicting native usage for the same message')
             return None
-        self.seen[ident] = (parts, reason, {k: usage[k] for k in USAGE_FIELDS if k in usage}, streamed)
+        # A message the CLI did not stream has only its own copy to compare with.
+        self.seen[ident] = (parts, native or parts, reason, {k: usage[k] for k in USAGE_FIELDS if k in usage}, streamed)
         if len(self.seen) > 4096:
             raise ModelResponseError('Native message limit exceeded')
         self.consecutive_interruptions = 0
-        return NativeMessage(ident, tuple(blocks), parsed_usage, reason, stop_details)
+        return NativeMessage(ident, tuple(blocks), parsed_usage, reason, stop_details, rewritten)
 
     def feed(self, value):
         if value['type'] == 'assistant':
@@ -266,7 +454,8 @@ class Assembler:
                 self.hint_size += len(json.dumps(msg).encode())
                 if self.hint_size > MAX_RECORD or len(self.hints) >= 2048:
                     raise ModelResponseError('Native assistant snapshots exceed aggregate limit')
-                self.hints.append((parts, reason, {k: usage[k] for k in USAGE_FIELDS if k in usage}))
+                # Its blocks too, until message_stop, to name what differs (copy_mismatch).
+                self.hints.append((parts, reason, {k: usage[k] for k in USAGE_FIELDS if k in usage}, msg['content']))
                 return None
             if self.current is not None and msg.get('id') not in self.seen:
                 raise ModelResponseError('Assistant record overlaps another native stream')
@@ -379,7 +568,7 @@ class Assembler:
                 # Refused before any content, or mid-block: report the refusal,
                 # not the incomplete stream it explains.
                 raise NativeRefusal(self.stop_details)
-            if not self.delta_seen and all(hint_reason is None for _, hint_reason, _ in self.hints):
+            if not self.delta_seen and all(hint[1] is None for hint in self.hints):
                 # No final delta, and no complete assistant record in its
                 # place: the stream was cut, whatever the blocks look like.
                 return self._interrupted()
@@ -387,12 +576,21 @@ class Assembler:
                 raise ModelResponseError('Incomplete native message at stop')
             blocks = [self.blocks[i] for i in range(len(self.blocks))]
             complete = block_fingerprints(blocks)
-            for parts, hint_reason, hint_usage in self.hints:
+            # The CLI's records may show its rewrite of tool input. Only that
+            # difference is accepted, and only the streamed blocks are adopted.
+            views = [native_view(block) for block in blocks]
+            rewritten = tuple(block.get('id') for block, view in zip(blocks, views) if view is not block)
+            native = block_fingerprints(views) if rewritten else complete
+            accepted = set(complete) | set(native)
+            for parts, hint_reason, hint_usage, copies in self.hints:
                 if hint_reason is None:
-                    check_shadow(parts, complete)
+                    if not shadow_matches(parts, complete, native):
+                        raise copy_mismatch(parts, copies, blocks, accepted, 'snapshot',
+                                            'Native assistant snapshot disagrees with its stream')
                     continue
-                if parts != complete:
-                    raise ModelResponseError('Streamed and completed native content disagree')
+                if parts not in (complete, native):
+                    raise copy_mismatch(parts, copies, blocks, accepted, 'complete record',
+                                        'Streamed and completed native content disagree')
                 if self.stop_reason is not None and hint_reason != self.stop_reason:
                     raise ModelResponseError('Streamed and completed stop reasons disagree')
                 self.stop_reason = hint_reason
@@ -403,7 +601,7 @@ class Assembler:
             if 'output_tokens' not in self.usage:
                 raise ModelResponseError('Native stream lacks final output usage')
             result = self.emit(self.current, blocks, self.usage, self.stop_reason,
-                               stop_details=self.stop_details, streamed=True)
+                               stop_details=self.stop_details, streamed=True, native=native, rewritten=rewritten)
             self.current = None
             self.blocks, self.hints = {}, []  # do not retain text/signatures after completion
             return result

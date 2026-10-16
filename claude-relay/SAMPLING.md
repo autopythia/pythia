@@ -147,6 +147,9 @@ complete a tool batch, or replace final usage. Explicit complete-record conflict
 still fail. Only the observed `status=requesting` and well-formed
 `thinking_tokens` telemetry were added to the system-event allowlist; compacting,
 compact boundaries, hooks and unknown events still retire the run.
+(Since `claude-stream-json-v8`, a tool block's copies may also show the CLI's
+rewrite of `\uXXXX` text in its input; see the
+[tool-input rewrite notes](../doc/claude-relay-tool-input-rewrite-plan.md).)
 
 The first live MCP attempt exposed an additional startup negotiation: Claude
 sent `server/discover` with protocol `2026-07-28`, then fell back to standard

@@ -106,7 +106,7 @@ class RegistrationWaitTests(unittest.TestCase):
             with self.subTest(wrong=wrong), mock.patch.object(_mcp, 'time', SimpleNamespace(monotonic=lambda: clock.now)), \
                     mock.patch.object(box.condition, 'wait', side_effect=register):
                 if wrong:
-                    with self.assertRaisesRegex(ModelError, 'does not match'):
+                    with self.assertRaisesRegex(ModelError, r'rewrote tool call a \(echo\).* argument value is a different number'):
                         box.call('a', 'echo', {'value': 1})
                 else:
                     self.assertEqual(box.call('a', 'echo', {'value': 1})['content'][0]['text'], 'real result')

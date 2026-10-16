@@ -13,6 +13,7 @@ import uuid
 
 from ..model import ModelError, ModelResponseError
 from ..model_catalog import parse_json_value, thaw_json
+from ._cli_protocol import NATIVE_INPUT_REWRITE, NativeToolInputRewritten, input_difference, native_input_rewrite
 from ._context import canonical
 from ._recovery import ExpiredCall, NativeMCPTimeout, is_host_echo, is_native_timeout, native_timeout_texts
 
@@ -103,8 +104,13 @@ class Mailbox:
             for ident, name, args in calls:
                 if name not in self.tools:
                     raise self.fail('Native tool is not in the current catalog')
-                self.slots[ident] = dict(name=name, args=canonical(args), claimed=False, returned=False,
-                                         result=None, registered=registered)
+                # The CLI calls with its rewrite of the streamed input, if any
+                # (native_input_rewrite). Either form matches; the host runs
+                # the streamed one, never the callback's arguments.
+                native = native_input_rewrite(args)
+                self.slots[ident] = dict(name=name, args=canonical(args),
+                                         native_args=None if native is args else canonical(native),
+                                         claimed=False, returned=False, result=None, registered=registered)
             if self.trace:
                 self.trace.register(calls)
             self.condition.notify_all()
@@ -174,11 +180,16 @@ class Mailbox:
             if self.closed:
                 raise self.failure or ModelResponseError('Mailbox retired')
             slot = self.slots[ident]
-            if slot['claimed'] or slot['name'] != name or slot['args'] != expected:
+            if slot['claimed'] or slot['name'] != name:
                 raise self.fail('MCP callback does not match its native tool use')
+            if expected not in (slot['args'], slot['native_args']):
+                # Named, with where the CLI's arguments differ (never their text).
+                detail = input_difference(json.loads(slot['args']), args)
+                raise self._fail_error(NativeToolInputRewritten(ident, name, 'MCP call', detail, adopted=True))
             slot['claimed'] = True
             if self.trace:
-                self.trace.emit('mailbox_claim', scope=self.trace.scope(ident), native_tool_use_id=ident)
+                rewrite = {NATIVE_INPUT_REWRITE: True} if expected != slot['args'] else {}
+                self.trace.emit('mailbox_claim', scope=self.trace.scope(ident), native_tool_use_id=ident, **rewrite)
             deadline = time.monotonic() + self.wait_seconds
             while slot['result'] is None and not self.closed:
                 remaining = deadline - time.monotonic()

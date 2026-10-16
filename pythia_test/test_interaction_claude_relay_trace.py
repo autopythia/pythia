@@ -34,6 +34,8 @@ class RelayTraceTests(unittest.TestCase):
     setUp = fixtures.ModelTests.setUp
     stop_broker = fixtures.ModelTests.stop_broker
     launch_options = fixtures.ModelTests.launch_options
+    fixture_state = fixtures.ModelTests.fixture_state
+    sample_through_rewrite = fixtures.ModelTests.sample_through_rewrite
 
     def traced(self, *, timeout=None):
         self.model.close()
@@ -191,6 +193,24 @@ class RelayTraceTests(unittest.TestCase):
                            r['unsigned_thinking_blocks'], r['consecutive']) for r in cuts],
                          [('m-cut-0', ['thinking'], 0, 1, 1)])
         self.assertEqual(cuts[0]['op'], 'sample')
+
+    def test_a_cli_rewrite_of_tool_input_is_traced_and_retires_the_continuation(self):
+        trace = self.traced()
+        with trace.operation('sample'):
+            sample, _ = self.sample_through_rewrite(InteractionContext((Message('user', 'rewritten-tool-input'),)),
+                                                    tools=fixtures.TOOLS)
+        self.assertEqual(len(sample.tool_calls), 1)
+        trace.close()
+        events = rows(trace.event_path)
+        self.assertEqual([(r['native_tool_use_id'], r.get('native_input_rewrite'))
+                          for r in events if r['type'] == 'mailbox_claim'], [('toolu_rewrite', True)])
+        self.assertEqual([(r['reason'], r['native_tool_use_ids'], r['op'])
+                          for r in events if r['type'] == 'continuation_abandoned'],
+                         [('native_input_rewrite', ['toolu_rewrite'], 'sample')])
+        self.assertEqual([r['type'] for r in events if r['type'] in ('native_failure', 'continuation_retire')],
+                         ['continuation_retire'])
+        [end] = [r for r in events if r['type'] == 'sample_end']
+        self.assertIsNone(end['results_due_in_seconds'])
 
     def test_frontend_failures_save_metadata_and_keep_payload_only_in_trace(self):
         for frontend in ('cli', 'auto'):

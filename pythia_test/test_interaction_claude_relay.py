@@ -45,6 +45,10 @@ RELAY = ROOT / 'claude-relay/claude_relay.py'
 FIXTURE = ROOT / 'pythia_test/fixtures/claude_relay_cli.py'
 TOOLS = (ToolSpec('echo', 'Return a value', {'type': 'object', 'properties': {'value': {'type': 'integer'}}}),)
 DEFAULT_TOOLS = {'exec_command', 'write_stdin', 'apply_patch', 'update_plan'}
+# The fixture's 'rewritten-tool-input' call: the note as its model streamed it
+# (literal \u2013 text), and as its CLI records and calls it.
+STREAMED_NOTE = 'lines 1\\u20132, kept \\\\u2013'
+NATIVE_NOTE = 'lines 1\u20132, kept \\\\u2013'
 
 
 class PackageTests(unittest.TestCase):
@@ -161,6 +165,34 @@ class MailboxTests(unittest.TestCase):
         late.call('c', 'echo', {'value': 3})
         self.assertEqual(late.batch_started(['c']), registered)
         self.assertIsNone(late.batch_started(['unknown']))
+
+    def test_a_callback_may_carry_the_clis_rewrite_of_the_streamed_input(self):
+        events = []
+        trace = SimpleNamespace(register=lambda calls: None, scope=lambda ident=None: {},
+                                emit=lambda kind, **fields: events.append((kind, fields)))
+        box = Mailbox(TOOLS, wait_seconds=2, trace=trace)
+        streamed = {'value': 1, 'note': STREAMED_NOTE}
+        box.register([('a', 'echo', streamed), ('b', 'echo', streamed), ('c', 'echo', {'value': 2})])
+        self.assertIsNone(box.slots['c']['native_args'])  # nothing to rewrite
+        box.release({'a': ('one', True), 'b': ('two', True), 'c': ('three', True)})
+        self.assertEqual(box.call('a', 'echo', {'value': 1, 'note': NATIVE_NOTE})['content'][0]['text'], 'one')
+        self.assertEqual(box.call('b', 'echo', streamed)['content'][0]['text'], 'two')
+        self.assertEqual(box.call('c', 'echo', {'value': 2})['content'][0]['text'], 'three')
+        claims = [(fields['native_tool_use_id'], fields.get('native_input_rewrite'))
+                  for kind, fields in events if kind == 'mailbox_claim']
+        self.assertEqual(claims, [('a', True), ('b', None), ('c', None)])
+        prefix = 'Native CLI rewrote tool call a (echo) beyond its known \\uXXXX decoding, in its MCP call: '
+        for other, detail in (({'value': 1, 'note': NATIVE_NOTE.replace('\\\\u2013', '\\\u2013')},  # another rewrite
+                               'argument note has a non-ASCII character at line 1, column 18, where a backslash '
+                               'was expected (18 characters, 23 expected)'),
+                              ({'value': 2, 'note': NATIVE_NOTE}, 'argument value is a different number')):
+            box = Mailbox(TOOLS, wait_seconds=2)
+            box.register([('a', 'echo', streamed)])
+            with self.subTest(other=other), self.assertRaises(ModelError) as caught:
+                box.call('a', 'echo', other)
+            self.assertEqual(str(caught.exception), prefix + detail)  # its calls may run as streamed
+            self.assertEqual(caught.exception.error_code, 'native_tool_input_rewritten')
+            self.assertIs(box.failure, caught.exception)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -486,6 +518,56 @@ class ModelTests(unittest.TestCase):
                 self.assertNotIn('cut thinking', repr(sample.items))  # nothing from the cut message
                 self.assertEqual(sample.usage.total_tokens, 9)
                 self.assertIsNone(self.model._runtime)
+
+    def sample_through_rewrite(self, context, **options):
+        """Sample 'rewritten-tool-input', holding the retirement until the CLI's
+        callback (with its rewritten arguments) is claimed: claimed, error, pid."""
+        retire, seen = self.model.retire, []
+        def after_the_callback():
+            runtime, deadline = self.model._runtime, time.monotonic() + 5
+            while True:
+                with runtime.mailbox.condition:
+                    claimed = runtime.mailbox.slots['toolu_rewrite']['claimed']
+                if claimed or time.monotonic() > deadline:
+                    break
+                time.sleep(.005)
+            seen.append((claimed, runtime.error, self.fixture_state(runtime)['pid']))
+            retire()
+        with mock.patch.object(self.model, 'retire', side_effect=after_the_callback):
+            sample = self.model.sample(context, **options)
+        return sample, seen
+
+    def test_a_call_the_cli_rewrote_runs_as_streamed_and_the_next_sample_cold_imports(self):
+        context = InteractionContext((Instructions(''), Message('user', 'rewritten-tool-input')))
+        sample, seen = self.sample_through_rewrite(context, tools=TOOLS)
+        [(claimed, error, pid)] = seen
+        self.assertTrue(claimed)  # its MCP callback, with the CLI's arguments, matched
+        self.assertIsNone(error)
+        [call] = sample.tool_calls
+        self.assertEqual(json.loads(call.arguments_json), {'value': 1, 'note': STREAMED_NOTE})
+        self.assertIsNone(sample.results_due)  # that CLI gets no results: no native clock
+        self.assertIsNone(self.model._runtime)  # retired: its history holds its own copy
+        context.extend(sample.context_items())
+        context.append(ToolResult(call.call_id, 'done'))
+        final = self.model.sample(context, tools=TOOLS)
+        self.assertEqual(final.last_assistant_text, 'cold:rewritten-tool-input')
+        state = self.fixture_state()
+        self.assertNotEqual(state['pid'], pid)
+        self.assertEqual(state['history_call_arguments'], [{'value': 1, 'note': STREAMED_NOTE}])
+        self.assertEqual(state['history_result_ids'], [call.call_id])
+
+    def test_a_rewrite_beyond_the_known_rule_fails_naming_the_call_and_where(self):
+        with self.assertRaises(ModelError) as caught:
+            self.model.sample(InteractionContext((Message('user', 'rewritten-tool-input-beyond'),)), tools=TOOLS)
+        failure = caught.exception.failure
+        self.assertEqual((failure.category, failure.error_code), ('NativeToolInputRewritten', 'native_tool_input_rewritten'))
+        self.assertTrue(failure.message.startswith(
+            'Native CLI rewrote tool call toolu_rewrite (mcp__pythia__echo) beyond its known \\uXXXX decoding, in its '
+            'snapshot: argument note has a non-ASCII character at line 1, column 18, where a backslash was expected '
+            '(18 characters, 23 expected); no tool calls may execute (phase='), failure.message)
+        self.assertNotIn('lines', failure.message)  # none of the input itself
+        self.assertEqual(caught.exception.completed_items, ())  # nothing published, nothing run
+        self.assertIsNone(self.model._runtime)
 
     def test_a_cut_after_a_tool_handoff_keeps_the_warm_continuation(self):
         context = InteractionContext((Instructions(''), Message('user', 'stream-cut-after-tools')))

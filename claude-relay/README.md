@@ -39,7 +39,7 @@ by these short tests.
   parent PID, and the client installs a death guard before connecting. B's child
   guard independently covers broker death before the wrapper execs Bubblewrap.
 - An **explicit expected native CLI version** is required. The experimental
-  `claude-stream-json-v7` profile uses print/stream-json input/output, partial
+  `claude-stream-json-v8` profile uses print/stream-json input/output, partial
   events, strict MCP configuration, empty built-in tools/settings sources,
   `dontAsk` permissions, and no native session persistence. Unexpected control
   operations, built-in tools, compaction, or inventory differences fail closed.
@@ -72,6 +72,19 @@ by these short tests.
   "Native tool result has an unknown or duplicate call ID". Nothing from that
   response is published or run. See the
   [tool-name notes](../doc/claude-relay-tool-name-plan.md).
+- Tool input rewrite: before recording or calling a streamed tool call, CLI
+  2.1.289 decodes literal `\uXXXX` text in its input (after an odd run of
+  backslashes) into the character, in its block snapshot and its MCP call. The
+  relay used to fail with "Native assistant snapshot disagrees with its stream"
+  (6 traced calls, all with escapes the model meant, such as `"\u2013"` in
+  Python source). It now accepts that one difference and runs the call as
+  streamed. The CLI's history presumably keeps its rewritten copy, so the relay traces
+  `continuation_abandoned` (reason `native_input_rewrite`) and retires the
+  continuation; the next sample cold-imports Pythia's records. Any other
+  difference still fails, as `NativeToolInputRewritten` (error code
+  `native_tool_input_rewritten`), naming the call and where the CLI's copy
+  differs: argument, line, column and kind of character, never the text. See the
+  [tool-input rewrite notes](../doc/claude-relay-tool-input-rewrite-plan.md).
 - Native `stream_event/ping` keepalives are no-ops. Early MCP callbacks get a
   registration grace derived from the existing generation timeout instead of a
   separate ten-second cap; full-message validation still precedes tool execution.

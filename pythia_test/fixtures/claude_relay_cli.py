@@ -109,6 +109,7 @@ print('fixture-state:' + json.dumps({'pid': os.getpid(), 'effort': effort, 'summ
                                    'mcp_tool_timeout': tool_timeout_ms,
                                    'history_result_ids': [row['id'] for row in history if row['kind'] == 'result'],
                                    'history_call_names': [row['name'] for row in history if row['kind'] == 'call'],
+                                   'history_call_arguments': [row['arguments'] for row in history if row['kind'] == 'call'],
                                    'system_preamble': option('--system-prompt').split('\n\n', 1)[0],
                                    'disable_auto_compact': os.environ.get('DISABLE_AUTO_COMPACT')}),
       file=sys.stderr, flush=True)
@@ -313,6 +314,34 @@ elif text == 'host-command-deadline':
     sent = time.monotonic()
     first = tool_result(blocks[0])
     answer = f'first-call-seconds={time.monotonic() - sent:.3f}|{first}|{tool_result(blocks[1])}'
+elif text in ('rewritten-tool-input', 'rewritten-tool-input-beyond') and not any(row['kind'] == 'result' for row in history):
+    # Observed 2.1.289 behavior, synthetic contents: the model streams literal
+    # \u2013 text (one backslash, then two); the CLI's block snapshot and MCP
+    # call decode the first into an en dash and leave the escaped backslash.
+    # 'beyond' decodes that one too (\ then the en dash): not the known rule.
+    streamed = {'value': 1, 'note': 'lines 1\\u20132, kept \\\\u2013'}
+    native = {'value': 1, 'note': 'lines 1\u20132, kept \\\u2013' if text.endswith('-beyond')
+              else 'lines 1\u20132, kept \\\\u2013'}
+    block = {'type': 'tool_use', 'id': 'toolu_rewrite', 'name': names[0], 'input': {}, 'caller': {'type': 'direct'}}
+    def event(kind, **fields):
+        emit({'type': 'stream_event', 'event': {'type': kind, **fields}})
+    emit({'type': 'system', 'subtype': 'status', 'status': 'requesting'})
+    event('message_start', message={'id': 'm-rewrite', 'usage': {'input_tokens': 10, 'output_tokens': 1}})
+    event('content_block_start', index=0, content_block=block)
+    raw = json.dumps(streamed)
+    for start in range(0, len(raw), 5):  # fragments split the escapes, as streamed
+        event('content_block_delta', index=0, delta={'type': 'input_json_delta', 'partial_json': raw[start:start + 5]})
+    emit({'type': 'assistant', 'message': {'id': 'm-rewrite', 'content': [{**block, 'input': native}],
+                                           'stop_reason': None, 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
+    event('content_block_stop', index=0)
+    event('message_delta', delta={'stop_reason': 'tool_use'}, usage={'input_tokens': 10, 'output_tokens': 3})
+    event('message_stop')
+    try:
+        tool_result({**block, 'input': native})
+    except (KeyError, OSError):
+        pass  # the relay retires this process rather than answer it
+    sys.stdin.read()
+    raise SystemExit(0)
 elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row in history):
     arguments = {} if text == 'empty-arguments' else {'value': 1}
     blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': arguments} for ident in ('toolu_a', 'toolu_b')]

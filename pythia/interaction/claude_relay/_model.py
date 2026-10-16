@@ -19,7 +19,7 @@ from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
 from ._context import Snapshot, record, handoff
-from ._cli_protocol import DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS, PROFILE
+from ._cli_protocol import DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS, NATIVE_INPUT_REWRITE, PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
 from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
@@ -202,8 +202,13 @@ class ClaudeRelayModel:
                         self._pending = {runtime.generation + ':' + ident: ident for ident, _, _ in calls}
                 if not calls and not any(isinstance(item, Message) and item.content_text.strip() for item in items):
                     raise ModelResponseError('Native run has no final assistant text')
+                # The CLI rewrote some of these calls' input in its own copies
+                # (native_input_rewrite), so its history no longer matches
+                # Pythia's records: it must not go on. The host runs the calls as
+                # streamed; the next sample cold-imports. No native clock applies.
+                rewritten = message.rewritten_tool_ids if calls else ()
                 results_due = None
-                if calls:
+                if calls and not rewritten:
                     started_at = runtime.mailbox.batch_started([ident for ident, _, _ in calls])
                     if started_at is not None:
                         budget = min(self.endpoint.native_tool_timeout_seconds, self.endpoint.parked_timeout_seconds)
@@ -211,6 +216,10 @@ class ClaudeRelayModel:
                 sample = ModelSample(items, stop_reason=message.stop_reason, usage=message.usage,
                                      provider_turn_id=message.id, results_due=results_due)
                 if not calls:
+                    self.retire()
+                elif rewritten:
+                    runtime.trace.emit('continuation_abandoned', reason=NATIVE_INPUT_REWRITE,
+                                       native_tool_use_ids=list(rewritten))
                     self.retire()
                 runtime.trace.emit('sample_end', scope={**runtime.trace.scope(), **scope},
                                    stop_reason=message.stop_reason,

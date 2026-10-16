@@ -1,9 +1,11 @@
 """Sanitized 2.1.289 record shapes, no native binary or network access."""
+import json
 import unittest
 from unittest import mock
 
 from pythia.interaction.claude_relay._cli_protocol import Assembler, MAX_CONSECUTIVE_INTERRUPTIONS
-from pythia.interaction.claude_relay._cli_protocol import NativeRefusal, NativeStreamInterrupted
+from pythia.interaction.claude_relay._cli_protocol import NativeRefusal, NativeStreamInterrupted, native_input_rewrite
+from pythia.interaction.claude_relay._cli_protocol import NativeToolInputRewritten, block_difference, input_difference
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.model import ModelRefusal, ModelResponseError
 
@@ -88,6 +90,32 @@ def feed_all(assembler, records):
     for value in records[:-1]:
         assert assembler.feed(value) is None, value
     return assembler.feed(records[-1])
+
+
+# Observed 2.1.289 (Oct 16), synthetic contents: the model streams literal
+# \u2013 text in a tool input; the CLI's snapshot shows each one-backslash
+# escape decoded into an en dash, and the escaped backslash (two) left alone.
+STREAMED_PATCH = ('+    self.assertIn("lines 1\\u201311;", pointer)\n'
+                  '+    self.assertNotIn("1\\u20132", pointer)  # nor "\\\\u2013"\n')
+NATIVE_PATCH = ('+    self.assertIn("lines 1\u201311;", pointer)\n'
+                '+    self.assertNotIn("1\u20132", pointer)  # nor "\\\\u2013"\n')
+TOOL_START = {'type': 'tool_use', 'id': 'toolu_x', 'name': 'mcp__pythia__echo', 'input': {}, 'caller': {'type': 'direct'}}
+
+
+def rewrite_records(snapshot_input, *, fragment=7):
+    """The failing message's observed shape: thinking, text, then a tool block
+    streamed in many fragments, each block followed by the CLI's snapshot."""
+    raw = json.dumps({'patch': STREAMED_PATCH})
+    return [*observed_records()[:-2],
+            stream_event('content_block_start', index=2, content_block=TOOL_START),
+            *(stream_event('content_block_delta', index=2,
+                           delta={'type': 'input_json_delta', 'partial_json': raw[start:start + fragment]})
+              for start in range(0, len(raw), fragment)),
+            snapshot([{**TOOL_START, 'input': snapshot_input}]),
+            stream_event('content_block_stop', index=2),
+            stream_event('message_delta', delta={'stop_reason': 'tool_use'},
+                         usage={'input_tokens': 468, 'output_tokens': 546}),
+            stream_event('message_stop')]
 
 
 class NativeStreamTests(unittest.TestCase):
@@ -208,6 +236,117 @@ class NativeStreamTests(unittest.TestCase):
         for partials in ((' ',), ('{',)):  # anything else still has to be complete JSON
             with self.subTest(partials=partials), self.assertRaisesRegex(ModelResponseError, 'tool JSON'):
                 outcome(records(partials, {}))
+
+
+class NativeInputRewriteTests(unittest.TestCase):
+    def test_the_rule_decodes_unicode_escapes_after_an_odd_backslash_run(self):
+        cases = {
+            'lines 1\\u201311': 'lines 1\u201311',  # observed: one backslash
+            '\\\\u2013': '\\\\u2013',  # observed: two, an escaped backslash
+            '\\\\\\\\u2013': '\\\\\\\\u2013',  # observed: four
+            '\\ufeffone\\r\\ntwo': '\ufeffone\\r\\ntwo',  # observed: lowercase hex; \r and \n stay text
+            '\\\\\\u2013': '\\\\\u2013',  # three: an escaped backslash, then an escape
+            '\\uFEFF': '\ufeff',
+            '\\ud83d\\ude00': '\U0001F600',  # decoded surrogate halves pair up
+            '\\ud83d': '\ud83d',
+            '\\u201 \\u20G3 \\U0001F600 \\x41 u2013': '\\u201 \\u20G3 \\U0001F600 \\x41 u2013',
+        }
+        for streamed, native in cases.items():
+            with self.subTest(streamed=streamed):
+                self.assertEqual(native_input_rewrite(streamed), native)
+        value = {'cmd': 'a\\u2013', 'plan': [{'step': 'b\\u2013', 'status': 'pending'}], 'k\\u2013': 1, 'yes': True}
+        self.assertEqual(native_input_rewrite(value), {'cmd': 'a\u2013', 'plan': [{'step': 'b\u2013', 'status': 'pending'}],
+                                                       'k\\u2013': 1, 'yes': True})  # keys are left alone
+        unchanged = {'cmd': 'no \\n escapes \u2013', 'items': [1, 'two', {'three': None}], 'k\\u2013': 2}
+        self.assertIs(native_input_rewrite(unchanged), unchanged)
+
+    def test_the_observed_tool_snapshot_shows_the_rewrite_and_the_stream_is_adopted(self):
+        for fragment in (1, 7, 10_000):  # the escapes are split across fragments, or not
+            with self.subTest(fragment=fragment):
+                message, (items, calls) = outcome(rewrite_records({'patch': NATIVE_PATCH}, fragment=fragment))
+                self.assertEqual(message.rewritten_tool_ids, ('toolu_x',))
+                self.assertEqual(calls, [('toolu_x', 'echo', {'patch': STREAMED_PATCH})])
+                self.assertEqual(json.loads(items[-1].arguments_json), {'patch': STREAMED_PATCH})
+        # A copy as streamed is accepted too; the CLI's history is still not trusted.
+        message, (_, calls) = outcome(rewrite_records({'patch': STREAMED_PATCH}))
+        self.assertEqual((message.rewritten_tool_ids, calls[0][2]), (('toolu_x',), {'patch': STREAMED_PATCH}))
+        self.assertEqual(outcome(observed_records())[0].rewritten_tool_ids, ())
+
+    def test_any_other_difference_fails_naming_the_call_and_where_it_differs(self):
+        prefix = ('Native CLI rewrote tool call toolu_x (mcp__pythia__echo) beyond its known \\uXXXX decoding, '
+                  'in its snapshot: ')
+        cases = {  # the copy keeps an escape the rule decodes, decodes an escaped backslash, etc.
+            NATIVE_PATCH.replace('1\u20132', '1\\u20132'): 'argument patch has a backslash at line 2, column 25, '
+                                                           'where a non-ASCII character was expected (103 characters, 98 expected)',
+            NATIVE_PATCH.replace('\\\\u2013', '\\\u2013'): 'argument patch has a non-ASCII character at line 2, column 48, '
+                                                           'where a backslash was expected (93 characters, 98 expected)',
+            NATIVE_PATCH + ' ': 'argument patch has whitespace at line 3, column 1, past its expected end '
+                                '(99 characters, 98 expected)',
+            NATIVE_PATCH[:40]: 'argument patch ends at line 1, column 41, where a letter or digit was expected '
+                               '(40 characters, 98 expected)',
+        }
+        for patch, detail in cases.items():
+            with self.subTest(detail=detail), self.assertRaises(NativeToolInputRewritten) as caught:
+                outcome(rewrite_records({'patch': patch}))
+            self.assertEqual(str(caught.exception), prefix + detail + '; no tool calls may execute')
+            self.assertEqual(caught.exception.error_code, 'native_tool_input_rewritten')
+            self.assertNotIn('pointer', str(caught.exception))  # no model output is copied
+        with self.assertRaisesRegex(NativeToolInputRewritten, 'in its snapshot: its input adds value;'):
+            outcome(rewrite_records({'patch': NATIVE_PATCH, 'value': 1}))
+        # Text and thinking blocks are not rewritten (2.1.289 left both alone).
+        records = observed_records()
+        records[7] = stream_event('content_block_delta', index=1, delta={'type': 'text_delta', 'text': 'en \\u2013'})
+        records[8] = snapshot([{'type': 'text', 'text': 'en \u2013'}])
+        with self.assertRaises(ModelResponseError) as caught:
+            outcome(records)
+        self.assertEqual(str(caught.exception), 'Native assistant snapshot disagrees with its stream (its text block)')
+        self.assertNotIsInstance(caught.exception, NativeToolInputRewritten)
+
+    def test_differences_are_described_by_position_and_kind_only(self):
+        cases = (
+            ({'cmd': 'a b'}, {'cmd': 'a\tb'},
+             'argument cmd has whitespace at line 1, column 2, where other whitespace was expected (3 characters, 3 expected)'),
+            ({'cmd': 'x\ny\\u2013'}, {'cmd': 'x\nyz'},  # compared with the input as the rule rewrites it
+             'argument cmd has a letter or digit at line 2, column 2, where a non-ASCII character was expected '
+             '(4 characters, 4 expected)'),
+            ({'plan': [{'step': 'a\\u2013'}]}, {'plan': [{'step': 'a-'}]},
+             'argument plan[0].step has an ASCII symbol at line 1, column 2, where a non-ASCII character was expected '
+             '(2 characters, 2 expected)'),
+            ({'plan': [{'step': 'a'}]}, {'plan': [{'step': 'a'}, {'step': 'b'}]}, 'argument plan has 2 items where 1 was expected'),
+            ({'value': 1}, {'value': '1'}, 'argument value is a string where a number was expected'),
+            ({'value': 1}, {'value': 1.0}, 'argument value is a different number'),
+            ({'cmd': 'x'}, {'cmd': 'x', 'secret key!': 0, 'b': 1, 'c': 2, 'd': 3}, 'its input adds <invalid>, b, c and 1 more'),
+            ({'cmd': 'x'}, {}, 'its input lacks cmd'),
+            ({'cmd': 'x'}, ['x'], 'its input is a list where an object was expected'),
+        )
+        for streamed, copy, detail in cases:
+            with self.subTest(detail=detail):
+                self.assertEqual(input_difference(streamed, copy), detail)
+        block = {**TOOL_START, 'input': {'patch': STREAMED_PATCH}}
+        self.assertEqual(block_difference(block, {**block, 'caller': {'type': 'other'}}), 'its caller field differs')
+        error = NativeToolInputRewritten('bad id!', 'a name', 'MCP call', 'its caller field differs', adopted=True)
+        self.assertEqual(str(error), 'Native CLI rewrote tool call <invalid> (<invalid>) beyond its known \\uXXXX '
+                                     'decoding, in its MCP call: its caller field differs')
+
+    def test_late_and_complete_records_compare_the_same_way(self):
+        streamed = {**TOOL_START, 'input': {'patch': STREAMED_PATCH}}
+        native = {**TOOL_START, 'input': {'patch': NATIVE_PATCH}}
+        wrong = {**TOOL_START, 'input': {'patch': NATIVE_PATCH + ' '}}
+        usage = {'input_tokens': 468, 'output_tokens': 546}
+        records = rewrite_records({'patch': NATIVE_PATCH})
+        records.insert(-1, snapshot([THINKING, TEXT, native], reason='tool_use', usage=usage))
+        assembler = Assembler()
+        self.assertEqual(feed_all(assembler, records).rewritten_tool_ids, ('toolu_x',))
+        for blocks in ([native], [streamed], [THINKING, TEXT, native]):
+            self.assertIsNone(assembler.feed(snapshot(blocks)))  # late block snapshots
+        self.assertIsNone(assembler.feed(snapshot([THINKING, TEXT, native], reason='tool_use', usage=usage)))
+        with self.assertRaisesRegex(ModelResponseError, 'snapshot disagrees'):
+            assembler.feed(snapshot([wrong]))
+        with self.assertRaisesRegex(ModelResponseError, 'Inconsistent repeated'):
+            assembler.feed(snapshot([THINKING, TEXT, wrong], reason='tool_use', usage=usage))
+        records[-2] = snapshot([THINKING, TEXT, wrong], reason='tool_use', usage=usage)
+        with self.assertRaisesRegex(NativeToolInputRewritten, 'in its complete record: argument patch has whitespace'):
+            feed_all(Assembler(), records)
 
 
 class RefusalTests(unittest.TestCase):
