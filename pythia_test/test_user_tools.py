@@ -126,11 +126,11 @@ class UserToolValueTests(unittest.TestCase):
             "max_output_tokens = None",
             "request_timeout_seconds = None",
             "enable_auto_compaction = True",
-            "auto_compact_tokens = None",
+            "auto_compaction_context_tokens = None",
             "max_context_tokens = None",
             "compaction_mode = 'pi'",
-            "compaction_keep_recent_tokens = 20000",
-            "compaction_max_output_tokens = None",
+            "compaction_pi_keep_recent_tokens = 20000",
+            "compaction_pi_max_output_tokens = None",
             "extra_sample_params = {}",
         )))
         json_dump = execute("/config.json")
@@ -479,18 +479,19 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(config_calls), 2)
         self.assertEqual(len(config_results), 2)
-        # The official Codex route defaults to provider compaction.
+        # The official Codex route defaults to coldstart, then warmpi twice;
+        # without exec_command, coldstart is dropped silently.
         defaults = {
             "enable_workspace": True,
             "max_samples": None,
             "max_output_tokens": None,
             "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             "enable_auto_compaction": True,
-            "auto_compact_tokens": None,
+            "auto_compaction_context_tokens": None,
             "max_context_tokens": None,
-            "compaction_mode": "provider",
-            "compaction_keep_recent_tokens": 20000,
-            "compaction_max_output_tokens": None,
+            "compaction_mode": "warmpi:2",
+            "compaction_pi_keep_recent_tokens": 20000,
+            "compaction_pi_max_output_tokens": None,
             "extra_sample_params": {},
         }
         self.assertEqual(
@@ -625,14 +626,14 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 terminal.key("c-d")
 
         model = _Model(self.path, _answer("uncompacted"))
-        self.args.auto_compact_tokens = 100
+        self.args.auto_compaction_context_tokens = 100
         with patch_compaction(cli, "create_default_compactor") as create:
             self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
 
         create.assert_not_called()
         self.assertEqual(
             model.calls[0][2],
-            SampleParams(enable_auto_compaction=False, auto_compact_tokens=100,
+            SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100,
                          request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
         )
 
@@ -1066,8 +1067,10 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         compactor = FakeCompactor()
         with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
             self.assertEqual(await self.run_cli(model, terminal), 0)
-        # The official Codex route defaults to provider compaction.
-        create.assert_called_once_with(model, CompactionSettings(mode="provider"))
+        # The official Codex route defaults to warmpi after coldstart, which
+        # this session can't run.
+        create.assert_called_once_with(model, CompactionSettings(mode="warmpi"),
+                                       reason="manual")
         self.assertEqual(parameters, [(SampleParams(
             enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ), None)])
@@ -1159,8 +1162,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
         self.args.compaction_mode = "pi"
-        self.args.compaction_keep_recent_tokens = 0
-        self.args.compaction_max_output_tokens = 512
+        self.args.compaction_pi_keep_recent_tokens = 0
+        self.args.compaction_pi_max_output_tokens = 512
         model = _Model(self.path, _answer("## Goal\nShip it."))
         terminal = _Terminal(self.compact_frame("/compact keep file paths"))
         self.assertEqual(await self.run_cli(model, terminal), 0)
@@ -1199,7 +1202,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saved.items[-1].result.success)
         self.assertEqual(
             saved.items[-1].result.output,
-            "Nothing to compact: the context fits in compaction_keep_recent_tokens.",
+            "Nothing to compact: the context fits in compaction_pi_keep_recent_tokens.",
         )
         self.assertFalse(any(isinstance(item, ContextPrefix) for item in saved))
 
@@ -1210,8 +1213,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         message = (
             "summary request for the history (412 items, ~905,000 estimated tokens) "
             "exceeded the model's context window; pi compaction sends each part in one "
-            "request and does not split it. Lower compaction_max_output_tokens, or raise "
-            "compaction_keep_recent_tokens to summarize less."
+            "request and does not split it. Lower compaction_pi_max_output_tokens, or raise "
+            "compaction_pi_keep_recent_tokens to summarize less."
         )
         compactor = mock.Mock()
         compactor.compact.side_effect = CompactionContextWindowError(message)
@@ -1276,7 +1279,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(statuses)
         self.assertRegex(statuses[0], r"^compacting \d+s$")
 
-    async def test_compact_uses_remote_v2_by_default_for_codex_responses(self):
+    async def test_compact_uses_remote_v2_with_provider_for_codex_responses(self):
         original = (
             Init("session"),
             Message("user", "retain this request"),
@@ -1285,6 +1288,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         )
         save_interaction_save(self.path, InteractionContext(original))
         self.args.resume = True
+        # Remote compaction is opt-in since warmpi joined the default.
+        self.args.compaction_mode = "provider"
         observed = []
 
         class Response:

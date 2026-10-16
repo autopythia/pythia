@@ -31,8 +31,8 @@ from pythia_test.test_interaction_cli import _Terminal
 
 
 # Compaction is due before every sample, and keeps only the last unit verbatim.
-_CONFIG = InteractionConfig(InteractionConfigSnapshot(auto_compact_tokens=1,
-                                                      compaction_keep_recent_tokens=1))
+_CONFIG = InteractionConfig(InteractionConfigSnapshot(auto_compaction_context_tokens=1,
+                                                      compaction_pi_keep_recent_tokens=1))
 _CANCELLED = "Compaction cancelled during execution by the stop; no compaction checkpoint was installed."
 
 
@@ -171,6 +171,10 @@ class TurnCompactionTests(unittest.IsolatedAsyncioTestCase):
 class CompactCommandTests(unittest.IsolatedAsyncioTestCase):
     """/compact runs outside a turn: /exit!! cancels it too, and its record says so."""
 
+    MODE = "pi"
+    # What builds the compaction's request, which the stop comes during.
+    BUILDS = "_history_prompt"
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -185,7 +189,8 @@ class CompactCommandTests(unittest.IsolatedAsyncioTestCase):
             "--claude-relay-launcher", "/nonexistent/claude_relay.py",
             "--claude-relay-socket", "/nonexistent/broker.sock",
             "--claude-relay-server-uid", "1000", "--claude-relay-cli-version", "2.1.0-fixture",
-            "--no-user-model-catalog", "--compaction-keep-recent-tokens", "0",
+            "--no-user-model-catalog", "--compaction-pi-keep-recent-tokens", "0",
+            "--compaction-mode", self.MODE,
         ])
         self.args.resume = True
 
@@ -207,7 +212,7 @@ class CompactCommandTests(unittest.IsolatedAsyncioTestCase):
         before it starts (while the compactor builds its prompt)."""
         model, steps, building = relay_model(), [], threading.Event()
         self.addCleanup(model.close)
-        original = compaction._history_prompt
+        original = getattr(compaction, self.BUILDS)
 
         def prompt(*args, **kwargs):
             if not in_flight:
@@ -224,7 +229,7 @@ class CompactCommandTests(unittest.IsolatedAsyncioTestCase):
                 steps.append("exit")
                 t.submit("/exit!!")
         with fake_relay_runtime() as launches, \
-                mock.patch.object(compaction, "_history_prompt", side_effect=prompt):
+                mock.patch.object(compaction, self.BUILDS, side_effect=prompt):
             self.assertEqual(await self._run(model, frame), 0)
         [result] = self._compact_outcome()  # and no checkpoint
         self.assertIsInstance(result, UserToolResult)
@@ -260,10 +265,18 @@ class CompactCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self._run(model, frame), 0)
         result, checkpoint, metadata = self._compact_outcome()
         self.assertTrue(result.result.success)
-        self.assertEqual(result.result.output, "Context compacted using a pi summary checkpoint.")
+        self.assertEqual(result.result.output,
+                         f"Context compacted using a {self.MODE} summary checkpoint.")
         self.assertIsInstance(checkpoint, ContextPrefix)
         self.assertIsInstance(metadata, CompactionMetadata)
         self.assertEqual(len(launches.all), 1)
+
+
+class WarmPiCompactCommandTests(CompactCommandTests):
+    """The same with warmpi, whose request is the conversation's own."""
+
+    MODE = "warmpi"
+    BUILDS = "_warmpi_instruction"
 
 
 if __name__ == "__main__":

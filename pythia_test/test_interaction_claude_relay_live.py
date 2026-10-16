@@ -198,7 +198,7 @@ class LiveRelayTests(unittest.TestCase):
 
     def test_pi_summary_and_fresh_post_compaction_continuation(self):
         context, old = self.parked(older_history=True)
-        self.assertTrue(auto_compaction_due(self.model, context, InteractionConfigSnapshot(auto_compact_tokens=1)))
+        self.assertTrue(auto_compaction_due(self.model, context, InteractionConfigSnapshot(auto_compaction_context_tokens=1)))
         before = context.items
         summaries = []
         def start(*args, **kwargs):

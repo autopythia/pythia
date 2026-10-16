@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .model_catalog import MODEL_TIMEOUT_FIELDS, ModelBinding, thaw_json
+from .model_catalog import COMPACTION_DEFAULT_FIELDS, MODEL_TIMEOUT_FIELDS, ModelBinding, thaw_json
 
 
 MAX_DEBUG_MODEL_BINDING_BYTES = 262_144
@@ -43,6 +43,11 @@ def _debug_entry(binding):
         # The catalog's per-model values; None means the built-in default.
         "timeouts": {
             name: getattr(binding.timeouts, name) for name in MODEL_TIMEOUT_FIELDS
+        },
+        # The catalog's compaction settings: the entry's over [compaction].
+        # None means the built-in default. Added without a version change.
+        "compaction": {
+            name: getattr(binding.compaction, name) for name in COMPACTION_DEFAULT_FIELDS
         },
         "extra_sample_params": thaw_json(binding.extra_sample_params),
         "responses": (

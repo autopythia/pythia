@@ -15,13 +15,18 @@ from typing import Optional
 from typing import Union
 from typing import Mapping
 
-from .compaction import COMPACTION_MODES
+from .compaction import compaction_methods
+from .compaction import format_compaction_mode
+from .compaction import normalize_compaction_mode
+from .compaction import parse_compaction_mode
 from .compaction import CompactionSettings
+from .compaction import DEFAULT_COMPACTION_MODE
 from .compaction import DEFAULT_KEEP_RECENT_TOKENS
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .messages import resolve_messages_max_output_tokens
 from .model import SampleParams
 from .model_catalog import ModelBinding
+from .model_catalog import CompactionDefaults
 from .model_catalog import binding_from_namespace, freeze_extra_sample_params, thaw_json
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .timeouts import validate_timeout_seconds
@@ -34,27 +39,37 @@ CONFIG_KEYS = (
     "max_output_tokens",
     "request_timeout_seconds",
     "enable_auto_compaction",
-    "auto_compact_tokens",
+    "auto_compaction_context_tokens",
     "max_context_tokens",
     "compaction_mode",
-    "compaction_keep_recent_tokens",
-    "compaction_max_output_tokens",
+    "compaction_pi_keep_recent_tokens",
+    "compaction_pi_max_output_tokens",
     "extra_sample_params",
 )
+# Keys renamed in October 2026, from their old names. The old names keep
+# working, with a warning that names the new one: as /config keys, as options,
+# in auto's config files, and as demo.run keywords. Version-3 auto saves use
+# them and load silently. Python fields and InteractionConfig's keyword
+# arguments have only the new names.
+RENAMED_CONFIG_KEYS = {
+    "auto_compact_tokens": "auto_compaction_context_tokens",
+    "compaction_keep_recent_tokens": "compaction_pi_keep_recent_tokens",
+    "compaction_max_output_tokens": "compaction_pi_max_output_tokens",
+}
 _BOOLEAN_KEYS = frozenset(("enable_workspace", "enable_auto_compaction"))
 _OPTIONAL_POSITIVE_INTEGER_KEYS = frozenset((
     "max_samples",
     "max_output_tokens",
-    "auto_compact_tokens",
+    "auto_compaction_context_tokens",
     "max_context_tokens",
-    "compaction_max_output_tokens",
+    "compaction_pi_max_output_tokens",
 ))
 # ``null`` restores the default through the config's fallback.
-_OPTIONAL_NONNEGATIVE_INTEGER_KEYS = frozenset(("compaction_keep_recent_tokens",))
+_OPTIONAL_NONNEGATIVE_INTEGER_KEYS = frozenset(("compaction_pi_keep_recent_tokens",))
 # Optional seconds; ``null`` restores the default through the config's fallback.
 _OPTIONAL_SECONDS_KEYS = frozenset(("request_timeout_seconds",))
 # Readable in /config, but only set at launch.
-_LAUNCH_ONLY_KEYS = frozenset(("compaction_mode", "extra_sample_params"))
+_LAUNCH_ONLY_KEYS = frozenset(("extra_sample_params",))
 _INTEGER_LITERAL_RE = re.compile(r"^[+-]?[0-9]+$")
 # Seconds also accept plain decimals; no exponent, infinity, or NaN spellings.
 _DECIMAL_LITERAL_RE = re.compile(r"^[+-]?[0-9]+\.[0-9]+$")
@@ -88,12 +103,14 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
         except ValueError as exc:
             raise ConfigError(str(exc)) from None
     if key == "compaction_mode":
-        # None is the route's default, resolved when a config is bound.
-        if value is not None and (
-            not isinstance(value, str) or value not in COMPACTION_MODES
-        ):
-            raise ConfigError("compaction_mode requires 'pi' or 'provider'.")
-        return value
+        # A compaction sequence, kept in its normal form. None is the route's
+        # default, resolved when a config is bound.
+        if value is None:
+            return None
+        try:
+            return normalize_compaction_mode(value)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
     if key in _BOOLEAN_KEYS:
         if not isinstance(value, bool):
             raise ConfigError(f"{key} requires True or False.")
@@ -128,7 +145,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     """Parse the intentionally small JSON/Python scalar input grammar.
 
     Integers, booleans, and null for every key; seconds keys also take plain
-    decimals such as ``90.5``.
+    decimals such as ``90.5``. ``compaction_mode`` takes a compaction
+    sequence, such as ``coldstart,pi:2``, or null.
     """
     key = _require_key(key)
     if key in _LAUNCH_ONLY_KEYS:
@@ -136,6 +154,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     if not isinstance(text, str):
         raise ConfigError(f"Invalid value for {key}.")
     literal = text.strip()
+    if key == "compaction_mode":
+        return validate_config_value(key, None if literal in ("null", "None") else literal)
     aliases = {
         "null": None,
         "None": None,
@@ -155,25 +175,123 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     return validate_config_value(key, value)
 
 
+_NO_PROVIDER = "this route has no provider compaction; use --compaction-mode pi"
+
+
+@dataclass(frozen=True)
+class CompactionRoute:
+    """What one session's route allows in ``compaction_mode``, fixed at launch.
+
+    ``default`` is the route's own method, which ``legacydefault`` entries
+    name. ``provider`` says whether the route has provider compaction. On
+    Messages (``messages``), ``provider`` turns on server-side compaction,
+    which runs inside samples, so it may only come first. ``server``, once
+    known, is whether this session's Messages endpoint carries server-side
+    compaction: set at launch, so a later change can't add or remove
+    ``provider``.
+    """
+
+    default: str = "pi"
+    provider: bool = False
+    messages: bool = False
+    server: Optional[bool] = None
+
+    def resolve(self, value: object) -> str:
+        """Resolve ``legacydefault`` entries and check the route; return the normal form."""
+        try:
+            entries = tuple(
+                (self.default if method == "legacydefault" else method, attempts)
+                for method, attempts in parse_compaction_mode(value)
+            )
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
+        methods = [method for method, _attempts in entries]
+        if "provider" in methods:
+            if not self.provider:
+                raise ConfigError(_NO_PROVIDER)
+            if self.messages and "provider" in methods[1:]:
+                raise ConfigError(
+                    "On Messages, provider may only come first in compaction_mode: it "
+                    "turns on server-side compaction, which runs inside samples."
+                )
+        if self.server is not None and (methods[0] == "provider") != self.server:
+            raise ConfigError(
+                "compaction_mode can't add or remove provider on this Messages endpoint: "
+                f"its server-side compaction is {'on' if self.server else 'off'}, and that "
+                "is fixed when the endpoint is built."
+            )
+        return format_compaction_mode(entries)
+
+    @property
+    def default_sequence(self) -> str:
+        """What an unset ``compaction_mode`` is on this route, resolved.
+
+        ``DEFAULT_COMPACTION_MODE``: coldstart, then warmpi up to twice, the
+        official Codex route included. On a Messages endpoint with server-side
+        compaction it is ``provider`` alone, since provider may only come
+        first there.
+        """
+        if self.messages and self.default == "provider":
+            return "provider"
+        return self.resolve(DEFAULT_COMPACTION_MODE)
+
+
+def _binding_route(binding, mode: Optional[str] = None) -> CompactionRoute:
+    """A binding's route; with the launch ``mode``, also its Messages server state."""
+    remote = bool(binding.supports_remote_compaction)
+    messages = binding.api == "messages"
+    server = None
+    if messages and mode is not None:
+        server = compaction_methods(mode)[0] == "provider"
+    return CompactionRoute(
+        default="provider" if remote or server else "pi",
+        provider=messages or remote,
+        messages=messages,
+        server=server,
+    )
+
+
 def resolve_compaction_mode(binding, requested: Optional[str] = None) -> str:
     """Resolve ``--compaction-mode`` for one model binding.
 
-    Without a request, the official ChatGPT/Codex route uses ``provider``
-    (remote compaction) and every other route uses ``pi``. ``provider`` is
-    also allowed for Messages, as Anthropic server-side compaction. A
-    Codex-compatible third-party endpoint is not assumed to support remote
-    compaction.
+    The value is a compaction sequence (``parse_compaction_mode``). Without a
+    request, it is the model catalog's value (``ModelBinding.compaction``),
+    else the default sequence: coldstart, then warmpi up to twice. A catalog
+    value that can't run on this route fails, naming the catalog. The route's
+    own method, which ``legacydefault`` entries name, is ``provider`` (remote
+    compaction) on the official ChatGPT/Codex route and ``pi`` elsewhere.
+    ``provider`` is also allowed for Messages, as
+    Anthropic server-side compaction, but only first. A Codex-compatible
+    third-party endpoint is not assumed to support remote compaction.
     """
-    if requested is None:
-        return "provider" if binding.supports_remote_compaction else "pi"
+    route = _binding_route(binding)
     requested = validate_config_value("compaction_mode", requested)
-    if requested == "provider" and not (
-        binding.api == "messages" or binding.supports_remote_compaction
-    ):
+    if requested is not None:
+        return route.resolve(requested)
+    configured = binding.compaction.mode
+    if configured is None:
+        return route.default_sequence
+    try:
+        return route.resolve(configured)
+    except ConfigError as exc:
         raise ConfigError(
-            "this route has no provider compaction; use --compaction-mode pi"
-        )
-    return requested
+            f"compaction_mode {configured} (from the model catalog): {exc}") from None
+
+
+def _catalog_default(route: CompactionRoute, configured: Optional[str]) -> str:
+    """The route's default compaction sequence: the catalog's, if it can run there.
+
+    ``configured`` is the model catalog's value, in its normal form. On a
+    Messages endpoint, server-side compaction is fixed when the endpoint is
+    built, so a value that would add or remove ``provider`` can't run; the
+    route's built-in default (``default_sequence``) applies instead.
+    """
+    if configured is not None:
+        try:
+            return route.resolve(configured)
+        except ConfigError:
+            pass
+    return route.default_sequence
 
 
 def resolve_request_timeout_seconds(binding, requested=None) -> Optional[float]:
@@ -194,36 +312,41 @@ def resolve_request_timeout_seconds(binding, requested=None) -> Optional[float]:
     return DEFAULT_REQUEST_TIMEOUT_SECONDS if configured is None else configured
 
 
-def _model_compaction_mode(model, requested: Optional[str]) -> str:
-    """Infer a Python-built model's mode, or check a requested one."""
+def _model_route(model) -> CompactionRoute:
+    """A Python-built model's route, from its adapter and endpoint."""
     from .messages import MessagesModel
     from .responses import _ResponsesModelBase
 
-    requested = validate_config_value("compaction_mode", requested)
     if isinstance(model, MessagesModel):
         configured = model.endpoint.server_compaction is not None
-        if requested == "provider" and not configured:
-            raise ConfigError(
-                "compaction_mode 'provider' requires "
-                "MessagesEndpoint(server_compaction=...)."
-            )
-        if requested == "pi" and configured:
-            raise ConfigError(
-                "compaction_mode 'pi' conflicts with the endpoint's "
-                "server_compaction; omit server_compaction for pi."
-            )
-        return "provider" if configured else "pi"
+        return CompactionRoute(default="provider" if configured else "pi",
+                               provider=True, messages=True, server=configured)
     remote = (
         isinstance(model, _ResponsesModelBase)
         and model.supports_remote_compaction
     )
-    if requested == "provider" and not remote:
-        raise ConfigError(
-            "This model has no provider compaction; use compaction_mode 'pi'."
-        )
+    return CompactionRoute(default="provider" if remote else "pi", provider=bool(remote))
+
+
+def _model_compaction_defaults(model) -> CompactionDefaults:
+    """A Python-built model's catalog compaction settings, from its binding."""
+    binding = getattr(model, "binding", None)
+    return binding.compaction if isinstance(binding, ModelBinding) else CompactionDefaults()
+
+
+def _model_compaction_mode(model, requested: Optional[str]) -> str:
+    """Infer a Python-built model's mode, or check a requested one.
+
+    On Messages, ``provider`` comes first exactly when the endpoint has
+    server-side compaction (``MessagesEndpoint(server_compaction=...)``).
+    Without a request, the binding's catalog value applies where the model
+    can run it; the model is already built, so one it can't run is ignored.
+    """
+    route = _model_route(model)
+    requested = validate_config_value("compaction_mode", requested)
     if requested is not None:
-        return requested
-    return "provider" if remote else "pi"
+        return route.resolve(requested)
+    return _catalog_default(route, _model_compaction_defaults(model).mode)
 
 
 @dataclass(frozen=True)
@@ -233,8 +356,9 @@ class InteractionConfigSnapshot:
     ``extra_sample_params`` is a launch-only, read-only view of the model
     binding's map. It is not projected into sample params: requests inherit
     the binding's map, so samples and compactions send the same extensions.
-    ``compaction_mode`` is launch-only too; ``None`` means the route's
-    default until a config binds it.
+    ``compaction_mode`` is a compaction sequence (``parse_compaction_mode``),
+    such as ``coldstart,pi:2``; ``None`` means the route's default until a
+    config binds it.
 
     ``request_timeout_seconds`` is projected into sample params as each
     request's HTTP timeout. ``None`` leaves the model endpoint's own timeout;
@@ -247,11 +371,11 @@ class InteractionConfigSnapshot:
     max_output_tokens: Optional[int] = None
     request_timeout_seconds: Optional[float] = None
     enable_auto_compaction: bool = True
-    auto_compact_tokens: Optional[int] = None
+    auto_compaction_context_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
     compaction_mode: Optional[str] = None
-    compaction_keep_recent_tokens: Optional[int] = DEFAULT_KEEP_RECENT_TOKENS
-    compaction_max_output_tokens: Optional[int] = None
+    compaction_pi_keep_recent_tokens: Optional[int] = DEFAULT_KEEP_RECENT_TOKENS
+    compaction_pi_max_output_tokens: Optional[int] = None
     extra_sample_params: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -277,16 +401,16 @@ class InteractionConfigSnapshot:
             max_output_tokens=self.max_output_tokens,
             request_timeout_seconds=self.request_timeout_seconds,
             enable_auto_compaction=self.enable_auto_compaction,
-            auto_compact_tokens=self.auto_compact_tokens,
+            auto_compaction_context_tokens=self.auto_compaction_context_tokens,
         )
 
     def compaction_settings(self) -> CompactionSettings:
         """Compactor selection and pi options for this snapshot."""
-        keep = self.compaction_keep_recent_tokens
+        keep = self.compaction_pi_keep_recent_tokens
         return CompactionSettings(
             mode=self.compaction_mode or "pi",
             keep_recent_tokens=DEFAULT_KEEP_RECENT_TOKENS if keep is None else keep,
-            max_output_tokens=self.compaction_max_output_tokens,
+            max_output_tokens=self.compaction_pi_max_output_tokens,
         )
 
 
@@ -298,6 +422,19 @@ class InteractionConfig:
     Reads and request projection never consult models or the catalog.
     ``request_timeout_applies=False`` (Claude Relay) rejects any request
     timeout.
+
+    ``compaction_route`` (from the factories) resolves ``legacydefault`` in
+    ``compaction_mode`` and checks every value against the route; an unset
+    value is the model catalog's (``compaction_mode_fallback``) where the
+    route can run it, else the route's default sequence
+    (``CompactionRoute.default_sequence``), and ``pi`` without a route. The
+    other ``compaction_*_fallback`` values are the catalog's too, else the
+    built-in defaults. With ``coldstart_unavailable``, the reason this
+    session can't run coldstart compaction, the launch value and its fallback
+    lose coldstart, and a change that asks for coldstart is refused.
+    ``coldstart_dropped`` records a launch value that lost it, as the value
+    before and after, unless that value was the default, the catalog's or the
+    built-in one, which loses it silently.
     """
 
     def __init__(
@@ -308,11 +445,16 @@ class InteractionConfig:
         on_enable_workspace: Optional[Callable[[bool], None]] = None,
         require_max_output_tokens: bool = False,
         max_output_tokens_fallback: Optional[int] = None,
-        auto_compact_tokens_fallback: Optional[int] = None,
+        auto_compaction_context_tokens_fallback: Optional[int] = None,
         max_context_tokens_fallback: Optional[int] = None,
-        min_auto_compact_tokens: Optional[int] = None,
+        min_auto_compaction_context_tokens: Optional[int] = None,
         request_timeout_seconds_fallback: Optional[float] = None,
         request_timeout_applies: bool = True,
+        compaction_route: Optional[CompactionRoute] = None,
+        coldstart_unavailable: Optional[str] = None,
+        compaction_mode_fallback: Optional[str] = None,
+        compaction_pi_keep_recent_tokens_fallback: Optional[int] = None,
+        compaction_pi_max_output_tokens_fallback: Optional[int] = None,
     ) -> None:
         if not isinstance(snapshot, InteractionConfigSnapshot):
             raise TypeError("snapshot must be InteractionConfigSnapshot")
@@ -328,25 +470,62 @@ class InteractionConfig:
             raise TypeError("require_max_output_tokens must be a bool")
         if not isinstance(request_timeout_applies, bool):
             raise TypeError("request_timeout_applies must be a bool")
+        if compaction_route is not None and not isinstance(compaction_route, CompactionRoute):
+            raise TypeError("compaction_route must be CompactionRoute or None")
+        if coldstart_unavailable is not None and (
+            not isinstance(coldstart_unavailable, str) or not coldstart_unavailable.strip()
+        ):
+            raise TypeError("coldstart_unavailable must be a nonempty string or None")
+        compaction_mode_fallback = validate_config_value(
+            "compaction_mode", compaction_mode_fallback)
+        if compaction_route is None:
+            mode_default = "pi" if compaction_mode_fallback is None else compaction_mode_fallback
+        else:
+            mode_default = _catalog_default(compaction_route, compaction_mode_fallback)
+        if compaction_pi_keep_recent_tokens_fallback is None:
+            compaction_pi_keep_recent_tokens_fallback = DEFAULT_KEEP_RECENT_TOKENS
         # Bound defaults are used only at initialization/mutation, never on read.
         self._fallbacks = {
             key: validate_config_value(key, value)
             for key, value in (
                 ("max_output_tokens", max_output_tokens_fallback),
                 ("request_timeout_seconds", request_timeout_seconds_fallback),
-                ("auto_compact_tokens", auto_compact_tokens_fallback),
+                ("auto_compaction_context_tokens", auto_compaction_context_tokens_fallback),
                 ("max_context_tokens", max_context_tokens_fallback),
-                ("compaction_mode", "pi"),
-                ("compaction_keep_recent_tokens", DEFAULT_KEEP_RECENT_TOKENS),
+                ("compaction_mode", mode_default),
+                ("compaction_pi_keep_recent_tokens", compaction_pi_keep_recent_tokens_fallback),
+                ("compaction_pi_max_output_tokens", compaction_pi_max_output_tokens_fallback),
             )
         }
         self._require_max_output_tokens = require_max_output_tokens
         self._request_timeout_applies = request_timeout_applies
-        self._min_auto_compact_tokens = validate_config_value(
-            "auto_compact_tokens", min_auto_compact_tokens,
+        self._min_auto_compaction_context_tokens = validate_config_value(
+            "auto_compaction_context_tokens", min_auto_compaction_context_tokens,
         )
+        self._compaction_route = compaction_route
+        # The default before coldstart is dropped, for _without_coldstart.
+        self._mode_default = self._fallbacks["compaction_mode"]
+        self._coldstart_unavailable = coldstart_unavailable
+        self.coldstart_dropped: Optional[tuple] = None
         snapshot = self._resolve(snapshot)
         initial = snapshot if initial is None else self._resolve(initial)
+        if compaction_route is not None:
+            snapshot, initial = (
+                replace(value, compaction_mode=compaction_route.resolve(value.compaction_mode))
+                for value in (snapshot, initial)
+            )
+        if coldstart_unavailable is not None:
+            default = self._fallbacks["compaction_mode"]
+            self._fallbacks["compaction_mode"] = self._without_coldstart(default)
+            before = snapshot.compaction_mode
+            snapshot, initial = (
+                replace(value, compaction_mode=self._without_coldstart(value.compaction_mode))
+                for value in (snapshot, initial)
+            )
+            # Notices are for values that someone set: the default sequence,
+            # or a value equal to it, loses coldstart silently.
+            if snapshot.compaction_mode != before and before != default:
+                self.coldstart_dropped = (before, snapshot.compaction_mode)
         self._validate(snapshot)
         self._validate(initial)
         self._lock = RLock()
@@ -354,6 +533,39 @@ class InteractionConfig:
         # The resolved launch values remain fixed after live config changes.
         self._initial = initial
         self._on_enable_workspace = on_enable_workspace
+
+    @property
+    def coldstart_unavailable(self) -> Optional[str]:
+        """Why this session can't run coldstart compaction, or None."""
+        return self._coldstart_unavailable
+
+    def _without_coldstart(self, mode: str) -> str:
+        """``mode`` without coldstart.
+
+        If nothing is left, this session's default without it: the catalog's
+        value, else the built-in one. If that is coldstart alone too, the
+        built-in default without it: warmpi twice.
+        """
+        method = "pi" if self._compaction_route is None else self._compaction_route.default
+        for value in (mode, self._mode_default, DEFAULT_COMPACTION_MODE):
+            entries = [(method if name == "legacydefault" else name, attempts)
+                       for name, attempts in parse_compaction_mode(value)
+                       if name != "coldstart"]
+            if entries:
+                return format_compaction_mode(entries)
+        raise AssertionError("DEFAULT_COMPACTION_MODE names a method besides coldstart")
+
+    def _changed_compaction_mode(self, value: str) -> str:
+        """Check a /config change of ``compaction_mode`` (not null) for this session."""
+        if self._compaction_route is not None:
+            value = self._compaction_route.resolve(value)
+        if (self._coldstart_unavailable is not None
+                and "coldstart" in compaction_methods(value)):
+            raise ConfigError(
+                "compaction_mode can't include coldstart in this session: "
+                f"{self._coldstart_unavailable}. It stays {self.get('compaction_mode')}."
+            )
+        return value
 
     def _resolve(
         self, snapshot: InteractionConfigSnapshot,
@@ -368,11 +580,11 @@ class InteractionConfig:
             raise ConfigError("max_output_tokens is required for this Messages model.")
         if not self._request_timeout_applies and snapshot.request_timeout_seconds is not None:
             raise ConfigError(_NO_REQUEST_TIMEOUT)
-        threshold = snapshot.auto_compact_tokens
-        minimum = self._min_auto_compact_tokens
+        threshold = snapshot.auto_compaction_context_tokens
+        minimum = self._min_auto_compaction_context_tokens
         if threshold is not None and minimum is not None and threshold < minimum:
             raise ConfigError(
-                f"auto_compact_tokens must be at least {minimum} for this model."
+                f"auto_compaction_context_tokens must be at least {minimum} for this model."
             )
 
     def _publish(self, candidate: InteractionConfigSnapshot) -> None:
@@ -390,8 +602,15 @@ class InteractionConfig:
         *,
         on_enable_workspace: Optional[Callable[[bool], None]] = None,
         catalog=None,
+        coldstart_unavailable: Optional[str] = None,
     ) -> "InteractionConfig":
-        """Seed one final namespace; do not write resolved values back into it."""
+        """Seed one final namespace; do not write resolved values back into it.
+
+        ``coldstart_unavailable`` is why this session can't run coldstart
+        compaction, if it can't (see the class docstring).
+        Compaction settings without a launch value take the model catalog's
+        (``ModelBinding.compaction``), which ``null`` also restores.
+        """
         binding = binding_from_namespace(args, catalog)
         mode = resolve_compaction_mode(
             binding, getattr(args, "compaction_mode", None),
@@ -420,14 +639,14 @@ class InteractionConfig:
                 max_output_tokens=max_output_tokens,
                 request_timeout_seconds=request_timeout_seconds,
                 enable_auto_compaction=args.enable_auto_compaction,
-                auto_compact_tokens=getattr(args, "auto_compact_tokens", None),
+                auto_compaction_context_tokens=getattr(args, "auto_compaction_context_tokens", None),
                 max_context_tokens=getattr(args, "max_context_tokens", None),
                 compaction_mode=mode,
-                compaction_keep_recent_tokens=getattr(
-                    args, "compaction_keep_recent_tokens", None,
+                compaction_pi_keep_recent_tokens=getattr(
+                    args, "compaction_pi_keep_recent_tokens", None,
                 ),
-                compaction_max_output_tokens=getattr(
-                    args, "compaction_max_output_tokens", None,
+                compaction_pi_max_output_tokens=getattr(
+                    args, "compaction_pi_max_output_tokens", None,
                 ),
                 extra_sample_params=binding.extra_sample_params,
             ),
@@ -436,17 +655,23 @@ class InteractionConfig:
             max_output_tokens_fallback=max_output_tokens_fallback,
             request_timeout_seconds_fallback=resolve_request_timeout_seconds(binding),
             request_timeout_applies=binding.api != "claude-relay",
-            auto_compact_tokens_fallback=(
+            auto_compaction_context_tokens_fallback=(
                 None if limits is None else limits.auto_compaction_context_tokens
             ),
             max_context_tokens_fallback=(
                 None if limits is None else limits.max_context_tokens
             ),
             # Anthropic's trigger minimum binds only its server compaction.
-            min_auto_compact_tokens=(
+            min_auto_compaction_context_tokens=(
                 MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
-                if binding.api == "messages" and mode == "provider" else None
+                if binding.api == "messages" and compaction_methods(mode)[0] == "provider"
+                else None
             ),
+            compaction_route=_binding_route(binding, mode),
+            coldstart_unavailable=coldstart_unavailable,
+            compaction_mode_fallback=binding.compaction.mode,
+            compaction_pi_keep_recent_tokens_fallback=binding.compaction.pi_keep_recent_tokens,
+            compaction_pi_max_output_tokens_fallback=binding.compaction.pi_max_output_tokens,
         )
 
     @classmethod
@@ -454,6 +679,8 @@ class InteractionConfig:
         cls,
         model,
         snapshot: InteractionConfigSnapshot = InteractionConfigSnapshot(),
+        *,
+        coldstart_unavailable: Optional[str] = None,
     ) -> "InteractionConfig":
         """Bind Python frontend inputs once, without loading credentials.
 
@@ -462,11 +689,15 @@ class InteractionConfig:
         built-in model's binding owns ``extra_sample_params``; a snapshot may
         repeat that map but not change it. The compaction mode is inferred
         from the adapter: ``provider`` for a Messages endpoint with server
-        compaction or a Codex model with remote compaction, else ``pi``. A
-        snapshot may request ``pi`` on Codex, but not a mode the model can't
-        run. An HTTP endpoint's ``request_timeout_seconds`` seeds the launch
+        compaction; otherwise coldstart, then warmpi up to twice, on a Codex
+        model with remote compaction too. A snapshot may request
+        ``pi`` on Codex, but not a mode the model can't run. An HTTP
+        endpoint's ``request_timeout_seconds`` seeds the launch
         timeout unless the snapshot sets one; ``null`` later restores the
         binding's catalog value or default. Claude Relay rejects a timeout.
+        The binding's catalog compaction settings are what ``null`` restores;
+        the snapshot's values are launch values, its default 20,000-token
+        ``compaction_pi_keep_recent_tokens`` included.
         """
         from .chat_completions import ChatCompletionsModel
         from .messages import MessagesModel
@@ -487,10 +718,10 @@ class InteractionConfig:
                     endpoint.max_output_tokens if snapshot.max_output_tokens is None
                     else snapshot.max_output_tokens
                 ),
-                auto_compact_tokens=(
+                auto_compaction_context_tokens=(
                     compaction.trigger_input_tokens
-                    if snapshot.auto_compact_tokens is None and compaction is not None
-                    else snapshot.auto_compact_tokens
+                    if snapshot.auto_compaction_context_tokens is None and compaction is not None
+                    else snapshot.auto_compaction_context_tokens
                 ),
             )
             profile = "messages"
@@ -502,15 +733,21 @@ class InteractionConfig:
             profile = "chat-completions"
         else:
             binding = getattr(model, "binding", None)
+            catalog = _model_compaction_defaults(model)
             return cls(
                 snapshot,
-                auto_compact_tokens_fallback=getattr(
+                auto_compaction_context_tokens_fallback=getattr(
                     model, "auto_compaction_context_tokens", None,
                 ),
                 max_context_tokens_fallback=getattr(model, "max_context_tokens", None),
                 request_timeout_applies=not (
                     isinstance(binding, ModelBinding) and binding.api == "claude-relay"
                 ),
+                compaction_route=_model_route(model),
+                coldstart_unavailable=coldstart_unavailable,
+                compaction_mode_fallback=catalog.mode,
+                compaction_pi_keep_recent_tokens_fallback=catalog.pi_keep_recent_tokens,
+                compaction_pi_max_output_tokens_fallback=catalog.pi_max_output_tokens,
             )
         binding = model.binding
         if (snapshot.extra_sample_params
@@ -527,7 +764,7 @@ class InteractionConfig:
             model_api=profile, model=endpoint.model,
             model_binding=binding,
             **snapshot.as_dict(),
-        ))
+        ), coldstart_unavailable=coldstart_unavailable)
 
     def snapshot(self) -> InteractionConfigSnapshot:
         with self._lock:
@@ -548,6 +785,8 @@ class InteractionConfig:
         value = validate_config_value(key, value)
         if value is None and key in self._fallbacks:
             value = self._fallbacks[key]
+        elif key == "compaction_mode":
+            value = self._changed_compaction_mode(value)
         with self._lock:
             current = self._snapshot
             if getattr(current, key) == value:
@@ -602,10 +841,12 @@ class InteractionConfig:
 
 __all__ = [
     "CONFIG_KEYS",
+    "CompactionRoute",
     "ConfigError",
     "ConfigValue",
     "InteractionConfig",
     "InteractionConfigSnapshot",
+    "RENAMED_CONFIG_KEYS",
     "parse_config_literal",
     "resolve_compaction_mode",
     "resolve_request_timeout_seconds",

@@ -15,6 +15,7 @@ from typing import Set
 from typing import Tuple
 
 from .compaction import _compaction_summary_text
+from .compaction import is_coldstart_pointer
 from .items import CompactionMetadata
 from .items import ContextPrefix
 from .items import Init
@@ -436,9 +437,11 @@ def _render_instructions(item: Instructions) -> Tuple[str, ...]:
 
 
 def _render_context_prefix(item: ContextPrefix) -> Tuple[str, ...]:
-    """The item count, then the compaction summary text if there is one.
+    """The item count, then the checkpoint's new text, if it has any.
 
-    The kept items were already shown where they first appeared.
+    That is a pi summary's text, or else a coldstart pointer, which is always
+    a coldstart checkpoint's last item; such a checkpoint never holds a
+    summary. The kept items were already shown where they first appeared.
     """
     item_count = len(item.prefix_items)
     noun = "item" if item_count == 1 else "items"
@@ -448,6 +451,9 @@ def _render_context_prefix(item: ContextPrefix) -> Tuple[str, ...]:
         if summary is not None:
             blocks.append(summary)
             break
+    else:
+        if item.prefix_items and is_coldstart_pointer(item.prefix_items[-1]):
+            blocks.append(item.prefix_items[-1].content)
     return tuple(blocks)
 
 

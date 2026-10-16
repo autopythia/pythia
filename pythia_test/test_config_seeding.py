@@ -101,7 +101,7 @@ class ConfigSeedingTests(unittest.TestCase):
             ):
                 config = InteractionConfig.from_namespace(arguments(api, model))
                 self.assertEqual(config.snapshot(), config.initial_snapshot())
-                self.assertEqual(config.get("auto_compact_tokens"), 872_000)
+                self.assertEqual(config.get("auto_compaction_context_tokens"), 872_000)
                 self.assertEqual(config.get("max_context_tokens"), 1_000_000)
                 self.assertEqual(config.get("max_output_tokens"), budget)
                 self.assertEqual(config.get("request_timeout_seconds"), DEFAULT_REQUEST_TIMEOUT_SECONDS)
@@ -109,7 +109,7 @@ class ConfigSeedingTests(unittest.TestCase):
                 # projection leaves them to the binding, as for every request.
                 self.assertEqual(config.get("extra_sample_params"), extra_sample_params)
                 self.assertEqual(config.snapshot().sample_params(), SampleParams(
-                    auto_compact_tokens=872_000, max_output_tokens=budget,
+                    auto_compaction_context_tokens=872_000, max_output_tokens=budget,
                     enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 ))
 
@@ -120,7 +120,7 @@ class ConfigSeedingTests(unittest.TestCase):
         ):
             with self.subTest(api=api, model=model):
                 config = InteractionConfig.from_namespace(arguments(api, model))
-                self.assertIsNone(config.get("auto_compact_tokens"))
+                self.assertIsNone(config.get("auto_compaction_context_tokens"))
                 self.assertIsNone(config.get("max_context_tokens"))
                 self.assertIsNone(config.get("max_output_tokens"))
 
@@ -130,13 +130,15 @@ class ConfigSeedingTests(unittest.TestCase):
         ))
         config = InteractionConfig.from_model(model)
         self.assertEqual(config.snapshot(), InteractionConfigSnapshot(
-            compaction_mode="pi", request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            compaction_mode="coldstart,warmpi:2",
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ))
 
     def test_python_models_infer_the_compaction_mode(self):
         official = codex_model(model="codex-gpt-6-astra", auth=CodexAuth("FAKE"))
         self.assertTrue(official.supports_remote_compaction)
-        self.assertEqual(InteractionConfig.from_model(official).get("compaction_mode"), "provider")
+        self.assertEqual(InteractionConfig.from_model(official).get("compaction_mode"),
+                         "coldstart,warmpi:2")
         # A snapshot may request pi on Codex.
         self.assertEqual(InteractionConfig.from_model(
             official, InteractionConfigSnapshot(compaction_mode="pi"),
@@ -146,13 +148,15 @@ class ConfigSeedingTests(unittest.TestCase):
         plain = MessagesModel(messages_endpoint(
             api_url="https://api.anthropic.com", model="claude-fable-5.1",
         ))
-        self.assertEqual(InteractionConfig.from_model(plain).get("compaction_mode"), "pi")
+        self.assertEqual(InteractionConfig.from_model(plain).get("compaction_mode"),
+                         "coldstart,warmpi:2")
 
         class Custom:
             def sample(self, context, *, tools=(), sample_params=None):
                 raise AssertionError("not sampled")
 
-        self.assertEqual(InteractionConfig.from_model(Custom()).get("compaction_mode"), "pi")
+        self.assertEqual(InteractionConfig.from_model(Custom()).get("compaction_mode"),
+                         "coldstart,warmpi:2")
         for model, requested in (
             (plain, "provider"), (server, "pi"), (Custom(), "provider"),
             (ChatCompletionsModel(chat_endpoint(api_url="http://localhost:8000")), "provider"),
@@ -169,9 +173,9 @@ class ConfigSeedingTests(unittest.TestCase):
     def test_python_endpoint_preferences_seed_but_do_not_override_runtime_config(self):
         model = CaptureMessages(trigger=150_000)
         config = InteractionConfig.from_model(model)
-        self.assertEqual(config.initial_values()["auto_compact_tokens"], 150_000)
+        self.assertEqual(config.initial_values()["auto_compaction_context_tokens"], 150_000)
         self.assertEqual(config.initial_values()["max_output_tokens"], 321)
-        config.set("auto_compact_tokens", None)
+        config.set("auto_compaction_context_tokens", None)
         config.set("max_output_tokens", 77)
         payload = model._build_request_payload(previous_context(), (), config.snapshot().sample_params())
         self.assertEqual(payload["max_tokens"], 77)
@@ -224,21 +228,21 @@ class ConfigSeedingTests(unittest.TestCase):
 
     def test_null_resolves_immediately_but_reset_restores_launch_override(self):
         config = InteractionConfig.from_namespace(arguments(
-            auto_compact_tokens=500_000, max_context_tokens=950_000,
+            auto_compaction_context_tokens=500_000, max_context_tokens=950_000,
         ))
         initial = config.initial_snapshot()
-        config.set("auto_compact_tokens", 100_000)
+        config.set("auto_compaction_context_tokens", 100_000)
         config.set("max_context_tokens", 1_000)  # Informational, not a constraint.
-        self.assertEqual(config.set("auto_compact_tokens", None), 872_000)
+        self.assertEqual(config.set("auto_compaction_context_tokens", None), 872_000)
         self.assertEqual(config.set("max_context_tokens", None), 1_000_000)
-        self.assertEqual(config.get("auto_compact_tokens"), 872_000)
-        self.assertIn("auto_compact_tokens = 872000", config.render(json_output=False))
+        self.assertEqual(config.get("auto_compaction_context_tokens"), 872_000)
+        self.assertIn("auto_compaction_context_tokens = 872000", config.render(json_output=False))
         payload = json.loads(config.render(json_output=True))
-        self.assertEqual(payload["auto_compact_tokens"], 872_000)
-        self.assertEqual(payload["__init__"]["auto_compact_tokens"], 500_000)
-        self.assertEqual(config.snapshot().sample_params().auto_compact_tokens, 872_000)
-        config.reset("auto_compact_tokens")
-        self.assertEqual(config.get("auto_compact_tokens"), 500_000)
+        self.assertEqual(payload["auto_compaction_context_tokens"], 872_000)
+        self.assertEqual(payload["__init__"]["auto_compaction_context_tokens"], 500_000)
+        self.assertEqual(config.snapshot().sample_params().auto_compaction_context_tokens, 872_000)
+        config.reset("auto_compaction_context_tokens")
+        self.assertEqual(config.get("auto_compaction_context_tokens"), 500_000)
         self.assertEqual(config.get("max_context_tokens"), 1_000_000)
         self.assertEqual(config.reset(), initial)
         self.assertIs(config.initial_snapshot(), initial)
@@ -251,9 +255,9 @@ class ConfigSeedingTests(unittest.TestCase):
                 config = InteractionConfig.from_namespace(args)
                 before = config.snapshot()
                 with self.assertRaisesRegex(ConfigError, "50000"):
-                    config.set("auto_compact_tokens", 49_999)
+                    config.set("auto_compaction_context_tokens", 49_999)
                 self.assertIs(config.snapshot(), before)
-                args.auto_compact_tokens = 49_999
+                args.auto_compaction_context_tokens = 49_999
                 with self.assertRaisesRegex(ConfigError, "50000"):
                     InteractionConfig.from_namespace(args)
 
@@ -278,13 +282,13 @@ class ConfigSeedingTests(unittest.TestCase):
         config.set("enable_auto_compaction", True)
         self.assertEqual(config.snapshot().sample_params(), initial)
         self.assertEqual(config.values(), config.initial_values())
-        config.set("auto_compact_tokens", 100)
-        self.assertIn("# init: auto_compact_tokens = None", config.render(json_output=False))
-        self.assertIsNone(config.set("auto_compact_tokens", None))
-        self.assertIsNone(config.snapshot().sample_params().auto_compact_tokens)
+        config.set("auto_compaction_context_tokens", 100)
+        self.assertIn("# init: auto_compaction_context_tokens = None", config.render(json_output=False))
+        self.assertIsNone(config.set("auto_compaction_context_tokens", None))
+        self.assertIsNone(config.snapshot().sample_params().auto_compaction_context_tokens)
 
     def test_projection_keeps_per_call_fields_but_not_old_policy(self):
-        base = SampleParams(max_output_tokens=7, auto_compact_tokens=8,
+        base = SampleParams(max_output_tokens=7, auto_compaction_context_tokens=8,
                             enable_auto_compaction=False, temperature=0.5,
                             top_p=0.8, stop=("stop",), seed=4, extra={"top_k": 5})
         snapshot = InteractionConfigSnapshot(
@@ -304,7 +308,7 @@ class SampleParamsPrecedenceTests(unittest.TestCase):
         for threshold, expected in ((100_000, 100_000), (None, 150_000)):
             with self.subTest(threshold=threshold):
                 payload = model._build_request_payload(previous_context(), (), SampleParams(
-                    max_output_tokens=77, auto_compact_tokens=threshold,
+                    max_output_tokens=77, auto_compaction_context_tokens=threshold,
                 ))
                 self.assertEqual(payload["max_tokens"], 77)
                 edit = payload["context_management"]["edits"][0]
@@ -326,7 +330,7 @@ class SampleParamsPrecedenceTests(unittest.TestCase):
     def test_messages_per_call_trigger_is_validated_not_ignored(self):
         with self.assertRaisesRegex(ModelConfigurationError, "at least"):
             CaptureMessages(trigger=150_000)._build_request_payload(
-                previous_context(), (), SampleParams(auto_compact_tokens=49_999),
+                previous_context(), (), SampleParams(auto_compaction_context_tokens=49_999),
             )
 
     def test_enabling_messages_compaction_without_endpoint_policy(self):
@@ -354,13 +358,13 @@ class SampleParamsPrecedenceTests(unittest.TestCase):
         model = codex_model(model="codex-gpt-6-astra", auth=CodexAuth("FAKE"))
         config = InteractionConfig.from_namespace(arguments())
         payload, _ = model._build_request_payload(previous_context(), (), config.snapshot().sample_params())
-        for key in ("max_output_tokens", "auto_compact_tokens", "max_context_tokens", "enable_auto_compaction"):
+        for key in ("max_output_tokens", "auto_compaction_context_tokens", "max_context_tokens", "enable_auto_compaction"):
             self.assertNotIn(key, payload)
 
     def test_host_only_options_do_not_change_chat_sampling_payload(self):
         model = ChatCompletionsModel(chat_endpoint(api_url="http://localhost:8000"))
         payload = model._build_request_payload(previous_context(), (), SampleParams(
-            enable_auto_compaction=True, auto_compact_tokens=100_000,
+            enable_auto_compaction=True, auto_compaction_context_tokens=100_000,
         ))
         ordinary = model._build_request_payload(previous_context(), (), None)
         self.assertEqual(payload, ordinary)
@@ -371,7 +375,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         for threshold, enabled in ((None, True), (100_000, True), (100_000, False)):
             with self.subTest(threshold=threshold, enabled=enabled), tempfile.TemporaryDirectory() as directory:
                 config = InteractionConfig.from_namespace(arguments(
-                    "messages", "claude-fable-5.1", auto_compact_tokens=threshold,
+                    "messages", "claude-fable-5.1", auto_compaction_context_tokens=threshold,
                     enable_auto_compaction=enabled, compaction_mode="provider",
                 ))
                 model = CaptureMessages(trigger=150_000)
@@ -381,16 +385,16 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(model.payloads), 1)
                 if enabled:
                     self.assertEqual(model.payloads[0]["context_management"]["edits"][0]["trigger"]["value"],
-                                     config.get("auto_compact_tokens"))
+                                     config.get("auto_compaction_context_tokens"))
                 else:
                     self.assertNotIn("context_management", model.payloads[0])
 
     async def test_cli_messages_pi_mode_compacts_on_the_host(self):
         with tempfile.TemporaryDirectory() as directory:
             config = InteractionConfig.from_namespace(arguments(
-                "messages", "claude-fable-5.1", auto_compact_tokens=100,
+                "messages", "claude-fable-5.1", auto_compaction_context_tokens=100,
             ))
-            self.assertEqual(config.get("compaction_mode"), "pi")
+            self.assertEqual(config.get("compaction_mode"), "coldstart,warmpi:2")
             model = CaptureMessages()
             model.endpoint = replace(model.endpoint, server_compaction=None)
             compactor = mock.Mock()
@@ -398,7 +402,10 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
             with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
                 await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
                                 InteractionSaveWriter(Path(directory) / "log.jsonl"), config)
-            create.assert_called_once_with(model, config.snapshot().compaction_settings())
+            # Without exec_command the runner skips coldstart, and warmpi runs alone.
+            create.assert_called_once_with(
+                model, replace(config.snapshot().compaction_settings(), mode="warmpi"),
+                reason="threshold")
             self.assertEqual(compactor.compact.call_args.kwargs["sample_params"],
                              config.snapshot().sample_params())
             self.assertEqual(len(model.payloads), 1)
@@ -408,7 +415,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         for threshold in (None, 100):
             with self.subTest(threshold=threshold), tempfile.TemporaryDirectory() as directory:
                 model = CaptureHost()
-                config = InteractionConfig(InteractionConfigSnapshot(auto_compact_tokens=threshold))
+                config = InteractionConfig(InteractionConfigSnapshot(auto_compaction_context_tokens=threshold))
                 compactor = mock.Mock()
                 compactor.compact.return_value = CompactionResult((ContextPrefix((Message("assistant", "summary"),)),))
                 with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
@@ -428,7 +435,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         for model in (CaptureHost(), CaptureMessages(trigger=150_000)):
             for threshold in (None, 100_000):
                 with self.subTest(model=type(model), threshold=threshold):
-                    config = InteractionConfigSnapshot(auto_compact_tokens=threshold, max_output_tokens=77)
+                    config = InteractionConfigSnapshot(auto_compaction_context_tokens=threshold, max_output_tokens=77)
                     compactor = mock.Mock()
                     compactor.compact.return_value = CompactionResult((ContextPrefix((Message("assistant", "summary"),)),))
                     with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
@@ -439,9 +446,9 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     def test_demo_normalizes_keyword_and_options_before_sampling(self):
         for kwargs in (
-            {"auto_compact_tokens": 100_000},
-            {"sample_params": SampleParams(auto_compact_tokens=100_000)},
-            {"auto_compact_tokens": 100_000, "sample_params": SampleParams(auto_compact_tokens=100_000)},
+            {"auto_compaction_context_tokens": 100_000},
+            {"sample_params": SampleParams(auto_compaction_context_tokens=100_000)},
+            {"auto_compaction_context_tokens": 100_000, "sample_params": SampleParams(auto_compaction_context_tokens=100_000)},
         ):
             with self.subTest(kwargs=kwargs):
                 model = CaptureMessages()
@@ -451,8 +458,8 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(model.payloads[0]["context_management"]["edits"][0]["trigger"]["value"], 100_000)
                 self.assertEqual(model.payloads[0]["max_tokens"], 321)
         with self.assertRaisesRegex(ValueError, "Conflicting"):
-            demo.run(CaptureMessages(), Environment(), auto_compact_tokens=100_000,
-                     sample_params=SampleParams(auto_compact_tokens=200_000))
+            demo.run(CaptureMessages(), Environment(), auto_compaction_context_tokens=100_000,
+                     sample_params=SampleParams(auto_compaction_context_tokens=200_000))
 
     def test_demo_binds_endpoint_policy_once_and_keeps_per_call_extra(self):
         model = CaptureMessages(trigger=150_000)
@@ -497,7 +504,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         with redirect_stdout(io.StringIO()):
             demo.run(model, Environment(), prompt="hello")
         self.assertEqual(model.reads, 1)
-        self.assertEqual(model.sample_params[0].auto_compact_tokens, 100)
+        self.assertEqual(model.sample_params[0].auto_compaction_context_tokens, 100)
 
 
 class AutoSeedingTests(unittest.TestCase):
@@ -506,26 +513,26 @@ class AutoSeedingTests(unittest.TestCase):
             path = Path(directory) / "input.json"
             path.write_text(json.dumps({
                 "version": 3,
-                "main": {"model_api": "codex", "model": "codex-gpt-6-astra", "auto_compact_tokens": 600_000},
+                "main": {"model_api": "codex", "model": "codex-gpt-6-astra", "auto_compaction_context_tokens": 600_000},
                 "worker": {"model_api": "messages", "model": "claude-fable-5.1",
-                           "auto_compact_tokens": None, "max_context_tokens": None},
-                "watcher": {"model": "muse-spark-1.3", "auto_compact_tokens": None},
+                           "auto_compaction_context_tokens": None, "max_context_tokens": None},
+                "watcher": {"model": "muse-spark-1.3", "auto_compaction_context_tokens": None},
             }))
             args = build_parser().parse_args([
-                "--auto-compact-tokens", "500000", "--max-context-tokens", "950000",
+                "--auto-compaction-context-tokens", "500000", "--max-context-tokens", "950000",
             ])
             raw = resolve_config(path, {key: value for key, value in vars(args).items() if key in DEFAULTS})
             configs = {i: InteractionConfig.from_namespace(namespace(value)) for i, value in raw.items()}
             # The command line's model-specific options are main's; each role on
             # its own model resolves its own catalog defaults.
-            self.assertEqual(configs[1].get("auto_compact_tokens"), 500_000)
-            self.assertEqual(configs[2].get("auto_compact_tokens"), 872_000)
+            self.assertEqual(configs[1].get("auto_compaction_context_tokens"), 500_000)
+            self.assertEqual(configs[2].get("auto_compaction_context_tokens"), 872_000)
             self.assertEqual(configs[1].get("max_context_tokens"), 950_000)
             self.assertEqual(configs[2].get("max_context_tokens"), 1_000_000)
-            self.assertIsNone(configs[-1].get("auto_compact_tokens"))
-            self.assertIsNone(raw[2]["auto_compact_tokens"])
-            configs[1].set("auto_compact_tokens", 100_000)
-            self.assertEqual(configs[2].get("auto_compact_tokens"), 872_000)
+            self.assertIsNone(configs[-1].get("auto_compaction_context_tokens"))
+            self.assertIsNone(raw[2]["auto_compaction_context_tokens"])
+            configs[1].set("auto_compaction_context_tokens", 100_000)
+            self.assertEqual(configs[2].get("auto_compaction_context_tokens"), 872_000)
             saved = Path(directory) / "saved.json"
             saved.write_text(json.dumps(saved_document(raw)))
             resumed = resolve_config(saved=load_saved_config(saved))
@@ -541,7 +548,7 @@ class AutoSeedingTests(unittest.TestCase):
                         {"version": version, "contexts": {str(i): s for i, s in raw.items()}}))
                     with self.assertRaisesRegex(ValueError, "earlier version"):
                         load_saved_config(path)
-            for missing in ("auto_compact_tokens", "compaction_mode"):
+            for missing in ("auto_compaction_context_tokens", "compaction_mode"):
                 with self.subTest(missing=missing):
                     document = saved_document(raw)
                     del document["main"][missing]
@@ -551,7 +558,7 @@ class AutoSeedingTests(unittest.TestCase):
 
     def test_new_cli_defaults_are_suppressed_and_values_are_validated_per_context(self):
         args = build_parser().parse_args([])
-        for key in ("auto_compact_tokens", "max_context_tokens"):
+        for key in ("auto_compaction_context_tokens", "max_context_tokens"):
             self.assertFalse(hasattr(args, key))
             for value in (0, -1, True, "100"):
                 with self.subTest(key=key, value=value), self.assertRaises(ValueError):
@@ -559,12 +566,12 @@ class AutoSeedingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "50000"):
             resolve_config(overrides={"model_api": "messages", "model": "claude-fable-5.1",
                                       "compaction_mode": "provider",
-                                      "auto_compact_tokens": 49_999})
+                                      "auto_compaction_context_tokens": 49_999})
         # The minimum binds only Anthropic's server compaction.
         resolve_config(overrides={"model_api": "messages", "model": "claude-fable-5.1",
-                                  "auto_compact_tokens": 49_999})
-        for key, value in (("compaction_mode", "remote"), ("compaction_keep_recent_tokens", -1),
-                           ("compaction_max_output_tokens", 0)):
+                                  "auto_compaction_context_tokens": 49_999})
+        for key, value in (("compaction_mode", "remote"), ("compaction_pi_keep_recent_tokens", -1),
+                           ("compaction_pi_max_output_tokens", 0)):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 resolve_config(overrides={key: value})
         with self.assertRaisesRegex(ValueError, "no provider compaction"):

@@ -44,11 +44,11 @@ class InteractionConfigTests(unittest.TestCase):
                 "max_output_tokens = None",
                 "request_timeout_seconds = None",
                 "enable_auto_compaction = True",
-                "auto_compact_tokens = None",
+                "auto_compaction_context_tokens = None",
                 "max_context_tokens = None",
                 "compaction_mode = 'pi'",
-                "compaction_keep_recent_tokens = 20000",
-                "compaction_max_output_tokens = None",
+                "compaction_pi_keep_recent_tokens = 20000",
+                "compaction_pi_max_output_tokens = None",
                 "extra_sample_params = {}",
             )),
         )
@@ -59,11 +59,11 @@ class InteractionConfigTests(unittest.TestCase):
             "max_output_tokens": None,
             "request_timeout_seconds": None,
             "enable_auto_compaction": True,
-            "auto_compact_tokens": None,
+            "auto_compaction_context_tokens": None,
             "max_context_tokens": None,
             "compaction_mode": "pi",
-            "compaction_keep_recent_tokens": 20000,
-            "compaction_max_output_tokens": None,
+            "compaction_pi_keep_recent_tokens": 20000,
+            "compaction_pi_max_output_tokens": None,
             "extra_sample_params": {},
         }
         self.assertEqual(json.loads(rendered_json), {**defaults, "__init__": defaults})
@@ -80,9 +80,9 @@ class InteractionConfigTests(unittest.TestCase):
 
     def test_initial_values_render_as_comments_and_json_defaults(self):
         config = InteractionConfig(
-            InteractionConfigSnapshot(auto_compact_tokens=100),
+            InteractionConfigSnapshot(auto_compaction_context_tokens=100),
             initial=InteractionConfigSnapshot(
-                auto_compact_tokens=500_000,
+                auto_compaction_context_tokens=500_000,
             ),
         )
         self.assertEqual(
@@ -93,20 +93,20 @@ class InteractionConfigTests(unittest.TestCase):
                 "max_output_tokens = None",
                 "request_timeout_seconds = None",
                 "enable_auto_compaction = True",
-                "# init: auto_compact_tokens = 500000",
-                "auto_compact_tokens = 100",
+                "# init: auto_compaction_context_tokens = 500000",
+                "auto_compaction_context_tokens = 100",
                 "max_context_tokens = None",
                 "compaction_mode = 'pi'",
-                "compaction_keep_recent_tokens = 20000",
-                "compaction_max_output_tokens = None",
+                "compaction_pi_keep_recent_tokens = 20000",
+                "compaction_pi_max_output_tokens = None",
                 "extra_sample_params = {}",
             )),
         )
         payload = json.loads(config.render(json_output=True))
-        self.assertEqual(payload["auto_compact_tokens"], 100)
-        self.assertEqual(payload["__init__"]["auto_compact_tokens"], 500_000)
+        self.assertEqual(payload["auto_compaction_context_tokens"], 100)
+        self.assertEqual(payload["__init__"]["auto_compaction_context_tokens"], 500_000)
 
-        config.set("auto_compact_tokens", 500_000)
+        config.set("auto_compaction_context_tokens", 500_000)
         self.assertNotIn("# init:", config.render(json_output=False))
 
     def test_namespace_values_seed_process_state(self):
@@ -115,10 +115,10 @@ class InteractionConfigTests(unittest.TestCase):
             "--enable-auto-compaction=False",
             "--max-samples", "3",
             "--max-output-tokens", "2048",
-            "--auto-compact-tokens", "500000",
+            "--auto-compaction-context-tokens", "500000",
             "--max-context-tokens", "1000000",
-            "--compaction-keep-recent-tokens", "0",
-            "--compaction-max-output-tokens", "4096",
+            "--compaction-pi-keep-recent-tokens", "0",
+            "--compaction-pi-max-output-tokens", "4096",
         ])
 
         config = InteractionConfig.from_namespace(args)
@@ -129,23 +129,24 @@ class InteractionConfigTests(unittest.TestCase):
             "max_output_tokens": 2048,
             "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             "enable_auto_compaction": False,
-            "auto_compact_tokens": 500000,
+            "auto_compaction_context_tokens": 500000,
             "max_context_tokens": 1000000,
-            "compaction_mode": "pi",
-            "compaction_keep_recent_tokens": 0,
-            "compaction_max_output_tokens": 4096,
+            "compaction_mode": "coldstart,warmpi:2",
+            "compaction_pi_keep_recent_tokens": 0,
+            "compaction_pi_max_output_tokens": 4096,
             "extra_sample_params": {},
         })
         self.assertEqual(
             config.snapshot().compaction_settings(),
-            CompactionSettings(mode="pi", keep_recent_tokens=0, max_output_tokens=4096),
+            CompactionSettings(mode="coldstart,warmpi:2", keep_recent_tokens=0,
+                               max_output_tokens=4096),
         )
         self.assertEqual(
             config.snapshot().sample_params(),
             SampleParams(
                 max_output_tokens=2048,
                 enable_auto_compaction=False,
-                auto_compact_tokens=500000,
+                auto_compaction_context_tokens=500000,
                 request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
             ),
         )
@@ -189,7 +190,7 @@ class InteractionConfigTests(unittest.TestCase):
                 [*relay, "--request-timeout-seconds", "60"]))
 
     def test_context_limit_keys_validate_and_stay_independent(self):
-        for key in ("auto_compact_tokens", "max_context_tokens"):
+        for key in ("auto_compaction_context_tokens", "max_context_tokens"):
             self.assertIsNone(parse_config_literal(key, "null"))
             self.assertEqual(parse_config_literal(key, "123"), 123)
             for bad in ("0", "-1", "1.5", "True", "x"):
@@ -199,29 +200,29 @@ class InteractionConfigTests(unittest.TestCase):
 
         config = InteractionConfig()
         self.assertEqual(config.snapshot().sample_params(), SampleParams(enable_auto_compaction=True))
-        config.set("auto_compact_tokens", 500000)
+        config.set("auto_compaction_context_tokens", 500000)
         self.assertEqual(
             config.snapshot().sample_params(),
-            SampleParams(auto_compact_tokens=500000, enable_auto_compaction=True),
+            SampleParams(auto_compaction_context_tokens=500000, enable_auto_compaction=True),
         )
         # max_context_tokens is informational: no auto<=max gate.
         config.set("max_context_tokens", 1000)
-        self.assertEqual(config.get("auto_compact_tokens"), 500000)
+        self.assertEqual(config.get("auto_compaction_context_tokens"), 500000)
         self.assertEqual(config.get("max_context_tokens"), 1000)
-        config.set("auto_compact_tokens", None)
+        config.set("auto_compaction_context_tokens", None)
         self.assertEqual(config.snapshot().sample_params(), SampleParams(enable_auto_compaction=True))
 
     def test_compaction_keys_validate_and_resolve_null(self):
-        self.assertEqual(parse_config_literal("compaction_keep_recent_tokens", "0"), 0)
-        self.assertIsNone(parse_config_literal("compaction_keep_recent_tokens", "null"))
-        self.assertEqual(parse_config_literal("compaction_max_output_tokens", "77"), 77)
-        self.assertIsNone(parse_config_literal("compaction_max_output_tokens", "None"))
+        self.assertEqual(parse_config_literal("compaction_pi_keep_recent_tokens", "0"), 0)
+        self.assertIsNone(parse_config_literal("compaction_pi_keep_recent_tokens", "null"))
+        self.assertEqual(parse_config_literal("compaction_pi_max_output_tokens", "77"), 77)
+        self.assertIsNone(parse_config_literal("compaction_pi_max_output_tokens", "None"))
         for key, bad in (
-            ("compaction_keep_recent_tokens", "-1"),
-            ("compaction_keep_recent_tokens", "True"),
-            ("compaction_keep_recent_tokens", "1.5"),
-            ("compaction_max_output_tokens", "0"),
-            ("compaction_max_output_tokens", "False"),
+            ("compaction_pi_keep_recent_tokens", "-1"),
+            ("compaction_pi_keep_recent_tokens", "True"),
+            ("compaction_pi_keep_recent_tokens", "1.5"),
+            ("compaction_pi_max_output_tokens", "0"),
+            ("compaction_pi_max_output_tokens", "False"),
         ):
             with self.subTest(key=key, bad=bad):
                 with self.assertRaises(ConfigError) as raised:
@@ -229,33 +230,40 @@ class InteractionConfigTests(unittest.TestCase):
                 self.assertNotIn(bad, str(raised.exception))
 
         config = InteractionConfig()
-        self.assertEqual(config.set("compaction_keep_recent_tokens", 0), 0)
+        self.assertEqual(config.set("compaction_pi_keep_recent_tokens", 0), 0)
         self.assertEqual(config.snapshot().compaction_settings().keep_recent_tokens, 0)
         # null restores the default, rather than storing None.
-        self.assertEqual(config.set("compaction_keep_recent_tokens", None), 20_000)
-        self.assertEqual(config.get("compaction_keep_recent_tokens"), 20_000)
-        self.assertEqual(config.set("compaction_max_output_tokens", 99), 99)
+        self.assertEqual(config.set("compaction_pi_keep_recent_tokens", None), 20_000)
+        self.assertEqual(config.get("compaction_pi_keep_recent_tokens"), 20_000)
+        self.assertEqual(config.set("compaction_pi_max_output_tokens", 99), 99)
         self.assertEqual(config.snapshot().compaction_settings().max_output_tokens, 99)
-        self.assertIsNone(config.set("compaction_max_output_tokens", None))
+        self.assertIsNone(config.set("compaction_pi_max_output_tokens", None))
         # Summary budgets never change the sampling projection.
         self.assertEqual(config.snapshot().sample_params(), SampleParams(enable_auto_compaction=True))
         with self.assertRaises(ConfigError):
-            config.set("compaction_keep_recent_tokens", -1)
+            config.set("compaction_pi_keep_recent_tokens", -1)
         with self.assertRaises(ConfigError):
-            InteractionConfigSnapshot(compaction_max_output_tokens=0)
+            InteractionConfigSnapshot(compaction_pi_max_output_tokens=0)
 
-    def test_compaction_mode_is_launch_only(self):
+    def test_compaction_mode_is_a_live_sequence(self):
         config = InteractionConfig()
-        for mode in ("pi", "provider"):
-            with self.subTest(mode=mode):
-                with self.assertRaisesRegex(ConfigError, "compaction_mode is launch-only"):
-                    parse_config_literal("compaction_mode", mode)
-                with self.assertRaisesRegex(ConfigError, "compaction_mode is launch-only"):
-                    config.set("compaction_mode", mode)
         self.assertEqual(config.get("compaction_mode"), "pi")
+        for text, value in (("pi", "pi"), (" pi : 2 , coldstart ", "pi:2,coldstart"),
+                            ("legacydefault:1", "legacydefault"), ("null", None)):
+            with self.subTest(text=text):
+                self.assertEqual(parse_config_literal("compaction_mode", text), value)
+        self.assertEqual(config.set("compaction_mode", "pi:2,coldstart"), "pi:2,coldstart")
         self.assertEqual(config.render("compaction_mode", json_output=False),
-                         "compaction_mode = 'pi'")
-        with self.assertRaisesRegex(ConfigError, "'pi' or 'provider'"):
+                         "# init: compaction_mode = 'pi'\ncompaction_mode = 'pi:2,coldstart'")
+        self.assertEqual(config.snapshot().compaction_settings().methods,
+                         (("pi", 2), ("coldstart", 1)))
+        self.assertEqual(config.set("compaction_mode", None), "pi")
+        # Methods may follow coldstart, which fails when its save can't be used.
+        self.assertEqual(parse_config_literal("compaction_mode", "coldstart,pi"), "coldstart,pi")
+        for bad in ("remote", "pi:0", "pi:10", ""):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                parse_config_literal("compaction_mode", bad)
+        with self.assertRaisesRegex(ConfigError, "unknown method 'remote'"):
             InteractionConfigSnapshot(compaction_mode="remote")
 
     def test_compaction_mode_resolves_per_route(self):
@@ -270,9 +278,11 @@ class InteractionConfigTests(unittest.TestCase):
         claude = catalog.bind("messages", "claude-opus-5.5")
         local = catalog.bind("chat-completions", "local")
         self.assertTrue(official.supports_remote_compaction)
+        # Unset: coldstart, then the route's method up to twice.
         for binding, default in (
-            (official, "provider"), (meta, "pi"), (custom, "pi"),
-            (claude, "pi"), (local, "pi"),
+            (official, "coldstart,warmpi:2"), (meta, "coldstart,warmpi:2"),
+            (custom, "coldstart,warmpi:2"), (claude, "coldstart,warmpi:2"),
+            (local, "coldstart,warmpi:2"),
         ):
             with self.subTest(binding=binding.selector, url=binding.endpoint.url):
                 self.assertEqual(resolve_compaction_mode(binding), default)
@@ -288,10 +298,10 @@ class InteractionConfigTests(unittest.TestCase):
 
     def test_namespace_resolves_the_mode_and_applies_the_minimum_only_to_provider(self):
         for argv, mode in (
-            (["--endpoint-api", "codex", "--model", "codex-gpt-6-astra"], "provider"),
+            (["--endpoint-api", "codex", "--model", "codex-gpt-6-astra"], "coldstart,warmpi:2"),
             (["--endpoint-api", "codex", "--model", "codex-gpt-6-astra",
               "--compaction-mode", "pi"], "pi"),
-            (["--endpoint-api", "messages", "--model", "claude-fable-5.1"], "pi"),
+            (["--endpoint-api", "messages", "--model", "claude-fable-5.1"], "coldstart,warmpi:2"),
             (["--endpoint-api", "messages", "--model", "claude-fable-5.1",
               "--compaction-mode", "provider"], "provider"),
         ):
@@ -301,14 +311,14 @@ class InteractionConfigTests(unittest.TestCase):
                 self.assertEqual(config.snapshot().compaction_settings().mode, mode)
         pi = InteractionConfig.from_namespace(cli._build_parser().parse_args([
             "--endpoint-api", "messages", "--model", "claude-fable-5.1",
-            "--auto-compact-tokens", "20000",
+            "--auto-compaction-context-tokens", "20000",
         ]))
-        self.assertEqual(pi.get("auto_compact_tokens"), 20_000)
-        self.assertEqual(pi.set("auto_compact_tokens", 1_000), 1_000)
+        self.assertEqual(pi.get("auto_compaction_context_tokens"), 20_000)
+        self.assertEqual(pi.set("auto_compaction_context_tokens", 1_000), 1_000)
         with self.assertRaisesRegex(ConfigError, "at least 50000"):
             InteractionConfig.from_namespace(cli._build_parser().parse_args([
                 "--endpoint-api", "messages", "--model", "claude-fable-5.1",
-                "--compaction-mode", "provider", "--auto-compact-tokens", "20000",
+                "--compaction-mode", "provider", "--auto-compaction-context-tokens", "20000",
             ]))
         with self.assertRaisesRegex(ConfigError, "no provider compaction"):
             InteractionConfig.from_namespace(cli._build_parser().parse_args([

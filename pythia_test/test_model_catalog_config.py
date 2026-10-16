@@ -521,7 +521,7 @@ class BoundRequestTests(unittest.TestCase):
         model = build_model(args)
         config = InteractionConfig.from_namespace(args)
         self.assertEqual(args.model_api, "chat-completions")
-        self.assertEqual(config.get("auto_compact_tokens"), 100000)
+        self.assertEqual(config.get("auto_compaction_context_tokens"), 100000)
         self.assertEqual(config.get("max_context_tokens"), 150000)
         self.assertIsNone(config.get("max_output_tokens"))  # The ceiling is not a budget.
         self.assertEqual(config.initial_values(), config.values())
@@ -558,11 +558,11 @@ class BoundRequestTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", empty)
 
     def test_user_messages_limits_defaults_and_wire_model_do_not_lookup_builtins(self):
-        # Pi mode, the default, uses the catalog threshold on the host.
+        # The default (coldstart, then warmpi) uses the catalog threshold on the host.
         args = args_for(catalog(MESSAGE), "--model", "worker")
         cfg = InteractionConfig.from_namespace(args)
-        self.assertEqual(cfg.get("compaction_mode"), "pi")
-        self.assertEqual(cfg.get("auto_compact_tokens"), 60000)
+        self.assertEqual(cfg.get("compaction_mode"), "coldstart,warmpi:2")
+        self.assertEqual(cfg.get("auto_compaction_context_tokens"), 60000)
         model = build_model(args)
         self.assertIsInstance(model, MessagesModel)
         self.assertEqual(model.endpoint.max_output_tokens, 8000)
@@ -783,7 +783,7 @@ class BoundRequestTests(unittest.TestCase):
         cfg, model = InteractionConfig.from_namespace(args), build_model(args)
         second = catalog(LOCAL.replace("served-local", "other-wire").replace("100000", "110000"))
         self.assertEqual(second.bind(name="local-max").endpoint.model, "other-wire")
-        self.assertEqual(cfg.set("auto_compact_tokens", None), 100000)
+        self.assertEqual(cfg.set("auto_compaction_context_tokens", None), 100000)
         self.assertEqual(model._build_request_payload(context(), (), None)["model"], "served-local")
         self.assertIsNone(model_catalog.get_model_spec("chat-completions", "local-max"))
 
@@ -801,7 +801,7 @@ class BoundRequestTests(unittest.TestCase):
             build_model(args)
         registry = catalog()
         self.assertEqual(build_model(args, catalog=registry).binding.endpoint.model, "served-local")
-        self.assertEqual(InteractionConfig.from_namespace(args, catalog=registry).get("auto_compact_tokens"), 100000)
+        self.assertEqual(InteractionConfig.from_namespace(args, catalog=registry).get("auto_compaction_context_tokens"), 100000)
 
     def test_unconfigured_chat_sampling_does_not_enable_reasoning(self):
         model = ChatCompletionsModel(chat_endpoint("http://localhost:8000", "literal"))
@@ -851,7 +851,7 @@ class AutoCatalogTests(unittest.TestCase):
             worker_args = namespace(settings[2], registry)
             worker = InteractionConfig.from_namespace(worker_args)
             self.assertEqual(worker_args.model_api, "messages")
-            self.assertEqual(worker.get("auto_compact_tokens"), 60000)
+            self.assertEqual(worker.get("auto_compaction_context_tokens"), 60000)
             # Exactly the worker's own catalog params; nothing leaks from the main context or LOCAL.
             self.assertEqual(model_catalog.thaw_json(worker.get("extra_sample_params")), {"output_config": {"effort": "high"}})
             self.assertTrue(main.get("extra_sample_params")["custom"])

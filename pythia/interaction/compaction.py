@@ -1,4 +1,4 @@
-"""Context compaction: the compactor protocol and pi-style summaries.
+"""Context compaction: the compactor protocol, its methods, and sequences.
 
 ``PiCompactor`` ports the coding agent's compaction from pi
 (``packages/coding-agent/src/core/compaction/``). It keeps the most recent
@@ -6,12 +6,22 @@ context verbatim except signed thinking, summarizes the older span from a
 plain-text transcript under a dedicated summarizer system prompt, updates the
 previous summary iteratively, and summarizes the start of a split turn
 separately. The remote Responses compactor lives with its adapter
-(``responses.ResponsesOpaqueCompactor``).
+(``responses.ResponsesOpaqueCompactor``). ``ColdstartCompactor`` makes no model
+request: its checkpoint points to the saved log, which the model then reads
+with its tools. It first checks that the save holds the context.
+``WarmPiCompactor`` (warmpi) makes pi's checkpoint from the conversation's own
+request instead of pi's, so it reads the conversation's prompt cache.
+
+A compaction sequence (``compaction_mode``, such as ``coldstart,warmpi:2``, the
+default of every route without server-side compaction) lists methods with
+their attempts; ``run_compaction`` tries them in order.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Sequence
@@ -19,6 +29,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
 from functools import wraps
+from pathlib import Path
 from time import perf_counter
 from typing import List
 from typing import Optional
@@ -44,8 +55,13 @@ from .items import ToolResult
 from .items import TurnSummary
 from .items import UserInteractionBoundary
 from .model import Model
+from .model import ModelAuthenticationError
+from .model import ModelCancelled
+from .model import ModelConfigurationError
 from .model import ModelContextWindowError
+from .model import ModelError
 from .model import ModelSample
+from .model import ModelThinkingBindingError
 from .model import SampleParams
 from .model import TokenUsage
 
@@ -54,9 +70,27 @@ if TYPE_CHECKING:
     from .environment import ToolSpec
 
 
-# ``pi`` summarizes on the host. ``provider`` selects the provider's own
-# compaction: Codex remote compaction, or Anthropic server-side compaction.
-COMPACTION_MODES = ("pi", "provider")
+# Compaction methods. ``pi`` summarizes on the host. ``warmpi`` makes pi's
+# checkpoint from the conversation's own request, which reads its prompt
+# cache. ``provider`` selects the provider's own compaction: Codex remote
+# compaction, or Anthropic server-side compaction. ``coldstart`` makes no
+# request: its checkpoint points to the log.
+COMPACTION_METHODS = ("pi", "warmpi", "provider", "coldstart")
+# What a compaction_mode entry may name: a method, or ``legacydefault``, the
+# route's own method (``provider`` on the official Codex route and on a
+# Messages endpoint with server-side compaction, ``pi`` elsewhere). It was the
+# default before coldstart came first.
+COMPACTION_MODES = ("legacydefault", *COMPACTION_METHODS)
+# What an unset compaction_mode means, on every route but a Messages endpoint
+# with server-side compaction: coldstart, then warmpi up to twice, for
+# transient API failures. coldstart needs no retry: it fails only when its
+# save can't be used, which another attempt wouldn't change. See
+# runtime_config.CompactionRoute.default_sequence.
+DEFAULT_COMPACTION_MODE = "coldstart,warmpi:2"
+MAX_COMPACTION_ATTEMPTS = 9
+_ATTEMPTS_RE = re.compile(r"[1-9]")
+# Why a compaction runs: the threshold, overflow recovery, or /compact.
+COMPACTION_REASONS = ("threshold", "overflow", "manual")
 # Pi's ``keepRecentTokens``, ``TOOL_RESULT_MAX_CHARS``, and
 # ``ESTIMATED_IMAGE_CHARS``.
 DEFAULT_KEEP_RECENT_TOKENS = 20_000
@@ -214,6 +248,62 @@ class CompactionContextWindowError(CompactionError):
     """A summary request exceeded the model's context window."""
 
 
+class CompactionLogError(CompactionError):
+    """coldstart's save is missing, can't be loaded, or doesn't hold the context.
+
+    A sequence moves on to its next method at once: the same save would fail
+    again.
+    """
+
+
+def parse_compaction_mode(value: object) -> Tuple[Tuple[str, int], ...]:
+    """Parse a compaction sequence into ``((method, attempts), ...)``.
+
+    The grammar is ``METHOD[:ATTEMPTS][,METHOD[:ATTEMPTS]]...``: a name from
+    ``COMPACTION_MODES``, with 1 to 9 attempts, 1 when omitted. Spaces around
+    ``,`` and ``:`` are ignored. Any method may follow ``coldstart``, which
+    fails when its save can't be used (``CompactionLogError``).
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "compaction_mode requires a sequence of methods, such as 'pi' or "
+            "'coldstart,pi:2'."
+        )
+    entries: List[Tuple[str, int]] = []
+    for raw in value.split(","):
+        method, colon, count = (part.strip() for part in raw.partition(":"))
+        if method not in COMPACTION_MODES:
+            raise ValueError(
+                f"compaction_mode: unknown method {method!r}; use "
+                f"{', '.join(COMPACTION_MODES)}."
+            )
+        if colon and _ATTEMPTS_RE.fullmatch(count) is None:
+            raise ValueError(
+                f"compaction_mode: the attempts for {method} must be 1 to "
+                f"{MAX_COMPACTION_ATTEMPTS}."
+            )
+        entries.append((method, int(count) if colon else 1))
+    return tuple(entries)
+
+
+def format_compaction_mode(entries: Iterable[Tuple[str, int]]) -> str:
+    """A sequence's normal form: no spaces, and no ``:1``."""
+    return ",".join(
+        method if attempts == 1 else f"{method}:{attempts}"
+        for method, attempts in entries
+    )
+
+
+def normalize_compaction_mode(value: object) -> str:
+    """Check a compaction sequence and return its normal form."""
+    return format_compaction_mode(parse_compaction_mode(value))
+
+
+def compaction_methods(value: object) -> Tuple[str, ...]:
+    """The methods that a compaction sequence names, in order."""
+    return tuple(method for method, _attempts in parse_compaction_mode(value))
+
+
 def _require_keep_recent_tokens(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError("keep_recent_tokens must be a nonnegative integer")
@@ -232,7 +322,9 @@ def _require_summary_budget(value: object) -> Optional[int]:
 class CompactionSettings:
     """Compactor selection and pi options, from one config snapshot.
 
-    ``max_output_tokens=None`` gives each summary request the turn's budget.
+    ``mode`` is a compaction sequence (``parse_compaction_mode``), kept in its
+    normal form. ``max_output_tokens=None`` gives each summary request the
+    turn's budget.
     """
 
     mode: str = "pi"
@@ -240,10 +332,14 @@ class CompactionSettings:
     max_output_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.mode, str) or self.mode not in COMPACTION_MODES:
-            raise ValueError("mode must be 'pi' or 'provider'")
+        object.__setattr__(self, "mode", normalize_compaction_mode(self.mode))
         _require_keep_recent_tokens(self.keep_recent_tokens)
         _require_summary_budget(self.max_output_tokens)
+
+    @property
+    def methods(self) -> Tuple[Tuple[str, int], ...]:
+        """The sequence's entries: ``((method, attempts), ...)``."""
+        return parse_compaction_mode(self.mode)
 
 
 @dataclass(frozen=True)
@@ -425,7 +521,7 @@ def auto_compaction_due(model: Model, context: InteractionContext, snapshot) -> 
     # TODO: Pi reports a failed threshold compaction and keeps sampling
     # (``_runAutoCompaction`` in pi's ``agent-session.ts``); here the failure
     # fails the turn.
-    threshold = snapshot.auto_compact_tokens
+    threshold = snapshot.auto_compaction_context_tokens
     return bool(
         snapshot.enable_auto_compaction
         and uses_host_auto_compaction(model)
@@ -455,21 +551,50 @@ def _timed_compact(
     return measured
 
 
+def _model_method(model: Model, method: str) -> str:
+    """Resolve ``legacydefault`` for a model: remote compaction where it has it."""
+    if method != "legacydefault":
+        return method
+    remote = getattr(model, "supports_remote_compaction", False) is True
+    return "provider" if remote else "pi"
+
+
 def create_default_compactor(
     model: Model,
     settings: CompactionSettings = CompactionSettings(),
+    *,
+    log: Optional["CompactionLog"] = None,
+    reason: str = "threshold",
 ) -> Compactor:
-    """Select a compactor for one mode without probing a provider at runtime.
+    """Build the compactor for the first method of ``settings.mode``.
 
-    ``provider`` mode uses remote opaque compaction when the model advertises
-    it: the built-in ChatGPT/Codex Responses route. Everything else uses
-    ``PiCompactor``, including manual compaction for Messages in ``provider``
-    mode, since Anthropic has no on-demand server compaction.
+    ``run_compaction`` calls it once for each method, with that method alone
+    as ``settings.mode``. ``provider`` uses remote opaque compaction when the
+    model advertises it: the built-in ChatGPT/Codex Responses route.
+    Otherwise ``provider`` uses ``PiCompactor``, as manual compaction does for
+    Messages in ``provider`` mode, since Anthropic has no on-demand server
+    compaction. ``coldstart`` needs the save's ``log``, and ``warmpi`` takes
+    the compaction's ``reason`` (``COMPACTION_REASONS``): in overflow recovery
+    it sends pi's request. No provider is probed.
     """
     if not isinstance(settings, CompactionSettings):
         raise TypeError("settings must be CompactionSettings")
+    if reason not in COMPACTION_REASONS:
+        raise ValueError(f"reason must be one of {COMPACTION_REASONS}")
+    method = _model_method(model, settings.methods[0][0])
+    if method == "coldstart":
+        if log is None:
+            raise CompactionError("coldstart compaction needs a save to point to")
+        return ColdstartCompactor(log)
+    if method == "warmpi":
+        return WarmPiCompactor(
+            model,
+            keep_recent_tokens=settings.keep_recent_tokens,
+            max_output_tokens=settings.max_output_tokens,
+            reason=reason,
+        )
     if (
-        settings.mode == "provider"
+        method == "provider"
         and getattr(model, "supports_remote_compaction", False) is True
     ):
         # ``responses`` imports this module for its concrete compactor.
@@ -829,7 +954,7 @@ def _find_cut(
             if points:
                 return points[-1]
             raise NothingToCompact("nothing precedes the recent tail")
-    raise NothingToCompact("the context fits in compaction_keep_recent_tokens")
+    raise NothingToCompact("the context fits in compaction_pi_keep_recent_tokens")
 
 
 def _plan_compaction(
@@ -878,7 +1003,7 @@ def _context_window_message(
         f"summary request for {part} ({count} {noun}, ~{tokens:,} estimated "
         "tokens) exceeded the model's context window; pi compaction sends "
         "each part in one request and does not split it. Lower "
-        "compaction_max_output_tokens, or raise compaction_keep_recent_tokens "
+        "compaction_pi_max_output_tokens, or raise compaction_pi_keep_recent_tokens "
         "to summarize less."
     )
 
@@ -914,6 +1039,47 @@ def _sum_usage(usages: Iterable[TokenUsage]) -> TokenUsage:
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cached_input_tokens=cached_input_tokens,
+    )
+
+
+def _pi_checkpoint(plan: _CompactionPlan, summary: str) -> ContextPrefix:
+    """pi's checkpoint: the instructions, carried checkpoints, the summary, the tail.
+
+    pi and warmpi build the same one; only their summaries come from
+    different requests.
+    """
+    # Boundaries stay: the Messages and Chat Completions encoders flush
+    # assistant blocks at them. The other items are log-only, and
+    # ModelFailure is not allowed in prefixes.
+    # Signed thinking leaves too. Anthropic binds each thinking block to
+    # the conversation that preceded it, which the summary replaces, so
+    # the next request would fail with HTTP 400 ("Invalid `signature` in
+    # `thinking` block. The block is bound to a different conversation.").
+    # Responses reasoning (``encrypted_content``) stays.
+    # TODO: Preserve thinking across compaction if Anthropic adds a way;
+    # the binding has no keep option today. Its
+    # ``thinking-binding-controls-2026-08-01`` beta header, together with
+    # ``thinking.block_binding.prefix_mismatch_behavior: "drop_block"``
+    # (default ``"error"``), makes the server drop unbound blocks instead.
+    # That would also unstick saves whose prefix already kept them, but it
+    # was verified only on claude-opus-5-5 with adaptive thinking, and it
+    # would silently drop thinking after any other history bug too.
+    tail = tuple(
+        item
+        for item in plan.tail
+        if not isinstance(item, (SampleMetadata, TurnSummary, ModelFailure))
+        and not _is_signed_thinking(item)
+    )
+    return ContextPrefix(
+        prefix_items=(
+            *plan.instruction_prefix,
+            *plan.checkpoints,
+            Message(
+                role="user",
+                content=f"{COMPACTION_SUMMARY_PREFIX}{summary}{COMPACTION_SUMMARY_SUFFIX}",
+            ),
+            *tail,
+        ),
     )
 
 
@@ -1002,42 +1168,7 @@ class PiCompactor:
             samples.append(sample)
             summary = f"{history_text}{_SPLIT_TURN_SEPARATOR}{turn_text}"
 
-        # Boundaries stay: the Messages and Chat Completions encoders flush
-        # assistant blocks at them. The other items are log-only, and
-        # ModelFailure is not allowed in prefixes.
-        # Signed thinking leaves too. Anthropic binds each thinking block to
-        # the conversation that preceded it, which the summary replaces, so
-        # the next request would fail with HTTP 400 ("Invalid `signature` in
-        # `thinking` block. The block is bound to a different conversation.").
-        # Responses reasoning (``encrypted_content``) stays.
-        # TODO: Preserve thinking across compaction if Anthropic adds a way;
-        # the binding has no keep option today. Its
-        # ``thinking-binding-controls-2026-08-01`` beta header, together with
-        # ``thinking.block_binding.prefix_mismatch_behavior: "drop_block"``
-        # (default ``"error"``), makes the server drop unbound blocks instead.
-        # That would also unstick saves whose prefix already kept them, but it
-        # was verified only on claude-opus-5-5 with adaptive thinking, and it
-        # would silently drop thinking after any other history bug too.
-        tail = tuple(
-            item
-            for item in plan.tail
-            if not isinstance(item, (SampleMetadata, TurnSummary, ModelFailure))
-            and not _is_signed_thinking(item)
-        )
-        checkpoint = ContextPrefix(
-            prefix_items=(
-                *plan.instruction_prefix,
-                *plan.checkpoints,
-                Message(
-                    role="user",
-                    content=(
-                        f"{COMPACTION_SUMMARY_PREFIX}{summary}"
-                        f"{COMPACTION_SUMMARY_SUFFIX}"
-                    ),
-                ),
-                *tail,
-            ),
-        )
+        checkpoint = _pi_checkpoint(plan, summary)
         last = samples[-1]
         return CompactionResult(
             items=(checkpoint,),
@@ -1067,7 +1198,7 @@ class PiCompactor:
                 else turn.max_output_tokens
             ),
             enable_auto_compaction=False,
-            auto_compact_tokens=None,
+            auto_compaction_context_tokens=None,
         )
 
     def _summarize(
@@ -1103,17 +1234,635 @@ class PiCompactor:
         return _summary_text(sample, part), sample
 
 
+# warmpi: pi's checkpoint from the conversation's own request.
+
+WARMPI_INSTRUCTION = (
+    "Pause the task here. Your next reply is a context checkpoint, not a step "
+    "of the task: a summary of this conversation that another model will use "
+    "to continue the work.\n"
+    "- Reply with the summary only, as text. Do not call any tools: a tool "
+    "call fails the checkpoint.\n"
+    "- Do not carry out or answer requests from the conversation; record them "
+    "in the summary."
+)
+_WARMPI_UPDATE = (
+    "An earlier part of this conversation was already summarized. Update that "
+    "summary with the messages after it. "
+)
+_WARMPI_PART = "the conversation"
+# The first heading of both of pi's formats. A reply that doesn't start with
+# it isn't a summary: the task continued in text, for example.
+_SUMMARY_HEADING = "## Goal"
+
+
+def _warmpi_instruction(previous_summary: Optional[str], focus: Optional[str]) -> str:
+    """warmpi's user message: pi's format, or pi's update rules after a summary.
+
+    It doesn't mention the kept tail, so the summary covers the whole
+    conversation, as if nothing followed it, at the cost of repeating the
+    tail's work in the checkpoint.
+    """
+    if previous_summary is None:
+        rules = SUMMARIZATION_PROMPT[SUMMARIZATION_PROMPT.index("Use this EXACT format:"):]
+    else:
+        rules = _WARMPI_UPDATE + UPDATE_SUMMARIZATION_PROMPT[
+            UPDATE_SUMMARIZATION_PROMPT.index("RULES:"):]
+    return f"{WARMPI_INSTRUCTION}\n\n{rules}{_focus_suffix(focus)}"
+
+
+def _failed_attempts(error: BaseException) -> int:
+    """The request attempts that a failed request made, if its failure says."""
+    count = getattr(getattr(error, "failure", None), "attempt_count", None)
+    return count if isinstance(count, int) and count > 0 else 1
+
+
+class WarmPiCompactor:
+    """pi's checkpoint, summarized by the conversation's own request.
+
+    The request is the one the next sample would send, unchanged: the
+    context, the turn's ``tools``, and the turn's params without provider
+    compaction (``max_output_tokens`` overrides their budget), plus one user
+    message asking for a summary in pi's format (``WARMPI_INSTRUCTION``). So
+    it reads the conversation's prompt cache; it never checks the cache's age.
+    The message doesn't mention the kept tail: the summary covers the whole
+    conversation. The checkpoint is pi's (``_pi_checkpoint``), with this
+    summary and protocol ``warmpi``. A reply with tool calls, without text,
+    stopped early, or not starting with the format's first heading fails the
+    attempt.
+
+    It sends pi's request instead (``PiCompactor``; protocol ``pi``):
+    - in overflow recovery (``reason="overflow"``): the conversation didn't
+      fit, so the conversation and an instruction won't either;
+    - within the same attempt, when its own request is too large for the
+      window (``recovery`` ``warmpi_too_large``), or when the provider rejects
+      its signed thinking (``ModelThinkingBindingError``;
+      ``warmpi_thinking_rejected``). pi's transcript cuts tool results, and
+      has no signed blocks.
+    """
+
+    def __init__(
+        self,
+        model: Model,
+        *,
+        keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
+        max_output_tokens: Optional[int] = None,
+        reason: str = "threshold",
+    ) -> None:
+        if reason not in COMPACTION_REASONS:
+            raise ValueError(f"reason must be one of {COMPACTION_REASONS}")
+        self._pi = PiCompactor(
+            model,
+            keep_recent_tokens=keep_recent_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+        self._model = model
+        self.keep_recent_tokens = self._pi.keep_recent_tokens
+        self.max_output_tokens = self._pi.max_output_tokens
+        self.reason = reason
+
+    @_timed_compact
+    def compact(
+        self,
+        context: InteractionContext,
+        *,
+        tools: Sequence["ToolSpec"] = (),
+        sample_params: Optional[SampleParams] = None,
+        instructions: Optional[str] = None,
+    ) -> CompactionResult:
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
+        if sample_params is not None and not isinstance(sample_params, SampleParams):
+            raise TypeError("sample_params must be SampleParams or None")
+        if instructions is not None and not isinstance(instructions, str):
+            raise TypeError("instructions must be a string or None")
+        pi = {"sample_params": sample_params, "instructions": instructions}
+        if self.reason == "overflow":
+            return self._pi.compact(context, **pi)
+        focus = None if instructions is None else instructions.strip() or None
+        try:
+            context.assert_model_ready()
+        except ContextValidationError as exc:
+            raise CompactionError(str(exc)) from exc
+        plan = _plan_compaction(context.model_items(), self.keep_recent_tokens)
+        request = context.copy()
+        request.append(Message(
+            role="user",
+            content=_warmpi_instruction(plan.previous_summary, focus),
+        ))
+        try:
+            sample = self._model.sample(
+                request,
+                tools=tuple(tools),
+                sample_params=self._pi._summary_params(sample_params),
+            )
+        except ModelContextWindowError as exc:
+            return self._pi_instead(context, pi, "warmpi_too_large", _failed_attempts(exc))
+        except ModelThinkingBindingError as exc:
+            return self._pi_instead(
+                context, pi, "warmpi_thinking_rejected", _failed_attempts(exc))
+        if not isinstance(sample, ModelSample):
+            raise CompactionError(
+                f"model returned {type(sample).__name__}, expected ModelSample"
+            )
+        if sample.stop_reason == "model_context_window_exceeded":
+            return self._pi_instead(
+                context, pi, "warmpi_too_large", sample.request_attempts, sample.usage)
+        summary = _summary_text(sample, _WARMPI_PART)
+        if not summary.startswith(_SUMMARY_HEADING):
+            raise CompactionError(
+                f"summary request for {_WARMPI_PART} returned text that doesn't start "
+                f'with "{_SUMMARY_HEADING}", the first heading of its format; an '
+                "answer in another form is never installed"
+            )
+        return CompactionResult(
+            items=(_pi_checkpoint(plan, summary),),
+            usage=sample.usage,
+            protocol="warmpi",
+            provider_session_id=sample.provider_session_id,
+            provider_turn_id=sample.provider_turn_id,
+            provider_turn_state=sample.provider_turn_state,
+            request_attempts=sample.request_attempts,
+            recovery=sample.recovery,
+        )
+
+    def _pi_instead(
+        self,
+        context: InteractionContext,
+        pi: dict,
+        label: str,
+        attempts: int,
+        usage: Optional[TokenUsage] = None,
+    ) -> CompactionResult:
+        """pi's request, within this attempt, after warmpi's own request.
+
+        ``attempts`` and ``usage`` are those of warmpi's request; ``label`` is
+        why it sent pi's, the first ``recovery`` entry.
+        """
+        result = self._pi.compact(context, **pi)
+        return replace(
+            result,
+            usage=result.usage if usage is None else _sum_usage((usage, result.usage)),
+            request_attempts=attempts + result.request_attempts,
+            recovery=(label, *result.recovery),
+        )
+
+
+# Coldstart compaction: a pointer to the saved log instead of a summary.
+
+COLDSTART_POINTER_PREFIX = "This conversation was compacted without a summary."
+COLDSTART_USER_MESSAGE_CHARS = 2_000
+# The tool that reads the log. On Claude Relay the model calls it by its native
+# name, mcp__pythia__exec_command, so the pointer names no tool.
+_COLDSTART_READER = "exec_command"
+_COLDSTART_LOG_FORMAT = (
+    'Each line is one JSON item with a "type". Text is in "message" items '
+    '("role", "content"), tool calls are "tool_call" items ("name", '
+    '"arguments_json"), and their outputs are "tool_result" items ("output"). '
+    'A "context_prefix" item is an earlier compaction; its "prefix_items" are '
+    "what was kept at that point. Lines can be long, so extract fields with a "
+    "short script rather than printing whole lines."
+)
+
+
+@dataclass(frozen=True)
+class CompactionLog:
+    """The save that a coldstart pointer names.
+
+    ``path`` is the save file. ``cwd`` is the tools' working directory: the
+    pointer gives the path relative to it when the save is inside it.
+    """
+
+    path: Path
+    cwd: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", Path(self.path))
+        if self.cwd is not None:
+            object.__setattr__(self, "cwd", Path(self.cwd))
+
+    def reference(self) -> Tuple[str, bool]:
+        """The path to show, and whether it is relative to ``cwd``."""
+        if self.cwd is not None:
+            for path, base in (
+                (self.path.absolute(), self.cwd.absolute()),
+                (self.path.resolve(), self.cwd.resolve()),
+            ):
+                try:
+                    return path.relative_to(base).as_posix(), True
+                except ValueError:
+                    continue
+        return str(self.path.absolute()), False
+
+    def check(self, context: InteractionContext) -> None:
+        """Check that the save holds ``context``, or raise ``CompactionLogError``.
+
+        The save's first N lines must be the context's N items, in order.
+        Later lines may follow: ``/compact`` saves its own call before it
+        compacts. An incomplete last line, which an interrupted append leaves,
+        is ignored, as on resume. Items are compared as objects, then by their
+        save encoding when the objects differ.
+        """
+        from .save import SaveError
+        from .save import load_interaction_save
+
+        name = self.reference()[0]
+        try:
+            saved = load_interaction_save(self.path)
+        except SaveError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                raise CompactionLogError(f"the save {name} was not found") from None
+            raise CompactionLogError(f"the save {name} can't be loaded: {exc}") from None
+        if len(saved) < len(context):
+            raise CompactionLogError(
+                f"the save {name} has {len(saved)} lines, fewer than the context's "
+                f"{len(context)} items"
+            )
+        for line, (item, saved_item) in enumerate(zip(context.items, saved.items), 1):
+            if item is saved_item or item == saved_item:
+                continue
+            if _save_encoding(item) != _save_encoding(saved_item):
+                raise CompactionLogError(
+                    f"line {line} of the save {name} differs from the context"
+                )
+
+
+def _save_encoding(item: InteractionItem) -> str:
+    """An item as its save line encodes it, with sorted keys."""
+    from .save import interaction_item_to_dict
+
+    return json.dumps(interaction_item_to_dict(item), sort_keys=True, ensure_ascii=False)
+
+
+def compaction_log(path, environment=None) -> Optional[CompactionLog]:
+    """The log of the save at ``path``, with ``environment``'s working directory.
+
+    ``None`` without a save. An environment without a ``cwd`` (one without
+    the default tools) gives the pointer an absolute path.
+    """
+    if path is None:
+        return None
+    cwd = getattr(environment, "cwd", None)
+    return CompactionLog(path, cwd if isinstance(cwd, (str, os.PathLike)) else None)
+
+
+def coldstart_unavailable(tool_specs: Iterable[object], log_path) -> Optional[str]:
+    """Why coldstart compaction can't run with these tools and save, or None.
+
+    It needs a save for its pointer to name, and ``exec_command`` among the
+    tools to read it. Frontends check this once per role at launch: a role's
+    tools and save don't change while it runs.
+    """
+    if log_path is None:
+        return "coldstart compaction needs a save to point to"
+    if not any(getattr(spec, "name", None) == _COLDSTART_READER for spec in tool_specs):
+        return "coldstart compaction needs exec_command to read the saved log"
+    return None
+
+
+def is_coldstart_pointer(item: object) -> bool:
+    """Whether an item is the user message of a coldstart checkpoint."""
+    return (
+        isinstance(item, Message)
+        and item.role == "user"
+        and isinstance(item.content, str)
+        and item.content.startswith(COLDSTART_POINTER_PREFIX)
+    )
+
+
+def _latest_user_message(
+    items: Sequence[InteractionItem],
+) -> Optional[Tuple[int, str]]:
+    """The raw log's latest user message, as (line, text), or None.
+
+    Summaries and pointers live in checkpoints, not as top-level user
+    messages, but they are skipped anyway. The text is cut to
+    ``COLDSTART_USER_MESSAGE_CHARS``.
+    """
+    for index in range(len(items) - 1, -1, -1):
+        item = items[index]
+        if (
+            isinstance(item, Message)
+            and item.role == "user"
+            and not is_compaction_summary(item)
+            and not is_coldstart_pointer(item)
+        ):
+            text = _message_text(item)
+            if len(text) > COLDSTART_USER_MESSAGE_CHARS:
+                omitted = len(text) - COLDSTART_USER_MESSAGE_CHARS
+                text = (
+                    f"{text[:COLDSTART_USER_MESSAGE_CHARS]}\n"
+                    f"[{omitted} more characters omitted]"
+                )
+            return index + 1, text
+    return None
+
+
+class ColdstartCompactor:
+    """Compaction without a model request: a pointer to the saved log.
+
+    The new prefix holds the instructions, any Responses checkpoints, and one
+    user message. The message names the save and its lines before the
+    compaction (1 to N, where N is the context's length; saves are
+    append-only, so those lines never change), quotes the latest user message
+    with its line, and asks the model to read what it needs with its tools and
+    pick up where the log leaves off. It needs ``exec_command`` among
+    ``tools``. Before it installs the pointer, it checks that the save holds
+    the context (``CompactionLog.check``), and raises ``CompactionLogError``
+    if not, so a sequence moves on to its next method.
+    """
+
+    def __init__(self, log: CompactionLog) -> None:
+        if not isinstance(log, CompactionLog):
+            raise TypeError("log must be CompactionLog")
+        self.log = log
+
+    @_timed_compact
+    def compact(
+        self,
+        context: InteractionContext,
+        *,
+        tools: Sequence["ToolSpec"] = (),
+        sample_params: Optional[SampleParams] = None,
+        instructions: Optional[str] = None,
+    ) -> CompactionResult:
+        del sample_params
+        if not isinstance(context, InteractionContext):
+            raise TypeError("context must be InteractionContext")
+        if instructions is not None and not isinstance(instructions, str):
+            raise TypeError("instructions must be a string or None")
+        reason = coldstart_unavailable(tools, self.log.path)
+        if reason is not None:
+            raise CompactionError(reason)
+        try:
+            context.assert_model_ready()
+        except ContextValidationError as exc:
+            raise CompactionError(str(exc)) from exc
+        instruction_prefix, rest = _split_instruction_prefix(context.model_items())
+        checkpoints = tuple(
+            item for item in rest
+            if isinstance(item, OpaqueCompaction) and item.protocol == "responses"
+        )
+        if not _has_content(
+            item for item in rest
+            if not (isinstance(item, OpaqueCompaction) and item.protocol == "responses")
+            and not is_coldstart_pointer(item)
+        ):
+            raise NothingToCompact(
+                "there is nothing to compact beyond a coldstart pointer"
+            )
+        self.log.check(context)
+        focus = None if instructions is None else instructions.strip() or None
+        pointer = Message(role="user", content=self._pointer(context, focus))
+        return CompactionResult(
+            items=(ContextPrefix((*instruction_prefix, *checkpoints, pointer)),),
+            protocol="coldstart",
+            request_attempts=0,
+        )
+
+    def _pointer(self, context: InteractionContext, focus: Optional[str]) -> str:
+        reference, relative = self.log.reference()
+        where = (
+            f"`{reference}` (relative to your tools' working directory)"
+            if relative else f"`{reference}`"
+        )
+        paragraphs = [
+            f"{COLDSTART_POINTER_PREFIX} Its log up to this point is saved in "
+            f"{where}, lines 1\u2013{len(context)}; later lines continue from "
+            "here. Read what you need from it with your tools, then pick up "
+            "where it left off."
+        ]
+        latest = _latest_user_message(context.items)
+        if latest is not None:
+            line, text = latest
+            paragraphs.append(
+                f"The latest user message is on line {line}:\n"
+                f"<user-message>\n{text}\n</user-message>"
+            )
+        paragraphs.append(_COLDSTART_LOG_FORMAT)
+        return "\n\n".join(paragraphs) + _focus_suffix(focus)
+
+
+# Compaction sequences.
+
+_NOTICE_DETAIL_CHARS = 300
+
+
+@dataclass(frozen=True)
+class CompactionFailure:
+    """One failed attempt of a compaction sequence (see ``run_compaction``).
+
+    ``failure`` is the item to save for it: the error's own ``ModelFailure``,
+    or one made from the error. ``next_method`` is what the sequence tries
+    next, or None when nothing is left; ``retry`` says whether that is another
+    attempt of the same entry.
+    """
+
+    method: str
+    error: BaseException
+    failure: ModelFailure
+    attempt: int
+    attempts: int
+    next_method: Optional[str] = None
+    retry: bool = False
+
+    @property
+    def label(self) -> str:
+        """Its ``CompactionMetadata.recovery`` entry."""
+        return f"{self.method}_failed"
+
+    def notice(self) -> str:
+        """A one-line notice, such as "pi compaction failed (...); trying coldstart."."""
+        detail = self.failure.message
+        if len(detail) > _NOTICE_DETAIL_CHARS:
+            detail = detail[:_NOTICE_DETAIL_CHARS].rstrip() + "..."
+        head = f"{self.method} compaction failed ({type(self.error).__name__}: {detail})"
+        if self.next_method is None:
+            return f"{head}."
+        if self.retry:
+            return (
+                f"{head}; trying {self.method} again (attempt {self.attempt + 1} "
+                f"of {self.attempts})."
+            )
+        return f"{head}; trying {self.next_method}."
+
+
+def _failure_item(error: BaseException) -> ModelFailure:
+    """The item that records a failed attempt in the save."""
+    failure = getattr(error, "failure", None)
+    if isinstance(error, ModelError):
+        if isinstance(failure, ModelFailure):
+            return failure
+        # Adapter messages can carry response bodies; failure items don't.
+        message = "details were withheld"
+    else:
+        message = " ".join(str(error).split()) or type(error).__name__
+    return ModelFailure(category=type(error).__name__[:128], message=message[:1024])
+
+
+def _ends_compaction(error: BaseException, *, reason: str, later: bool) -> bool:
+    """Whether a failure ends the whole sequence rather than one attempt.
+
+    A cancel or an authentication error ends it, as does any exception that
+    is neither a compaction nor a model failure (a bug). ``NothingToCompact``
+    ends it too, except in overflow recovery with a later method: pi can't
+    make the context fit there, but coldstart can.
+    """
+    if isinstance(error, NothingToCompact):
+        return reason != "overflow" or not later
+    if isinstance(error, (ModelCancelled, ModelAuthenticationError)):
+        return True
+    return not isinstance(error, (CompactionError, ModelError))
+
+
+def _retryable(error: BaseException) -> bool:
+    """Whether another attempt of the same method could succeed.
+
+    Not after a request too large for the window, a configuration error (such
+    as text the route can't encode), or a coldstart save that can't be used:
+    the same request, or the same save, would fail again.
+    """
+    return not isinstance(error, (
+        NothingToCompact, CompactionContextWindowError, ModelContextWindowError,
+        ModelConfigurationError, CompactionLogError,
+    ))
+
+
+def _rejects_focus(model: Model, method: str) -> bool:
+    """Codex remote compaction takes no focus text."""
+    return method == "provider" and getattr(model, "supports_remote_compaction", False) is True
+
+
+def run_compaction(
+    context: InteractionContext,
+    model: Model,
+    settings: CompactionSettings,
+    *,
+    factory: Optional[Callable[..., Compactor]] = None,
+    tools: Sequence["ToolSpec"] = (),
+    sample_params: Optional[SampleParams] = None,
+    instructions: Optional[str] = None,
+    reason: str = "threshold",
+    log: Optional[CompactionLog] = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
+    on_failure: Optional[Callable[[CompactionFailure], None]] = None,
+) -> CompactionResult:
+    """Run the sequence of ``settings.mode``: each method in turn, up to its attempts.
+
+    ``factory`` builds one method's compactor, as ``create_default_compactor``
+    does (the default); callers pass their own reference so tests can patch
+    it. Each attempt compacts a copy of ``context``, so items that
+    ``on_failure`` appends to it are part of the next attempt's log.
+
+    - A transport, response, or compaction failure is retried while the
+      entry's attempts last, then the next method runs. A summary request too
+      large for the window (``CompactionContextWindowError``), a
+      ``ModelConfigurationError``, or a coldstart save that can't be used
+      (``CompactionLogError``) moves on at once.
+    - A stop (``stop_requested``), a cancel, an authentication error, or any
+      other exception ends the sequence, raised as it is.
+    - ``NothingToCompact`` is raised as it is: nothing is compacted. In
+      overflow recovery (``reason="overflow"``) it moves on instead, while a
+      later method remains.
+    - With focus text (``instructions``), a method that rejects it is
+      skipped while a later method remains.
+    - coldstart is skipped where it can't run, without a ``log`` or without
+      ``exec_command`` among ``tools``, while a later method remains. As the
+      last method, it runs and fails.
+    - warmpi is built with the compaction's ``reason``.
+
+    ``on_failure`` is called after each failed attempt that doesn't end the
+    sequence, including the last one. When every attempt fails, the last
+    failure is raised. The result's ``recovery`` lists each failed attempt.
+    """
+    if reason not in COMPACTION_REASONS:
+        raise ValueError(f"reason must be one of {COMPACTION_REASONS}")
+    if not isinstance(settings, CompactionSettings):
+        raise TypeError("settings must be CompactionSettings")
+    factory = create_default_compactor if factory is None else factory
+    stopping = stop_requested if stop_requested is not None else (lambda: False)
+    focus = instructions is not None and bool(instructions.strip())
+    entries = [(_model_method(model, method), attempts) for method, attempts in settings.methods]
+    log_path = None if log is None else log.path
+
+    def skipped(method: str) -> bool:
+        if focus and _rejects_focus(model, method):
+            return True
+        return method == "coldstart" and coldstart_unavailable(tools, log_path) is not None
+
+    runnable = [
+        (method, attempts) for index, (method, attempts) in enumerate(entries)
+        if not (index + 1 < len(entries) and skipped(method))
+    ]
+    calls = {"tools": tools, "sample_params": sample_params}
+    if instructions is not None:
+        calls["instructions"] = instructions
+    failed: List[str] = []
+    last: Optional[BaseException] = None
+    for position, (method, attempts) in enumerate(runnable):
+        later = position + 1 < len(runnable)
+        # Only coldstart points to the save, and only warmpi takes the reason.
+        options = ({"log": log} if method == "coldstart"
+                   else {"reason": reason} if method == "warmpi" else {})
+        for attempt in range(1, attempts + 1):
+            try:
+                compactor = factory(model, replace(settings, mode=method), **options)
+                result = compactor.compact(context.copy(), **calls)
+            except Exception as error:
+                if stopping() or _ends_compaction(error, reason=reason, later=later):
+                    raise
+                last = error
+            else:
+                # Callers check the result's type; it matters here only when
+                # the failed attempts are added to it.
+                if failed:
+                    if not isinstance(result, CompactionResult):
+                        raise TypeError(
+                            "compactor must return CompactionResult, got "
+                            f"{type(result).__name__}"
+                        )
+                    result = replace(result, recovery=(*failed, *result.recovery))
+                return result
+            retry = attempt < attempts and _retryable(last)
+            report = CompactionFailure(
+                method=method,
+                error=last,
+                failure=_failure_item(last),
+                attempt=attempt,
+                attempts=attempts,
+                next_method=(
+                    method if retry else runnable[position + 1][0] if later else None
+                ),
+                retry=retry,
+            )
+            failed.append(report.label)
+            if on_failure is not None:
+                on_failure(report)
+            if not retry:
+                break
+    assert last is not None
+    raise last
+
+
 __all__ = [
+    "COLDSTART_POINTER_PREFIX",
+    "COMPACTION_METHODS",
     "COMPACTION_MODES",
+    "COMPACTION_REASONS",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
+    "DEFAULT_COMPACTION_MODE",
+    "ColdstartCompactor",
     "CompactionContextWindowError",
     "CompactionError",
+    "CompactionFailure",
+    "CompactionLog",
+    "CompactionLogError",
     "CompactionResult",
     "CompactionSettings",
     "Compactor",
     "DEFAULT_KEEP_RECENT_TOKENS",
     "ESTIMATED_IMAGE_CHARS",
+    "MAX_COMPACTION_ATTEMPTS",
     "NothingToCompact",
     "PiCompactor",
     "SUMMARIZATION_PROMPT",
@@ -1121,11 +1870,21 @@ __all__ = [
     "TOOL_RESULT_MAX_CHARS",
     "TURN_PREFIX_SUMMARIZATION_PROMPT",
     "UPDATE_SUMMARIZATION_PROMPT",
+    "WARMPI_INSTRUCTION",
+    "WarmPiCompactor",
     "auto_compaction_due",
+    "coldstart_unavailable",
+    "compaction_log",
+    "compaction_methods",
     "create_default_compactor",
     "estimate_context_tokens",
     "estimate_item_tokens",
+    "format_compaction_mode",
+    "is_coldstart_pointer",
     "is_compaction_summary",
+    "normalize_compaction_mode",
+    "parse_compaction_mode",
+    "run_compaction",
     "should_auto_compact",
     "uses_host_auto_compaction",
 ]

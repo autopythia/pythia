@@ -265,7 +265,7 @@ rewrite a Messages preset into a relay preset, or switch the selected model.
 | Catalog `limits.max_output_tokens` | Declared model capacity metadata; not a default request budget |
 | `SampleParams.max_output_tokens` | Typed positive integer/None request for each model generation |
 | Frontend `--max-output-tokens` / runtime configuration | Existing Pythia source of that per-call request |
-| `--compaction-max-output-tokens` | Override for Pi summary calls; omission inherits the turn budget through `PiCompactor._summary_params` |
+| `--compaction-pi-max-output-tokens` | Override for Pi summary calls; omission inherits the turn budget through `PiCompactor._summary_params` |
 
 `None` sends no explicit native output cap. Never silently substitute a catalog
 ceiling, hardcoded 128k, the max-effort setting, a timeout, a dollar budget, a turn
@@ -391,7 +391,7 @@ The automatic trigger remains the existing Pythia policy:
 - Enabled flag AND an explicit/catalog threshold are required. A
   `limits.max_context_tokens` ceiling alone does not currently derive a trigger.
 - `limits.auto_compaction_context_tokens` seeds the threshold; CLI/runtime
-  `auto_compact_tokens` overrides it according to existing config precedence.
+  `auto_compaction_context_tokens` overrides it according to existing config precedence.
 - Use verified per-model-message usage as the estimate anchor, then estimate newly
   appended content. Never add cumulative CLI run totals to each sample.
 - Select a conservative threshold below the **effective native** context window

@@ -97,6 +97,19 @@ class ModelAuthenticationError(ModelTransportError):
     pass
 
 
+class ModelThinkingBindingError(ModelTransportError):
+    """The provider rejected a signed thinking block made for another prefix.
+
+    Anthropic binds each thinking block to the conversation before it, the
+    tools offered included, and answers a request that changed them with HTTP
+    400 ("Invalid `signature` in `thinking` block. The block is bound to a
+    different conversation."). Sending the same request again fails the same
+    way; a request without the block doesn't. Callers that can't send one
+    without it see a ``ModelTransportError``, as before; warmpi sends pi's
+    request instead, which carries no signed blocks.
+    """
+
+
 class ModelTimeoutError(ModelTransportError):
     pass
 
@@ -192,7 +205,7 @@ class SampleParams:
     # Host/provider context-management control, never a sampling wire field.
     enable_auto_compaction: Optional[bool] = None
     # Host context-management threshold override, never a sampling wire field.
-    auto_compact_tokens: Optional[int] = None
+    auto_compaction_context_tokens: Optional[int] = None
     extra: Optional[Mapping] = None
     request_timeout_seconds: Optional[float] = None
 
@@ -237,13 +250,13 @@ class SampleParams:
             raise TypeError(
                 "enable_auto_compaction must be a bool or None"
             )
-        if self.auto_compact_tokens is not None and (
-            isinstance(self.auto_compact_tokens, bool)
-            or not isinstance(self.auto_compact_tokens, int)
-            or self.auto_compact_tokens <= 0
+        if self.auto_compaction_context_tokens is not None and (
+            isinstance(self.auto_compaction_context_tokens, bool)
+            or not isinstance(self.auto_compaction_context_tokens, int)
+            or self.auto_compaction_context_tokens <= 0
         ):
             raise ValueError(
-                "auto_compact_tokens must be a positive integer or None"
+                "auto_compaction_context_tokens must be a positive integer or None"
             )
         if self.extra is not None:
             object.__setattr__(self, "extra", freeze_extra_sample_params(self.extra))
@@ -488,6 +501,7 @@ __all__ = [
     "ModelRefusal",
     "ModelResponseError",
     "ModelSample",
+    "ModelThinkingBindingError",
     "ModelTimeoutError",
     "ModelTransportError",
     "SampleParams",

@@ -305,7 +305,7 @@ extra_sample_params.output_config = {"effort": "max"}
 
 The capacity numbers above are the repository's native Opus 5.5 facts, not relay
 ceilings or requested budgets. An automatic Pi threshold is separate host policy:
-set `limits.auto_compaction_context_tokens` or `--auto-compact-tokens` with headroom.
+set `limits.auto_compaction_context_tokens` or `--auto-compaction-context-tokens` with headroom.
 Choose the preset with `--model opus55-relay-max`; do **not** use the smoke command's
 `--no-user-model-catalog` when loading your user catalog. No broker model override
 or fallback is involved. Account/model support for an advertised native effort

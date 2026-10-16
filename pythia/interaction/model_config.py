@@ -7,12 +7,14 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import warnings
 
 from ._prompt import add_prompt_arguments
 from ._request_gate import cancellable_urlopen
 from .chat_completions import ChatCompletionsEndpoint
 from .chat_completions import ChatCompletionsModel
-from .compaction import COMPACTION_MODES
+from .compaction import compaction_methods
+from .compaction import normalize_compaction_mode
 from .compaction import DEFAULT_KEEP_RECENT_TOKENS
 from .messages import MessagesEndpoint
 from .messages import MessagesModel
@@ -22,12 +24,14 @@ from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
 from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
+from .model_catalog import COMPACTION_DEFAULT_FIELDS
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
 from .model_catalog_config import load_model_catalog
 from .responses import CodexResponsesModel
 from .responses import ResponsesModel
+from .runtime_config import RENAMED_CONFIG_KEYS
 from .timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
@@ -62,7 +66,7 @@ def relay_endpoint(args, binding):
         uid = int(raw_uid) if raw_uid is not None and not isinstance(raw_uid, bool) else None
     except (ValueError, TypeError):
         raise ValueError("Claude Relay expected server UID must be an integer") from None
-    if getattr(args, "max_output_tokens", None) is not None or getattr(args, "compaction_max_output_tokens", None) is not None:
+    if getattr(args, "max_output_tokens", None) is not None or getattr(args, "compaction_pi_max_output_tokens", None) is not None:
         # TODO(claude-relay output-budgets): remove this guard only alongside the
         # verified _sampling/runtime mapping and relay/wrapper capability checks.
         raise ValueError("Claude Relay does not yet support explicit output-token budgets")
@@ -89,6 +93,28 @@ def relay_endpoint(args, binding):
     )
 
 
+def compaction_mode_argument(value: str) -> str:
+    """``--compaction-mode``: a compaction sequence, such as ``coldstart,pi:2``."""
+    try:
+        return normalize_compaction_mode(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+COMPACTION_MODE_HELP = (
+    "compaction methods to try in order, each with its attempts (1 when "
+    "omitted), such as coldstart,warmpi:2. pi summarizes older context on "
+    "the host and keeps recent items verbatim; warmpi makes pi's checkpoint "
+    "from the conversation's own request, which reads its prompt cache; "
+    "provider uses Codex remote compaction or Anthropic server-side "
+    "compaction (on Messages only first); coldstart makes no model request "
+    "and points the model to the saved log, and fails when the save doesn't "
+    "hold the context. legacydefault is the route's own method, the default "
+    "until October 2026: provider on the official ChatGPT/Codex route, pi "
+    "elsewhere"
+)
+
+
 def _boolean_argument(value: str) -> bool:
     if not isinstance(value, str):
         raise argparse.ArgumentTypeError("expected True or False")
@@ -98,6 +124,38 @@ def _boolean_argument(value: str) -> bool:
     if normalized == "false":
         return False
     raise argparse.ArgumentTypeError("expected True or False")
+
+
+def _option(key: str) -> str:
+    return "--" + key.replace("_", "-")
+
+
+class _RenamedOption(argparse.Action):
+    """A renamed option's old name: it sets the new option, with a warning."""
+
+    def __init__(self, option_strings, dest, *, new_option, **kwargs):
+        super().__init__(option_strings, dest, **kwargs)
+        self.new_option = new_option
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # FutureWarning, not DeprecationWarning: Python shows it by default.
+        warnings.warn(f"{option_string} is deprecated; use {self.new_option}.",
+                      FutureWarning)
+        setattr(namespace, self.dest, values)
+
+
+def add_renamed_options(parser: argparse.ArgumentParser) -> None:
+    """Add the old names of renamed options (RENAMED_CONFIG_KEYS), hidden.
+
+    Each sets its new option's destination, with a FutureWarning that names
+    the new option. All three take an integer. They set no default, so the
+    new option's default stands.
+    """
+    for old, new in RENAMED_CONFIG_KEYS.items():
+        parser.add_argument(
+            _option(old), action=_RenamedOption, new_option=_option(new), dest=new,
+            type=int, default=argparse.SUPPRESS, metavar="N", help=argparse.SUPPRESS,
+        )
 
 
 def _save_path_argument(value: str) -> Path:
@@ -177,13 +235,23 @@ def render_model_catalog(catalog):
         aliases = f" (aliases: {', '.join(spec.aliases)})" if spec.aliases else ""
         origin = catalog.origins[(spec.endpoint.api, spec.name)]
         settings = "".join(f", {setting}" for setting in (
-            *_request_settings(spec), *_timeout_settings(spec)))
+            *_request_settings(spec), *_timeout_settings(spec),
+            *(f"compaction.{name}={value}" for name, value in _compaction_settings(spec.compaction))))
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
                      f"url={spec.endpoint.url}, auth={spec.endpoint.auth}, source={origin}{settings}")
     if catalog.auto_models:
         lines.append("[auto] " + ", ".join(
             f"{role}.model = {name}" for role, name in catalog.auto_models.items()))
+    compaction = _compaction_settings(catalog.compaction)
+    if compaction:
+        lines.append("[compaction] " + ", ".join(f"{name} = {value}" for name, value in compaction))
     return "\n".join(lines)
+
+
+def _compaction_settings(defaults) -> list:
+    """A catalog's set compaction values, as (name, value), in the catalog's names."""
+    return [(name, getattr(defaults, name)) for name in COMPACTION_DEFAULT_FIELDS
+            if getattr(defaults, name) is not None]
 
 
 def _extra_sample_params_argument(text):
@@ -276,7 +344,7 @@ def build_model(
     from .runtime_config import resolve_request_timeout_seconds
 
     mode = resolve_compaction_mode(binding, getattr(args, "compaction_mode", None))
-    for name in ("auto_compact_tokens", "max_context_tokens"):
+    for name in ("auto_compaction_context_tokens", "max_context_tokens"):
         value = getattr(args, name, None)
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
@@ -284,19 +352,19 @@ def build_model(
             raise ValueError(
                 f"--{name.replace('_', '-')} must be a positive integer"
             )
-    keep = getattr(args, "compaction_keep_recent_tokens", None)
+    keep = getattr(args, "compaction_pi_keep_recent_tokens", None)
     if keep is not None and (
         isinstance(keep, bool) or not isinstance(keep, int) or keep < 0
     ):
         raise ValueError(
-            "--compaction-keep-recent-tokens must be a nonnegative integer"
+            "--compaction-pi-keep-recent-tokens must be a nonnegative integer"
         )
-    budget = getattr(args, "compaction_max_output_tokens", None)
+    budget = getattr(args, "compaction_pi_max_output_tokens", None)
     if budget is not None and (
         isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0
     ):
         raise ValueError(
-            "--compaction-max-output-tokens must be a positive integer"
+            "--compaction-pi-max-output-tokens must be a positive integer"
         )
 
     if args.model_api == "claude-relay":
@@ -337,14 +405,15 @@ def build_model(
             )
         if args.model is None or not args.model.strip():
             raise ValueError("--model is required with --endpoint-api messages")
-        auto_compact_tokens = getattr(args, "auto_compact_tokens", None)
+        auto_compaction_context_tokens = getattr(args, "auto_compaction_context_tokens", None)
+        server = compaction_methods(mode)[0] == "provider"
         if (
-            mode == "provider"
-            and auto_compact_tokens is not None
-            and auto_compact_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
+            server
+            and auto_compaction_context_tokens is not None
+            and auto_compaction_context_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
         ):
             raise ValueError(
-                "--auto-compact-tokens must be at least "
+                "--auto-compaction-context-tokens must be at least "
                 f"{MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS} for "
                 "--endpoint-api messages with --compaction-mode provider"
             )
@@ -352,7 +421,7 @@ def build_model(
         # config's per-call enable_auto_compaction suppresses it, so a later
         # /config change applies to the next turn. Pi mode attaches none.
         compaction_options = (
-            MessagesServerCompaction() if mode == "provider" else None
+            MessagesServerCompaction() if server else None
         )
         # Validate required budgets before touching credential sources.
         output_budget = InteractionConfig.from_namespace(args).get("max_output_tokens")
@@ -454,7 +523,7 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
         help=(
             "enable automatic compaction: a pi summary, or Codex remote "
             "compaction in provider mode, when the context reaches "
-            "auto_compact_tokens, with one compact-and-retry when a sample "
+            "auto_compaction_context_tokens, with one compact-and-retry when a sample "
             "exceeds the context window; Messages server edits in provider "
             "mode. A bare flag means True (default: %(default)s)"
         ),
@@ -486,48 +555,48 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
         ),
     )
     parser.add_argument(
-        "--auto-compact-tokens",
+        "--auto-compaction-context-tokens",
         type=int,
         default=None,
         metavar="N",
         help=(
             "initial automatic-compaction token threshold; overrides the model "
             "catalog value and is tunable at runtime with "
-            "/config auto_compact_tokens (default: catalog value, if known; "
+            "/config auto_compaction_context_tokens (default: catalog value, if known; "
             "setting null restores that value)"
         ),
     )
     parser.add_argument(
         "--compaction-mode",
-        choices=COMPACTION_MODES,
+        type=compaction_mode_argument,
         default=None,
+        metavar="SEQUENCE",
         help=(
-            "pi summarizes older context on the host and keeps recent items "
-            "verbatim; provider uses Codex remote compaction or Anthropic "
-            "server-side compaction. Launch-only (default: provider on the "
-            "official ChatGPT/Codex route, pi elsewhere)"
+            COMPACTION_MODE_HELP + "; tunable with /config compaction_mode "
+            "(default: coldstart,warmpi:2; a session without exec_command "
+            "drops coldstart)"
         ),
     )
     parser.add_argument(
-        "--compaction-keep-recent-tokens",
+        "--compaction-pi-keep-recent-tokens",
         type=int,
         default=None,
         metavar="N",
         help=(
             "estimated tokens of recent context that pi compaction keeps "
             "verbatim; 0 keeps nothing. Tunable with "
-            "/config compaction_keep_recent_tokens "
+            "/config compaction_pi_keep_recent_tokens "
             f"(default: {DEFAULT_KEEP_RECENT_TOKENS})"
         ),
     )
     parser.add_argument(
-        "--compaction-max-output-tokens",
+        "--compaction-pi-max-output-tokens",
         type=int,
         default=None,
         metavar="N",
         help=(
             "output budget of each pi summary request; tunable with "
-            "/config compaction_max_output_tokens "
+            "/config compaction_pi_max_output_tokens "
             "(default: the turn's max_output_tokens)"
         ),
     )
@@ -596,5 +665,6 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
             "(default: %(default)s)"
         ),
     )
+    add_renamed_options(parser)
     return parser
 

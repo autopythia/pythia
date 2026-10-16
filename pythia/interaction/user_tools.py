@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 import json
 import re
+from typing import Optional
 
 from ._account_http import AccountServiceError
 from .codex_auth import CodexAuthError, _resolve_auth_file, load_codex_auth
@@ -16,6 +18,7 @@ from .model_catalog import binding_from_namespace
 from .runtime_config import CONFIG_KEYS
 from .runtime_config import ConfigError
 from .runtime_config import InteractionConfig
+from .runtime_config import RENAMED_CONFIG_KEYS
 from .runtime_config import parse_config_literal
 from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 
@@ -24,6 +27,9 @@ from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 class UserToolIntent:
     name: str
     arguments_json: str
+    # A note for the user, such as on a deprecated name; not part of the
+    # command, so intents compare equal without it.
+    notice: Optional[str] = field(default=None, compare=False)
 
 
 def parse_user_tool(text: str) -> UserToolIntent:
@@ -47,8 +53,12 @@ def parse_user_tool(text: str) -> UserToolIntent:
         if len(words) > 3:
             raise ValueError("Usage: /config[.json] [KEY [VALUE]].")
         arguments = {}
+        notice = None
         if len(words) >= 2:
             key = words[1]
+            if key in RENAMED_CONFIG_KEYS:
+                key = RENAMED_CONFIG_KEYS[key]
+                notice = f"Note: {words[1]} is deprecated; use {key}."
             if key not in CONFIG_KEYS:
                 raise ValueError(
                     "Unknown config key; use /config to list supported keys."
@@ -64,6 +74,7 @@ def parse_user_tool(text: str) -> UserToolIntent:
         return UserToolIntent(
             "config",
             json.dumps(arguments, separators=(",", ":")),
+            notice,
         )
 
     name = command[1:]

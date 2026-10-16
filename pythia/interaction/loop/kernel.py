@@ -21,7 +21,9 @@ comes right after it and the sample the steer goes to needs it; a steer never
 skips or cancels it. A preempting stop reaches it through the model instead:
 the apps close their models, which cancels the request in flight and refuses
 the next one, and a compaction that fails during a stop ends the turn as
-stopped.
+stopped. A compaction runs the config's sequence of methods
+(``compaction.run_compaction``); each failed attempt is saved as a
+``ModelFailure`` before the next one.
 
 A stop ends the turn at one of three levels (``Urgency``): at the next
 interrupt point, after the tool batch (``stop_requested``); once the operation
@@ -39,7 +41,9 @@ from typing import Iterable, Optional, Sequence, Tuple
 from ..compaction import CompactionResult
 from ..compaction import NothingToCompact
 from ..compaction import auto_compaction_due
+from ..compaction import compaction_log
 from ..compaction import create_default_compactor
+from ..compaction import run_compaction
 from ..compaction import uses_host_auto_compaction
 from ..display import render_interaction_items
 from ..environment import CancelToken
@@ -208,6 +212,13 @@ class TurnHost:
         """A context manager around each sample, tool call, and compaction."""
         return contextlib.nullcontext()
 
+    def log_path(self):
+        """The save file of this context, which coldstart compaction points to.
+
+        None (the default) when the context has no save.
+        """
+        return None
+
     def notice(self, text: str) -> None:
         """Show a one-line host notice."""
 
@@ -305,7 +316,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 host.notice(OVERFLOW_NOTICE)
                 try:
                     compacted = compact(context, model, environment, config, host,
-                                        sample_params)
+                                        sample_params, reason="overflow")
                 except _CompactionStopped:
                     return STOPPED
                 except Exception:
@@ -370,20 +381,37 @@ def _save_summary(context, host, started) -> None:
     host.show(render_interaction_items((summary,)))
 
 
-def compact(context, model, environment, config, host, sample_params) -> bool:
+def compact(context, model, environment, config, host, sample_params, *,
+            reason="threshold") -> bool:
     """Install one automatic compaction; False when there is nothing to compact.
 
-    It is not a preemptible operation (see the module docstring). A compaction
-    that fails while the host is stopping (as when a preempting stop closes the
-    model) raises ``_CompactionStopped``, which the turn loop treats as a stop,
-    not a failure.
+    It runs the config's compaction sequence (``run_compaction``), for the
+    ``threshold`` or for ``overflow`` recovery. Each failed attempt that the
+    sequence moves past is saved as a ``ModelFailure``, shown, and announced
+    with a notice. It is not a preemptible operation (see the module
+    docstring). A compaction that fails while the host is stopping (as when a
+    preempting stop closes the model) raises ``_CompactionStopped``, which the
+    turn loop treats as a stop, not a failure.
     """
     host.phase("compacting")
-    compactor = create_default_compactor(model, config.compaction_settings())
+
+    def failed(report):
+        host.append(context, (report.failure,))
+        host.show(render_interaction_items((report.failure,)))
+        host.notice(report.notice())
+
+    settings = config.compaction_settings()
+    # Only coldstart points to the save.
+    log = (compaction_log(host.log_path(), environment)
+           if any(method == "coldstart" for method, _ in settings.methods) else None)
     try:
         with host.trace("compact", context_revision=len(context)):
-            result = compactor.compact(context.copy(), tools=environment.tool_specs,
-                                       sample_params=sample_params)
+            result = run_compaction(
+                context, model, settings,
+                factory=create_default_compactor, tools=environment.tool_specs,
+                sample_params=sample_params, reason=reason, log=log,
+                stop_requested=host.stop_requested, on_failure=failed,
+            )
     except NothingToCompact:
         return False
     except Exception:

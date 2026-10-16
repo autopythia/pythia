@@ -57,6 +57,7 @@ from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
 from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
+from .compaction import coldstart_unavailable
 from .runtime_config import InteractionConfig
 from .save import InteractionSaveWriter, SaveError, resume_interaction_save
 from .timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
@@ -288,6 +289,20 @@ def _timeout_summary(settings, binding, relay_options):
     return f"{label} {configured:g}s ({source})"
 
 
+def _compaction_summary(index, settings, catalog, enable_default_tools):
+    """The role's compaction sequence as it would run, for --print-config.
+
+    The watcher never has exec_command, and neither has a role with
+    --enable-default-tools False, so their sequences lose coldstart.
+    """
+    reason = ("it has no exec_command"
+              if index == -1 or not enable_default_tools else None)
+    config = InteractionConfig.from_namespace(namespace(settings, catalog),
+                                              coldstart_unavailable=reason)
+    text = f"compaction {config.get('compaction_mode')}"
+    return text if config.coldstart_dropped is None else f"{text} (coldstart dropped)"
+
+
 def _check_credentials(settings, indices, catalog):
     """Fail before a save exists when a sampling role's credential reference is
     unusable; messages name the variable or file, never a value."""
@@ -384,6 +399,9 @@ class _AutoHost(TurnHost):
 
     def __init__(self, session, index):
         self._session, self._index = session, index
+
+    def log_path(self):
+        return self._session._writers[self._index].path
 
     def append(self, context, items):
         self._session._checkpoint(self._index, context, items)
@@ -482,6 +500,9 @@ class _Session:
         self._models = {}
         self._model_lock = threading.Lock()
         self.sources = dict(getattr(settings, "sources", {}))
+        self.mode_sources = dict(getattr(settings, "mode_sources", {}))
+        # Role index -> (compaction_mode it runs, why coldstart was dropped).
+        self._coldstart_dropped = {}
         self.bindings = {i: namespace(self.settings[i], self.catalog).model_binding for i in self.roles}
         self.names = {i: self.settings[i]["name"] for i in self.roles}
         self._model_factory, self._environment_factory = model_factory, environment_factory
@@ -667,7 +688,9 @@ class _Session:
                 with self._changed:
                     self._accepting = True
             self._emit(None, (DisplayItem(f"Save directory: {self.path}"),
-                              *(DisplayItem(line) for line in self._tool_notices())), "notice")
+                              *(DisplayItem(line) for line in self._tool_notices()),
+                              *(DisplayItem(line) for line in self._coldstart_notices())),
+                       "notice")
             if self._resumed:
                 self._emit(None, (DisplayItem(
                     "Note: resumed saved history without replaying old work; command-session IDs and runtime state were not restored."
@@ -717,6 +740,44 @@ class _Session:
             lines.append(f"Warning: {self._role_list(relay)} "
                          f"{'runs' if len(relay) == 1 else 'run'} Claude Relay host tools as "
                          "the Pythia user, outside the Claude sandbox.")
+        return tuple(lines)
+
+    def _coldstart_reason(self, index, environment):
+        """Why a role can't run coldstart compaction, if it can't."""
+        reason = coldstart_unavailable(environment.tool_specs, self._writers[index].path)
+        if reason is not None:
+            if index == -1:
+                reason += ", and the watcher's only tools are read_context and resume"
+            elif not self._enable_default_tools:
+                reason += ", and default model tools are disabled"
+        return reason
+
+    def _coldstart_notices(self):
+        """Startup lines for roles whose compaction_mode lost coldstart.
+
+        Roles with the same value, source, and result share a line. The
+        watcher never has exec_command: a value it takes from main (main's
+        options or entries) loses coldstart silently, and only its own entry,
+        in a --context-config file or in the save, gets the notice.
+        """
+        with self._changed:
+            dropped = dict(self._coldstart_dropped)
+        groups = {}
+        for index in self.roles:
+            if index not in dropped:
+                continue
+            source = self.mode_sources.get(index)
+            if index == -1 and source not in ("config file", "saved"):
+                continue
+            after, reason = dropped[index]
+            value = self.settings[index]["compaction_mode"]
+            groups.setdefault((value, source, after, reason), []).append(index)
+        lines = []
+        for (value, source, after, reason), indices in groups.items():
+            origin = "" if source is None else f" ({source})"
+            verb = "compacts" if len(indices) == 1 else "compact"
+            lines.append(f"Note: {self._role_list(indices)} {verb} with {after}, not "
+                         f"compaction_mode {value}{origin}: {reason}.")
         return tuple(lines)
 
     def _role_list(self, indices):
@@ -841,7 +902,6 @@ class _Session:
             if index in self._traces:
                 args._debug_trace = self._traces[index]  # invocation only, never saved settings
             args.enable_default_tools = self._enable_default_tools  # launch-only, likewise
-            config = InteractionConfig.from_namespace(args).snapshot()
             service = self.service
             binding = None if service is None else _Binding(index, service.client(str(index)))
             if index == -1:
@@ -853,6 +913,15 @@ class _Session:
             environment = self._environment_factory(index, args, tools)
             if not isinstance(environment, Environment):
                 raise TypeError("Environment factory must return an Environment.")
+            # After the environment: a role without exec_command can't run
+            # coldstart compaction, so its compaction_mode loses it.
+            config = InteractionConfig.from_namespace(
+                args, coldstart_unavailable=self._coldstart_reason(index, environment))
+            if config.coldstart_dropped is not None and (index != -1 or self._supervising):
+                with self._changed:
+                    self._coldstart_dropped[index] = (config.coldstart_dropped[1],
+                                                      config.coldstart_unavailable)
+            config = config.snapshot()
             # An observe-only watcher is host control: no provider/auth
             # initialization. A supervising watcher runs its own model turns.
             needs_model = index != -1 or self._supervising
@@ -1912,6 +1981,8 @@ def main(argv=None):
                 if index in sampling:
                     line += "; " + _timeout_summary(settings[index], binding,
                                                     settings.relay_options)
+                    line += "; " + _compaction_summary(index, settings[index], catalog,
+                                                       args.enable_default_tools)
                 print(line)
             print(json.dumps(saved_document({i: settings[i] for i in roles}, settings.sources),
                              indent=2, ensure_ascii=False))

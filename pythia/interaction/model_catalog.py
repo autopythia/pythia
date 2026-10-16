@@ -6,8 +6,9 @@ Maximum/output limits are metadata rather than request budgets;
 frontends and server-compaction configuration. Endpoints contain non-secret
 delivery policy, not resolved credential values or permission to use account
 services. Timeouts are per-model wait budgets that launch options and per-call
-params override. Unknown names remain valid pass-through candidates for the
-owning adapter.
+params override. Compaction settings (``CompactionDefaults``) are defaults
+that launch options and ``/config`` override. Unknown names remain valid
+pass-through candidates for the owning adapter.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ _RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
     "model", "messages", "input", "instructions", "stream", "stream_options",
     "tools", "parallel_tool_calls", "max_tokens", "max_output_tokens",
     "max_completion_tokens", "max_new_tokens", "temperature", "top_p", "stop",
-    "stop_sequences", "seed", "enable_auto_compaction", "auto_compact_tokens",
+    "stop_sequences", "seed", "enable_auto_compaction", "auto_compaction_context_tokens",
     "max_context_tokens", "context_management", "api", "model_api", "api_model",
     "api_url", "api_key", "api_key_env", "headers", "authorization",
     "bearer_token", "access_token", "account_id", "request_timeout_seconds",
@@ -234,12 +235,15 @@ class EndpointSpec:
     def is_official_codex(self):
         return self.api == "codex" and self.url.rstrip("/") == CODEX_RESPONSES_API_URL + "/responses"
 
+    @property
+    def supports_remote_compaction(self):
+        """Codex remote compaction: the official route, with its login or a supplied token."""
+        return self.is_official_codex and self.auth in {"codex-login", "supplied"}
+
 @dataclass(frozen=True)
 class ModelLimits:
     """Context policy and known ceilings for one catalogued model."""
 
-    # TODO: Add a per-model ``compaction_keep_recent_tokens`` default (pi's
-    # ``compaction.modelOverrides``); the runtime key defaults to 20,000.
     auto_compaction_context_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
@@ -288,6 +292,86 @@ class ModelTimeouts:
                 object.__setattr__(self, name, validate_timeout_seconds(value, name))
 
 
+# What a catalog's [compaction] section and a model section's compaction.*
+# fields set; each is the runtime setting "compaction_" + its name.
+COMPACTION_DEFAULT_FIELDS = ("mode", "pi_keep_recent_tokens", "pi_max_output_tokens")
+# [compaction] applies to every route, but only some routes have provider.
+SECTION_PROVIDER_ERROR = (
+    "it may not name provider, which only some routes have; legacydefault names "
+    "each route's own method"
+)
+
+
+def _compaction_grammar():
+    """The compaction module, for its sequence grammar.
+
+    It imports ``model``, which imports this module, so it is imported on use.
+    """
+    from . import compaction
+
+    return compaction
+
+
+@dataclass(frozen=True)
+class CompactionDefaults:
+    """Compaction settings from a model catalog; ``None`` leaves the next layer's.
+
+    A model entry's values (``compaction.*``) apply over the catalog's
+    ``[compaction]`` section, field by field (``over``); launch options and
+    ``/config`` apply over both, as pi's ``compaction.modelOverrides`` do.
+    ``mode`` is a compaction sequence, kept in its normal form;
+    ``pi_keep_recent_tokens`` may be 0, and ``pi_max_output_tokens`` is
+    positive.
+    """
+
+    mode: Optional[str] = None
+    pi_keep_recent_tokens: Optional[int] = None
+    pi_max_output_tokens: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.mode is not None:
+            object.__setattr__(
+                self, "mode", _compaction_grammar().normalize_compaction_mode(self.mode))
+        for name, minimum, kind in (("pi_keep_recent_tokens", 0, "nonnegative"),
+                                    ("pi_max_output_tokens", 1, "positive")):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < minimum
+            ):
+                raise ValueError(f"{name} must be a {kind} integer or None")
+
+    def over(self, base: "CompactionDefaults") -> "CompactionDefaults":
+        """These values where set, else ``base``'s."""
+        return CompactionDefaults(**{
+            name: getattr(base, name) if getattr(self, name) is None else getattr(self, name)
+            for name in COMPACTION_DEFAULT_FIELDS
+        })
+
+
+def compaction_route_error(endpoint: EndpointSpec, mode: Optional[str]) -> Optional[str]:
+    """Why a compaction ``mode`` can't run on ``endpoint``, or None.
+
+    ``provider`` needs the endpoint's own compaction: Anthropic server-side
+    compaction on Messages, where it comes first since it runs inside
+    samples, or Codex remote compaction (``supports_remote_compaction``).
+    Launch options can change the endpoint, so frontends check again for the
+    route they bind.
+    """
+    if mode is None:
+        return None
+    methods = _compaction_grammar().compaction_methods(mode)
+    if "provider" not in methods:
+        return None
+    if endpoint.api == "messages":
+        if "provider" in methods[1:]:
+            return ("on Messages, provider may only come first: it turns on server-side "
+                    "compaction, which runs inside samples")
+        return None
+    if not endpoint.supports_remote_compaction:
+        return "this endpoint has no provider compaction"
+    return None
+
+
 # TODO: Fold these typed presets into extra_sample_params (Responses ``reasoning``
 # and ``text``), as catalog v3 did for Messages effort; Responses would then
 # no longer reserve those fields.
@@ -318,6 +402,7 @@ class ModelSpec:
     source: Optional[str] = None
     extra_sample_params: Mapping = field(default_factory=dict)
     timeouts: ModelTimeouts = field(default_factory=ModelTimeouts)
+    compaction: CompactionDefaults = field(default_factory=CompactionDefaults)
 
     def __post_init__(self) -> None:
         _require_identifier(self.name, "name")
@@ -336,6 +421,11 @@ class ModelSpec:
                 raise ValueError("Claude Relay sends no HTTP model requests; use its relay timeouts")
         elif any(getattr(self.timeouts, name) is not None for name in _RELAY_TIMEOUT_FIELDS):
             raise ValueError("Generation, parked, startup, and stop timeouts require Claude Relay")
+        if not isinstance(self.compaction, CompactionDefaults):
+            raise TypeError("compaction must be CompactionDefaults")
+        error = compaction_route_error(self.endpoint, self.compaction.mode)
+        if error is not None:
+            raise ValueError(f"compaction.mode: {error}")
         if self.responses is not None:
             if not isinstance(self.responses, ResponsesDefaults):
                 raise TypeError("responses must be ResponsesDefaults or None")
@@ -557,7 +647,9 @@ class ModelBinding:
     """One resolved endpoint, including explicitly bound pass-through models.
 
     ``extra_sample_params`` (catalog map plus launch overlay) is the model's
-    default for ``SampleParams.extra``.
+    default for ``SampleParams.extra``. ``compaction`` is the catalog's
+    compaction settings for it: its entry's ``compaction.*`` over the
+    catalog's ``[compaction]``.
     """
 
     selector: Optional[str]
@@ -566,6 +658,7 @@ class ModelBinding:
     extra_sample_params: Mapping = field(default_factory=dict)
     origin: str = "builtin"
     api_explicit: bool = True
+    compaction: CompactionDefaults = field(default_factory=CompactionDefaults)
 
     def __post_init__(self):
         if not isinstance(self.endpoint, EndpointSpec):
@@ -582,6 +675,8 @@ class ModelBinding:
                 raise ValueError("binding spec must match the selected API")
             if self.selector not in (self.spec.name, *self.spec.aliases):
                 raise ValueError("binding selector does not select its spec")
+        if not isinstance(self.compaction, CompactionDefaults):
+            raise TypeError("binding compaction must be CompactionDefaults")
         object.__setattr__(self, "extra_sample_params", freeze_extra_sample_params(self.extra_sample_params, self.api))
 
     @property
@@ -602,7 +697,7 @@ class ModelBinding:
 
     @property
     def supports_remote_compaction(self):
-        return self.endpoint.is_official_codex and self.endpoint.auth in {"codex-login", "supplied"}
+        return self.endpoint.supports_remote_compaction
 
     def with_extra_sample_params(self, overlay=None):
         params = dict(self.extra_sample_params)
@@ -616,11 +711,14 @@ class ModelCatalog:
 
     auto_models maps auto role names to their default catalog selectors (the
     user catalog's optional [auto] section); other frontends ignore it.
+    compaction holds the [compaction] section's settings, which every model
+    bound through the catalog takes under its own (``bind``).
     """
 
     specs: Tuple[ModelSpec, ...] = ()
     origins: Mapping = field(default_factory=dict, repr=False)
     auto_models: Mapping = field(default_factory=dict)
+    compaction: CompactionDefaults = field(default_factory=CompactionDefaults)
     _index: Mapping = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -635,6 +733,11 @@ class ModelCatalog:
             for key, value in self.auto_models.items()
         ):
             raise TypeError("catalog auto_models must map role names to model names")
+        if not isinstance(self.compaction, CompactionDefaults):
+            raise TypeError("catalog compaction must be CompactionDefaults")
+        if (self.compaction.mode is not None
+                and "provider" in _compaction_grammar().compaction_methods(self.compaction.mode)):
+            raise ValueError(f"[compaction] mode: {SECTION_PROVIDER_ERROR}")
         object.__setattr__(self, "specs", specs)
         object.__setattr__(self, "_index", index)
         object.__setattr__(self, "origins", MappingProxyType({
@@ -702,6 +805,7 @@ class ModelCatalog:
             {} if spec is None else spec.extra_sample_params,
             "builtin" if spec is None else self.origins[(spec.endpoint.api, spec.name)],
             explicit,
+            compaction=self.compaction if spec is None else spec.compaction.over(self.compaction),
         )
         return binding.with_extra_sample_params(extra_sample_params)
 
@@ -773,6 +877,8 @@ __all__ = [
     "CODEX_RESPONSES_API_URL",
     "META_RESPONSES_API_URL",
     "OPENAI_RESPONSES_API_URL",
+    "COMPACTION_DEFAULT_FIELDS",
+    "CompactionDefaults",
     "ModelLimits",
     "ModelCatalog",
     "ModelBinding",

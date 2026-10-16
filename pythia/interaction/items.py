@@ -392,9 +392,10 @@ class CompactionMetadata:
         if (
             isinstance(self.request_attempts, bool)
             or not isinstance(self.request_attempts, int)
-            or self.request_attempts <= 0
+            or self.request_attempts < 0
         ):
-            raise ValueError("request_attempts must be a positive integer")
+            # 0: a compaction that made no model request (coldstart).
+            raise ValueError("request_attempts must be a nonnegative integer")
         recovery = tuple(self.recovery)
         for index, value in enumerate(recovery):
             _require_string(value, f"recovery[{index}]", allow_empty=False)

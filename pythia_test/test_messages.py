@@ -244,7 +244,7 @@ class MessagesEndpointTests(unittest.TestCase):
         payload = model._build_request_payload(
             InteractionContext((Message("user", "Hello."),)),
             (),
-            SampleParams(auto_compact_tokens=123_456),
+            SampleParams(auto_compaction_context_tokens=123_456),
         )
 
         self.assertEqual(
@@ -255,7 +255,7 @@ class MessagesEndpointTests(unittest.TestCase):
             model._build_request_payload(
                 InteractionContext((Message("user", "Hello."),)),
                 (),
-                SampleParams(auto_compact_tokens=49_999),
+                SampleParams(auto_compaction_context_tokens=49_999),
             )
 
         explicit = MessagesModel(_endpoint(
@@ -269,7 +269,7 @@ class MessagesEndpointTests(unittest.TestCase):
         explicit_payload = explicit._build_request_payload(
             InteractionContext((Message("user", "Hello."),)),
             (),
-            SampleParams(auto_compact_tokens=200_000),
+            SampleParams(auto_compaction_context_tokens=200_000),
         )
         # Per-call > endpoint > catalog: the call's trigger beats the endpoint's.
         self.assertEqual(
@@ -397,7 +397,7 @@ class MessagesSummaryRequestTests(unittest.TestCase):
                     prompt_caching=MessagesPromptCaching(),
                 ), opener=opener)
                 snapshot = InteractionConfig.from_model(model).snapshot()
-                self.assertEqual(snapshot.compaction_mode, "pi")
+                self.assertEqual(snapshot.compaction_mode, "coldstart,warmpi:2")
                 settings = CompactionSettings(keep_recent_tokens=0, max_output_tokens=budget)
                 result = create_default_compactor(model, settings).compact(
                     context,

@@ -202,8 +202,8 @@ for module in (cli, demo):
              "--max-samples", "3", "--max-output-tokens", "77", "--cwd", "work",
              "--save", "chosen.jsonl", "--enable-auto-compaction=False",
              "--enable-workspace=False", "--compaction-mode", "pi",
-             "--compaction-keep-recent-tokens", "0",
-             "--compaction-max-output-tokens", "512"],
+             "--compaction-pi-keep-recent-tokens", "0",
+             "--compaction-pi-max-output-tokens", "512"],
         ):
             demo_args = vars(demo._build_parser().parse_args(argv))
             self.assertFalse(demo_args.pop("experimental_user_message_injection"))
@@ -238,25 +238,25 @@ for module in (cli, demo):
     def test_context_limit_arguments_validate(self):
         # Context-limit args are positive ints (or unset) and chat-completions
         # accepts them; Messages enforces its compaction minimum.
-        for option in ("--auto-compact-tokens", "--max-context-tokens"):
+        for option in ("--auto-compaction-context-tokens", "--max-context-tokens"):
             args = cli._build_parser().parse_args(["--model", "m", option, "0"])
             with self.assertRaisesRegex(ValueError, option.lstrip("-")):
                 cli.build_model(args)
         # The minimum binds only Anthropic's server compaction.
         messages = cli._build_parser().parse_args([
             "--endpoint-api", "messages", "--model", "claude-fable-5.1",
-            "--auto-compact-tokens", "100", "--compaction-mode", "provider",
+            "--auto-compaction-context-tokens", "100", "--compaction-mode", "provider",
         ])
         with self.assertRaisesRegex(ValueError, "at least 50000"):
             cli.build_model(messages)
         pi = cli._build_parser().parse_args([
             "--endpoint-api", "messages", "--model", "claude-fable-5.1",
-            "--auto-compact-tokens", "100", "--endpoint-auth", "none",
+            "--auto-compaction-context-tokens", "100", "--endpoint-auth", "none",
         ])
         self.assertIsNone(cli.build_model(pi).endpoint.server_compaction)
         for option, value, message in (
-            ("--compaction-keep-recent-tokens", "-1", "nonnegative"),
-            ("--compaction-max-output-tokens", "0", "positive"),
+            ("--compaction-pi-keep-recent-tokens", "-1", "nonnegative"),
+            ("--compaction-pi-max-output-tokens", "0", "positive"),
         ):
             args = cli._build_parser().parse_args(["--model", "m", option, value])
             with self.assertRaisesRegex(ValueError, message):
@@ -623,7 +623,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
         with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--enable-default-tools=False", "--resume", "--prompt", "continue",
-                "--auto-compact-tokens", "100",
+                "--auto-compaction-context-tokens", "100",
             ]), 0)
         self.assertEqual(compactor.compact.call_count, 2)  # automatic, then /compact
         for call in compactor.compact.call_args_list:
@@ -640,7 +640,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
 
 
 class CLIControllerTests(_ControllerTestCase):
-    async def test_auto_compact_tokens_config_drives_compaction(self):
+    async def test_auto_compaction_context_tokens_config_drives_compaction(self):
         save_interaction_save(self.path, InteractionContext((
             Init("old"), Message("assistant", "old answer"),
             SampleMetadata(TokenUsage(total_tokens=100)),
@@ -662,7 +662,7 @@ class CLIControllerTests(_ControllerTestCase):
         with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
                 "--enable-default-tools=False", "--resume",
-                "--auto-compact-tokens", "100", "--prompt", "continue",
+                "--auto-compaction-context-tokens", "100", "--prompt", "continue",
             ]), 0)
         self.assertEqual(compactor.compact.call_count, 1)
         self.assertEqual(len(model.calls), 1)
@@ -1025,18 +1025,19 @@ class CLIControllerTests(_ControllerTestCase):
                 await self._run(
                     model,
                     terminal,
-                    ["--resume", "--prompt", "follow up", "--auto-compact-tokens", "100"],
+                    ["--resume", "--prompt", "follow up", "--auto-compaction-context-tokens", "100"],
                 ),
                 0,
             )
 
-        create.assert_called_once_with(model, CompactionSettings())
+        create.assert_called_once_with(model, CompactionSettings(mode="warmpi"),
+                                       reason="threshold")
         self.assertEqual(len(compacted), 1)
         self.assertIn(Message("user", "follow up"), compacted[0][0])
         # The turn's params, without focus text.
         self.assertEqual(compacted[0][2], model.calls[0][2])
         self.assertEqual(compacted[0][2], SampleParams(
-            enable_auto_compaction=True, auto_compact_tokens=100,
+            enable_auto_compaction=True, auto_compaction_context_tokens=100,
             request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         ))
         self.assertIsNone(compacted[0][3])
@@ -1093,7 +1094,7 @@ class CLIControllerTests(_ControllerTestCase):
                         "--prompt",
                         "follow up",
                         "--enable-auto-compaction=False",
-                        "--auto-compact-tokens", "100",
+                        "--auto-compaction-context-tokens", "100",
                     ],
                 ),
                 0,
@@ -1103,7 +1104,7 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(
             model.calls[0][2],
-            SampleParams(enable_auto_compaction=False, auto_compact_tokens=100,
+            SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100,
                          request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
         )
         self.assertIn(

@@ -8,26 +8,41 @@ from .codex_auth import CodexAuthError
 from .codex_auth import CodexAuthUnavailable
 from .codex_auth import load_codex_auth
 from .codex_auth import load_codex_credentials
+from .compaction import COLDSTART_POINTER_PREFIX
+from .compaction import COMPACTION_METHODS
+from .compaction import COMPACTION_MODES
 from .compaction import COMPACTION_SUMMARY_PREFIX
 from .compaction import COMPACTION_SUMMARY_SUFFIX
+from .compaction import ColdstartCompactor
 from .compaction import CompactionContextWindowError
 from .compaction import CompactionError
+from .compaction import CompactionFailure
+from .compaction import CompactionLog
+from .compaction import CompactionLogError
 from .compaction import CompactionResult
 from .compaction import CompactionSettings
 from .compaction import Compactor
+from .compaction import DEFAULT_COMPACTION_MODE
 from .compaction import DEFAULT_KEEP_RECENT_TOKENS
 from .compaction import ESTIMATED_IMAGE_CHARS
 from .compaction import NothingToCompact
 from .compaction import PiCompactor
+from .compaction import WarmPiCompactor
 from .compaction import SUMMARIZATION_PROMPT
 from .compaction import SUMMARIZATION_SYSTEM_PROMPT
 from .compaction import TOOL_RESULT_MAX_CHARS
 from .compaction import TURN_PREFIX_SUMMARIZATION_PROMPT
 from .compaction import UPDATE_SUMMARIZATION_PROMPT
 from .compaction import auto_compaction_due
+from .compaction import coldstart_unavailable
+from .compaction import compaction_log
 from .compaction import create_default_compactor
 from .compaction import estimate_context_tokens
+from .compaction import is_coldstart_pointer
 from .compaction import is_compaction_summary
+from .compaction import normalize_compaction_mode
+from .compaction import parse_compaction_mode
+from .compaction import run_compaction
 from .compaction import should_auto_compact
 from .compaction import uses_host_auto_compaction
 from .context import ContextValidationError
@@ -109,6 +124,7 @@ from .model import ModelContextWindowError
 from .model import ModelError
 from .model import ModelResponseError
 from .model import ModelSample
+from .model import ModelThinkingBindingError
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import ModelCancelled
@@ -189,9 +205,16 @@ __all__ = [
     "Urgency",
     "command_urgency",
     "escalated_stop",
+    "COLDSTART_POINTER_PREFIX",
+    "COMPACTION_METHODS",
+    "COMPACTION_MODES",
     "COMPACTION_SUMMARY_PREFIX",
     "COMPACTION_SUMMARY_SUFFIX",
+    "ColdstartCompactor",
     "CompactionContextWindowError",
+    "CompactionFailure",
+    "CompactionLog",
+    "CompactionLogError",
     "CompactionError",
     "CompactionMetadata",
     "CompactionResult",
@@ -204,6 +227,7 @@ __all__ = [
     "ContextValidationError",
     "DefaultEnvironment",
     "DEFAULT_ANTHROPIC_VERSION",
+    "DEFAULT_COMPACTION_MODE",
     "DEFAULT_KEEP_RECENT_TOKENS",
     "DEFAULT_LOGIN_TIMEOUT_SECONDS",
     "DEFAULT_REQUEST_TIMEOUT_SECONDS",
@@ -238,6 +262,7 @@ __all__ = [
     "ModelSample",
     "ModelSampleBoundary",
     "ModelSpec",
+    "ModelThinkingBindingError",
     "ModelTimeoutError",
     "ModelTimeouts",
     "ModelTransportError",
@@ -249,6 +274,7 @@ __all__ = [
     "MAX_TIMEOUT_SECONDS",
     "OPENAI_RESPONSES_API_URL",
     "PiCompactor",
+    "WarmPiCompactor",
     "PlanState",
     "PlanStep",
     "PlanStore",
@@ -293,6 +319,8 @@ __all__ = [
     "USER_AGENT",
     "X_CODEX_TURN_STATE_HEADER",
     "auto_compaction_due",
+    "coldstart_unavailable",
+    "compaction_log",
     "create_apply_patch_tool",
     "create_default_compactor",
     "create_exec_command_tool",
@@ -300,7 +328,11 @@ __all__ = [
     "create_write_stdin_tool",
     "estimate_context_tokens",
     "get_model_spec",
+    "is_coldstart_pointer",
     "is_compaction_summary",
+    "normalize_compaction_mode",
+    "parse_compaction_mode",
+    "run_compaction",
     "list_model_specs",
     "render_interaction_items",
     "interaction_item_from_dict",

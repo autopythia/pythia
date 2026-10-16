@@ -53,10 +53,10 @@ DEMO_ARGUMENT_DEFAULTS = {
     "enable_auto_compaction": True,
     "enable_workspace": True,
     "enable_experimental_media": False,
-    "auto_compact_tokens": None,
+    "auto_compaction_context_tokens": None,
     "compaction_mode": None,
-    "compaction_keep_recent_tokens": None,
-    "compaction_max_output_tokens": None,
+    "compaction_pi_keep_recent_tokens": None,
+    "compaction_pi_max_output_tokens": None,
     "max_context_tokens": None,
     "max_samples": None,
     "max_output_tokens": None,
@@ -246,11 +246,11 @@ class DemoStartupBaselineTests(unittest.TestCase):
 
     def test_compaction_flags_are_resolved_and_forwarded(self):
         for argv, forwarded in (
-            ([], {"compaction_mode": "pi", "compaction_keep_recent_tokens": 20_000,
-                  "compaction_max_output_tokens": None}),
-            (["--compaction-keep-recent-tokens", "0", "--compaction-max-output-tokens", "64"],
-             {"compaction_mode": "pi", "compaction_keep_recent_tokens": 0,
-              "compaction_max_output_tokens": 64}),
+            ([], {"compaction_mode": "coldstart,warmpi:2", "compaction_pi_keep_recent_tokens": 20_000,
+                  "compaction_pi_max_output_tokens": None}),
+            (["--compaction-pi-keep-recent-tokens", "0", "--compaction-pi-max-output-tokens", "64"],
+             {"compaction_mode": "coldstart,warmpi:2", "compaction_pi_keep_recent_tokens": 0,
+              "compaction_pi_max_output_tokens": 64}),
         ):
             with self.subTest(argv=argv):
                 with mock.patch.object(demo, "run", return_value="Done.") as run:

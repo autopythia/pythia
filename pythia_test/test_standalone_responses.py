@@ -202,8 +202,8 @@ class ResponsesModelConfigurationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PUBLIC_TEST_KEY": "public-key"}):
             model = ResponsesModel(binding=CATALOG.bind(name="public-test"))
         config = InteractionConfig.from_model(model)
-        self.assertEqual(config.get("compaction_mode"), "pi")
-        self.assertEqual(config.get("auto_compact_tokens"), 90000)
+        self.assertEqual(config.get("compaction_mode"), "coldstart,warmpi:2")
+        self.assertEqual(config.get("auto_compaction_context_tokens"), 90000)
         self.assertEqual(config.get("max_context_tokens"), 128000)
         self.assertEqual(dict(config.get("extra_sample_params")), {"truncation": "auto"})
         self.assertFalse(model.supports_remote_compaction)

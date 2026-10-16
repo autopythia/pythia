@@ -141,7 +141,7 @@ class EndpointRuntimeTests(unittest.TestCase):
         self.assertIsNone(args.model_binding.spec)
         self.assertIsNone(args.model_binding.selector)
         self.assertEqual(build_model(args).endpoint.url, "http://localhost:8000/infer")
-        self.assertIsNone(InteractionConfig.from_namespace(args).get("auto_compact_tokens"))
+        self.assertIsNone(InteractionConfig.from_namespace(args).get("auto_compaction_context_tokens"))
         self.assertEqual(
             cli._build_parser().parse_args([
                 "--endpoint-api", "messages",
@@ -302,7 +302,8 @@ class StandaloneResponsesFrontendTests(unittest.TestCase):
                         (model.endpoint.url, model.endpoint.model, model.binding.endpoint.auth),
                         ("https://api.openai.com/v1/responses", "gpt-test", "env:OPENAI_API_KEY"),
                     )
-                    self.assertEqual(InteractionConfig.from_namespace(args).get("compaction_mode"), "pi")
+                    self.assertEqual(InteractionConfig.from_namespace(args).get("compaction_mode"),
+                                     "coldstart,warmpi:2")
                     self.assertFalse(supports_account_services(args))
 
     def test_credentials_urls_and_required_options(self):

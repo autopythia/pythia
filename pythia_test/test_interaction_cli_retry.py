@@ -284,7 +284,7 @@ class RetryControllerTests(_ControllerTestCase):
                         patch_compaction(cli, "auto_compaction_due", return_value=kind == "compaction"), \
                         patch_compaction(cli, "create_default_compactor", return_value=compactor):
                     self.assertEqual(await self._run(model, terminal, [
-                        "--prompt", "hello", "--max-samples", "1", "--auto-compact-tokens", "100",
+                        "--prompt", "hello", "--max-samples", "1", "--auto-compaction-context-tokens", "100",
                     ], environment), 1)
                 self.assertEqual(execute.call_count, int(kind == "tool"))
                 self.assertEqual(len(model.calls), int(kind != "compaction"))
@@ -500,7 +500,8 @@ class OverflowRecoveryTests(_ControllerTestCase):
         terminal = _Terminal(quit_when_settled)
         with patch_compaction(cli, "create_default_compactor", return_value=compactor) as create:
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
-        create.assert_called_once_with(model, CompactionSettings())
+        create.assert_called_once_with(model, CompactionSettings(mode="warmpi"),
+                                       reason="overflow")
         compactor.compact.assert_called_once()
         self.assertEqual(compactor.compact.call_args.kwargs["sample_params"], model.calls[0][2])
         self.assertEqual(len(model.calls), 2)
@@ -528,7 +529,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
     async def test_nothing_to_compact_keeps_the_sampling_error(self):
         model = _Model(self.path, overflow())
         compactor = self.compactor(side_effect=NothingToCompact(
-            "the context fits in compaction_keep_recent_tokens",
+            "the context fits in compaction_pi_keep_recent_tokens",
         ))
         terminal = _Terminal(quit_when_settled)
         with patch_compaction(cli, "create_default_compactor", return_value=compactor):
@@ -574,7 +575,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
         compactor = self.compactor(side_effect=NothingToCompact("nothing precedes the recent tail"))
         with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, _Terminal(quit_when_settled), [
-                "--prompt", "hello", "--auto-compact-tokens", "1",
+                "--prompt", "hello", "--auto-compaction-context-tokens", "1",
             ]), 0)
         compactor.compact.assert_called_once()
         self.assertEqual(len(model.calls), 1)
@@ -587,7 +588,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
         terminal = _Terminal(quit_when_settled)
         with patch_compaction(cli, "create_default_compactor", return_value=compactor):
             self.assertEqual(await self._run(model, terminal, [
-                "--prompt", "hello", "--auto-compact-tokens", "1",
+                "--prompt", "hello", "--auto-compaction-context-tokens", "1",
             ]), 1)
         self.assertEqual(model.calls, [])
         texts = [item.text for item in terminal.items]

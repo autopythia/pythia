@@ -21,8 +21,12 @@ from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
 from pythia.interaction.codex_auth import _resolve_auth_file
 from pythia.interaction.compaction import SUMMARIZATION_SYSTEM_PROMPT
+from pythia.interaction.compaction import WARMPI_INSTRUCTION
 from pythia.interaction.model import ModelTimeoutError
 from pythia.interaction.model import ModelTransportError
+
+# The first line of warmpi's instruction, as it appears in a relay record.
+_WARMPI_MARK = WARMPI_INSTRUCTION.split("\n", 1)[0]
 
 
 def _full_url(prefix, suffix):
@@ -180,10 +184,11 @@ class FakeRelayRuntime:
     """A stand-in for one native Claude relay run (``claude_relay._runtime.Runtime``).
 
     Only the native process is faked: ClaudeRelayModel's own epoch, retire, and
-    close logic runs unchanged. A summary request (a Pi compaction's, known by
-    the summarizer's instructions) waits until the test calls :meth:`answer`,
-    the run is closed (as a retire or close does), or ``WAIT_SECONDS`` pass;
-    any other request answers "final answer" at once.
+    close logic runs unchanged. A summary request waits until the test calls
+    :meth:`answer`, the run is closed (as a retire or close does), or
+    ``WAIT_SECONDS`` pass; any other request answers "final answer" at once.
+    A summary request is pi's, known by the summarizer's instructions, or
+    warmpi's, known by its instruction after the conversation.
     """
 
     WAIT_SECONDS = 2.0
@@ -202,8 +207,11 @@ class FakeRelayRuntime:
 
     @property
     def summary(self):
-        return (self.snapshot is not None
-                and self.snapshot.instructions == SUMMARIZATION_SYSTEM_PROMPT)
+        if self.snapshot is None:
+            return False
+        records = self.snapshot.records
+        return (self.snapshot.instructions == SUMMARIZATION_SYSTEM_PROMPT
+                or bool(records) and _WARMPI_MARK in records[-1])
 
     def begin_sample(self, started, scope):
         pass

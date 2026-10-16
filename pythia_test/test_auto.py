@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 from urllib.request import urlopen
+import warnings
 
 from pythia.interaction import DisplayItem, Environment, Message, ModelSample, ModelSampleBoundary, Tool, ToolCall
 from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary, Tools
@@ -40,6 +41,7 @@ from pythia.interaction._auto_config import FOLLOWS_MAIN, build_parser, namespac
 from pythia.interaction.messages import resolve_messages_max_output_tokens
 from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.model_config import relay_endpoint
+from pythia.interaction.runtime_config import RENAMED_CONFIG_KEYS
 from pythia.interaction.runtime_config import InteractionConfig
 
 
@@ -261,13 +263,13 @@ class ConfigTests(unittest.TestCase):
                             auto.load_saved_config(path)
                 snapshot["main"][key] = original
 
-    def test_saved_config_is_version_3_and_older_saves_are_rejected(self):
+    def test_saved_config_is_version_4_and_older_saves_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             current = resolve_config(overrides={"cwd": tmp, "model": "saved-model"})
             document = auto.saved_document(current)
             self.assertEqual(set(document), {"version", "main", "worker", "watcher"})
-            self.assertEqual(document["version"], 3)
+            self.assertEqual(document["version"], 4)
             self.assertEqual(set(document["main"]), set(auto.DEFAULTS) | {"name"})
             path.write_text(json.dumps(document))
             self.assertEqual(resolve_config(saved=auto.load_saved_config(path)), current)
@@ -277,7 +279,7 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "earlier version of auto"):
                         auto.load_saved_config(path)
             incomplete = {key: value for key, value in document["main"].items() if key != "cwd"}
-            for broken in ({**document, "version": 4}, {**document, "main": incomplete},
+            for broken in ({**document, "version": 5}, {**document, "main": incomplete},
                            {**document, "watcher": {"model": "no identity"}},
                            {**document, "observer": {"name": "x", "instructions": None}}):
                 with self.subTest(broken=broken):
@@ -481,7 +483,7 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         resolve_config(path)
             path.write_text('{"version":1,"contexts":{}}')
-            with self.assertRaisesRegex(ValueError, "version 3"):
+            with self.assertRaisesRegex(ValueError, "version 4"):
                 resolve_config(path)
             # Instructions are per role; the command line's win over the file's.
             path.write_text(json.dumps({"version": 3, "main": {"instructions": "file main"},
@@ -570,14 +572,14 @@ class TimeoutConfigTests(unittest.TestCase):
             catalog_path.write_text(self.CATALOG)
             for flags, expected in (
                 ([], ["#1 (main): chat-completions / slow (command line); "
-                      "request timeout 1800s (model catalog)",
+                      "request timeout 1800s (model catalog); compaction coldstart,warmpi:2",
                       "#-1 (watcher): claude-relay / relay (command line); "
-                      "generation timeout 2400s (model catalog)"]),
+                      "generation timeout 2400s (model catalog); compaction warmpi:2"]),
                 (["--request-timeout-seconds", "600", "--claude-relay-generation-timeout", "60"],
                  ["#1 (main): chat-completions / slow (command line); "
-                  "request timeout 600s (configured)",
+                  "request timeout 600s (configured); compaction coldstart,warmpi:2",
                   "#-1 (watcher): claude-relay / relay (command line); "
-                  "generation timeout 60s (command line)"]),
+                  "generation timeout 60s (command line); compaction warmpi:2"]),
             ):
                 with self.subTest(flags=flags):
                     stdout, stderr = io.StringIO(), io.StringIO()
@@ -679,10 +681,10 @@ class RoleModelTests(unittest.TestCase):
         self.assertEqual(settings[-1]["codex_auth_file"], "/x/auth.json")
         # Model-specific options stay with main's model.
         limits = {"model": "claude-opus-5.5", "max_output_tokens": 64000,
-                  "auto_compact_tokens": 100000, "extra_sample_params": {"custom": 1}}
+                  "auto_compaction_context_tokens": 100000, "extra_sample_params": {"custom": 1}}
         settings = self.resolve(limits, role_models={-1: "codex-gpt-6-luna"})
         self.assertEqual(settings[1]["max_output_tokens"], 64000)
-        for key in ("max_output_tokens", "auto_compact_tokens", "extra_sample_params"):
+        for key in ("max_output_tokens", "auto_compaction_context_tokens", "extra_sample_params"):
             self.assertIsNone(settings[-1][key], key)
         self.assertEqual(self.resolve(limits)[-1]["max_output_tokens"], 64000)
         # Shared settings still apply to every role.
@@ -1158,7 +1160,13 @@ class RuntimeTests(unittest.TestCase):
 
     def test_a_preempting_stop_cancels_main_s_relay_compaction_before_its_request(self):
         # preempt() while main's compaction builds its summary request: none is
-        # in flight, so only closing main's model keeps it from starting.
+        # in flight, so only closing main's model keeps it from starting. For
+        # pi's request, and for warmpi's, the conversation's own.
+        for mode, builds in (("pi", "_history_prompt"), ("warmpi", "_warmpi_instruction")):
+            with self.subTest(mode=mode):
+                self.preempt_relay_compaction(Path(self.temp.name) / mode, mode, builds)
+
+    def preempt_relay_compaction(self, path, mode, builds):
         catalog = parse_model_catalog(
             "[catalog]\nversion = 4\n"
             "[model.relay]\nendpoint.api = claude-relay\nendpoint.model = fixture-model\n"
@@ -1167,7 +1175,8 @@ class RuntimeTests(unittest.TestCase):
             "endpoint.model = plain\nendpoint.auth = none\n")
         settings = resolve_config(overrides={"cwd": self.temp.name}, catalog=catalog,
                                   role_models={1: "relay", -1: "plain"})
-        settings[1].update(auto_compact_tokens=1, compaction_keep_recent_tokens=1)
+        settings[1].update(auto_compaction_context_tokens=1, compaction_pi_keep_recent_tokens=1,
+                           compaction_mode=mode)
         settings.relay_options = dict(TimeoutConfigTests.RELAY_OPTIONS)
         models = {}
 
@@ -1179,7 +1188,7 @@ class RuntimeTests(unittest.TestCase):
             models[index] = (ClaudeRelayModel(relay_endpoint(args, args.model_binding))
                              if index == 1 else Watcher())
             return models[index]
-        original = compaction._history_prompt
+        original = getattr(compaction, builds)
 
         def prompt(*args, **kwargs):
             epoch = models[1]._epoch
@@ -1188,12 +1197,12 @@ class RuntimeTests(unittest.TestCase):
             return original(*args, **kwargs)
         with fake_relay_runtime() as launches:
             session = auto._Session(
-                self.path, settings, model_factory=model_factory,
+                path, settings, model_factory=model_factory,
                 environment_factory=lambda index, args, tools: Environment(tools)).start()
             self.addCleanup(session.close)
             # The first task has nothing to compact yet; the second has the first.
             self.assertTrue(self.settled(session, session.submit("first task")))
-            with mock.patch.object(compaction, "_history_prompt", side_effect=prompt):
+            with mock.patch.object(compaction, builds, side_effect=prompt):
                 self.assertFalse(self.settled(session, session.submit("second task")))
             session.close()
         self.assertEqual([run.summary for run in launches.all], [False])  # no summary request
@@ -2449,13 +2458,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(any(isinstance(i, Message) and i.role == "assistant" for i in saved))
         self.assertFalse(any(e.kind == "debug" for e in session.drain_events()))
 
-    def test_saved_config_is_version_3_with_running_roles(self):
+    def test_saved_config_is_version_4_with_running_roles(self):
         session = self.session({}, role_models={2: "worker-model"})
         document = json.loads((self.path / "config.json").read_text())
-        self.assertEqual(document["version"], 3)
+        self.assertEqual(document["version"], 4)
         self.assertEqual(set(document), {"version", "main", "worker", "watcher"})
-        for key in ("compaction_mode", "compaction_keep_recent_tokens",
-                    "compaction_max_output_tokens"):
+        for key in ("compaction_mode", "compaction_pi_keep_recent_tokens",
+                    "compaction_pi_max_output_tokens"):
             self.assertIn(key, document["main"])
         # The worker keeps the model it chose; the watcher follows main.
         self.assertEqual(document["worker"]["model"], "worker-model")
@@ -2475,14 +2484,14 @@ class RuntimeTests(unittest.TestCase):
         compactor = self.compactor()
         with mock.patch.object(kernel, "create_default_compactor", return_value=compactor) as create:
             session = self.session({1: [answer()]}, settings_overrides={
-                "auto_compact_tokens": 1, "compaction_keep_recent_tokens": 0,
-                "compaction_max_output_tokens": 64,
+                "auto_compaction_context_tokens": 1, "compaction_pi_keep_recent_tokens": 0,
+                "compaction_pi_max_output_tokens": 64,
             })
             source = session.submit("compact first")
             self.assertTrue(self.finished(session, source["thread_id"]))
         create.assert_called_once()
         self.assertEqual(create.call_args.args[1], CompactionSettings(
-            mode="pi", keep_recent_tokens=0, max_output_tokens=64,
+            mode="warmpi", keep_recent_tokens=0, max_output_tokens=64,
         ))
         self.assertEqual(compactor.compact.call_args.kwargs["sample_params"], self.options[1][0])
         self.assertEqual(self.calls[1][0].model_items(), (Message("user", "summary"),))
@@ -2490,7 +2499,7 @@ class RuntimeTests(unittest.TestCase):
     def test_threshold_nothing_to_compact_samples_normally(self):
         compactor = self.compactor(side_effect=NothingToCompact("nothing precedes the recent tail"))
         with mock.patch.object(kernel, "create_default_compactor", return_value=compactor):
-            session = self.session({1: [answer()]}, settings_overrides={"auto_compact_tokens": 1})
+            session = self.session({1: [answer()]}, settings_overrides={"auto_compaction_context_tokens": 1})
             source = session.submit("nothing to compact")
             self.assertTrue(self.finished(session, source["thread_id"]))
         compactor.compact.assert_called_once()
@@ -3042,6 +3051,29 @@ class RuntimeTests(unittest.TestCase):
         repeated = auto._Session(self.path, again, resume=True,
                                  enable_experimental_worker_board=True).start()
         repeated.close()
+
+    def test_a_version_3_save_resumes_renamed_and_is_saved_as_version_4(self):
+        session = self.session({}, settings_overrides={"compaction_pi_max_output_tokens": 9},
+                               worker_board=False)
+        session.close()
+        config = self.path / "config.json"
+        document = json.loads(config.read_text())
+        self.assertEqual(document["version"], 4)
+        old_names = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
+        config.write_text(json.dumps({"version": 3, **{
+            role: {old_names.get(key, key): value for key, value in entry.items()}
+            for role, entry in document.items() if role != "version"
+        }}))
+        self.assertIn('"compaction_max_output_tokens": 9', config.read_text())
+        # Auto wrote the save, so it resumes without a deprecation warning.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            session = self.session({}, worker_board=False, resume=True)
+        session.close()
+        self.assertEqual([str(warning.message) for warning in caught
+                          if issubclass(warning.category, FutureWarning)], [])
+        self.assertEqual(session.settings[1]["compaction_pi_max_output_tokens"], 9)
+        self.assertEqual(json.loads(config.read_text()), document)
 
     def test_resume_missing_directory_is_fresh_and_pending_call_is_not_rerun(self):
         session = self.session({}, resume=True)
@@ -3782,9 +3814,12 @@ class EntryPointTests(unittest.TestCase):
             self.assertFalse(save.exists())
             lines = stdout.getvalue().splitlines()
             timeout = f"; request timeout {DEFAULT_REQUEST_TIMEOUT_SECONDS:g}s (default)"
+            # The watcher can't run coldstart, and loses it from the default silently.
             self.assertEqual(lines[:2], [
-                "#1 (main): chat-completions / big at gpu:8000 (command line)" + timeout,
-                "#-1 (watcher): chat-completions / small at gpu:8000 (command line)" + timeout,
+                "#1 (main): chat-completions / big at gpu:8000 (command line)" + timeout
+                + "; compaction coldstart,warmpi:2",
+                "#-1 (watcher): chat-completions / small at gpu:8000 (command line)" + timeout
+                + "; compaction warmpi:2",
             ])
             document = json.loads("\n".join(lines[2:]))
             self.assertEqual(set(document), {"version", "main", "watcher"})

@@ -44,7 +44,10 @@ from .codex_auth import CodexAuthUnavailable
 from .compaction import CompactionError
 from .compaction import CompactionResult
 from .compaction import NothingToCompact
+from .compaction import coldstart_unavailable
+from .compaction import compaction_log
 from .compaction import create_default_compactor
+from .compaction import run_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
@@ -377,6 +380,8 @@ class _UIState:
                 self.pending.append(intent)
                 self.editor = Editor()
                 self.changed.set()
+                if isinstance(intent, UserToolIntent) and intent.notice is not None:
+                    self.notice(intent.notice)
 
     def _submit_text(self, text: str, *, draft: Optional[str] = None,
                      flush: Optional[Urgency] = None, steers: bool = True) -> None:
@@ -626,16 +631,44 @@ def _compaction_failure_output(exc: BaseException) -> str:
     return "Compaction failed; provider and response details were withheld."
 
 
-def _compaction_success_output(result: CompactionResult) -> str:
+# Host methods, whose checkpoints may carry an earlier remote checkpoint.
+_HOST_COMPACTION_PROTOCOLS = frozenset(("pi", "warmpi", "coldstart"))
+
+
+def _compaction_success_output(result: CompactionResult, *,
+                               log_lines: Optional[int] = None) -> str:
+    """The /compact result text, by the checkpoint's protocol.
+
+    ``log_lines`` is how many lines of the save a coldstart pointer names.
+    """
     checkpoint = result.items[0]
     assert isinstance(checkpoint, ContextPrefix)
-    # A pi prefix can carry an earlier Responses checkpoint verbatim.
-    remote = result.protocol != "pi" and any(
-        isinstance(item, OpaqueCompaction)
-        for item in checkpoint.prefix_items
+    if result.protocol == "coldstart":
+        lines = "" if log_lines is None else f" (lines 1\u2013{log_lines})"
+        return (f"Context compacted using a coldstart pointer to the log{lines}; "
+                "no model request was made.")
+    # A host checkpoint can carry an earlier Responses checkpoint verbatim.
+    remote = result.protocol == "responses_compaction_v2" or (
+        result.protocol not in _HOST_COMPACTION_PROTOCOLS
+        and any(isinstance(item, OpaqueCompaction) for item in checkpoint.prefix_items)
     )
-    mode = "a remote opaque checkpoint" if remote else "a pi summary checkpoint"
+    mode = (
+        "a remote opaque checkpoint" if remote
+        else "a warmpi summary checkpoint" if result.protocol == "warmpi"
+        else "a pi summary checkpoint"
+    )
     return f"Context compacted using {mode}."
+
+
+def _with_failed_attempts(failures, output: str, error=None) -> str:
+    """Prefix /compact's result with its failed attempts, one line each.
+
+    They go in the result rather than in ModelFailure items: nothing may come
+    between the user-tool call and its result, and a failure item after the
+    result would make a finished turn look unfinished to /continue.
+    """
+    lines = [report.notice() for report in failures if report.error is not error]
+    return "\n".join((*lines, output))
 
 
 def _compact_focus(intent: UserToolIntent) -> Optional[str]:
@@ -703,17 +736,21 @@ async def _compact_user_tool(
             )
             contribution: tuple[InteractionItem, ...] = (result_item,)
         else:
+            failures = []
             try:
-                compactor = create_default_compactor(
-                    model, snapshot.compaction_settings(),
-                )
                 with _traced_operation(state, "compact", context_revision=len(source_context)):
-                    compaction = await _on_context_thread(state, 
-                        compactor.compact,
-                        source_context,
+                    compaction = await _on_context_thread(
+                        state, run_compaction, source_context, model,
+                        snapshot.compaction_settings(),
+                        factory=create_default_compactor,
                         tools=model_environment.tool_specs,
                         sample_params=snapshot.sample_params(),
                         instructions=_compact_focus(intent),
+                        reason="manual",
+                        log=compaction_log(writer.path, model_environment),
+                        stop_requested=lambda: (state.closing
+                                                or state.stop_level is not None),
+                        on_failure=failures.append,
                     )
                 if not isinstance(compaction, CompactionResult):
                     raise TypeError(
@@ -724,7 +761,7 @@ async def _compact_user_tool(
                 result_item = UserToolResult(
                     ToolResult(
                         call.call.call_id,
-                        f"Nothing to compact: {exc}.",
+                        _with_failed_attempts(failures, f"Nothing to compact: {exc}.", exc),
                         success=False,
                     )
                 )
@@ -741,9 +778,10 @@ async def _compact_user_tool(
                 result_item = UserToolResult(
                     ToolResult(
                         call.call.call_id,
-                        ("Compaction cancelled during execution by the stop; no compaction "
-                         "checkpoint was installed." if cancelled
-                         else _compaction_failure_output(exc)),
+                        _with_failed_attempts(failures, (
+                            "Compaction cancelled during execution by the stop; no "
+                            "compaction checkpoint was installed." if cancelled
+                            else _compaction_failure_output(exc)), exc),
                         success=False,
                     )
                 )
@@ -752,7 +790,8 @@ async def _compact_user_tool(
                 result_item = UserToolResult(
                     ToolResult(
                         call.call.call_id,
-                        _compaction_success_output(compaction),
+                        _with_failed_attempts(failures, _compaction_success_output(
+                            compaction, log_lines=len(source_context))),
                     )
                 )
                 # Validate and save these together: a durable success result
@@ -1004,6 +1043,9 @@ class _CliHost(TurnHost):
 
     def preemptible(self, cancel):
         return self._state.preemption.operation(cancel)
+
+    def log_path(self):
+        return self._writer.path
 
     @contextmanager
     def trace(self, op: str, **tags):
@@ -1420,20 +1462,29 @@ async def _drive_interaction_body(
                     )
 
 
-def _runtime_config(environment, args):
+def _coldstart_unavailable(environment, args, path) -> Optional[str]:
+    """Why this session can't run coldstart compaction, if it can't."""
+    reason = coldstart_unavailable(environment.tool_specs, path)
+    if reason is not None and path is not None and not getattr(args, "enable_default_tools", True):
+        reason += ", and default model tools are disabled"
+    return reason
+
+
+def _runtime_config(environment, args, path=None):
     workspace_update = getattr(environment, "set_enable_workspace", None)
     config = InteractionConfig.from_namespace(
         args,
         on_enable_workspace=(
             workspace_update if callable(workspace_update) else None
         ),
+        coldstart_unavailable=_coldstart_unavailable(environment, args, path),
     )
     if callable(workspace_update):
         workspace_update(config.get("enable_workspace"))
     return config
 
 
-def _startup_notices(state, args, path):
+def _startup_notices(state, args, path, config=None):
     state.notice(f"Save log: {path}")
     if state.trace is not None:
         state.notice(
@@ -1457,6 +1508,13 @@ def _startup_notices(state, args, path):
     else:
         state.notice("Note: default model tools are disabled; user commands remain available."
                      if not state.headless else "Note: default model tools are disabled.")
+    dropped = None if config is None else config.coldstart_dropped
+    if dropped is not None:
+        state.notice(
+            f"Note: this session compacts with {dropped[1]}, not compaction_mode "
+            f"{getattr(args, 'compaction_mode', None) or dropped[0]} (--compaction-mode): "
+            f"{config.coldstart_unavailable}."
+        )
 
 
 async def _run_headless(model, environment, args, path, *, trace=None):
@@ -1464,13 +1522,13 @@ async def _run_headless(model, environment, args, path, *, trace=None):
     if model is None:
         raise ValueError("Headless execution requires an available model.")
     path = Path(path).absolute()
-    config = _runtime_config(environment, args)
+    config = _runtime_config(environment, args, path)
     state = _UIState(
         headless=True,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
     )
-    _startup_notices(state, args, path)
+    _startup_notices(state, args, path, config)
     loop = asyncio.get_running_loop()
     interrupted = False
     previous_sigint = None
@@ -1515,7 +1573,7 @@ async def _run(
     trace: Optional[DebugTrace] = None,
 ) -> int:
     path = Path(path).absolute()
-    config = _runtime_config(environment, args)
+    config = _runtime_config(environment, args, path)
     prompt = args.prompt or ""
     state = _UIState(
         editor=Editor(prompt, len(prompt)), auth_required=model is None,
@@ -1528,7 +1586,7 @@ async def _run(
         "current tool batch; with ! they wait only for the current operation, and with !! they "
         "also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
     )
-    _startup_notices(state, args, path)
+    _startup_notices(state, args, path, config)
     worker = None
     frame = 0
     with terminal:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from pythia.interaction import COLDSTART_POINTER_PREFIX
 from pythia.interaction import COMPACTION_SUMMARY_PREFIX
 from pythia.interaction import COMPACTION_SUMMARY_SUFFIX
 from pythia.interaction import CompactionMetadata
@@ -230,6 +231,38 @@ class InteractionItemRendererTests(unittest.TestCase):
         # Remote checkpoints render as before.
         remote = render_interaction_items((ContextPrefix((
             Message("user", "Retained request."),
+            OpaqueCompaction.from_responses("secret"),
+        )),))
+        self.assertEqual(tuple(item.text for item in remote), ("[context prefix] 2 items",))
+
+    def test_context_prefix_shows_its_coldstart_pointer(self):
+        # A coldstart checkpoint has no summary; its pointer is the new text.
+        pointer = f"{COLDSTART_POINTER_PREFIX} Its log is saved in `run.jsonl`."
+        rendered = render_interaction_items((ContextPrefix((
+            Instructions("Rules."),
+            OpaqueCompaction.from_responses("carried-checkpoint"),
+            Message("user", pointer),
+        )),))
+        self.assertEqual(tuple(item.text for item in rendered), (
+            "[context prefix] 3 items",
+            pointer,
+        ))
+        self.assertEqual(tuple(item.label for item in rendered), ("context prefix", None))
+        # A later checkpoint that kept the pointer shows only what is new: a
+        # pi checkpoint its summary, and a remote checkpoint nothing.
+        summary = f"{COMPACTION_SUMMARY_PREFIX}## Goal\nShip it.{COMPACTION_SUMMARY_SUFFIX}"
+        pi = render_interaction_items((ContextPrefix((
+            Instructions("Rules."),
+            Message("user", summary),
+            Message("user", pointer),
+            Message("assistant", "Kept answer."),
+        )),))
+        self.assertEqual(tuple(item.text for item in pi), (
+            "[context prefix] 4 items",
+            "## Goal\nShip it.",
+        ))
+        remote = render_interaction_items((ContextPrefix((
+            Message("user", pointer),
             OpaqueCompaction.from_responses("secret"),
         )),))
         self.assertEqual(tuple(item.text for item in remote), ("[context prefix] 2 items",))

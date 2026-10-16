@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import sys
 from pathlib import Path
 from time import perf_counter
 from typing import Optional
 from typing import Sequence
 from typing import Union
+import warnings
 
+from .compaction import coldstart_unavailable
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import render_interaction_items
@@ -39,6 +42,7 @@ from ._model_binding_debug import debug_model_binding_path
 from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import InteractionConfig
 from .runtime_config import InteractionConfigSnapshot
+from .runtime_config import RENAMED_CONFIG_KEYS
 from .save import InteractionSaveWriter
 from .save import resume_interaction_save
 from .user import UserInteraction
@@ -67,8 +71,12 @@ EXPERIMENTAL_USER_MESSAGE_PROMPT = (
 class _DemoHost(TurnHost):
     """The demo's side of the shared loop: save after each change, print items."""
 
-    def __init__(self, persist):
+    def __init__(self, persist, log_path=None):
         self._persist = persist
+        self._log_path = log_path
+
+    def log_path(self):
+        return self._log_path
 
     def append(self, context, items):
         context.extend(items)
@@ -79,6 +87,28 @@ class _DemoHost(TurnHost):
             print(item)
 
 
+def _accept_old_keywords(run):
+    """Let ``run`` take the old names of its renamed keywords, with a warning.
+
+    They are the old names of the config keys in RENAMED_CONFIG_KEYS.
+    """
+
+    @functools.wraps(run)
+    def call(*args, **kwargs):
+        for old, new in RENAMED_CONFIG_KEYS.items():
+            if old in kwargs:
+                if new in kwargs:
+                    raise TypeError(f"run() got both {old!r} and its new name {new!r}")
+                # FutureWarning, not DeprecationWarning: Python shows it by default.
+                warnings.warn(f"demo.run's {old} keyword is deprecated; use {new}.",
+                              FutureWarning, stacklevel=2)
+                kwargs[new] = kwargs.pop(old)
+        return run(*args, **kwargs)
+
+    return call
+
+
+@_accept_old_keywords
 def run(
     model: Model,
     environment: Environment,
@@ -93,12 +123,12 @@ def run(
     enable_media: bool = False,
     enable_workspace: bool = True,
     cwd: Path = Path("."),
-    auto_compact_tokens: Optional[int] = None,
+    auto_compaction_context_tokens: Optional[int] = None,
     max_context_tokens: Optional[int] = None,
     debug_save_model_binding: bool = False,
     compaction_mode: Optional[str] = None,
-    compaction_keep_recent_tokens: Optional[int] = None,
-    compaction_max_output_tokens: Optional[int] = None,
+    compaction_pi_keep_recent_tokens: Optional[int] = None,
+    compaction_pi_max_output_tokens: Optional[int] = None,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
@@ -117,7 +147,7 @@ def run(
     if debug_save_model_binding and save_path is None:
         raise ValueError("debug_save_model_binding requires save_path")
     for field_name, value in (
-        ("auto_compact_tokens", auto_compact_tokens),
+        ("auto_compaction_context_tokens", auto_compaction_context_tokens),
         ("max_context_tokens", max_context_tokens),
     ):
         if value is not None and (
@@ -151,11 +181,11 @@ def run(
         raise TypeError("sample_params must be SampleParams or None")
     base_params = sample_params or SampleParams()
     if (
-        auto_compact_tokens is not None
-        and base_params.auto_compact_tokens is not None
-        and auto_compact_tokens != base_params.auto_compact_tokens
+        auto_compaction_context_tokens is not None
+        and base_params.auto_compaction_context_tokens is not None
+        and auto_compaction_context_tokens != base_params.auto_compaction_context_tokens
     ):
-        raise ValueError("Conflicting auto_compact_tokens keyword and sample param")
+        raise ValueError("Conflicting auto_compaction_context_tokens keyword and sample param")
     # Bind config-owned fields once; the projection keeps the caller's other
     # per-call preferences, including a per-call ``extra`` override.
     inputs = InteractionConfigSnapshot(
@@ -166,16 +196,24 @@ def run(
         enable_auto_compaction=(
             enable_auto_compaction and base_params.enable_auto_compaction is not False
         ),
-        auto_compact_tokens=(
-            auto_compact_tokens if auto_compact_tokens is not None
-            else base_params.auto_compact_tokens
+        auto_compaction_context_tokens=(
+            auto_compaction_context_tokens if auto_compaction_context_tokens is not None
+            else base_params.auto_compaction_context_tokens
         ),
         max_context_tokens=max_context_tokens,
         compaction_mode=compaction_mode,
-        compaction_keep_recent_tokens=compaction_keep_recent_tokens,
-        compaction_max_output_tokens=compaction_max_output_tokens,
+        compaction_pi_keep_recent_tokens=compaction_pi_keep_recent_tokens,
+        compaction_pi_max_output_tokens=compaction_pi_max_output_tokens,
     )
-    turn_config = InteractionConfig.from_model(model, inputs).snapshot()
+    reason = coldstart_unavailable(environment.tool_specs, save_path)
+    if reason is not None and save_path is None:
+        reason += ", and save_path is None"
+    config = InteractionConfig.from_model(model, inputs, coldstart_unavailable=reason)
+    if config.coldstart_dropped is not None:
+        before, after = config.coldstart_dropped
+        print(f"Note: compacting with {after}, not compaction_mode "
+              f"{compaction_mode or before}: {reason}.", file=sys.stderr)
+    turn_config = config.snapshot()
     sample_params = turn_config.sample_params(base_params)
     binding = getattr(model, "binding", None) if debug_save_model_binding else None
     if not isinstance(binding, ModelBinding):
@@ -285,7 +323,8 @@ def run(
         for display_item in user_interaction.display_items():
             print(display_item)
 
-    result = run_turn(context, model, environment, turn_config, _DemoHost(_persist),
+    result = run_turn(context, model, environment, turn_config,
+                      _DemoHost(_persist, None if save_path is None else Path(save_path)),
                       sample_params=sample_params)
     return result.final_text
 
@@ -392,12 +431,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 enable_media=args.enable_experimental_media,
                 enable_workspace=config.enable_workspace,
                 cwd=cwd,
-                auto_compact_tokens=config.auto_compact_tokens,
+                auto_compaction_context_tokens=config.auto_compaction_context_tokens,
                 max_context_tokens=config.max_context_tokens,
                 debug_save_model_binding=args.debug_save_model_binding,
                 compaction_mode=config.compaction_mode,
-                compaction_keep_recent_tokens=config.compaction_keep_recent_tokens,
-                compaction_max_output_tokens=config.compaction_max_output_tokens,
+                compaction_pi_keep_recent_tokens=config.compaction_pi_keep_recent_tokens,
+                compaction_pi_max_output_tokens=config.compaction_pi_max_output_tokens,
             )
     except Exception as exc:
         print(f"demo failed: {exc}", file=sys.stderr)

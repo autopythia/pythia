@@ -557,7 +557,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                     "compaction_metadata.provider_response_id",
                 ),
                 elapsed_seconds=elapsed,
-                request_attempts=_require_positive_int(
+                request_attempts=_require_nonnegative_int(
                     mapping.get("request_attempts", 1),
                     "compaction_metadata.request_attempts",
                 ),

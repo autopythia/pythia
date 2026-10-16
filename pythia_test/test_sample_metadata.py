@@ -430,7 +430,7 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             model.sample_params,
-            [SampleParams(auto_compact_tokens=100, enable_auto_compaction=True)],
+            [SampleParams(auto_compaction_context_tokens=100, enable_auto_compaction=True)],
         )
         self.assertEqual(model.contexts[0].model_items(), (
             Message("user", "follow up"),
@@ -462,8 +462,8 @@ class SampleMetadataTests(unittest.TestCase):
             with patch_compaction(demo, "create_default_compactor", return_value=compactor) as create:
                 answer = demo.run(
                     model, Environment(), prompt="hello", max_samples=1,
-                    compaction_mode="pi", compaction_keep_recent_tokens=0,
-                    compaction_max_output_tokens=64,
+                    compaction_mode="pi", compaction_pi_keep_recent_tokens=0,
+                    compaction_pi_max_output_tokens=64,
                 )
         self.assertEqual(answer, "Done.")
         # One compact-and-retry; the failed attempt does not count.
@@ -522,7 +522,7 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             model.sample_params,
-            [SampleParams(enable_auto_compaction=False, auto_compact_tokens=100)],
+            [SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100)],
         )
         self.assertIn(
             Message("assistant", "uncompacted"),

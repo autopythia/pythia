@@ -968,7 +968,7 @@ class CodexResponsesModelTests(unittest.TestCase):
             sample_params=SampleParams(
                 max_output_tokens=77,
                 enable_auto_compaction=True,
-                auto_compact_tokens=100,
+                auto_compaction_context_tokens=100,
                 extra={"service_tier": "flex"},
             ),
             instructions="   ",

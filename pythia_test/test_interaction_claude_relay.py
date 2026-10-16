@@ -771,7 +771,7 @@ class ModelTests(unittest.TestCase):
         old = self.model._runtime
         context.extend(sample.context_items())
         context.extend([ToolResult(call.call_id, 'already executed') for call in sample.tool_calls])
-        self.assertTrue(auto_compaction_due(self.model, context, InteractionConfigSnapshot(auto_compact_tokens=1)))
+        self.assertTrue(auto_compaction_due(self.model, context, InteractionConfigSnapshot(auto_compaction_context_tokens=1)))
         before = context.items
         summaries = []
         def construct(*args, **kwargs):

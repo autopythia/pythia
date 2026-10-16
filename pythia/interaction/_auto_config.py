@@ -15,15 +15,20 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from urllib.parse import urlsplit
+import warnings
 
 from ._auto_board import parse_json
 from ._prompt import add_prompt_arguments
-from .compaction import COMPACTION_MODES
+from .compaction import normalize_compaction_mode
 from .model import SampleParams
+from .model_config import COMPACTION_MODE_HELP
 from .model_config import _boolean_argument
+from .model_config import add_renamed_options
+from .model_config import compaction_mode_argument
 from .model_config import add_catalog_arguments, add_endpoint_arguments, prepare_namespace
 from .model_catalog import BUILTIN_MODEL_CATALOG, freeze_extra_sample_params, thaw_json
 from .runtime_config import InteractionConfig
+from .runtime_config import RENAMED_CONFIG_KEYS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .timeouts import validate_timeout_seconds
 
@@ -40,15 +45,19 @@ DEFAULTS = {
     # before this keep an explicit value.
     "request_timeout_seconds": None,
     "enable_workspace": True, "enable_auto_compaction": True,
-    "auto_compact_tokens": None, "max_context_tokens": None,
-    "compaction_mode": None, "compaction_keep_recent_tokens": None,
-    "compaction_max_output_tokens": None,
+    "auto_compaction_context_tokens": None, "max_context_tokens": None,
+    "compaction_mode": None, "compaction_pi_keep_recent_tokens": None,
+    "compaction_pi_max_output_tokens": None,
     "extra_sample_params": None,
     "instructions": None,
 }
 # One per-role JSON format for --context-config files and saved config.json:
-# {"version": 3, "main": {...}, "watcher": {...}, "worker": {...}}.
-CONFIG_VERSION = 3
+# {"version": 4, "main": {...}, "watcher": {...}, "worker": {...}}.
+CONFIG_VERSION = 4
+# Version 3 has the old names of the keys that version 4 renamed
+# (RENAMED_CONFIG_KEYS). Its saves load with the keys renamed; config files
+# may say 3 or 4, and old names in either load with a FutureWarning.
+_RENAMED_KEYS_VERSION = 3
 _KEYS = frozenset(DEFAULTS) | {"name"}
 # Per-role identity; never inherited.
 _IDENTITY = ("name", "instructions")
@@ -59,10 +68,10 @@ _ROUTE = ("model_api", "model", "endpoint_url", "endpoint_model", "endpoint_auth
 _MODEL_CHOICE = ("model_api", "model", "endpoint_url", "endpoint_model")
 _CONNECTION = ("endpoint_url", "endpoint_auth", "codex_home", "codex_auth_file")
 # Valid only for a particular model; never carried to another model.
-_MODEL_SPECIFIC = ("extra_sample_params", "max_output_tokens", "auto_compact_tokens",
-                   "max_context_tokens", "compaction_mode", "compaction_max_output_tokens")
+_MODEL_SPECIFIC = ("extra_sample_params", "max_output_tokens", "auto_compaction_context_tokens",
+                   "max_context_tokens", "compaction_mode", "compaction_pi_max_output_tokens")
 _SHARED = ("cwd", "max_samples", "request_timeout_seconds", "enable_workspace",
-           "enable_auto_compaction", "compaction_keep_recent_tokens")
+           "enable_auto_compaction", "compaction_pi_keep_recent_tokens")
 assert _KEYS == frozenset(_IDENTITY + _ROUTE + _MODEL_SPECIFIC + _SHARED)
 # Where a role's model came from, for display; FOLLOWS_MAIN roles save none.
 FOLLOWS_MAIN = "same as main"
@@ -80,6 +89,9 @@ class AutoSettings(dict):
         # Role index -> where its model came from (command line, config file,
         # saved, catalog default, FOLLOWS_MAIN, or built-in default).
         self.sources = {}
+        # Role index -> where its compaction_mode came from (command line,
+        # config file, saved, same as main), or None for the default.
+        self.mode_sources = {}
 
 
 def _layer(value, base):
@@ -89,6 +101,8 @@ def _layer(value, base):
     api = value.get("model_api")
     if api is not None and (not isinstance(api, str) or api not in _APIS):
         raise ValueError("Unsupported auto model API.")
+    if value.get("compaction_mode") is not None:
+        value["compaction_mode"] = normalize_compaction_mode(value["compaction_mode"])
     if value.get("extra_sample_params") is not None:
         value["extra_sample_params"] = thaw_json(freeze_extra_sample_params(value["extra_sample_params"]))
     for key in _PATHS:
@@ -146,6 +160,17 @@ def _merge(current, value, catalog):
     if isinstance(value.get("extra_sample_params"), dict):
         current["extra_sample_params"] = {**previous_params, **value["extra_sample_params"]}
     return current
+
+
+def _mode_source(options, entry, stored, main=None):
+    """Where a role's compaction_mode came from, most specific first."""
+    if "compaction_mode" in options:
+        return "command line"
+    if "compaction_mode" in entry:
+        return "config file"
+    if stored.get("compaction_mode") is not None:
+        return "saved"
+    return main
 
 
 def _chooses(layer):
@@ -207,8 +232,34 @@ def _read_document(path, what):
     return document
 
 
+def _renamed(document):
+    """``document`` with its roles' renamed keys under their new names, and
+    the old names it used, in RENAMED_CONFIG_KEYS order.
+
+    A role that sets both names of a key fails.
+    """
+    renamed, used = {}, set()
+    for name, entry in document.items():
+        if name != "version" and isinstance(entry, dict):
+            entry = dict(entry)
+            for old, new in RENAMED_CONFIG_KEYS.items():
+                if old in entry:
+                    if new in entry:
+                        raise ValueError(f"The {name} entry sets both {old} and its new "
+                                         f"name {new}; set only the new name.")
+                    entry[new] = entry.pop(old)
+                    used.add(old)
+        renamed[name] = entry
+    return renamed, [old for old in RENAMED_CONFIG_KEYS if old in used]
+
+
+def _listing(names):
+    """``a``, ``a and b``, or ``a, b and c``."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def _entries(document, base):
-    """Version-3 per-role entries by role index, with paths made absolute."""
+    """Per-role entries by role index, with paths made absolute."""
     unknown = set(document) - {"version"} - set(ROLE_INDEX)
     if unknown:
         raise ValueError("Auto configuration roles must be main, watcher, and worker.")
@@ -220,30 +271,52 @@ def _entries(document, base):
 
 
 def load_config_file(path):
-    """A --context-config file: {"version": 3, "main": {...}, "watcher": {...}}."""
+    """A --context-config file: {"version": 4, "main": {...}, "watcher": {...}}.
+
+    Version 3 loads too. Old key names (RENAMED_CONFIG_KEYS) load under their
+    new names, with one FutureWarning that names the file and the keys.
+    """
     path = Path(path).expanduser().absolute()
     document = _read_document(path, "auto context configuration")
     version = document.get("version")
-    if type(version) is not int or version != CONFIG_VERSION:
+    if type(version) is not int or version not in (_RENAMED_KEYS_VERSION, CONFIG_VERSION):
         raise ValueError(
-            f"Expected auto configuration version {CONFIG_VERSION}, with one entry per "
-            'role: {"version": 3, "main": {...}, "watcher": {...}}.'
+            f"Expected auto configuration version {CONFIG_VERSION} (or "
+            f"{_RENAMED_KEYS_VERSION}), with one entry per role: "
+            '{"version": 4, "main": {...}, "watcher": {...}}.'
         )
+    document, used = _renamed(document)
     # Relative paths are relative to the file.
-    return _entries(document, path.parent)
+    entries = _entries(document, path.parent)
+    if used:
+        # FutureWarning, not DeprecationWarning: Python shows it by default.
+        warnings.warn(
+            f"Auto configuration {str(path)!r} uses the deprecated {_listing(used)}; "
+            f"rename {'it' if len(used) == 1 else 'them'} to "
+            f"{_listing([RENAMED_CONFIG_KEYS[old] for old in used])}.",
+            FutureWarning,
+            stacklevel=2,
+        )
+    return entries
 
 
 def load_saved_config(path):
-    """A save's config.json: main in full, other roles only what they set."""
+    """A save's config.json: main in full, other roles only what they set.
+
+    A version-3 save loads with its renamed keys under their new names, and
+    without a warning: auto wrote it, and ``start()`` rewrites it as version 4.
+    """
     path = Path(path).expanduser().absolute()
     document = _read_document(path, "saved auto configuration")
     version = document.get("version")
-    if type(version) is int and version < CONFIG_VERSION:
+    if type(version) is int and version < _RENAMED_KEYS_VERSION:
         raise ValueError("This save was created by an earlier version of auto and cannot "
                          "be resumed; start a new save.")
     try:
-        if type(version) is not int or version != CONFIG_VERSION:
+        if type(version) is not int or version not in (_RENAMED_KEYS_VERSION, CONFIG_VERSION):
             raise ValueError()
+        if version == _RENAMED_KEYS_VERSION:
+            document, _ = _renamed(document)
         entries = _entries(document, path.parent)
     except ValueError:
         raise ValueError("Invalid saved auto configuration.") from None
@@ -310,6 +383,7 @@ def resolve_config(path=None, overrides=None, saved=None, *, catalog=BUILTIN_MOD
     settings["cwd"] = str(Path(settings["cwd"]).expanduser().absolute())
     _validate(settings, catalog)
     resolved[PRIMARY], resolved.sources[PRIMARY] = settings, source
+    resolved.mode_sources[PRIMARY] = _mode_source(options, entry, stored)
     main = settings
 
     for index in roles:
@@ -349,12 +423,16 @@ def resolve_config(path=None, overrides=None, saved=None, *, catalog=BUILTIN_MOD
         settings["cwd"] = str(Path(settings["cwd"]).expanduser().absolute())
         _validate(settings, catalog)
         resolved[index], resolved.sources[index] = settings, source
+        resolved.mode_sources[index] = _mode_source(
+            options, entry, stored,
+            "same as main" if shares and resolved.mode_sources[PRIMARY] else None)
     return resolved
 
 
 def saved_document(settings, sources=None):
-    """The version-3 document a save keeps: main in full, other roles only what
-    they set (their whole model selection when they chose their own model)."""
+    """The document a save keeps, at CONFIG_VERSION: main in full, other roles
+    only what they set (their whole model selection when they chose their own
+    model)."""
     sources = getattr(settings, "sources", {}) if sources is None else sources
     main = settings[PRIMARY]
     document = {"version": CONFIG_VERSION, NAMES[PRIMARY]: dict(main)}
@@ -439,8 +517,9 @@ def build_parser():
         allow_abbrev=False,
     )
     parser.add_argument("--context-config", type=Path,
-                        help=("precise per-role settings: a version-3 JSON file with main, "
-                              "watcher, and worker entries; options on the command line win"))
+                        help=("precise per-role settings: a version-4 JSON file (version 3 "
+                              "also loads) with main, watcher, and worker entries; options on "
+                              "the command line win"))
     parser.add_argument("--save", type=Path, default=Path("interaction-auto"),
                         help=("New or resumed save directory; existing paths require --resume "
                               "(default: interaction-auto)."))
@@ -543,14 +622,18 @@ def build_parser():
                         help="Optional sample limit per turn; unlimited when unset.")
     parser.add_argument("--max-output-tokens", type=int, default=argparse.SUPPRESS,
                         help="Optional output-token limit; uses model/API defaults when unset.")
-    parser.add_argument("--auto-compact-tokens", type=int, default=argparse.SUPPRESS,
+    parser.add_argument("--auto-compaction-context-tokens", type=int, default=argparse.SUPPRESS,
                         help="Common initial compaction threshold; defaults to each context's catalog.")
-    parser.add_argument("--compaction-mode", choices=COMPACTION_MODES, default=argparse.SUPPRESS,
-                        help=("Common compaction procedure: pi, or provider for Codex remote or "
-                              "Anthropic server-side compaction; defaults to each context's route."))
-    parser.add_argument("--compaction-keep-recent-tokens", type=int, default=argparse.SUPPRESS,
+    parser.add_argument("--compaction-mode", type=compaction_mode_argument,
+                        default=argparse.SUPPRESS, metavar="SEQUENCE",
+                        help=("Common " + COMPACTION_MODE_HELP + "; each role resolves "
+                              "legacydefault for its own route, and a role that can't run "
+                              "coldstart (the "
+                              "watcher, or any role with --enable-default-tools False) drops "
+                              "it (default: coldstart,warmpi:2)."))
+    parser.add_argument("--compaction-pi-keep-recent-tokens", type=int, default=argparse.SUPPRESS,
                         help="Common recent context kept verbatim by pi compaction (default: 20000).")
-    parser.add_argument("--compaction-max-output-tokens", type=int, default=argparse.SUPPRESS,
+    parser.add_argument("--compaction-pi-max-output-tokens", type=int, default=argparse.SUPPRESS,
                         help="Common pi summary output budget; defaults to each turn's budget.")
     parser.add_argument("--max-context-tokens", type=int, default=argparse.SUPPRESS,
                         help="Common informational context ceiling; defaults to each context's catalog.")
@@ -559,4 +642,5 @@ def build_parser():
                               "each context's catalog timeouts.request_seconds, else "
                               f"{DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds. Claude Relay roles "
                               "ignore it."))
+    add_renamed_options(parser)
     return parser

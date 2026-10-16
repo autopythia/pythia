@@ -1505,14 +1505,14 @@ class CompactionEstimateTests(unittest.TestCase):
             auto_compaction_owner = "server"
 
         context = InteractionContext((Message("user", _text(200)),))
-        due = InteractionConfigSnapshot(auto_compact_tokens=100)
+        due = InteractionConfigSnapshot(auto_compaction_context_tokens=100)
         self.assertTrue(auto_compaction_due(Host(), context, due))
         self.assertTrue(auto_compaction_due(object(), context, due))
         self.assertFalse(auto_compaction_due(Server(), context, due))
         for snapshot in (
-            InteractionConfigSnapshot(auto_compact_tokens=None),
-            InteractionConfigSnapshot(auto_compact_tokens=100, enable_auto_compaction=False),
-            InteractionConfigSnapshot(auto_compact_tokens=201),
+            InteractionConfigSnapshot(auto_compaction_context_tokens=None),
+            InteractionConfigSnapshot(auto_compaction_context_tokens=100, enable_auto_compaction=False),
+            InteractionConfigSnapshot(auto_compaction_context_tokens=201),
         ):
             with self.subTest(snapshot=snapshot):
                 self.assertFalse(auto_compaction_due(Host(), context, snapshot))
@@ -1997,7 +1997,7 @@ class CompactionTests(unittest.TestCase):
     def test_request_replaces_the_effective_context_and_inherits_turn_params(self):
         turn = SampleParams(
             max_output_tokens=900, temperature=0.3, top_p=0.9, stop=("END",),
-            seed=7, enable_auto_compaction=True, auto_compact_tokens=5_000,
+            seed=7, enable_auto_compaction=True, auto_compaction_context_tokens=5_000,
             extra={"thinking": {"type": "adaptive"}},
         )
         for budget, sample_params, expected in (
@@ -2097,8 +2097,8 @@ class CompactionTests(unittest.TestCase):
                     f"summary request for {part} ({count} items, ~{tokens:,} "
                     "estimated tokens) exceeded the model's context window"
                 ), message)
-                self.assertIn("compaction_max_output_tokens", message)
-                self.assertIn("compaction_keep_recent_tokens", message)
+                self.assertIn("compaction_pi_max_output_tokens", message)
+                self.assertIn("compaction_pi_keep_recent_tokens", message)
                 self.assertNotIn("1234567", message)
                 self.assertNotIn("\n", message)
                 self.assertLessEqual(len(message), 512)

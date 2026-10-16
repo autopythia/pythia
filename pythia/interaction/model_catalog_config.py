@@ -9,7 +9,10 @@ import re
 import warnings
 
 from ._config_file import read_config_bytes
+from .compaction import compaction_methods
 from .model_catalog import BUILTIN_MODEL_CATALOG
+from .model_catalog import COMPACTION_DEFAULT_FIELDS, CompactionDefaults
+from .model_catalog import SECTION_PROVIDER_ERROR, compaction_route_error
 from .model_catalog import ModelCatalog, ModelLimits, ModelSpec, ModelTimeouts
 from .model_catalog import EndpointSpec
 from .model_catalog import MODEL_TIMEOUT_FIELDS
@@ -24,6 +27,8 @@ MAX_CATALOG_MODELS = 1024
 # Optional timeouts.* fields were added to version 4 without a version change.
 # limits.auto_compact_context_tokens became limits.auto_compaction_context_tokens
 # within version 4; the old name still loads, with a FutureWarning.
+# The [compaction] section and compaction.* fields were added to version 4
+# without a version change.
 LATEST_MODEL_CATALOG_VERSION = 4
 _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
 _LIMIT_FIELDS = frozenset(("auto_compaction_context_tokens", "max_context_tokens", "max_output_tokens"))
@@ -36,6 +41,21 @@ _INTEGER = re.compile(r"^[+-]?[0-9]+$")
 _DECIMAL = re.compile(r"^[+-]?[0-9]+(?:\.[0-9]+)?$")
 # Roles whose default models the optional [auto] section may name.
 AUTO_ROLES = ("main", "watcher", "worker")
+_COMPACTION_PREFIX = "compaction."
+
+
+class _FieldError(ValueError):
+    """A model entry's field error whose message is safe to show.
+
+    Other entry errors are reported without detail, since values from extra
+    sample params or credentials must not appear in errors; compaction
+    settings are neither.
+    """
+
+
+def _alternatives(names):
+    """``a, b, or c``."""
+    return f"{', '.join(names[:-1])}, or {names[-1]}"
 
 
 def default_model_catalog_path():
@@ -50,6 +70,21 @@ def _text(value):
         if not isinstance(value, str):
             raise ValueError("Expected text.")
     return value
+
+
+def _compaction_value(name, raw):
+    """One [compaction] or compaction.* value: None for null, else the setting's.
+
+    Errors say what was expected; the caller says where.
+    """
+    if raw == "null":
+        return None
+    if name == "mode":
+        return CompactionDefaults(mode=_text(raw)).mode
+    kind, minimum = ("nonnegative", 0) if name == "pi_keep_recent_tokens" else ("positive", 1)
+    if _INTEGER.fullmatch(raw) is None or int(raw) < minimum:
+        raise ValueError(f"expected a {kind} integer or null")
+    return int(raw)
 
 
 def _entry(section, values, base):
@@ -86,6 +121,7 @@ def _entry(section, values, base):
         endpoint["api"] = api
     limits = {} if original is None else dict(vars(original.limits))
     timeouts = {} if original is None else dict(vars(original.timeouts))
+    compaction = {} if original is None else dict(vars(original.compaction))
     responses = {} if original is None or original.responses is None else dict(vars(original.responses))
     params = {} if original is None else dict(original.extra_sample_params)
     if "extra_sample_params" in values and any(
@@ -115,6 +151,16 @@ def _entry(section, values, base):
             timeouts[key[9:]] = None if value == "null" else float(value)
         elif key.startswith("responses.") and key[10:] in _RESPONSES_FIELDS:
             responses[key[10:]] = _text(value)
+        elif key.startswith(_COMPACTION_PREFIX):
+            setting = key.removeprefix(_COMPACTION_PREFIX)
+            if setting not in COMPACTION_DEFAULT_FIELDS:
+                raise _FieldError(f"{key} is not a compaction field; use " + _alternatives(
+                    [_COMPACTION_PREFIX + field for field in COMPACTION_DEFAULT_FIELDS]))
+            try:
+                # In an entry, null removes its own value: [compaction]'s applies.
+                compaction[setting] = _compaction_value(setting, value)
+            except ValueError as exc:
+                raise _FieldError(f"{key}: {exc}") from None
         elif key == "extra_sample_params":
             params = parse_json_value(value)
         elif key.startswith(_EXTRA_SAMPLE_PARAMS_PREFIX):
@@ -134,8 +180,13 @@ def _entry(section, values, base):
     endpoint = EndpointSpec(**endpoint)
     if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
         raise ValueError("Catalog Codex login requires the official Codex endpoint.")
+    compaction = CompactionDefaults(**compaction)
+    error = compaction_route_error(endpoint, compaction.mode)
+    if error is not None:
+        raise _FieldError(f"compaction.mode: {error}")
     fields.update(endpoint=endpoint, limits=ModelLimits(**limits),
-                  timeouts=ModelTimeouts(**timeouts), extra_sample_params=params)
+                  timeouts=ModelTimeouts(**timeouts), extra_sample_params=params,
+                  compaction=compaction)
     if responses:
         fields["responses"] = ResponsesDefaults(**responses)
     spec = (ModelSpec(name=name, **fields) if original is None
@@ -174,7 +225,7 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             version = LATEST_MODEL_CATALOG_VERSION
             assumed_version = True
         sections = [section for section in parser.sections() if section != "catalog"]
-        sections = [section for section in sections if section != "auto"]
+        sections = [section for section in sections if section not in ("auto", "compaction")]
         if len(sections) > MAX_CATALOG_MODELS or any(not section.startswith("model.") for section in sections):
             raise ValueError()
     except (configparser.Error, ValueError):
@@ -217,17 +268,22 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             seen.add(identity)
             specs[identity] = spec
             origins[identity] = str(source)
+        except _FieldError as exc:
+            raise ValueError(f"Invalid model catalog entry {section!r} in {source}: {exc}") from None
         except (ValueError, TypeError, KeyError, RecursionError):
             # No values from extra sample params/credentials should appear in errors.
             raise ValueError(f"Invalid model catalog entry {section!r} in {source}") from None
     try:
-        catalog = ModelCatalog(tuple(specs.values()), origins)
+        catalog = ModelCatalog(tuple(specs.values()), origins, compaction=base.compaction)
     except ValueError:
         raise ValueError(f"Model catalog selector/alias collision in {source}") from None
     if parser.has_section("auto"):
         catalog = replace(catalog, auto_models={
             **catalog.auto_models, **_auto_models(parser["auto"], catalog, source),
         })
+    if parser.has_section("compaction"):
+        catalog = replace(catalog, compaction=_compaction_section(
+            parser["compaction"], catalog.compaction, source))
     if assumed_version:
         warnings.warn(
             f"Model catalog {source!r} does not specify a version; assuming latest "
@@ -276,6 +332,23 @@ def _auto_models(section, catalog, source):
                              f"{name!r} is in the catalog for several APIs")
         models[role] = name
     return models
+
+
+def _compaction_section(section, base, source):
+    """[compaction]: settings for every model, over ``base``'s; null unsets one."""
+    values = dict(vars(base))
+    for key, raw in section.items():
+        if key not in COMPACTION_DEFAULT_FIELDS:
+            raise ValueError(f"Invalid model catalog [compaction] key {key!r} in {source}; "
+                             f"expected {_alternatives(COMPACTION_DEFAULT_FIELDS)}")
+        try:
+            values[key] = _compaction_value(key, raw)
+            if (key == "mode" and values[key] is not None
+                    and "provider" in compaction_methods(values[key])):
+                raise ValueError(SECTION_PROVIDER_ERROR)
+        except ValueError as exc:
+            raise ValueError(f"Invalid model catalog [compaction] {key} in {source}: {exc}") from None
+    return CompactionDefaults(**values)
 
 
 def load_model_catalog(path=None, *, enabled=True, base=BUILTIN_MODEL_CATALOG):

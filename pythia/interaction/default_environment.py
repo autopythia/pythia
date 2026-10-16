@@ -95,6 +95,11 @@ class DefaultEnvironment(Environment):
         return self._command_runtime
 
     @property
+    def cwd(self) -> Path:
+        """The tools' working directory (relative paths in commands start here)."""
+        return self._command_runtime.cwd
+
+    @property
     def enable_workspace(self) -> bool:
         return self._workspace_policy.enabled
 

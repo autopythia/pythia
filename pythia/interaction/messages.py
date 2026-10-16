@@ -48,6 +48,7 @@ from .model import ModelError
 from .model import ModelRefusal
 from .model import ModelResponseError
 from .model import ModelSample
+from .model import ModelThinkingBindingError
 from .model import ModelTimeoutError
 from .model import ModelTransportError
 from .model import SampleParams
@@ -125,7 +126,7 @@ class MessagesPromptCaching:
 class MessagesServerCompaction:
     """Server compaction policy; its trigger is the endpoint-level default.
 
-    A per-call ``SampleParams.auto_compact_tokens`` overrides the trigger, and
+    A per-call ``SampleParams.auto_compaction_context_tokens`` overrides the trigger, and
     an unset trigger uses the known auto-compaction limit when encoding.
     Without either, the trigger is omitted to use the server default.
     """
@@ -799,8 +800,15 @@ def _is_context_window_error(text: str) -> bool:
             "maximum context length",
             "context length exceeded",
             "too many tokens",
+            # Anthropic's answer to an input over the window (HTTP 400).
+            "prompt is too long",
         )
     )
+
+
+def _is_thinking_binding_error(text: str) -> bool:
+    """Anthropic's HTTP 400 for a signed thinking block made for another prefix."""
+    return "invalid `signature` in `thinking` block" in text.lower()
 
 
 def _messages_http_failure(
@@ -812,16 +820,25 @@ def _messages_http_failure(
     recovery: Tuple[str, ...],
 ) -> ModelError:
     context_window = status == 413 or _is_context_window_error(detail)
+    thinking = (not context_window and status == 400
+                and _is_thinking_binding_error(detail))
     message = (
         f"Messages HTTP {status}: {detail}"
         if detail
         else f"Messages HTTP {status}: request failed"
     )
     failure = ModelFailure(
-        category="context_window" if context_window else "http_error",
+        category=(
+            "context_window" if context_window
+            else "thinking_binding" if thinking
+            else "http_error"
+        ),
         message=(
             f"Messages HTTP {status}: context window exceeded"
             if context_window
+            else f"Messages HTTP {status}: a signed thinking block is bound to a "
+            "different conversation"
+            if thinking
             else f"Messages HTTP {status}: request failed"
         ),
         provider="messages",
@@ -830,7 +847,11 @@ def _messages_http_failure(
         attempt_count=attempt_count,
         recovery=recovery,
     )
-    error_type = ModelContextWindowError if context_window else ModelTransportError
+    error_type = (
+        ModelContextWindowError if context_window
+        else ModelThinkingBindingError if thinking
+        else ModelTransportError
+    )
     return error_type(message, failure=failure)
 
 
@@ -971,7 +992,7 @@ class MessagesModel:
             # Per-call > endpoint > catalog; if none is known, omit the
             # trigger so the server uses its default.
             trigger = (
-                None if sample_params is None else sample_params.auto_compact_tokens
+                None if sample_params is None else sample_params.auto_compaction_context_tokens
             )
             if trigger is None:
                 trigger = compaction.trigger_input_tokens
