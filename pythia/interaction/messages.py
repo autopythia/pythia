@@ -970,25 +970,21 @@ class MessagesModel:
         if compaction is not None and not suppressed:
             # Per-call > endpoint > catalog; if none is known, omit the
             # trigger so the server uses its default.
-            auto_compact_context = (
+            trigger = (
                 None if sample_params is None else sample_params.auto_compact_tokens
             )
-            if auto_compact_context is None:
-                auto_compact_context = compaction.trigger_input_tokens
-            if auto_compact_context is None and spec is not None:
-                auto_compact_context = spec.limits.auto_compact_context_tokens
-            if (
-                auto_compact_context is not None
-                and auto_compact_context
-                < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
-            ):
+            if trigger is None:
+                trigger = compaction.trigger_input_tokens
+            if trigger is None and spec is not None:
+                trigger = spec.limits.auto_compaction_context_tokens
+            if trigger is not None and trigger < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS:
                 raise ModelConfigurationError(
                     "auto-compaction trigger must be at least "
                     f"{MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS} tokens"
                 )
             compaction = replace(
                 compaction,
-                trigger_input_tokens=auto_compact_context,
+                trigger_input_tokens=trigger,
             )
             payload["context_management"] = {
                 "edits": [compaction.request_edit()]

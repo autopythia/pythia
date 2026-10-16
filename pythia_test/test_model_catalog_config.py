@@ -44,7 +44,7 @@ endpoint.model = served-local
 endpoint.url = http://127.0.0.1:8000/v1/chat/completions
 endpoint.auth = none
 aliases = ["local-alias"]
-limits.auto_compact_context_tokens = 100000
+limits.auto_compaction_context_tokens = 100000
 limits.max_context_tokens = 150000
 limits.max_output_tokens = 32000
 extra_sample_params.thinking = {"type": "enabled", "budget_tokens": 1000}
@@ -56,7 +56,7 @@ endpoint.api = messages
 endpoint.model = served-messages
 endpoint.url = https://messages.example.test/v1/messages
 endpoint.auth = none
-limits.auto_compact_context_tokens = 60000
+limits.auto_compaction_context_tokens = 60000
 limits.max_context_tokens = 80000
 limits.max_output_tokens = 8000
 extra_sample_params.output_config = {"effort": "high"}
@@ -144,17 +144,17 @@ extra_sample_params.nested = {
         registry = catalog("""
 [model.codex-gpt-6-astra]
 override = true
-limits.auto_compact_context_tokens = 700000
+limits.auto_compaction_context_tokens = 700000
 responses.text_verbosity = medium
 """)
         changed = registry.get_model_spec("codex", original.name)
-        self.assertEqual(changed.limits.auto_compact_context_tokens, 700000)
+        self.assertEqual(changed.limits.auto_compaction_context_tokens, 700000)
         self.assertEqual(changed.responses.text_verbosity, "medium")
         self.assertEqual(changed.endpoint, original.endpoint)
         self.assertEqual(changed.endpoint.model, original.endpoint.model)
         self.assertEqual(changed.responses.reasoning_summary, original.responses.reasoning_summary)
         self.assertEqual(changed.limits.max_context_tokens, original.limits.max_context_tokens)
-        self.assertEqual(original.limits.auto_compact_context_tokens, 872000)
+        self.assertEqual(original.limits.auto_compaction_context_tokens, 872000)
         self.assertIs(registry.get_model_spec("codex", "codex-gpt-6-astra-max"),
                       model_catalog.get_model_spec("codex", "codex-gpt-6-astra-max"))
 
@@ -184,12 +184,82 @@ extra_sample_params = {}
 override = true
 endpoint.api = messages
 aliases = ["my-fable"]
-limits.auto_compact_context_tokens = null
+limits.auto_compaction_context_tokens = null
 ''', base=base)
         self.assertIsNone(registry.get_model_spec("messages", "old-fable"))
         self.assertEqual(registry.get_model_spec("messages", "my-fable").name, "claude-fable-5.1")
-        self.assertIsNone(registry.bind("messages", "my-fable").limits.auto_compact_context_tokens)
+        self.assertIsNone(registry.bind("messages", "my-fable").limits.auto_compaction_context_tokens)
         self.assertIsNotNone(base.get_model_spec("messages", "old-fable"))
+
+    def test_auto_compaction_context_tokens_names_the_threshold(self):
+        with mock.patch("warnings.warn") as warn:
+            registry = catalog(LOCAL + MESSAGE)
+        warn.assert_not_called()
+        limits = registry.bind(name="local-max").limits
+        self.assertEqual(limits.auto_compaction_context_tokens, 100000)
+        self.assertEqual(registry.bind(name="worker").limits.auto_compaction_context_tokens, 60000)
+        self.assertFalse(hasattr(limits, "auto_compact_context_tokens"))
+
+    def test_deprecated_threshold_name_loads_with_one_warning_naming_its_sections(self):
+        old = (LOCAL + MESSAGE).replace(
+            "limits.auto_compaction_context_tokens", "limits.auto_compact_context_tokens",
+        )
+        with self.assertWarns(FutureWarning) as caught:
+            registry = parse_model_catalog(HEADER + old, source="catalog.ini")
+        self.assertEqual(len(caught.warnings), 1)
+        self.assertEqual(
+            str(caught.warning),
+            "Model catalog 'catalog.ini' uses the deprecated "
+            "limits.auto_compact_context_tokens in [model.local-max] and [model.worker]; "
+            "rename it to limits.auto_compaction_context_tokens.",
+        )
+        self.assertEqual(registry.bind(name="local-max").limits.auto_compaction_context_tokens, 100000)
+        self.assertEqual(registry.bind(name="worker").limits.auto_compaction_context_tokens, 60000)
+        # Overrides and null work as with the new name.
+        with self.assertWarnsRegex(FutureWarning, r"in \[model\.codex-gpt-6-astra\];"):
+            patched = catalog("""
+[model.codex-gpt-6-astra]
+override = true
+limits.auto_compact_context_tokens = 700000
+""")
+        self.assertEqual(
+            patched.get_model_spec("codex", "codex-gpt-6-astra").limits.auto_compaction_context_tokens,
+            700000,
+        )
+        with self.assertWarns(FutureWarning):
+            cleared = catalog("""
+[model.claude-fable-5.1]
+override = true
+endpoint.api = messages
+limits.auto_compact_context_tokens = null
+""")
+        self.assertIsNone(
+            cleared.bind("messages", "claude-fable-5.1").limits.auto_compaction_context_tokens,
+        )
+
+    def test_deprecated_threshold_name_is_validated_like_the_new_name(self):
+        for text in (
+            LOCAL.replace("limits.auto_compaction_context_tokens = 100000",
+                          "limits.auto_compact_context_tokens = true"),
+            LOCAL.replace("limits.auto_compaction_context_tokens = 100000",
+                          "limits.auto_compact_context_tokens = 200000"),  # above the maximum context
+            MESSAGE.replace("limits.auto_compaction_context_tokens = 60000",
+                            "limits.auto_compact_context_tokens = 49999"),
+        ):
+            with self.subTest(text=text), mock.patch("warnings.warn") as warn:
+                with self.assertRaises(ValueError):
+                    catalog(text)
+            # As for a missing version, the warning follows validation.
+            warn.assert_not_called()
+
+    def test_both_threshold_names_in_one_section_are_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^Invalid model catalog entry 'model\.local-max' in user: "
+            r"limits\.auto_compact_context_tokens is the deprecated name of "
+            r"limits\.auto_compaction_context_tokens; set only the new name$",
+        ):
+            catalog(LOCAL + "limits.auto_compact_context_tokens = 100000\n")
 
     def test_old_spellings_and_invalid_schema_are_rejected(self):
         bad = (

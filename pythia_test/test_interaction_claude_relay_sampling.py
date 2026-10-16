@@ -109,7 +109,7 @@ endpoint.api=claude-relay
 endpoint.model={native.endpoint.model}
 limits.max_context_tokens={limits.max_context_tokens}
 limits.max_output_tokens={limits.max_output_tokens}
-limits.auto_compact_context_tokens={limits.auto_compact_context_tokens}
+limits.auto_compaction_context_tokens={limits.auto_compaction_context_tokens}
 extra_sample_params.output_config={{"effort":"max"}}
 ''')
         resolved = catalog.bind(None, 'opus55-relay-max')

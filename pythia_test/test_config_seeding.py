@@ -65,7 +65,7 @@ class CaptureMessages(MessagesModel):
         self.payloads = []
 
     @property
-    def auto_compact_context_tokens(self):
+    def auto_compaction_context_tokens(self):
         raise AssertionError("frontend must not look up a model threshold")
 
     def sample(self, context, *, tools=(), sample_params=None):
@@ -80,7 +80,7 @@ class CaptureHost:
         self.sample_params = []
 
     @property
-    def auto_compact_context_tokens(self):
+    def auto_compaction_context_tokens(self):
         raise AssertionError("frontend must not look up a model threshold")
 
     def sample(self, context, *, tools=(), sample_params=None):
@@ -488,7 +488,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
         class OneReadModel(CaptureHost):
             reads = 0
             @property
-            def auto_compact_context_tokens(self):
+            def auto_compaction_context_tokens(self):
                 self.reads += 1
                 if self.reads != 1:
                     raise AssertionError("late model lookup")

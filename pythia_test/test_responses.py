@@ -410,7 +410,7 @@ class CodexResponsesConstructionTests(unittest.TestCase):
 
                     self.assertEqual(
                         (
-                            model.auto_compact_context_tokens,
+                            model.auto_compaction_context_tokens,
                             model.max_context_tokens,
                             model.max_output_tokens,
                         ),
@@ -1134,7 +1134,7 @@ class CodexResponsesModelTests(unittest.TestCase):
 
                 payload = _request_payload(opener)
                 self.assertEqual(payload["model"], expected_model)
-                self.assertNotIn("auto_compact_context_tokens", payload)
+                self.assertNotIn("auto_compaction_context_tokens", payload)
                 self.assertNotIn("max_context_tokens", payload)
                 if expected_effort is None:
                     self.assertNotIn("reasoning", payload)
@@ -1177,7 +1177,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 self.assertEqual(payload["model"], "gpt-6-astra")
                 self.assertEqual(payload["reasoning"], expected_reasoning)
                 self.assertEqual(payload["text"], {"verbosity": "low"})
-                self.assertNotIn("auto_compact_context_tokens", payload)
+                self.assertNotIn("auto_compaction_context_tokens", payload)
                 self.assertNotIn("max_context_tokens", payload)
 
     def test_reasoning_model_aliases_are_not_applied_to_generic_responses(self):

@@ -35,7 +35,7 @@ def _debug_entry(binding):
         "limits": {
             name: getattr(binding.limits, name)
             for name in (
-                "auto_compact_context_tokens",
+                "auto_compaction_context_tokens",
                 "max_context_tokens",
                 "max_output_tokens",
             )

@@ -1800,13 +1800,13 @@ class _ResponsesModelBase:
         self._gate.close()
 
     @property
-    def auto_compact_context_tokens(self) -> Optional[int]:
+    def auto_compaction_context_tokens(self) -> Optional[int]:
         """Catalog threshold for caller-owned automatic compaction, or None."""
         spec = _resolve_model_spec(self.endpoint)
         return (
             None
             if spec is None
-            else spec.limits.auto_compact_context_tokens
+            else spec.limits.auto_compaction_context_tokens
         )
 
     @property

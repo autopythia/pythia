@@ -2,7 +2,7 @@
 
 This module has no adapter, credential, environment, or network dependencies.
 Maximum/output limits are metadata rather than request budgets;
-``auto_compact_context_tokens`` is caller policy consumed by interaction
+``auto_compaction_context_tokens`` is caller policy consumed by interaction
 frontends and server-compaction configuration. Endpoints contain non-secret
 delivery policy, not resolved credential values or permission to use account
 services. Timeouts are per-model wait budgets that launch options and per-call
@@ -240,13 +240,13 @@ class ModelLimits:
 
     # TODO: Add a per-model ``compaction_keep_recent_tokens`` default (pi's
     # ``compaction.modelOverrides``); the runtime key defaults to 20,000.
-    auto_compact_context_tokens: Optional[int] = None
+    auto_compaction_context_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name in (
-            "auto_compact_context_tokens",
+            "auto_compaction_context_tokens",
             "max_context_tokens",
             "max_output_tokens",
         ):
@@ -256,12 +256,12 @@ class ModelLimits:
             ):
                 raise ValueError(f"{name} must be a positive integer or None")
         if (
-            self.auto_compact_context_tokens is not None
+            self.auto_compaction_context_tokens is not None
             and self.max_context_tokens is not None
-            and self.auto_compact_context_tokens > self.max_context_tokens
+            and self.auto_compaction_context_tokens > self.max_context_tokens
         ):
             raise ValueError(
-                "auto-compact context must not exceed maximum context"
+                "auto-compaction context must not exceed maximum context"
             )
 
 
@@ -326,8 +326,8 @@ class ModelSpec:
         _require_identifier(self.endpoint.model, "endpoint.model")
         if not isinstance(self.limits, ModelLimits):
             raise TypeError("limits must be ModelLimits")
-        if (self.endpoint.api == "messages" and self.limits.auto_compact_context_tokens is not None
-                and self.limits.auto_compact_context_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS):
+        if (self.endpoint.api == "messages" and self.limits.auto_compaction_context_tokens is not None
+                and self.limits.auto_compaction_context_tokens < MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS):
             raise ValueError("Messages compaction threshold must be at least 50000.")
         if not isinstance(self.timeouts, ModelTimeouts):
             raise TypeError("timeouts must be ModelTimeouts")
@@ -379,7 +379,7 @@ _PROFILE_DEFAULT_ENDPOINTS = MappingProxyType({
 
 # Shared immutable facts, inherited by effort presets rather than copied.
 _CODEX_LIMITS = ModelLimits(
-    auto_compact_context_tokens=872_000,
+    auto_compaction_context_tokens=872_000,
     max_context_tokens=1_000_000,
     max_output_tokens=128_000,
 )
@@ -432,7 +432,7 @@ _FABLE = ModelSpec(
     name="claude-fable-5.1",
     endpoint=replace(_ANTHROPIC, model="claude-fable-5-1"),
     limits=ModelLimits(
-        auto_compact_context_tokens=872_000,
+        auto_compaction_context_tokens=872_000,
         max_context_tokens=1_000_000,
         max_output_tokens=128_000,
     ),
@@ -446,7 +446,7 @@ _OPUS = ModelSpec(
     name="claude-opus-5.5",
     endpoint=replace(_ANTHROPIC, model="claude-opus-5-5"),
     limits=ModelLimits(
-        auto_compact_context_tokens=872_000,
+        auto_compaction_context_tokens=872_000,
         max_context_tokens=1_000_000,
         max_output_tokens=128_000,
     ),
@@ -460,7 +460,7 @@ _SONNET = ModelSpec(
     name="claude-sonnet-5.5",
     endpoint=replace(_ANTHROPIC, model="claude-sonnet-5-5"),
     limits=ModelLimits(
-        auto_compact_context_tokens=872_000,
+        auto_compaction_context_tokens=872_000,
         max_context_tokens=1_000_000,
         max_output_tokens=128_000,
     ),

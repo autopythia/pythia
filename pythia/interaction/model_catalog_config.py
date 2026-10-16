@@ -22,9 +22,13 @@ MAX_CATALOG_MODELS = 1024
 # Version 3 replaced messages.output_effort with request_params.output_config.
 # Version 4 renamed request_params to extra_sample_params.
 # Optional timeouts.* fields were added to version 4 without a version change.
+# limits.auto_compact_context_tokens became limits.auto_compaction_context_tokens
+# within version 4; the old name still loads, with a FutureWarning.
 LATEST_MODEL_CATALOG_VERSION = 4
 _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
-_LIMIT_FIELDS = frozenset(("auto_compact_context_tokens", "max_context_tokens", "max_output_tokens"))
+_LIMIT_FIELDS = frozenset(("auto_compaction_context_tokens", "max_context_tokens", "max_output_tokens"))
+# Deprecated catalog keys and their current names.
+_RENAMED_LIMIT_KEYS = {"limits.auto_compact_context_tokens": "limits.auto_compaction_context_tokens"}
 _RESPONSES_FIELDS = frozenset(("reasoning_effort", "reasoning_summary", "text_verbosity"))
 _TIMEOUT_FIELDS = frozenset(MODEL_TIMEOUT_FIELDS)
 _INTEGER = re.compile(r"^[+-]?[0-9]+$")
@@ -89,6 +93,8 @@ def _entry(section, values, base):
     ):
         raise ValueError("Cannot combine whole-map and per-key extra sample params.")
     for key, value in values.items():
+        # parse_model_catalog has rejected a section that sets both names.
+        key = _RENAMED_LIMIT_KEYS.get(key, key)
         if key in {"endpoint.model", "endpoint.url", "endpoint.auth"}:
             endpoint[key[9:]] = _text(value)
             if key == "endpoint.auth":
@@ -181,6 +187,7 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
     specs = {(spec.endpoint.api, spec.name): spec for spec in base.specs}
     origins = dict(base.origins)
     seen = set()
+    renamed = {}  # deprecated key -> sections that use it
     for section in sections:
         # Name the replacement rather than failing as a generic unknown field.
         if any(key.startswith("messages.") for key in parser[section]):
@@ -194,6 +201,14 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
                 f"Invalid model catalog entry {section!r} in {source}: request_params "
                 "was renamed to extra_sample_params in catalog version 4"
             )
+        for old, new in _RENAMED_LIMIT_KEYS.items():
+            if old in parser[section]:
+                if new in parser[section]:
+                    raise ValueError(
+                        f"Invalid model catalog entry {section!r} in {source}: {old} is the "
+                        f"deprecated name of {new}; set only the new name"
+                    )
+                renamed.setdefault(old, []).append(section)
         try:
             spec = _entry(section, parser[section], base)
             identity = (spec.endpoint.api, spec.name)
@@ -220,7 +235,21 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             UserWarning,
             stacklevel=2,
         )
+    for old, used in renamed.items():
+        # FutureWarning, not DeprecationWarning: Python shows it by default.
+        warnings.warn(
+            f"Model catalog {source!r} uses the deprecated {old} in {_listing(used)}; "
+            f"rename it to {_RENAMED_LIMIT_KEYS[old]}.",
+            FutureWarning,
+            stacklevel=2,
+        )
     return catalog
+
+
+def _listing(sections):
+    """``[a]``, ``[a] and [b]``, or ``[a], [b] and [c]``."""
+    names = [f"[{section}]" for section in sections]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _auto_models(section, catalog, source):

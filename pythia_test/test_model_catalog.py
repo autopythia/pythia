@@ -103,13 +103,13 @@ class ModelCatalogTests(unittest.TestCase):
                 self.assertEqual(payload.get("reasoning", {}), reasoning)
                 self.assertEqual(payload.get("text"), None if verbosity is None else {"verbosity": verbosity})
                 self.assertEqual(
-                    model.auto_compact_context_tokens,
-                    limits.auto_compact_context_tokens,
+                    model.auto_compaction_context_tokens,
+                    limits.auto_compaction_context_tokens,
                 )
                 self.assertEqual(model.max_context_tokens, limits.max_context_tokens)
                 self.assertEqual(model.max_output_tokens, limits.max_output_tokens)
                 for field in (
-                    "auto_compact_context_tokens",
+                    "auto_compaction_context_tokens",
                     "max_context_tokens",
                     "max_output_tokens",
                 ):
@@ -127,7 +127,7 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(
             fable.limits,
             ModelLimits(
-                auto_compact_context_tokens=872_000,
+                auto_compaction_context_tokens=872_000,
                 max_context_tokens=1_000_000,
                 max_output_tokens=128_000,
             ),
@@ -242,7 +242,7 @@ class ModelCatalogTests(unittest.TestCase):
                     self.assertEqual(payload["model"], name)
                     self.assertNotIn("reasoning", payload)
                     self.assertNotIn("text", payload)
-                    self.assertIsNone(model.auto_compact_context_tokens)
+                    self.assertIsNone(model.auto_compaction_context_tokens)
                     self.assertIsNone(model.max_context_tokens)
                     self.assertIsNone(model.max_output_tokens)
                     self.assertNotIn("session_id", model._build_headers(state))
@@ -274,7 +274,7 @@ class ModelCatalogTests(unittest.TestCase):
 
     def test_catalog_validation(self):
         for field in (
-            "auto_compact_context_tokens",
+            "auto_compaction_context_tokens",
             "max_context_tokens",
             "max_output_tokens",
         ):
@@ -282,7 +282,7 @@ class ModelCatalogTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ModelLimits(**{field: value})
         with self.assertRaises(ValueError):
-            ModelLimits(auto_compact_context_tokens=200, max_context_tokens=100)
+            ModelLimits(auto_compaction_context_tokens=200, max_context_tokens=100)
         spec = get_model_spec("messages", "claude-fable-5.1")
         for fields in ({"name": ""}, {"endpoint": "bad"},
                        {"aliases": "alias"}, {"aliases": [" "]},

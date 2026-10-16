@@ -218,7 +218,7 @@ per-role/catalog-selection facilities. The wire ID above is the one used in the
 repository's native model metadata and succeeded in the adapter tests above;
 access and compatibility in other versions/deployments still require live checks.
 Use the same native capacity facts in the catalog, not separate lower relay
-limits. `limits.auto_compact_context_tokens` is Pythia policy, not model capacity.
+limits. `limits.auto_compaction_context_tokens` is Pythia policy, not model capacity.
 
 Use the **same object shape as Messages**, not a new flat `effort` convention:
 `{"output_config": {"effort": "max"}}`. In INI, the line above supplies the
@@ -387,7 +387,7 @@ The automatic trigger remains the existing Pythia policy:
 
 - Enabled flag AND an explicit/catalog threshold are required. A
   `limits.max_context_tokens` ceiling alone does not currently derive a trigger.
-- `limits.auto_compact_context_tokens` seeds the threshold; CLI/runtime
+- `limits.auto_compaction_context_tokens` seeds the threshold; CLI/runtime
   `auto_compact_tokens` overrides it according to existing config precedence.
 - Use verified per-model-message usage as the estimate anchor, then estimate newly
   appended content. Never add cumulative CLI run totals to each sample.

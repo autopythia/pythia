@@ -382,7 +382,7 @@ class SampleMetadataTests(unittest.TestCase):
 
     def test_demo_runs_configured_auto_compaction_before_sample(self):
         class Model:
-            auto_compact_context_tokens = 100
+            auto_compaction_context_tokens = 100
 
             def __init__(self):
                 self.contexts = []
@@ -484,7 +484,7 @@ class SampleMetadataTests(unittest.TestCase):
 
     def test_demo_auto_compaction_can_be_disabled(self):
         class Model:
-            auto_compact_context_tokens = 100
+            auto_compaction_context_tokens = 100
 
             def __init__(self):
                 self.contexts = []

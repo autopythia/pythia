@@ -437,7 +437,7 @@ class InteractionConfig:
             request_timeout_seconds_fallback=resolve_request_timeout_seconds(binding),
             request_timeout_applies=binding.api != "claude-relay",
             auto_compact_tokens_fallback=(
-                None if limits is None else limits.auto_compact_context_tokens
+                None if limits is None else limits.auto_compaction_context_tokens
             ),
             max_context_tokens_fallback=(
                 None if limits is None else limits.max_context_tokens
@@ -505,7 +505,7 @@ class InteractionConfig:
             return cls(
                 snapshot,
                 auto_compact_tokens_fallback=getattr(
-                    model, "auto_compact_context_tokens", None,
+                    model, "auto_compaction_context_tokens", None,
                 ),
                 max_context_tokens_fallback=getattr(model, "max_context_tokens", None),
                 request_timeout_applies=not (

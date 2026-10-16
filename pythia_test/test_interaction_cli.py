@@ -649,7 +649,7 @@ class CLIControllerTests(_ControllerTestCase):
         model = _Model(self.path, _answer("continued"))
         # The config value drives compaction even though the model exposes no
         # auto-compaction attribute of its own.
-        self.assertFalse(hasattr(model, "auto_compact_context_tokens"))
+        self.assertFalse(hasattr(model, "auto_compaction_context_tokens"))
         compactor = mock.Mock()
         compactor.compact.return_value = CompactionResult((
             ContextPrefix((Message("assistant", "summary"),)),

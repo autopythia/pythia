@@ -29,7 +29,7 @@ endpoint.api = responses
 endpoint.url = https://api.example.test/v1/responses
 endpoint.model = public-wire
 endpoint.auth = env:PUBLIC_TEST_KEY
-limits.auto_compact_context_tokens = 90000
+limits.auto_compaction_context_tokens = 90000
 limits.max_context_tokens = 128000
 extra_sample_params.truncation = "auto"
 ''')
