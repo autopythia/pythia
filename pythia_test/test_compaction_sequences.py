@@ -16,7 +16,8 @@ import unittest
 from unittest import mock
 
 from pythia.interaction import (
-    BUILTIN_MODEL_CATALOG, COLDSTART_POINTER_PREFIX, COMPACTION_MODES, DEFAULT_COMPACTION_MODE,
+    BUILTIN_MODEL_CATALOG, COLDSTART_POINTER_PREFIX, COMPACTION_MODES,
+    COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, DEFAULT_COMPACTION_MODE,
     ColdstartCompactor,
     CompactionContextWindowError, CompactionError, CompactionLog, CompactionLogError,
     CompactionMetadata,
@@ -221,7 +222,7 @@ class ColdstartCompactorTests(unittest.TestCase):
         save_interaction_save(path, context)
         return CompactionLog(path, cwd)
 
-    def test_the_pointer_names_the_log_its_lines_and_the_latest_request(self):
+    def test_the_pointer_names_the_log_and_quotes_the_initial_and_latest_requests(self):
         context = InteractionContext(_history())
         log = self.saved(context, self.root / ".interaction" / "run.jsonl", self.root)
         result = ColdstartCompactor(log).compact(context, tools=TOOLS, instructions=" the plan ")
@@ -232,18 +233,42 @@ class ColdstartCompactorTests(unittest.TestCase):
         prefix = result.items[0].prefix_items
         self.assertEqual(len(prefix), 2)
         self.assertEqual(prefix[0], Instructions("Agent prompt."))
-        pointer = _pointer(result)
-        self.assertTrue(pointer.startswith(
+        # It names no tool (tool names differ by route), and the session's
+        # initial request comes before the latest one.
+        self.assertEqual(_pointer(result), (
             f"{COLDSTART_POINTER_PREFIX} Its log up to this point is saved in "
             "`.interaction/run.jsonl` (relative to your tools' working directory), "
-            "lines 1\u201312; later lines continue from here. Read what you need from it "
-            "with your tools, then pick up where it left off.\n\n"))
-        self.assertIn("The latest user message is on line 11:\n<user-message>\n"
-                      "Now the tests.\n</user-message>", pointer)
-        self.assertIn('Each line is one JSON item with a "type".', pointer)
-        self.assertTrue(pointer.endswith("\n\nAdditional focus: the plan"))
-        self.assertNotIn("jq", pointer)
-        self.assertNotIn("exec_command", pointer)  # tool names differ by route
+            "lines 1\u201312; later lines continue from here. Each line is a JSON item "
+            'with a "type", such as "message" ("role", "content"), "tool_call" '
+            '("name", "arguments_json"), "tool_result" ("output") or "context_prefix" '
+            "(an earlier compaction).\n\n"
+            "The initial user message is on line 3:\n"
+            "<user-message>\nFix the bug.\n</user-message>\n\n"
+            "The latest user message is on line 11:\n"
+            "<user-message>\nNow the tests.\n</user-message>\n\n"
+            "Read what you need from the log, then pick up where it left off.\n\n"
+            "Additional focus: the plan"))
+
+    def test_a_single_request_is_the_user_message_and_summaries_are_never_quoted(self):
+        summary = f"{COMPACTION_SUMMARY_PREFIX}## Goal\nOld work.{COMPACTION_SUMMARY_SUFFIX}"
+        context = InteractionContext((
+            Init("session"),
+            Instructions("Agent prompt."),
+            Message("user", summary),
+            Message("user", f"{COLDSTART_POINTER_PREFIX} An older pointer."),
+            Message("user", "Fix the bug."),
+            UserInteractionBoundary(),
+            Message("assistant", "Working."),
+            ModelSampleBoundary(),
+        ))
+        pointer = _pointer(ColdstartCompactor(self.saved(context, cwd=self.root)).compact(
+            context, tools=TOOLS))
+        self.assertIn("lines 1\u20138; later lines continue from here.", pointer)
+        self.assertIn("\n\nThe user message is on line 5:\n"
+                      "<user-message>\nFix the bug.\n</user-message>\n\n", pointer)
+        for text in ("initial user message", "latest user message", "Old work.",
+                     "An older pointer."):
+            self.assertNotIn(text, pointer)
 
     def test_a_save_outside_the_working_directory_is_named_by_its_absolute_path(self):
         context = InteractionContext(_history())
@@ -268,23 +293,32 @@ class ColdstartCompactorTests(unittest.TestCase):
             context, tools=TOOLS)
         prefix = result.items[0].prefix_items
         self.assertEqual(prefix[:2], (Instructions("Agent prompt."), checkpoint))
-        self.assertNotIn("The latest user message", _pointer(result))
+        self.assertNotIn("<user-message>", _pointer(result))  # neither quote
 
     def test_long_requests_are_cut_and_nothing_new_is_nothing_to_compact(self):
-        long = "x" * 2_500
-        context = InteractionContext((*_history()[:-2], Message("user", long),
-                                      UserInteractionBoundary()))
+        history = _history()
+        context = InteractionContext((*history[:2], Message("user", "y" * 2_100), *history[3:-2],
+                                      Message("user", "x" * 2_500), UserInteractionBoundary()))
         compactor = ColdstartCompactor(self.saved(context, cwd=self.root))
         result = compactor.compact(context, tools=TOOLS)
-        self.assertIn("x" * 2_000 + "\n[500 more characters omitted]\n</user-message>",
-                      _pointer(result))
+        quotes = ("The initial user message is on line 3:\n<user-message>\n" + "y" * 2_000
+                  + "\n[100 more characters omitted]\n</user-message>",
+                  "The latest user message is on line 11:\n<user-message>\n" + "x" * 2_000
+                  + "\n[500 more characters omitted]\n</user-message>")
+        for quote in quotes:
+            self.assertIn(quote, _pointer(result))
         context.extend(result.context_items())
         self.saved(context)
         with self.assertRaisesRegex(NothingToCompact, "beyond a coldstart pointer"):
             compactor.compact(context, tools=TOOLS)
         context.extend((Message("assistant", "Reading the log."), ModelSampleBoundary()))
         self.saved(context)
-        self.assertEqual(compactor.compact(context, tools=TOOLS).protocol, "coldstart")
+        again = compactor.compact(context, tools=TOOLS)
+        self.assertEqual(again.protocol, "coldstart")
+        # The session's initial request stays the initial one: the earlier pointer,
+        # inside its checkpoint, is never quoted.
+        for quote in quotes:
+            self.assertIn(quote, _pointer(again))
 
     def test_it_fails_unless_the_save_holds_the_context(self):
         context = InteractionContext(_history())

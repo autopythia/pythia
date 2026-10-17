@@ -1415,13 +1415,11 @@ COLDSTART_USER_MESSAGE_CHARS = 2_000
 # name, mcp__pythia__exec_command, so the pointer names no tool.
 _COLDSTART_READER = "exec_command"
 _COLDSTART_LOG_FORMAT = (
-    'Each line is one JSON item with a "type". Text is in "message" items '
-    '("role", "content"), tool calls are "tool_call" items ("name", '
-    '"arguments_json"), and their outputs are "tool_result" items ("output"). '
-    'A "context_prefix" item is an earlier compaction; its "prefix_items" are '
-    "what was kept at that point. Lines can be long, so extract fields with a "
-    "short script rather than printing whole lines."
+    'Each line is a JSON item with a "type", such as "message" ("role", '
+    '"content"), "tool_call" ("name", "arguments_json"), "tool_result" '
+    '("output") or "context_prefix" (an earlier compaction).'
 )
+_COLDSTART_INSTRUCTION = "Read what you need from the log, then pick up where it left off."
 
 
 @dataclass(frozen=True)
@@ -1529,32 +1527,50 @@ def is_coldstart_pointer(item: object) -> bool:
     )
 
 
-def _latest_user_message(
-    items: Sequence[InteractionItem],
-) -> Optional[Tuple[int, str]]:
-    """The raw log's latest user message, as (line, text), or None.
+def _is_quotable_request(item: object) -> bool:
+    """A top-level user message that is neither a summary nor a pointer.
 
     Summaries and pointers live in checkpoints, not as top-level user
-    messages, but they are skipped anyway. The text is cut to
+    messages, but they are skipped anyway.
+    """
+    return (
+        isinstance(item, Message)
+        and item.role == "user"
+        and not is_compaction_summary(item)
+        and not is_coldstart_pointer(item)
+    )
+
+
+def _quoted_text(message: Message) -> str:
+    """A message's text, cut to ``COLDSTART_USER_MESSAGE_CHARS``."""
+    text = _message_text(message)
+    if len(text) <= COLDSTART_USER_MESSAGE_CHARS:
+        return text
+    omitted = len(text) - COLDSTART_USER_MESSAGE_CHARS
+    return f"{text[:COLDSTART_USER_MESSAGE_CHARS]}\n[{omitted} more characters omitted]"
+
+
+def _quoted_user_messages(
+    items: Sequence[InteractionItem],
+) -> Tuple[Tuple[str, int, str], ...]:
+    """The raw log's initial and latest user messages, as (label, line, text).
+
+    The labels are "The initial user message" and "The latest user message",
+    or just "The user message" when the log has only one; there are none when
+    it has none (``_is_quotable_request``). Each text is cut to
     ``COLDSTART_USER_MESSAGE_CHARS``.
     """
-    for index in range(len(items) - 1, -1, -1):
-        item = items[index]
-        if (
-            isinstance(item, Message)
-            and item.role == "user"
-            and not is_compaction_summary(item)
-            and not is_coldstart_pointer(item)
-        ):
-            text = _message_text(item)
-            if len(text) > COLDSTART_USER_MESSAGE_CHARS:
-                omitted = len(text) - COLDSTART_USER_MESSAGE_CHARS
-                text = (
-                    f"{text[:COLDSTART_USER_MESSAGE_CHARS]}\n"
-                    f"[{omitted} more characters omitted]"
-                )
-            return index + 1, text
-    return None
+    initial = next(
+        (index for index, item in enumerate(items) if _is_quotable_request(item)), None)
+    if initial is None:
+        return ()
+    latest = next(index for index in range(len(items) - 1, initial - 1, -1)
+                  if _is_quotable_request(items[index]))
+    if initial == latest:
+        chosen = (("The user message", latest),)
+    else:
+        chosen = (("The initial user message", initial), ("The latest user message", latest))
+    return tuple((label, index + 1, _quoted_text(items[index])) for label, index in chosen)
 
 
 class ColdstartCompactor:
@@ -1563,9 +1579,10 @@ class ColdstartCompactor:
     The new prefix holds the instructions, any Responses checkpoints, and one
     user message. The message names the save and its lines before the
     compaction (1 to N, where N is the context's length; saves are
-    append-only, so those lines never change), quotes the latest user message
-    with its line, and asks the model to read what it needs with its tools and
-    pick up where the log leaves off. It needs ``exec_command`` among
+    append-only, so those lines never change) and the lines' format, quotes
+    the session's initial and latest user messages with their lines, or its
+    only one (``_quoted_user_messages``), and asks the model to read what it
+    needs and pick up where the log leaves off. It needs ``exec_command`` among
     ``tools``. Before it installs the pointer, it checks that the save holds
     the context (``CompactionLog.check``), and raises ``CompactionLogError``
     if not, so a sequence moves on to its next method.
@@ -1628,17 +1645,14 @@ class ColdstartCompactor:
         paragraphs = [
             f"{COLDSTART_POINTER_PREFIX} Its log up to this point is saved in "
             f"{where}, lines 1\u2013{len(context)}; later lines continue from "
-            "here. Read what you need from it with your tools, then pick up "
-            "where it left off."
+            f"here. {_COLDSTART_LOG_FORMAT}"
         ]
-        latest = _latest_user_message(context.items)
-        if latest is not None:
-            line, text = latest
+        for label, line, text in _quoted_user_messages(context.items):
             paragraphs.append(
-                f"The latest user message is on line {line}:\n"
+                f"{label} is on line {line}:\n"
                 f"<user-message>\n{text}\n</user-message>"
             )
-        paragraphs.append(_COLDSTART_LOG_FORMAT)
+        paragraphs.append(_COLDSTART_INSTRUCTION)
         return "\n\n".join(paragraphs) + _focus_suffix(focus)
 
 
