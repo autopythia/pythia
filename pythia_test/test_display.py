@@ -237,7 +237,7 @@ class InteractionItemRendererTests(unittest.TestCase):
 
     def test_context_prefix_shows_its_coldstart_pointer(self):
         # A coldstart checkpoint has no summary; its pointer is the new text.
-        pointer = f"{COLDSTART_POINTER_PREFIX} Its log is saved in `run.jsonl`."
+        pointer = f"{COLDSTART_POINTER_PREFIX} `run.jsonl`, lines 1\u20137."
         rendered = render_interaction_items((ContextPrefix((
             Instructions("Rules."),
             OpaqueCompaction.from_responses("carried-checkpoint"),

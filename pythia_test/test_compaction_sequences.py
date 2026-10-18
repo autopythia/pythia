@@ -10,7 +10,9 @@ from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -44,6 +46,29 @@ from pythia.interaction.save import interaction_item_from_dict
 EXEC = ToolSpec("exec_command", "Run a command.", {"type": "object"})
 TOOLS = (EXEC,)
 NO_EXEC = ("coldstart compaction needs exec_command to read the saved log")
+# The summary template that coldstart writes, after its first line: pi's sections.
+SECTIONS = (
+    "## Goal\n"
+    "[What is the user trying to accomplish? Can be multiple items if the session covers "
+    "different tasks.]\n\n"
+    "## Constraints & Preferences\n"
+    "- [Any constraints, preferences, or requirements mentioned by user]\n"
+    '- [Or "(none)" if none were mentioned]\n\n'
+    "## Progress\n"
+    "### Done\n"
+    "- [x] [Completed tasks/changes]\n\n"
+    "### In Progress\n"
+    "- [ ] [Current work]\n\n"
+    "### Blocked\n"
+    "- [Issues preventing progress, if any]\n\n"
+    "## Key Decisions\n"
+    "- **[Decision]**: [Brief rationale]\n\n"
+    "## Next Steps\n"
+    "1. [Ordered list of what should happen next]\n\n"
+    "## Critical Context\n"
+    "- [Any data, examples, or references needed to continue]\n"
+    '- [Or "(none)" if not applicable]\n'
+)
 
 
 def _answer(text="done"):
@@ -222,7 +247,7 @@ class ColdstartCompactorTests(unittest.TestCase):
         save_interaction_save(path, context)
         return CompactionLog(path, cwd)
 
-    def test_the_pointer_names_the_log_and_quotes_the_initial_and_latest_requests(self):
+    def test_the_pointer_names_the_log_its_summary_and_the_initial_and_latest_requests(self):
         context = InteractionContext(_history())
         log = self.saved(context, self.root / ".interaction" / "run.jsonl", self.root)
         result = ColdstartCompactor(log).compact(context, tools=TOOLS, instructions=" the plan ")
@@ -234,20 +259,159 @@ class ColdstartCompactorTests(unittest.TestCase):
         self.assertEqual(len(prefix), 2)
         self.assertEqual(prefix[0], Instructions("Agent prompt."))
         # It names no tool (tool names differ by route), and the session's
-        # initial request comes before the latest one.
+        # initial request comes before the latest one. The summary file is
+        # new, so it is a template, which the model fills in first.
         self.assertEqual(_pointer(result), (
-            f"{COLDSTART_POINTER_PREFIX} Its log up to this point is saved in "
+            "This conversation was compacted. Its log up to this point is saved in "
             "`.interaction/run.jsonl` (relative to your tools' working directory), "
             "lines 1\u201312; later lines continue from here. Each line is a JSON item "
             'with a "type", such as "message" ("role", "content"), "tool_call" '
             '("name", "arguments_json"), "tool_result" ("output") or "context_prefix" '
-            "(an earlier compaction).\n\n"
+            "(an earlier compaction). A summary template is in "
+            "`.interaction/run.summary.md`; it covers no lines yet.\n\n"
             "The initial user message is on line 3:\n"
             "<user-message>\nFix the bug.\n</user-message>\n\n"
             "The latest user message is on line 11:\n"
             "<user-message>\nNow the tests.\n</user-message>\n\n"
-            "Read what you need from the log, then pick up where it left off.\n\n"
+            "Read the summary, then the log's messages and anything else you need from it. "
+            "Before you continue, fill in the summary to cover lines 1\u201312: keep exact "
+            "paths, names and error messages, and change its first line to \"Covers lines "
+            "1\u201312 of session.\" Then pick up where the log left off.\n\n"
             "Additional focus: the plan"))
+        self.assertTrue(_pointer(result).startswith(COLDSTART_POINTER_PREFIX + " "))
+        # Coldstart wrote the template next to the save, as private as the save.
+        summary = self.root / ".interaction" / "run.summary.md"
+        self.assertEqual(log.summary_path, summary)
+        self.assertEqual(summary.read_text(encoding="utf-8"),
+                         f"Covers no lines yet of session.\n\n{SECTIONS}")
+        self.assertEqual(stat.S_IMODE(summary.stat().st_mode) & 0o077, 0)
+
+    def test_the_summarys_first_line_says_what_it_covers_and_is_only_read(self):
+        context = InteractionContext(_history())
+        compactor = ColdstartCompactor(self.saved(context, cwd=self.root))
+        context.extend(compactor.compact(context, tools=TOOLS).context_items())
+        context.extend((Message("assistant", "Updated the summary."), ModelSampleBoundary()))
+        self.saved(context)
+        summary = self.root / "run.summary.md"
+        line = "change its first line to \"Covers lines 1\u201316 of session.\" Then pick up"
+        covers = ("A summary of lines 1\u201312 is in `run.summary.md`.",
+                  "Read the summary, then the messages after line 12 and anything else you "
+                  "need from the log. Before you continue, edit the summary in place to cover "
+                  "lines 1\u201316: keep what still applies, add what is new, keep exact paths, "
+                  f"names and error messages, and {line} where the log left off.")
+        template = ("A summary template is in `run.summary.md`; it covers no lines yet.",
+                    "Read the summary, then the log's messages and anything else you need "
+                    "from it. Before you continue, fill in the summary to cover lines "
+                    "1\u201316: keep exact paths, names and error messages, and "
+                    f"{line} where the log left off.")
+        unknown = ("A summary is in `run.summary.md`, but its first line doesn't say which "
+                   "lines of this log it covers.",
+                   "Read the summary, then the log's messages and anything else you need "
+                   "from it. Before you continue, edit the summary in place to cover lines "
+                   "1\u201316: keep what still applies, add what is new, keep exact paths, "
+                   f"names and error messages, and {line} where the log left off.")
+        for label, first, (about, last) in (
+            ("as asked", "Covers lines 1\u201312 of session.", covers),
+            ("a hyphen, spaces and backticks", "  Covers lines 1 - 12 of `session`", covers),
+            ("a byte order mark and CRLF", "\ufeffCovers lines 1\u201412 of session.\r", covers),
+            ("still the template", "Covers no lines yet of session.", template),
+            ("more lines than the log", "Covers lines 1\u201399 of session.", unknown),
+            ("no lines", "Covers lines 1\u20130 of session.", unknown),
+            ("another first line", "# Summary", unknown),
+            ("an empty file", None, unknown),
+        ):
+            with self.subTest(label):
+                data = b"" if first is None else (first + "\n\n## Goal\nShip it.\n").encode()
+                summary.write_bytes(data)
+                pointer = _pointer(compactor.compact(context, tools=TOOLS))
+                self.assertIn(f"(an earlier compaction). {about}\n\n", pointer)
+                self.assertTrue(pointer.endswith(f"\n\n{last}"), pointer)
+                self.assertEqual(summary.read_bytes(), data)  # only read, never written
+        summary.write_bytes(b"\xff\xfeCovers lines 1\xe2\x80\x9312 of session.\n")  # not UTF-8
+        self.assertIn(unknown[0], _pointer(compactor.compact(context, tools=TOOLS)))
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()),
+                         ["run.jsonl", "run.summary.md"])
+
+    def test_a_summary_from_another_session_is_moved_aside_for_a_new_template(self):
+        context = InteractionContext(_history())
+        summary = self.root / "run.summary.md"
+        other = "Covers lines 1\u201340 of session_other.\n\n## Goal\nOld work.\n"
+        summary.write_text(other, encoding="utf-8")
+        older = self.root / "run.summary.md.0"
+        older.write_text("An older copy.\n", encoding="utf-8")
+        result = ColdstartCompactor(self.saved(context, cwd=self.root)).compact(context, tools=TOOLS)
+        pointer = _pointer(result)
+        self.assertIn("A summary template is in `run.summary.md`; it covers no lines yet.", pointer)
+        self.assertEqual(summary.read_text(encoding="utf-8"),
+                         f"Covers no lines yet of session.\n\n{SECTIONS}")
+        self.assertEqual(older.read_text(encoding="utf-8"), "An older copy.\n")
+        self.assertEqual((self.root / "run.summary.md.1").read_text(encoding="utf-8"), other)
+        # The compaction records the move; the pointer leaves the old file out.
+        self.assertEqual(result.recovery, ("summary_moved_aside",))
+        self.assertEqual(result.context_items()[-1].recovery, ("summary_moved_aside",))
+        self.assertNotIn("summary.md.1", pointer)
+
+    def test_without_an_init_line_the_summary_names_no_session(self):
+        context = InteractionContext(_history()[1:])
+        compactor = ColdstartCompactor(self.saved(context, cwd=self.root))
+        pointer = _pointer(compactor.compact(context, tools=TOOLS))
+        summary = self.root / "run.summary.md"
+        self.assertEqual(summary.read_text(encoding="utf-8"), f"Covers no lines yet.\n\n{SECTIONS}")
+        self.assertIn("change its first line to \"Covers lines 1\u201311.\" Then pick up", pointer)
+        summary.write_text("Covers lines 1\u20135.\n", encoding="utf-8")
+        self.assertIn("A summary of lines 1\u20135 is in `run.summary.md`.",
+                      _pointer(compactor.compact(context, tools=TOOLS)))
+        # A summary that names a session belongs to another save at this path.
+        summary.write_text("Covers lines 1\u20135 of session.\n", encoding="utf-8")
+        self.assertIn("A summary template is in", _pointer(compactor.compact(context, tools=TOOLS)))
+        self.assertEqual((self.root / "run.summary.md.0").read_text(encoding="utf-8"),
+                         "Covers lines 1\u20135 of session.\n")
+
+    def test_an_unusable_summary_fails_the_compaction_and_nothing_is_written(self):
+        context = InteractionContext(_history())
+        compactor = ColdstartCompactor(self.saved(context, cwd=self.root))
+        summary = self.root / "run.summary.md"
+        summary.mkdir()
+        with self.assertRaisesRegex(CompactionLogError,
+                                    r"^the summary run\.summary\.md is not a regular file$"):
+            compactor.compact(context, tools=TOOLS)
+        summary.rmdir()
+        # A link is never written through, even one to a missing file.
+        target = self.root / "elsewhere.md"
+        summary.symlink_to(target)
+        with self.assertRaisesRegex(
+                CompactionLogError,
+                r"^the summary run\.summary\.md is a symbolic link to a missing file$"):
+            compactor.compact(context, tools=TOOLS)
+        self.assertFalse(target.exists())
+        summary.unlink()
+        if os.getuid() != 0:  # root writes anyway
+            locked = self.root / "locked"
+            locked.mkdir()
+            log = self.saved(context, locked / "run.jsonl", self.root)
+            locked.chmod(0o500)
+            self.addCleanup(locked.chmod, 0o700)
+            with self.assertRaisesRegex(
+                    CompactionLogError,
+                    r"^the summary locked/run\.summary\.md can't be created: Permission denied$"):
+                ColdstartCompactor(log).compact(context, tools=TOOLS)
+        # Nothing to compact: no summary either.
+        empty = InteractionContext(_history()[:2])
+        with self.assertRaises(NothingToCompact):
+            ColdstartCompactor(self.saved(empty, cwd=self.root)).compact(empty, tools=TOOLS)
+        self.assertFalse(os.path.lexists(summary))
+
+    def test_pointers_old_and_new_are_recognized_and_other_messages_are_not(self):
+        for text, expected in (
+            (f"{COLDSTART_POINTER_PREFIX} `run.jsonl`, lines 1\u20137; later lines continue.", True),
+            # The opening before October 17.
+            ("This conversation was compacted without a summary. Its log up to this point is "
+             "saved in `run.jsonl`, lines 1\u20137.", True),
+            ("This conversation was compacted. Please carry on.", False),
+        ):
+            with self.subTest(text):
+                self.assertEqual(is_coldstart_pointer(Message("user", text)), expected)
+        self.assertFalse(is_coldstart_pointer(Message("assistant", f"{COLDSTART_POINTER_PREFIX} x")))
 
     def test_a_single_request_is_the_user_message_and_summaries_are_never_quoted(self):
         summary = f"{COMPACTION_SUMMARY_PREFIX}## Goal\nOld work.{COMPACTION_SUMMARY_SUFFIX}"
@@ -255,7 +419,8 @@ class ColdstartCompactorTests(unittest.TestCase):
             Init("session"),
             Instructions("Agent prompt."),
             Message("user", summary),
-            Message("user", f"{COLDSTART_POINTER_PREFIX} An older pointer."),
+            # A pointer from before October 17.
+            Message("user", "This conversation was compacted without a summary. An older pointer."),
             Message("user", "Fix the bug."),
             UserInteractionBoundary(),
             Message("assistant", "Working."),
@@ -278,6 +443,8 @@ class ColdstartCompactorTests(unittest.TestCase):
             with self.subTest(log=log):
                 pointer = _pointer(ColdstartCompactor(log).compact(context, tools=TOOLS))
                 self.assertIn(f"saved in `{outside}`, lines 1\u201312;", pointer)
+                self.assertIn(f"A summary template is in `{outside.with_suffix('.summary.md')}`;",
+                              pointer)
 
     def test_it_keeps_responses_checkpoints_and_quotes_only_top_level_requests(self):
         checkpoint = OpaqueCompaction("encrypted", protocol="responses")
@@ -344,6 +511,8 @@ class ColdstartCompactorTests(unittest.TestCase):
                 path.write_bytes(data)
                 with self.assertRaisesRegex(CompactionLogError, message):
                     compactor.compact(context, tools=TOOLS)
+        # A save it can't use leaves no summary behind.
+        self.assertFalse((self.root / "run.summary.md").exists())
         # Later lines may follow, as /compact saves its own call first, and an
         # incomplete last line (an interrupted append) is ignored.
         later = InteractionContext((*context.items, Message("assistant", "Later.")))
@@ -560,6 +729,12 @@ class TurnLoopTests(unittest.TestCase):
         self.assertTrue(is_coldstart_pointer(visible[1]))
         self.assertEqual(len(visible), 2)
         self.assertIn("lines 1\u201312;", visible[1].content)
+        # Without a working directory, both files are named by absolute path.
+        summary = self.path.with_suffix(".summary.md")
+        self.assertIn(f"A summary template is in `{summary}`; it covers no lines yet.",
+                      visible[1].content)
+        self.assertTrue(summary.read_text(encoding="utf-8").startswith(
+            "Covers no lines yet of session.\n\n## Goal\n"))
         # The turn shows the pointer, as it shows a pi summary.
         self.assertIn(DisplayItem(visible[1].content), self.host.shown)
         [metadata] = [item for item in saved if isinstance(item, CompactionMetadata)]
@@ -612,6 +787,26 @@ class TurnLoopTests(unittest.TestCase):
         self.assertEqual(failure, ModelFailure("CompactionLogError", message))
         [metadata] = [item for item in items if isinstance(item, CompactionMetadata)]
         self.assertEqual((metadata.protocol, metadata.recovery), ("pi", ("coldstart_failed",)))
+
+    def test_a_summary_it_cant_create_falls_back_with_a_notice(self):
+        model = _Model(*(_answer("done") for _ in range(3)))  # pi's requests, then the sample
+        context = InteractionContext(_history())
+        self.host = _Host(self.path, context)
+        summary = self.path.with_suffix(".summary.md")
+        summary.mkdir()  # something other than a file at the summary's path
+        result = kernel.run_turn(
+            context, model, Environment((_exec_tool(),)), InteractionConfigSnapshot(
+                auto_compaction_context_tokens=100, compaction_mode="coldstart,pi",
+                compaction_pi_keep_recent_tokens=0), self.host)
+        self.assertEqual(result.final_text, "done")
+        message = f"the summary {summary} is not a regular file"
+        self.assertIn(f"coldstart compaction failed (CompactionLogError: {message}); trying pi.",
+                      self.host.notices)
+        items = load_interaction_save(self.path).items
+        self.assertIn(ModelFailure("CompactionLogError", message), items)
+        [metadata] = [item for item in items if isinstance(item, CompactionMetadata)]
+        self.assertEqual((metadata.protocol, metadata.recovery), ("pi", ("coldstart_failed",)))
+        self.assertTrue(summary.is_dir())
 
     def test_overflow_recovery_moves_on_when_pi_has_nothing_to_compact(self):
         overflow = ModelContextWindowError("too long")
@@ -765,6 +960,11 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         prefix = next(item for item in saved if isinstance(item, ContextPrefix))
         self.assertIn("saved in `interaction.jsonl` (relative to your tools' working directory)",
                       prefix.prefix_items[-1].content)
+        # The summary file sits next to the save and names its session.
+        self.assertIn("A summary template is in `interaction.summary.md`; it covers no lines yet.",
+                      prefix.prefix_items[-1].content)
+        self.assertTrue(self.path.with_suffix(".summary.md").read_text(encoding="utf-8").startswith(
+            "Covers no lines yet of old.\n\n## Goal\n"))
 
     async def test_compact_with_the_default_compacts_cold(self):
         model = _Model()
@@ -825,6 +1025,22 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(isinstance(item, ModelFailure) for item in saved))
         # The finished turn still looks finished: /continue stays refused.
         self.assertEqual(turn_tail(saved.items).refusal, "the last turn ended")
+
+    async def test_a_summary_it_cant_create_is_shown_and_the_next_method_runs(self):
+        self.path.with_suffix(".summary.md").mkdir()
+        model = _Model(_answer("Summary."), _answer("next answer"), _answer("Summary again."))
+        with DefaultEnvironment(cwd=self.path.parent) as environment:
+            texts, saved = await self.run_cli(
+                model, ["next", "/compact"],
+                ["--compaction-mode", "coldstart,pi", "--compaction-pi-keep-recent-tokens", "0",
+                 "--auto-compaction-context-tokens", "100"], environment)
+        self.assertEqual(len(model.calls), 3)
+        failed = ("coldstart compaction failed (CompactionLogError: the summary "
+                  "interaction.summary.md is not a regular file); trying pi.")
+        # At the turn's start, a notice; after /compact, its result.
+        self.assertIn(f"[cli] {failed}", texts)
+        [result] = self.user_results(saved)
+        self.assertEqual(result.output, f"{failed}\nContext compacted using a pi summary checkpoint.")
 
     def test_the_result_text_follows_the_protocol(self):
         remote = OpaqueCompaction("encrypted", protocol="responses")

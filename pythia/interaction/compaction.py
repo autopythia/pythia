@@ -8,7 +8,8 @@ previous summary iteratively, and summarizes the start of a split turn
 separately. The remote Responses compactor lives with its adapter
 (``responses.ResponsesOpaqueCompactor``). ``ColdstartCompactor`` makes no model
 request: its checkpoint points to the saved log, which the model then reads
-with its tools. It first checks that the save holds the context.
+with its tools, and to a summary file next to it, which the model updates. It
+first checks that the save holds the context.
 ``WarmPiCompactor`` (warmpi) makes pi's checkpoint from the conversation's own
 request instead of pi's, so it reads the conversation's prompt cache.
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Sequence
@@ -30,6 +32,7 @@ from dataclasses import field
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
+from pathlib import PurePosixPath
 from time import perf_counter
 from typing import List
 from typing import Optional
@@ -41,6 +44,7 @@ from .context import ContextValidationError
 from .context import InteractionContext
 from .items import CompactionMetadata
 from .items import ContextPrefix
+from .items import Init
 from .items import InteractionItem
 from .items import Instructions
 from .items import Message
@@ -1407,9 +1411,14 @@ class WarmPiCompactor:
         )
 
 
-# Coldstart compaction: a pointer to the saved log instead of a summary.
+# Coldstart compaction: a pointer to the saved log, and a summary file that the
+# model keeps next to it.
 
-COLDSTART_POINTER_PREFIX = "This conversation was compacted without a summary."
+COLDSTART_POINTER_PREFIX = (
+    "This conversation was compacted. Its log up to this point is saved in"
+)
+# Pointers began so until October 17, when they had no summary file.
+_LEGACY_COLDSTART_POINTER_PREFIX = "This conversation was compacted without a summary."
 COLDSTART_USER_MESSAGE_CHARS = 2_000
 # The tool that reads the log. On Claude Relay the model calls it by its native
 # name, mcp__pythia__exec_command, so the pointer names no tool.
@@ -1419,7 +1428,21 @@ _COLDSTART_LOG_FORMAT = (
     '"content"), "tool_call" ("name", "arguments_json"), "tool_result" '
     '("output") or "context_prefix" (an earlier compaction).'
 )
-_COLDSTART_INSTRUCTION = "Read what you need from the log, then pick up where it left off."
+# The summary file: the save's path with this suffix in place of ``.jsonl``,
+# as for the debug trace files. Its first line says what it covers, such as
+# "Covers lines 1–3756 of session_4a8f….", and the rest is pi's format.
+_SUMMARY_SUFFIX = ".summary.md"
+# Only this much of the summary is read: its first line.
+_SUMMARY_LINE_BYTES = 4_096
+# The first line, read leniently: spaces, any dash, a trailing period, and the
+# session in backticks or not.
+_SUMMARY_FIRST_LINE = re.compile(
+    r"Covers (?:lines 1\s*[-\u2013\u2014]\s*(?P<last>[0-9]+)|(?P<empty>no lines yet))"
+    r"(?: of (?P<session>.+?))?\.?"
+)
+_SESSION_TOKEN = re.compile(r"[^\s`]+")
+# The recovery entry of a compaction that moved another session's summary aside.
+_SUMMARY_MOVED_ASIDE = "summary_moved_aside"
 
 
 @dataclass(frozen=True)
@@ -1450,6 +1473,45 @@ class CompactionLog:
                 except ValueError:
                     continue
         return str(self.path.absolute()), False
+
+    @property
+    def summary_path(self) -> Path:
+        """The summary file next to the save: ``.jsonl`` becomes ``.summary.md``."""
+        return self.path.with_suffix(_SUMMARY_SUFFIX)
+
+    def summary_reference(self) -> str:
+        """The summary's path to show: relative to ``cwd`` when the save's is."""
+        reference, relative = self.reference()
+        if relative:
+            return PurePosixPath(reference).with_suffix(_SUMMARY_SUFFIX).as_posix()
+        return str(self.summary_path.absolute())
+
+    def prepare_summary(self, session: Optional[str], length: int) -> "_SummaryFile":
+        """Read the summary's first line, or write a template; say what it covers.
+
+        ``session`` is the save's (its ``Init``'s prefix ID), or None, and
+        ``length`` the number of its lines that the compaction covers. A
+        missing summary gets the template (``_summary_template``), a new
+        private file, never written through a link. A summary whose first line
+        names another session was written for an earlier save at this path,
+        since replaced (``--resume=False``): it is renamed to the first free
+        ``.summary.md.<n>``, from 0, and gets the template. Nothing else is
+        written; the model edits the summary. Raises ``CompactionLogError``
+        when the summary can't be read, moved, or created.
+        """
+        path, name = self.summary_path, self.summary_reference()
+        data = _read_summary_line(path, name)
+        if data is None:
+            state, last = "template", None
+        else:
+            state, last = _summary_state(data, session, length)
+        moved = state == "foreign"
+        if moved:
+            _move_summary_aside(path, name)
+        if data is None or moved:
+            _create_summary(path, name, _summary_template(session))
+            state, last = "template", None
+        return _SummaryFile(name, state, last, moved_aside=moved)
 
     def check(self, context: InteractionContext) -> None:
         """Check that the save holds ``context``, or raise ``CompactionLogError``.
@@ -1491,6 +1553,144 @@ def _save_encoding(item: InteractionItem) -> str:
     return json.dumps(interaction_item_to_dict(item), sort_keys=True, ensure_ascii=False)
 
 
+@dataclass(frozen=True)
+class _SummaryFile:
+    """A coldstart summary as its pointer describes it (``prepare_summary``).
+
+    ``state`` is ``"template"`` (it covers no lines yet), ``"covers"`` (lines
+    1 to ``last``), or ``"unknown"`` (its first line doesn't say which lines
+    of this log it covers). ``reference`` is its path to show.
+    """
+
+    reference: str
+    state: str
+    last: Optional[int] = None
+    moved_aside: bool = False
+
+
+def _summary_line(last: Optional[int], session: Optional[str]) -> str:
+    """A summary's first line: it covers no lines yet, or lines 1 to ``last``."""
+    covered = "no lines yet" if last is None else f"lines 1\u2013{last}"
+    return f"Covers {covered}{'' if session is None else f' of {session}'}."
+
+
+def _summary_template(session: Optional[str]) -> str:
+    """A new summary: its first line, then pi's sections with their hints."""
+    start = SUMMARIZATION_PROMPT.index("## Goal")
+    end = SUMMARIZATION_PROMPT.index("\n\nKeep each section concise")
+    return f"{_summary_line(None, session)}\n\n{SUMMARIZATION_PROMPT[start:end]}\n"
+
+
+def _summary_state(data: bytes, session: Optional[str], length: int) -> Tuple[str, Optional[int]]:
+    """What a summary's first line says, given the save's ``session`` and ``length``.
+
+    Returns ``("covers", K)`` for lines 1 to K, where K is at most
+    ``length``; ``("template", None)``; ``("foreign", None)`` when it names
+    another session, as one word (an ID); or ``("unknown", None)``. A line
+    that names no session is ``unknown`` in a save that has one.
+    """
+    try:
+        line = data.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        return "unknown", None
+    match = _SUMMARY_FIRST_LINE.fullmatch(line)
+    if match is None:
+        return "unknown", None
+    named = match["session"]
+    if named is not None:
+        named = named.strip().strip("`").strip()
+    if named != session:
+        if named is not None and _SESSION_TOKEN.fullmatch(named):
+            return "foreign", None
+        return "unknown", None
+    if match["empty"] is not None:
+        return "template", None
+    last = int(match["last"])
+    if not 1 <= last <= length:
+        return "unknown", None
+    return "covers", last
+
+
+def _os_reason(error: OSError) -> str:
+    """An OS error's reason, without the path it names."""
+    return error.strerror or str(error) or type(error).__name__
+
+
+def _read_summary_line(path: Path, name: str) -> Optional[bytes]:
+    """The first line of the summary at ``path``, as bytes; None if there is none.
+
+    It is opened without blocking and must be a regular file; only its first
+    ``_SUMMARY_LINE_BYTES`` are read.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        if os.path.islink(path):
+            raise CompactionLogError(
+                f"the summary {name} is a symbolic link to a missing file") from None
+        return None
+    except OSError as exc:
+        raise CompactionLogError(f"the summary {name} can't be read: {_os_reason(exc)}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise CompactionLogError(f"the summary {name} is not a regular file")
+        data = b""
+        while len(data) < _SUMMARY_LINE_BYTES and b"\n" not in data:
+            chunk = os.read(descriptor, _SUMMARY_LINE_BYTES - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError as exc:
+        raise CompactionLogError(f"the summary {name} can't be read: {_os_reason(exc)}") from None
+    finally:
+        os.close(descriptor)
+    return data.split(b"\n", 1)[0]
+
+
+def _move_summary_aside(path: Path, name: str) -> None:
+    """Rename a summary to the first free ``<name>.<n>``, from 0."""
+    index = 0
+    while os.path.lexists(path.with_name(f"{path.name}.{index}")):
+        index += 1
+    try:
+        os.rename(path, path.with_name(f"{path.name}.{index}"))
+    except OSError as exc:
+        raise CompactionLogError(
+            f"the summary {name} can't be moved aside: {_os_reason(exc)}") from None
+
+
+def _create_summary(path: Path, name: str, text: str) -> None:
+    """Create the summary as a new private file, never through a link."""
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise CompactionLogError(
+            f"the summary {name} can't be created: {_os_reason(exc)}") from None
+    try:
+        try:
+            data = memoryview(text.encode("utf-8"))
+            while data:
+                data = data[os.write(descriptor, data):]
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        try:
+            os.unlink(path)  # no half-written template
+        except OSError:
+            pass
+        raise CompactionLogError(
+            f"the summary {name} can't be written: {_os_reason(exc)}") from None
+
+
+def _session_id(context: InteractionContext) -> Optional[str]:
+    """The save's session: its ``Init``'s prefix ID, or None without one."""
+    first = context[0] if len(context) else None
+    return first.prefix_id if isinstance(first, Init) else None
+
+
 def compaction_log(path, environment=None) -> Optional[CompactionLog]:
     """The log of the save at ``path``, with ``environment``'s working directory.
 
@@ -1518,12 +1718,13 @@ def coldstart_unavailable(tool_specs: Iterable[object], log_path) -> Optional[st
 
 
 def is_coldstart_pointer(item: object) -> bool:
-    """Whether an item is the user message of a coldstart checkpoint."""
+    """Whether an item is the user message of a coldstart checkpoint, old or new."""
     return (
         isinstance(item, Message)
         and item.role == "user"
         and isinstance(item.content, str)
-        and item.content.startswith(COLDSTART_POINTER_PREFIX)
+        and item.content.startswith(
+            (COLDSTART_POINTER_PREFIX, _LEGACY_COLDSTART_POINTER_PREFIX))
     )
 
 
@@ -1574,18 +1775,24 @@ def _quoted_user_messages(
 
 
 class ColdstartCompactor:
-    """Compaction without a model request: a pointer to the saved log.
+    """Compaction without a model request: a pointer to the saved log and its summary.
 
     The new prefix holds the instructions, any Responses checkpoints, and one
     user message. The message names the save and its lines before the
     compaction (1 to N, where N is the context's length; saves are
-    append-only, so those lines never change) and the lines' format, quotes
-    the session's initial and latest user messages with their lines, or its
-    only one (``_quoted_user_messages``), and asks the model to read what it
-    needs and pick up where the log leaves off. It needs ``exec_command`` among
+    append-only, so those lines never change), the lines' format, and the
+    summary file next to the save, with the lines it covers. It quotes the
+    session's initial and latest user messages with their lines, or its only
+    one (``_quoted_user_messages``). It asks the model to read the summary and
+    what it needs from the log, then, before it continues, to update the
+    summary to cover lines 1 to N, and to pick up where the log leaves off.
+    The summary's first line says what it covers, so a skipped update only
+    means more to read next time. It needs ``exec_command`` among
     ``tools``. Before it installs the pointer, it checks that the save holds
     the context (``CompactionLog.check``), and raises ``CompactionLogError``
-    if not, so a sequence moves on to its next method.
+    if not, so a sequence moves on to its next method; likewise when the
+    summary can't be read or created (``CompactionLog.prepare_summary``). A
+    summary moved aside is recorded as ``recovery`` ``summary_moved_aside``.
     """
 
     def __init__(self, log: CompactionLog) -> None:
@@ -1628,32 +1835,76 @@ class ColdstartCompactor:
                 "there is nothing to compact beyond a coldstart pointer"
             )
         self.log.check(context)
+        session = _session_id(context)
+        summary = self.log.prepare_summary(session, len(context))
         focus = None if instructions is None else instructions.strip() or None
-        pointer = Message(role="user", content=self._pointer(context, focus))
+        pointer = Message(role="user", content=self._pointer(context, focus, summary, session))
         return CompactionResult(
             items=(ContextPrefix((*instruction_prefix, *checkpoints, pointer)),),
             protocol="coldstart",
             request_attempts=0,
+            recovery=(_SUMMARY_MOVED_ASIDE,) if summary.moved_aside else (),
         )
 
-    def _pointer(self, context: InteractionContext, focus: Optional[str]) -> str:
+    def _pointer(
+        self,
+        context: InteractionContext,
+        focus: Optional[str],
+        summary: _SummaryFile,
+        session: Optional[str],
+    ) -> str:
         reference, relative = self.log.reference()
         where = (
             f"`{reference}` (relative to your tools' working directory)"
             if relative else f"`{reference}`"
         )
+        length = len(context)
         paragraphs = [
-            f"{COLDSTART_POINTER_PREFIX} Its log up to this point is saved in "
-            f"{where}, lines 1\u2013{len(context)}; later lines continue from "
-            f"here. {_COLDSTART_LOG_FORMAT}"
+            f"{COLDSTART_POINTER_PREFIX} {where}, lines 1\u2013{length}; later "
+            f"lines continue from here. {_COLDSTART_LOG_FORMAT} "
+            f"{_summary_sentence(summary)}"
         ]
         for label, line, text in _quoted_user_messages(context.items):
             paragraphs.append(
                 f"{label} is on line {line}:\n"
                 f"<user-message>\n{text}\n</user-message>"
             )
-        paragraphs.append(_COLDSTART_INSTRUCTION)
+        paragraphs.append(_summary_instruction(summary, length, session))
         return "\n\n".join(paragraphs) + _focus_suffix(focus)
+
+
+def _summary_sentence(summary: _SummaryFile) -> str:
+    """The pointer's sentence about the summary: where it is, what it covers."""
+    where = f"`{summary.reference}`"
+    if summary.state == "template":
+        return f"A summary template is in {where}; it covers no lines yet."
+    if summary.state == "covers":
+        return f"A summary of lines 1\u2013{summary.last} is in {where}."
+    return (f"A summary is in {where}, but its first line doesn't say which "
+            "lines of this log it covers.")
+
+
+def _summary_instruction(summary: _SummaryFile, length: int, session: Optional[str]) -> str:
+    """The pointer's last paragraph: read, update the summary to cover lines 1–``length``, go on.
+
+    The model reads the log's messages after the lines the summary covers,
+    or all of them, since the update needs what they say.
+    """
+    if summary.state == "covers":
+        read = (f"Read the summary, then the messages after line {summary.last} and "
+                "anything else you need from the log.")
+    else:
+        read = ("Read the summary, then the log's messages and anything else you "
+                "need from it.")
+    if summary.state == "template":
+        update = (f"fill in the summary to cover lines 1\u2013{length}: keep exact "
+                  "paths, names and error messages")
+    else:
+        update = (f"edit the summary in place to cover lines 1\u2013{length}: keep what "
+                  "still applies, add what is new, keep exact paths, names and error "
+                  "messages")
+    return (f"{read} Before you continue, {update}, and change its first line to "
+            f"\"{_summary_line(length, session)}\" Then pick up where the log left off.")
 
 
 # Compaction sequences.

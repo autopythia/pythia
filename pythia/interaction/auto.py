@@ -409,6 +409,10 @@ class _AutoHost(TurnHost):
     def show(self, items):
         self._session._emit(self._index, items)
 
+    def notice(self, text):
+        # Such as a failed compaction attempt; headless runs print it on stderr.
+        self._session._emit(self._index, (DisplayItem(text),), "notice")
+
     def phase(self, phase):
         self._session._phase(self._index, phase)
 

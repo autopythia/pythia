@@ -26,6 +26,7 @@ from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary, T
 from pythia.interaction import ModelFailure, ModelTransportError, Reasoning, OpaqueCompaction
 from pythia.interaction import CompactionContextWindowError, CompactionResult, CompactionSettings
 from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingToCompact
+from pythia.interaction import CompactionError
 from pythia.interaction import UserInteractionBoundary
 from pythia.interaction import load_interaction_save, save_interaction_save
 from pythia.interaction import auto
@@ -2504,6 +2505,21 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(self.finished(session, source["thread_id"]))
         compactor.compact.assert_called_once()
         self.assertEqual(len(self.calls[1]), 1)
+
+    def test_a_failed_compaction_attempt_shows_a_notice(self):
+        # The turn loop's notices reach auto's display, and headless stderr.
+        failing, working = self.compactor(side_effect=CompactionError("no summary")), self.compactor()
+        factory = lambda model, settings, **options: failing if settings.mode == "pi" else working
+        with mock.patch.object(kernel, "create_default_compactor", side_effect=factory):
+            session = self.session({1: [answer()]}, settings_overrides={
+                "auto_compaction_context_tokens": 1, "compaction_mode": "pi,warmpi"})
+            source = session.submit("compact first")
+            self.assertTrue(self.finished(session, source["thread_id"]))
+        failing.compact.assert_called_once()
+        working.compact.assert_called_once()
+        notices = [item.text for event in session.drain_events()
+                   if event.kind == "notice" and event.index == 1 for item in event.items]
+        self.assertIn("pi compaction failed (CompactionError: no summary); trying warmpi.", notices)
 
     def test_overflow_compacts_once_and_retries_the_sample(self):
         compactor = self.compactor()
