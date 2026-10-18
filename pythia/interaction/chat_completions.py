@@ -54,6 +54,7 @@ from .model import SampleParams
 from .model import _apply_extra_sample_params
 from .model import _request_timeout_seconds
 from .model import _timeout_message
+from .model import _with_sample_param_defaults
 from .model_catalog import ModelBinding
 from .model import TokenUsage
 from .model import _timed_sample
@@ -643,7 +644,7 @@ class ChatCompletionsModel:
         if encoded_tools:
             payload["tools"] = encoded_tools
             payload["parallel_tool_calls"] = False
-        _apply_sample_params(payload, sample_params)
+        _apply_sample_params(payload, _with_sample_param_defaults(self.binding, sample_params))
         _apply_extra_sample_params(payload, self.binding, sample_params)
         return payload
 

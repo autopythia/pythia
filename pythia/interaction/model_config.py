@@ -26,6 +26,7 @@ from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
 from .model_catalog import COMPACTION_DEFAULT_FIELDS
 from .model_catalog import MODEL_TIMEOUT_FIELDS
+from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
 from .model_catalog_config import load_model_catalog
@@ -235,7 +236,7 @@ def render_model_catalog(catalog):
         aliases = f" (aliases: {', '.join(spec.aliases)})" if spec.aliases else ""
         origin = catalog.origins[(spec.endpoint.api, spec.name)]
         settings = "".join(f", {setting}" for setting in (
-            *_request_settings(spec), *_timeout_settings(spec),
+            *_request_settings(spec), *_sample_param_settings(spec), *_timeout_settings(spec),
             *(f"compaction.{name}={value}" for name, value in _compaction_settings(spec.compaction))))
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
                      f"url={spec.endpoint.url}, auth={spec.endpoint.auth}, source={origin}{settings}")
@@ -492,6 +493,12 @@ def _timeout_settings(spec) -> list:
     """A catalog entry's configured timeouts, in the catalog's key syntax."""
     return [f"timeouts.{name}={getattr(spec.timeouts, name):g}"
             for name in MODEL_TIMEOUT_FIELDS if getattr(spec.timeouts, name) is not None]
+
+
+def _sample_param_settings(spec) -> list:
+    """A catalog entry's typed sample params, in the catalog's key syntax."""
+    return [f"sample_params.{name}={json.dumps(getattr(spec.sample_params, name))}"
+            for name in SAMPLE_PARAM_DEFAULT_FIELDS if getattr(spec.sample_params, name) is not None]
 
 
 def _model_argument_help() -> str:

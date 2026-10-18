@@ -31,6 +31,8 @@ from pythia.interaction import ModelLimits
 from pythia.interaction import ModelSpec
 from pythia.interaction import ModelTimeouts
 from pythia.interaction import ResponsesDefaults
+from pythia.interaction import SampleParamDefaults
+from pythia.interaction import SampleParams
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import cli
 from pythia.interaction import demo
@@ -335,6 +337,47 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(registry.bind("claude-relay", "relay").timeouts.generation_seconds, 2400.0)
         # Pass-through models use the built-in defaults.
         self.assertEqual(registry.bind("messages", "unlisted").timeouts, ModelTimeouts())
+
+    def test_sample_param_defaults_validate_and_apply_only_to_apis_that_send_them(self):
+        self.assertEqual(SampleParamDefaults(), SampleParamDefaults(None, None))
+        defaults = SampleParamDefaults(temperature=1, top_p=0)
+        self.assertEqual((defaults.temperature, defaults.top_p), (1.0, 0.0))
+        self.assertIsInstance(defaults.temperature, float)
+        for name, value in (("temperature", -0.1), ("temperature", True), ("temperature", "0.5"),
+                            ("temperature", float("inf")), ("temperature", float("nan")),
+                            ("temperature", 10 ** 400), ("top_p", 1.5), ("top_p", -0.1),
+                            ("top_p", False)):
+            with self.subTest(name=name, value=value):
+                # SampleParams' rules, exception types, and messages.
+                with self.assertRaises((TypeError, ValueError)) as expected:
+                    SampleParams(**{name: value})
+                with self.assertRaises(type(expected.exception)) as raised:
+                    SampleParamDefaults(**{name: value})
+                self.assertEqual(str(raised.exception), str(expected.exception))
+        with self.assertRaises(FrozenInstanceError):
+            SampleParamDefaults().temperature = 1.0
+        self.assertTrue(all(spec.sample_params == SampleParamDefaults() for spec in list_model_specs()))
+        fable = get_model_spec("messages", "claude-fable-5.1")
+        with self.assertRaises(TypeError):
+            replace(fable, sample_params={"temperature": 1.0})
+        relay = ModelSpec(
+            name="relay", endpoint=EndpointSpec("claude-relay", None, "claude-opus-5-5", "runtime"),
+        )
+        for spec in (get_model_spec("codex", "codex-gpt-6-astra"), relay):
+            with self.subTest(api=spec.endpoint.api), self.assertRaisesRegex(
+                ValueError, "^Codex and Claude Relay requests carry no temperature or top_p",
+            ):
+                replace(spec, sample_params=SampleParamDefaults(top_p=0.9))
+        generic = ModelSpec(
+            name="generic",
+            endpoint=EndpointSpec("responses", "https://api.example.test/v1/responses", "served", "none"),
+            sample_params=SampleParamDefaults(temperature=0.2),
+        )
+        registry = ModelCatalog((replace(fable, sample_params=SampleParamDefaults(temperature=1.0)), generic))
+        self.assertEqual(registry.bind("messages", "claude-fable-5.1").sample_params.temperature, 1.0)
+        self.assertEqual(registry.bind("responses", "generic").sample_params, SampleParamDefaults(temperature=0.2))
+        # Pass-through models send none.
+        self.assertEqual(registry.bind("messages", "unlisted").sample_params, SampleParamDefaults())
 
     def test_cli_and_demo_help_list_catalog_presets_and_aliases(self):
         for frontend in (cli, demo):

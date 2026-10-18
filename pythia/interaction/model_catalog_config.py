@@ -17,6 +17,8 @@ from .model_catalog import ModelCatalog, ModelLimits, ModelSpec, ModelTimeouts
 from .model_catalog import EndpointSpec
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import ResponsesDefaults
+from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS, SampleParamDefaults
+from .model_catalog import sample_params_route_error
 from .model_catalog import _normalize_profile, parse_json_value
 
 
@@ -29,8 +31,11 @@ MAX_CATALOG_MODELS = 1024
 # within version 4; the old name still loads, with a FutureWarning.
 # The [compaction] section and compaction.* fields were added to version 4
 # without a version change.
+# Optional sample_params.* fields were added to version 4 without a version
+# change.
 LATEST_MODEL_CATALOG_VERSION = 4
 _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
+_SAMPLE_PARAMS_PREFIX = "sample_params."
 _LIMIT_FIELDS = frozenset(("auto_compaction_context_tokens", "max_context_tokens", "max_output_tokens"))
 # Deprecated catalog keys and their current names.
 _RENAMED_LIMIT_KEYS = {"limits.auto_compact_context_tokens": "limits.auto_compaction_context_tokens"}
@@ -54,7 +59,9 @@ class _FieldError(ValueError):
 
 
 def _alternatives(names):
-    """``a, b, or c``."""
+    """``a``, ``a or b``, or ``a, b, or c``."""
+    if len(names) <= 2:
+        return " or ".join(names)
     return f"{', '.join(names[:-1])}, or {names[-1]}"
 
 
@@ -85,6 +92,36 @@ def _compaction_value(name, raw):
     if _INTEGER.fullmatch(raw) is None or int(raw) < minimum:
         raise ValueError(f"expected a {kind} integer or null")
     return int(raw)
+
+
+def _sample_param_value(name, raw):
+    """One sample_params.* value: None for null, else the field's validated number.
+
+    Errors say what was expected; the caller says where.
+    """
+    if raw == "null":
+        return None
+    if _DECIMAL.fullmatch(raw) is None:
+        raise ValueError("expected a plain decimal number, such as 0.7, or null")
+    return getattr(SampleParamDefaults(**{name: float(raw)}), name)
+
+
+def _typed_extras_error(key, params):
+    """A _FieldError when extensions name typed sample params, or None.
+
+    They are reserved like every typed field; this names the catalog field
+    that sets them instead. Only names are shown, never values.
+    """
+    if not isinstance(params, dict):
+        return None
+    named = {name.lower() for name in params if isinstance(name, str)}
+    typed = [name for name in SAMPLE_PARAM_DEFAULT_FIELDS if name in named]
+    if not typed:
+        return None
+    fields = " and ".join(_SAMPLE_PARAMS_PREFIX + name for name in typed)
+    what = (f"{typed[0]} is a typed sample param" if len(typed) == 1
+            else f"{' and '.join(typed)} are typed sample params")
+    return _FieldError(f"{key}: {what}; set {fields} instead")
 
 
 def _entry(section, values, base):
@@ -122,6 +159,7 @@ def _entry(section, values, base):
     limits = {} if original is None else dict(vars(original.limits))
     timeouts = {} if original is None else dict(vars(original.timeouts))
     compaction = {} if original is None else dict(vars(original.compaction))
+    sample_params = {} if original is None else dict(vars(original.sample_params))
     responses = {} if original is None or original.responses is None else dict(vars(original.responses))
     params = {} if original is None else dict(original.extra_sample_params)
     if "extra_sample_params" in values and any(
@@ -161,10 +199,27 @@ def _entry(section, values, base):
                 compaction[setting] = _compaction_value(setting, value)
             except ValueError as exc:
                 raise _FieldError(f"{key}: {exc}") from None
+        elif key.startswith(_SAMPLE_PARAMS_PREFIX):
+            setting = key.removeprefix(_SAMPLE_PARAMS_PREFIX)
+            if setting not in SAMPLE_PARAM_DEFAULT_FIELDS:
+                raise _FieldError(f"{key} is not a sample param field; use " + _alternatives(
+                    [_SAMPLE_PARAMS_PREFIX + field for field in SAMPLE_PARAM_DEFAULT_FIELDS]))
+            try:
+                # In an override, null removes the entry's value: no field is sent.
+                sample_params[setting] = _sample_param_value(setting, value)
+            except (TypeError, ValueError) as exc:
+                raise _FieldError(f"{key}: {exc}") from None
         elif key == "extra_sample_params":
             params = parse_json_value(value)
+            error = _typed_extras_error(key, params)
+            if error is not None:
+                raise error
         elif key.startswith(_EXTRA_SAMPLE_PARAMS_PREFIX):
-            params[key.removeprefix(_EXTRA_SAMPLE_PARAMS_PREFIX)] = parse_json_value(value)
+            extension = key.removeprefix(_EXTRA_SAMPLE_PARAMS_PREFIX)
+            error = _typed_extras_error(key, {extension: None})
+            if error is not None:
+                raise error
+            params[extension] = parse_json_value(value)
         else:
             raise ValueError("Unknown model field.")
 
@@ -184,9 +239,13 @@ def _entry(section, values, base):
     error = compaction_route_error(endpoint, compaction.mode)
     if error is not None:
         raise _FieldError(f"compaction.mode: {error}")
+    sample_params = SampleParamDefaults(**sample_params)
+    error = sample_params_route_error(endpoint.api, sample_params)
+    if error is not None:
+        raise _FieldError(f"sample_params: {error}")
     fields.update(endpoint=endpoint, limits=ModelLimits(**limits),
                   timeouts=ModelTimeouts(**timeouts), extra_sample_params=params,
-                  compaction=compaction)
+                  compaction=compaction, sample_params=sample_params)
     if responses:
         fields["responses"] = ResponsesDefaults(**responses)
     spec = (ModelSpec(name=name, **fields) if original is None

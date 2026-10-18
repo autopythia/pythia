@@ -25,8 +25,11 @@ from .items import ToolCall
 from .items import SampleMetadata
 from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
+from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import freeze_extra_sample_params
 from .model_catalog import thaw_json
+from .model_catalog import validate_temperature
+from .model_catalog import validate_top_p
 from .timeouts import validate_timeout_seconds
 
 if TYPE_CHECKING:
@@ -165,20 +168,6 @@ class ModelRefusal(ModelResponseError):
         super().__init__(message, failure=failure)
 
 
-def _validate_optional_finite_number(
-    value: object,
-    field_name: str,
-) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{field_name} must be numeric or None")
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError(f"{field_name} must be finite")
-    return parsed
-
-
 @dataclass(frozen=True)
 class SampleParams:
     """Per-call parameters of ``Model.sample()``.
@@ -186,7 +175,9 @@ class SampleParams:
     Every ``None`` field (and an empty ``stop``) inherits the model's default,
     with one precedence order: this call, then adapter settings such as a
     Messages endpoint's budget or compaction trigger, then the model binding
-    and catalog. Adapters reject typed fields that their API cannot send.
+    and catalog (``temperature`` and ``top_p`` from the catalog's
+    ``sample_params.*``). Adapters reject typed fields that their API cannot
+    send.
 
     ``extra`` holds request-body extensions for this call. A mapping replaces
     the binding's ``extra_sample_params`` (``{}`` sends none); ``None``
@@ -220,18 +211,10 @@ class SampleParams:
                     "max_output_tokens must be a positive integer or None"
                 )
 
-        temperature = _validate_optional_finite_number(
-            self.temperature,
-            "temperature",
-        )
-        if temperature is not None and temperature < 0:
-            raise ValueError("temperature must be nonnegative")
-        object.__setattr__(self, "temperature", temperature)
-
-        top_p = _validate_optional_finite_number(self.top_p, "top_p")
-        if top_p is not None and not 0 <= top_p <= 1:
-            raise ValueError("top_p must be between 0 and 1")
-        object.__setattr__(self, "top_p", top_p)
+        if self.temperature is not None:
+            object.__setattr__(self, "temperature", validate_temperature(self.temperature))
+        if self.top_p is not None:
+            object.__setattr__(self, "top_p", validate_top_p(self.top_p))
 
         stop = tuple(self.stop)
         for index, value in enumerate(stop):
@@ -277,6 +260,28 @@ def _timeout_message(message: str, timeout_seconds: Optional[float]) -> str:
     if timeout_seconds is None:
         return message
     return f"{message} (request_timeout_seconds={timeout_seconds:g})"
+
+
+def _with_sample_param_defaults(
+    binding: "ModelBinding",
+    sample_params: Optional[SampleParams],
+) -> Optional[SampleParams]:
+    """This call's params, with the binding's catalog temperature and top_p where unset.
+
+    A per-call value, 0 included, takes precedence over the catalog's
+    ``sample_params.*``. Adapters apply this when they encode their typed
+    fields, so every request gets it, compaction requests included.
+    """
+    defaults = binding.sample_params
+    changes = {
+        name: getattr(defaults, name)
+        for name in SAMPLE_PARAM_DEFAULT_FIELDS
+        if getattr(defaults, name) is not None
+        and (sample_params is None or getattr(sample_params, name) is None)
+    }
+    if not changes:
+        return sample_params
+    return replace(sample_params or SampleParams(), **changes)
 
 
 def _apply_extra_sample_params(

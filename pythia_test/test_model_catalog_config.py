@@ -17,7 +17,7 @@ from pythia.interaction import (
     BUILTIN_MODEL_CATALOG, CodexResponsesModel, CompactionSettings, ConfigError, Environment, Init,
     Instructions, InteractionConfig, InteractionConfigSnapshot, InteractionContext, Message, ModelCatalog,
     ModelConfigurationError, ModelSample, ModelTimeouts, SampleParams,
-    StreamingResponsesEndpoint, ToolSpec, LATEST_MODEL_CATALOG_VERSION,
+    SampleParamDefaults, StreamingResponsesEndpoint, ToolSpec, LATEST_MODEL_CATALOG_VERSION,
     create_default_compactor, load_model_catalog, parse_model_catalog,
 )
 from pythia.interaction import auto, cli, demo, model_catalog, responses
@@ -69,6 +69,22 @@ endpoint.url = https://responses.example.test/v1/responses
 endpoint.auth = env:CATALOG_TEST_TOKEN
 responses.reasoning_effort = high
 """
+GENERIC = """
+[model.generic]
+endpoint.api = responses
+endpoint.model = served-generic
+endpoint.url = https://responses.example.test/v1/responses
+endpoint.auth = none
+"""
+# A chat entry without extra sample params, for the whole-map form.
+PLAIN = """
+[model.plain]
+endpoint.api = chat-completions
+endpoint.model = served-plain
+endpoint.url = http://127.0.0.1:8000/v1/chat/completions
+endpoint.auth = none
+"""
+SAMPLED = "sample_params.temperature = 0.6\nsample_params.top_p = 0.95\n"
 
 
 def catalog(text=LOCAL, **kwargs):
@@ -359,6 +375,7 @@ extra_sample_params.service_tier = "priority"
         responses_owned = ("tool_choice", "store", "include", "reasoning", "text",
                            "prompt_cache_key", "previous_response_id", "conversation")
         owned = {
+            "chat-completions": ("n", "tool_choice", "functions", "function_call"),
             "messages": ("system", "cache_control"),
             "codex": responses_owned,
             "responses": responses_owned,
@@ -380,7 +397,8 @@ extra_sample_params.service_tier = "priority"
                             with self.assertRaises(ValueError):
                                 catalog(text).bind(api, name, extra_sample_params={spelling: 1})
                     else:
-                        # Protection is API-specific: e.g. Chat Completions keeps these.
+                        # Protection is API-specific: e.g. Messages keeps n, and
+                        # Chat Completions keeps system.
                         registry = catalog(text + f"extra_sample_params.{key} = 1\n")
                         self.assertEqual(registry.bind(api, name).extra_sample_params[key], 1)
 
@@ -513,6 +531,101 @@ timeouts.stop_seconds = 2.5
             "request_seconds": 1800.0, "generation_seconds": None, "parked_seconds": None,
             "startup_seconds": None, "stop_seconds": None,
         })
+
+    def test_sample_params_on_new_and_override_entries(self):
+        registry = catalog(LOCAL + SAMPLED + """
+[model.claude-opus-5.5-max]
+override = true
+sample_params.temperature = 1
+""" + GENERIC + "sample_params.top_p = 0.5\n")
+        self.assertEqual(registry.bind(name="local-max").sample_params,
+                         SampleParamDefaults(temperature=0.6, top_p=0.95))
+        self.assertEqual(registry.bind(name="local-alias").sample_params.top_p, 0.95)
+        builtin = model_catalog.get_model_spec("messages", "claude-opus-5.5-max")
+        changed = registry.get_model_spec("messages", "claude-opus-5.5-max")
+        self.assertEqual(changed.sample_params, SampleParamDefaults(temperature=1.0))
+        self.assertIsInstance(changed.sample_params.temperature, float)
+        self.assertEqual(changed.extra_sample_params, builtin.extra_sample_params)
+        self.assertEqual(builtin.sample_params, SampleParamDefaults())
+        # A preset's siblings keep their own (none).
+        self.assertEqual(registry.get_model_spec("messages", "claude-opus-5.5").sample_params,
+                         SampleParamDefaults())
+        self.assertEqual(registry.bind("responses", "generic").sample_params,
+                         SampleParamDefaults(top_p=0.5))
+        # An override inherits sample params it does not set; null removes one.
+        kept = catalog("[model.local-max]\noverride = true\nsample_params.top_p = 0.9\n", base=registry)
+        self.assertEqual(kept.bind(name="local-max").sample_params,
+                         SampleParamDefaults(temperature=0.6, top_p=0.9))
+        cleared = catalog("[model.local-max]\noverride = true\nsample_params.temperature = null\n",
+                          base=registry)
+        self.assertEqual(cleared.bind(name="local-max").sample_params, SampleParamDefaults(top_p=0.95))
+        self.assertEqual(cleared.bind(name="local-max").timeouts, registry.bind(name="local-max").timeouts)
+
+    def test_invalid_sample_params_are_rejected_naming_their_field(self):
+        relay = "\n[model.relay]\nendpoint.api = claude-relay\nendpoint.model = claude-opus-5-5\n"
+        decimal = "expected a plain decimal number, such as 0.7, or null"
+        routes = ("sample_params: Codex and Claude Relay requests carry no temperature or top_p; "
+                  "sample params require the chat-completions, messages, or responses API")
+        for text, message in (
+            (LOCAL + "sample_params.temperature = -0.5\n",
+             "sample_params.temperature: temperature must be nonnegative"),
+            (LOCAL + "sample_params.top_p = 1.5\n", "sample_params.top_p: top_p must be between 0 and 1"),
+            (LOCAL + "sample_params.temperature = 1e3\n", f"sample_params.temperature: {decimal}"),
+            (LOCAL + "sample_params.temperature = inf\n", f"sample_params.temperature: {decimal}"),
+            (LOCAL + 'sample_params.top_p = "0.5"\n', f"sample_params.top_p: {decimal}"),
+            (LOCAL + "sample_params.seed = 7\n", "sample_params.seed is not a sample param field; "
+             "use sample_params.temperature or sample_params.top_p"),
+            # Only the APIs whose adapters send them.
+            (CODEX + "sample_params.temperature = 0.5\n", routes),
+            ("[model.codex-gpt-6-astra]\noverride = true\nendpoint.api = codex\n"
+             "sample_params.top_p = 0.9\n", routes),
+            (relay + "sample_params.temperature = 1\n", routes),
+        ):
+            with self.subTest(text=text.strip().splitlines()[-1]):
+                with self.assertRaises(ValueError) as raised:
+                    catalog(text)
+                section = text.split("[", 1)[1].split("]", 1)[0]
+                self.assertEqual(str(raised.exception),
+                                 f"Invalid model catalog entry '{section}' in user: {message}")
+
+    def test_typed_sample_params_are_not_extra_sample_params(self):
+        for text, message in (
+            (LOCAL + "extra_sample_params.temperature = 0.5\n",
+             "extra_sample_params.temperature: temperature is a typed sample param; "
+             "set sample_params.temperature instead"),
+            (LOCAL + "extra_sample_params.TOP_P = 0.5\n",
+             "extra_sample_params.TOP_P: top_p is a typed sample param; set sample_params.top_p instead"),
+            (PLAIN + 'extra_sample_params = {"top_p": 0.5, "temperature": "VERY_SECRET_TOKEN"}\n',
+             "extra_sample_params: temperature and top_p are typed sample params; "
+             "set sample_params.temperature and sample_params.top_p instead"),
+        ):
+            with self.subTest(text=text.strip().splitlines()[-1]):
+                with self.assertRaises(ValueError) as raised:
+                    catalog(text)
+                self.assertTrue(str(raised.exception).endswith(f" in user: {message}"), raised.exception)
+                self.assertNotIn("VERY_SECRET_TOKEN", str(raised.exception))
+        # Launch overlays and per-call maps keep rejecting them as typed fields.
+        with self.assertRaises(ValueError):
+            catalog().bind(name="local-max", extra_sample_params={"temperature": 0.5})
+        with self.assertRaises(ValueError):
+            SampleParams(extra={"top_p": 0.5})
+
+    def test_listing_and_debug_snapshot_show_configured_sample_params(self):
+        registry = catalog(LOCAL + SAMPLED + "timeouts.request_seconds = 1800\n")
+        line = next(line for line in render_model_catalog(registry).splitlines()
+                    if line.startswith("local-max"))
+        self.assertTrue(line.endswith(
+            ", sample_params.temperature=0.6, sample_params.top_p=0.95, timeouts.request_seconds=1800",
+        ), line)
+        self.assertNotIn("sample_params", render_model_catalog(BUILTIN_MODEL_CATALOG))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bindings.json"
+            self.assertIsNone(save_debug_model_bindings(path, {
+                "main": registry.bind(name="local-max"), "other": catalog(MESSAGE).bind(name="worker"),
+            }))
+            entries = json.loads(path.read_text())["bindings"]
+        self.assertEqual(entries["main"]["sample_params"], {"temperature": 0.6, "top_p": 0.95})
+        self.assertEqual(entries["other"]["sample_params"], {"temperature": None, "top_p": None})
 
 
 class BoundRequestTests(unittest.TestCase):
@@ -698,6 +811,61 @@ class BoundRequestTests(unittest.TestCase):
         for payload in requests:
             self.assertEqual({key: payload.get(key) for key in expected}, expected)
         self.assertEqual(cfg.get("extra_sample_params"), expected)
+
+    def test_catalog_sample_params_default_every_request_and_per_call_values_win(self):
+        registry = catalog(LOCAL + SAMPLED + MESSAGE + SAMPLED + GENERIC + SAMPLED)
+        for name in ("local-max", "worker", "generic"):
+            args = args_for(registry, "--model", name)
+            model = build_model(args)
+            turn = InteractionConfig.from_namespace(args).snapshot().sample_params()
+            for params, expected in (
+                (None, (0.6, 0.95)),
+                (turn, (0.6, 0.95)),
+                # A per-call value wins, 0 included; the other keeps the catalog's.
+                (replace(turn, temperature=0.0), (0.0, 0.95)),
+                (SampleParams(top_p=1.0, max_output_tokens=10), (0.6, 1.0)),
+            ):
+                with self.subTest(api=model.binding.api, params=params):
+                    built = model._build_request_payload(context(), (), params)
+                    sent = built[0] if isinstance(built, tuple) else built
+                    self.assertEqual((sent["temperature"], sent["top_p"]), expected)
+        # Without them, nothing is sent: the server's defaults apply.
+        plain = build_model(args_for(catalog(), "--model", "local-max"))
+        self.assertFalse({"temperature", "top_p"} & plain._build_request_payload(context(), (), None).keys())
+
+    def test_samples_and_prompt_compaction_send_the_catalog_sample_params(self):
+        requests = []
+        class Response:
+            status = 200
+            headers = {}
+            def read(self):
+                return b'{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}'
+            def close(self):
+                pass
+        def opener(request, **kwargs):
+            requests.append(json.loads(request.data))
+            return Response()
+        args = args_for(catalog(LOCAL + SAMPLED), "--model", "local-max")
+        cfg = InteractionConfig.from_namespace(args)
+        model = build_model(args)
+        model._opener = opener
+        model.sample(context(), sample_params=cfg.snapshot().sample_params())
+        create_default_compactor(model, CompactionSettings(keep_recent_tokens=0)).compact(
+            context(), sample_params=cfg.snapshot().sample_params(),
+        )
+        self.assertEqual(len(requests), 2)
+        for payload in requests:
+            self.assertEqual((payload["temperature"], payload["top_p"]), (0.6, 0.95))
+
+    def test_chat_completions_owns_choice_count_and_tool_selection(self):
+        chat = ChatCompletionsModel(chat_endpoint("http://localhost:8000", "literal"))
+        tool = ToolSpec("lookup", "Look things up.", {"type": "object", "properties": {}})
+        for key, value in (("n", 2), ("tool_choice", "required"), ("functions", []),
+                           ("function_call", "auto")):
+            with self.subTest(key=key), self.assertRaisesRegex(ModelConfigurationError, "adapter-owned"):
+                chat._build_request_payload(context(), (tool,), SampleParams(extra={key: value}))
+        # With tools, the server's default tool choice applies ("auto").
+        self.assertNotIn("tool_choice", chat._build_request_payload(context(), (tool,), None))
 
     def test_python_config_takes_extras_from_the_model_binding(self):
         model = ChatCompletionsModel(ChatCompletionsEndpoint(binding=catalog().bind(name="local-max")))

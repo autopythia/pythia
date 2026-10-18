@@ -56,6 +56,7 @@ from .model import _apply_extra_sample_params
 from .model import _request_timeout_seconds
 from .model import _timed_sample
 from .model import _timeout_message
+from .model import _with_sample_param_defaults
 from .model_catalog import ModelBinding
 from .model_catalog import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -1010,7 +1011,7 @@ class MessagesModel:
             payload["context_management"] = {
                 "edits": [compaction.request_edit()]
             }
-        _apply_sample_params(payload, sample_params)
+        _apply_sample_params(payload, _with_sample_param_defaults(self.binding, sample_params))
         _apply_extra_sample_params(payload, self.binding, sample_params)
         return payload
 

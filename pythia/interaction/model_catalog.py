@@ -6,9 +6,11 @@ Maximum/output limits are metadata rather than request budgets;
 frontends and server-compaction configuration. Endpoints contain non-secret
 delivery policy, not resolved credential values or permission to use account
 services. Timeouts are per-model wait budgets that launch options and per-call
-params override. Compaction settings (``CompactionDefaults``) are defaults
-that launch options and ``/config`` override. Unknown names remain valid
-pass-through candidates for the owning adapter.
+params override. Sample params (``SampleParamDefaults``) are a model's
+temperature and top_p, which per-call params override. Compaction settings
+(``CompactionDefaults``) are defaults that launch options and ``/config``
+override. Unknown names remain valid pass-through candidates for the owning
+adapter.
 """
 
 from __future__ import annotations
@@ -55,8 +57,15 @@ _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
     # Stateless requests carry the complete context; no server-side history.
     "previous_response_id", "conversation",
 ))
+# Chat Completions reads one choice (n) and owns the tools, which the legacy
+# functions and function_call would compete with. It sends no tool_choice: with
+# tools, servers default to "auto", and pi's summary requests carry no tools,
+# without which servers refuse a tool_choice other than "none".
+_CHAT_COMPLETIONS_RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
+    "n", "tool_choice", "functions", "function_call",
+))
 _PROFILE_RESERVED_EXTRA_SAMPLE_PARAMS = MappingProxyType({
-    "chat-completions": _RESERVED_EXTRA_SAMPLE_PARAMS,
+    "chat-completions": _RESERVED_EXTRA_SAMPLE_PARAMS | _CHAT_COMPLETIONS_RESERVED_EXTRA_SAMPLE_PARAMS,
     "messages": _RESERVED_EXTRA_SAMPLE_PARAMS | {"system", "cache_control"},
     "responses": _RESERVED_EXTRA_SAMPLE_PARAMS | _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS,
     "codex": _RESERVED_EXTRA_SAMPLE_PARAMS | _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS,
@@ -127,6 +136,38 @@ def validate_timeout_seconds(value, name):
             f"{MAX_TIMEOUT_SECONDS:g} seconds"
         )
     return float(value)
+
+
+def _finite_number(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be numeric or None")
+    try:
+        parsed = float(value)
+    except OverflowError:
+        raise ValueError(f"{name} must be finite") from None
+    if not math.isfinite(parsed):
+        raise ValueError(f"{name} must be finite")
+    return parsed
+
+
+def validate_temperature(value):
+    """Return ``value`` as a float temperature: finite and at least 0.
+
+    ``SampleParams`` and the catalog's ``sample_params.temperature`` share it.
+    A ``TypeError`` names a value that is not a number (bools included).
+    """
+    temperature = _finite_number(value, "temperature")
+    if temperature < 0:
+        raise ValueError("temperature must be nonnegative")
+    return temperature
+
+
+def validate_top_p(value):
+    """Return ``value`` as a float ``top_p``, from 0 to 1; shared like the temperature's."""
+    top_p = _finite_number(value, "top_p")
+    if not 0 <= top_p <= 1:
+        raise ValueError("top_p must be between 0 and 1")
+    return top_p
 
 
 def thaw_json(value):
@@ -292,6 +333,42 @@ class ModelTimeouts:
                 object.__setattr__(self, name, validate_timeout_seconds(value, name))
 
 
+# The SampleParams fields that a catalog entry may set (sample_params.<name>).
+SAMPLE_PARAM_DEFAULT_FIELDS = ("temperature", "top_p")
+# The APIs whose adapters send them. Codex rejects them, and Claude Relay
+# cannot pass them to its native client.
+_SAMPLE_PARAM_APIS = frozenset(("chat-completions", "messages", "responses"))
+
+
+@dataclass(frozen=True)
+class SampleParamDefaults:
+    """A model's typed sample params from the catalog; ``None`` sends none.
+
+    Pythia request preferences, not claims about a model's native defaults:
+    an unset field leaves the server's default. A per-call ``SampleParams``
+    value takes precedence, also in compaction requests, which inherit the
+    turn's params. Only the APIs whose adapters send these fields accept them
+    (``sample_params_route_error``).
+    """
+
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None:
+            object.__setattr__(self, "temperature", validate_temperature(self.temperature))
+        if self.top_p is not None:
+            object.__setattr__(self, "top_p", validate_top_p(self.top_p))
+
+
+def sample_params_route_error(api: str, defaults: SampleParamDefaults) -> Optional[str]:
+    """Why ``defaults`` can't be sent on ``api``, or None."""
+    if api in _SAMPLE_PARAM_APIS or defaults == SampleParamDefaults():
+        return None
+    return ("Codex and Claude Relay requests carry no temperature or top_p; sample params "
+            "require the chat-completions, messages, or responses API")
+
+
 # What a catalog's [compaction] section and a model section's compaction.*
 # fields set; each is the runtime setting "compaction_" + its name.
 COMPACTION_DEFAULT_FIELDS = ("mode", "pi_keep_recent_tokens", "pi_max_output_tokens")
@@ -403,6 +480,7 @@ class ModelSpec:
     extra_sample_params: Mapping = field(default_factory=dict)
     timeouts: ModelTimeouts = field(default_factory=ModelTimeouts)
     compaction: CompactionDefaults = field(default_factory=CompactionDefaults)
+    sample_params: SampleParamDefaults = field(default_factory=SampleParamDefaults)
 
     def __post_init__(self) -> None:
         _require_identifier(self.name, "name")
@@ -426,6 +504,11 @@ class ModelSpec:
         error = compaction_route_error(self.endpoint, self.compaction.mode)
         if error is not None:
             raise ValueError(f"compaction.mode: {error}")
+        if not isinstance(self.sample_params, SampleParamDefaults):
+            raise TypeError("sample_params must be SampleParamDefaults")
+        error = sample_params_route_error(self.endpoint.api, self.sample_params)
+        if error is not None:
+            raise ValueError(error)
         if self.responses is not None:
             if not isinstance(self.responses, ResponsesDefaults):
                 raise TypeError("responses must be ResponsesDefaults or None")
@@ -647,9 +730,10 @@ class ModelBinding:
     """One resolved endpoint, including explicitly bound pass-through models.
 
     ``extra_sample_params`` (catalog map plus launch overlay) is the model's
-    default for ``SampleParams.extra``. ``compaction`` is the catalog's
-    compaction settings for it: its entry's ``compaction.*`` over the
-    catalog's ``[compaction]``.
+    default for ``SampleParams.extra``, and ``sample_params`` (the catalog
+    entry's) its default temperature and top_p. ``compaction`` is the
+    catalog's compaction settings for it: its entry's ``compaction.*`` over
+    the catalog's ``[compaction]``.
     """
 
     selector: Optional[str]
@@ -690,6 +774,11 @@ class ModelBinding:
     @property
     def timeouts(self):
         return ModelTimeouts() if self.spec is None else self.spec.timeouts
+
+    @property
+    def sample_params(self):
+        """The catalog entry's temperature and top_p; none for a pass-through model."""
+        return SampleParamDefaults() if self.spec is None else self.spec.sample_params
 
     @property
     def supports_account_services(self):
@@ -887,6 +976,8 @@ __all__ = [
     "EndpointSpec",
     "ModelSpec",
     "ResponsesDefaults",
+    "SAMPLE_PARAM_DEFAULT_FIELDS",
+    "SampleParamDefaults",
     "get_model_spec",
     "list_model_specs",
 ]
