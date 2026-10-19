@@ -107,7 +107,7 @@ class RelayTraceTests(unittest.TestCase):
                 save_interaction_save(save, context)
                 self.assertNotIn('PRIVATE_RETRY_PAYLOAD', save.read_text())
                 self.assertNotIn('authentication_failed', save.read_text())
-                self.assertIsNone(self.model._runtime)
+                self.assertTrue(self.model._runtime.idle)  # kept for the next turn
                 if trace:
                     trace.close()
                     events = rows(trace.event_path)

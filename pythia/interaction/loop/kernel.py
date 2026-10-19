@@ -235,7 +235,9 @@ def run_turn(context, model, environment, config, host: TurnHost, *,
 
     ``config`` is an ``InteractionConfig`` snapshot. Returns ``ended`` with
     the final text, ``yielded`` with a handoff note, or ``stopped``; raises on
-    failure. The model is retired when the turn ends, however it ends.
+    failure. The model is retired when the turn ends, unless it ended with a
+    final answer: then a model may keep its work for the next turn, as the
+    Claude relay keeps its native process (doc/claude-relay-warm-delivery-plan.md).
     ``sample_params`` overrides ``config.sample_params()``.
 
     ``control`` (only supervised main passes one) lets a tool end the turn:
@@ -243,9 +245,13 @@ def run_turn(context, model, environment, config, host: TurnHost, *,
     handoff note, if any. The loop never inspects tool names or output.
     """
     try:
-        return _run_turn(context, model, environment, config, host, sample_params, control)
-    finally:
+        result = _run_turn(context, model, environment, config, host, sample_params, control)
+    except BaseException:
         retire_model(model)
+        raise
+    if result.kind != "ended":
+        retire_model(model)
+    return result
 
 
 def _run_turn(context, model, environment, config, host, sample_params, control):

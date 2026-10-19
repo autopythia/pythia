@@ -6,6 +6,13 @@ from ..model import ModelTransportError
 
 
 NATIVE_MCP_TIMEOUT = 'native_mcp_timeout'
+# Why a kept native process went unused (continuation_abandoned): a delivery it
+# didn't take up, which is also the sample's recovery label; it ended while
+# idle, by exiting or with a record no idle CLI writes; its idle deadline.
+DELIVERY_UNACKNOWLEDGED = 'delivery_unacknowledged'
+IDLE_EXIT = 'idle_exit'
+IDLE_RECORD = 'idle_record'
+IDLE_DEADLINE = 'idle_deadline'
 # What the CLI reports as a call's result when it gives up on the call: its
 # 60 s HTTP abort while MCP_TOOL_TIMEOUT is unset, else its tool timeout,
 # which names the relay's MCP server (the --mcp-config key) and the tool.
@@ -87,3 +94,24 @@ class NativeMCPTimeout(ModelTransportError):
     def __init__(self, call: ExpiredCall):
         super().__init__('Native MCP operation expired before consuming the host reply')
         self.call = call
+
+
+class DeliveryUnacknowledged(ModelTransportError):
+    """Messages delivered to a live process that the CLI didn't take up: it
+    didn't report reading them in time (``queued``), answered without them (no
+    ``started`` before its next reply, or no echo of a turn's record), or ended
+    first. Or the process had already ended while idle (``reason``
+    ``idle_exit`` or ``idle_record``).
+
+    Nothing the process wrote after the delivery is adopted, and none of its
+    calls is registered, so the saved context is unchanged: the model retires
+    the process and answers the same sample from a cold import, and saves no
+    failure (doc/claude-relay-warm-delivery-plan.md, section 4).
+    """
+
+    error_code = DELIVERY_UNACKNOWLEDGED
+
+    def __init__(self, message='Native CLI did not take up the delivered messages', *,
+                 reason=DELIVERY_UNACKNOWLEDGED):
+        super().__init__(message)
+        self.reason = reason

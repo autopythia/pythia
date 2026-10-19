@@ -193,6 +193,11 @@ class FakeRelayRuntime:
 
     WAIT_SECONDS = 2.0
     launches = None  # set per patch (fake_relay_runtime)
+    # As a real run kept after a final answer: no known request start or cache
+    # lifetime (the model's idle deadline then counts from the answer), and
+    # never ended while idle.
+    kept = None
+    idle_end = None
 
     def __init__(self, endpoint, tools, token, *, sampling=None, trace=None):
         self.endpoint, self.generation = endpoint, token
@@ -228,6 +233,14 @@ class FakeRelayRuntime:
         usage = TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)
         self.events.put((SimpleNamespace(stop_reason="end_turn", usage=usage, id="msg_fake"),
                          (Message("assistant", text),), ()))
+
+    def deliver(self, texts, *, results=None):
+        """Messages delivered to this run, kept after a final answer: answered
+        as a request is, a summary request (warmpi's instruction) held."""
+        if any(_WARMPI_MARK in text for text in texts):
+            self.launches.summaries.put(self)
+        else:
+            self.answer("final answer")
 
     def next_message(self):
         try:

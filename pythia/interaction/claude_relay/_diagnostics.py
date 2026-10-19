@@ -27,6 +27,8 @@ def event_identity(record):
             error = None  # retain the event label, not a stale terminal error code
         if record.get('subtype') == 'status':
             parts.append(identifier(record.get('status')))
+    if kind == 'command_lifecycle':
+        parts.append(identifier(record.get('state')))
     if kind == 'stream_event':
         event = record.get('event')
         if not isinstance(event, dict):

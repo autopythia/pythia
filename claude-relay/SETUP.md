@@ -134,6 +134,13 @@ live listeners are refused; do not blindly delete or chmod someone else's socket
 Useful B-side flags:
 
 - `--relay-max-active 8`: concurrent/reserved invocations, including version queries.
+  A Pythia session keeps its native process between turns (in auto, one per
+  relay role) for up to 55 minutes after its last answer, so each session that
+  ran within the hour holds a slot. When all are taken, the broker refuses new
+  launches, which Pythia reports as "Relayed native version query failed".
+  Raise the limit for the sessions you run at once, or lower
+  `--claude-relay-idle-timeout` on A; each kept process is a live CLI (about
+  200 MB).
 - `--relay-stop-grace 3`: seconds between termination and forced kill.
 - `--relay-profile NAME`: non-secret deployment label shown by `--relay-check`.
 - Repeat `--relay-allow-uid` only when intentionally granting another trusted user

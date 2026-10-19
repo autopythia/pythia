@@ -232,8 +232,33 @@ class RunTurnTests(unittest.TestCase):
         self.assertIn("ToolCall", appends[0][1])
         self.assertIsInstance(context.items[-1], TurnSummary)
         self.assertEqual(context.pending_tool_calls(), ())
-        self.assertEqual(model.retired, 1)
+        self.assertEqual(model.retired, 0)  # kept after a final answer (see below)
         self.assertEqual(model.threads | host.threads, {threading.get_ident()})
+
+    def test_the_model_is_retired_when_a_turn_ends_other_than_with_a_final_answer(self):
+        # After a final answer a model may keep its work for the next turn, as
+        # the Claude relay keeps its native process; a stop, a yield or a
+        # failure leaves nothing to keep.
+        outcomes = {}
+        host = _Host()
+        model = _Model(host, _answer("done"))
+        outcomes["ended"] = (run_turn(_context(), model, _environment(host), _config(), host).kind,
+                             model.retired)
+        host = _Host(stop_after_calls=1)
+        model = _Model(host, _calls(_call("a"), _call("b")))
+        outcomes["stopped"] = (run_turn(_context(), model, _environment(host), _config(), host).kind,
+                               model.retired)
+        host = _Host()
+        model = _Model(host, _calls(_call("a")))
+        outcomes["yielded"] = (run_turn(_context(), model, _environment(host), _config(), host,
+                                        control=_Control(host, after_calls=1)).kind, model.retired)
+        host = _Host()
+        model = _Model(host, ModelTransportError("lost"))
+        with self.assertRaises(ModelTransportError):
+            run_turn(_context(), model, _environment(host), _config(), host)
+        outcomes["failed"] = ("failed", model.retired)
+        self.assertEqual(outcomes, {"ended": ("ended", 0), "stopped": ("stopped", 1),
+                                    "yielded": ("yielded", 1), "failed": ("failed", 1)})
 
     def test_each_call_runs_with_its_samples_results_due_and_is_traced(self):
         host, context = _TracingHost(), _context()
@@ -374,7 +399,7 @@ class RunTurnTests(unittest.TestCase):
                         run_turn(context, model, _environment(host), _config(), host)
                     self.assertEqual(host.retryable, 1 if overflow else 0)
                 self.assertEqual(len(model.script), 1)  # never sampled again
-                self.assertEqual(model.retired, 1)
+                self.assertEqual(model.retired, 2)  # the compaction's end, then the turn's
 
     def test_due_compaction_runs_before_the_interrupt_and_sample(self):
         host, context = _Host(), _context()
@@ -598,7 +623,7 @@ class SteeringTests(unittest.TestCase):
         model = _Model(host, sample, _answer("done"))
         result = run_turn(context, model, _environment(host), _config(max_samples=1), host)
         self.assertEqual(result.final_text, "done")  # the cancelled sample did not count
-        self.assertEqual(model.retired, 2)  # the cancel, then the turn's end
+        self.assertEqual(model.retired, 1)  # the cancel; the turn ended with a final answer
         self.assertEqual(host.retryable, 0)
         texts = [item.content for item in context.items if isinstance(item, Message)]
         self.assertEqual(texts, ["task", "par", "now", "done"])
@@ -615,7 +640,7 @@ class SteeringTests(unittest.TestCase):
         run_turn(context, model, _tools(waiting), _config(), host)
         self.assertEqual(_results(context), [("a", "cut short", True),
                                              ("b", kernel.SKIPPED_OUTPUT, False)])
-        self.assertEqual(model.retired, 1)  # a tool's cancel never retires the model
+        self.assertEqual(model.retired, 0)  # a tool's cancel never retires the model
 
     def test_a_preempting_steer_during_compaction_cancels_and_skips_nothing(self):
         # Compaction is not a preemptible operation: the steer waits for it and
@@ -632,7 +657,7 @@ class SteeringTests(unittest.TestCase):
                 mock.patch.object(kernel, "create_default_compactor", return_value=Compactor()):
             result = run_turn(context, model, _environment(host), _config(), host)
         self.assertEqual(result.final_text, "done")
-        self.assertEqual(model.retired, 1)  # only the turn's end: nothing was cancelled
+        self.assertEqual(model.retired, 1)  # the compaction's end only: nothing was cancelled
         self.assertEqual([e[0] for e in host.events if e[0] in ("compacted", "interrupt", "sample")],
                          ["compacted", "interrupt", "sample"])
         texts = [item.content for item in context.items if isinstance(item, Message)]

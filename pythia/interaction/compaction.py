@@ -66,6 +66,7 @@ from .model import ModelContextWindowError
 from .model import ModelError
 from .model import ModelSample
 from .model import ModelThinkingBindingError
+from .model import retire_model
 from .model import SampleParams
 from .model import TokenUsage
 
@@ -2038,74 +2039,83 @@ def run_compaction(
     ``on_failure`` is called after each failed attempt that doesn't end the
     sequence, including the last one. When every attempt fails, the last
     failure is raised. The result's ``recovery`` lists each failed attempt.
+
+    However the sequence ends, the model is then retired (``retire_model``),
+    for the turn loop and the CLI's ``/compact`` alike.
     """
     if reason not in COMPACTION_REASONS:
         raise ValueError(f"reason must be one of {COMPACTION_REASONS}")
     if not isinstance(settings, CompactionSettings):
         raise TypeError("settings must be CompactionSettings")
-    factory = create_default_compactor if factory is None else factory
-    stopping = stop_requested if stop_requested is not None else (lambda: False)
-    focus = instructions is not None and bool(instructions.strip())
-    entries = [(_model_method(model, method), attempts) for method, attempts in settings.methods]
-    log_path = None if log is None else log.path
+    try:
+        factory = create_default_compactor if factory is None else factory
+        stopping = stop_requested if stop_requested is not None else (lambda: False)
+        focus = instructions is not None and bool(instructions.strip())
+        entries = [(_model_method(model, method), attempts) for method, attempts in settings.methods]
+        log_path = None if log is None else log.path
 
-    def skipped(method: str) -> bool:
-        if focus and _rejects_focus(model, method):
-            return True
-        return method == "coldstart" and coldstart_unavailable(tools, log_path) is not None
+        def skipped(method: str) -> bool:
+            if focus and _rejects_focus(model, method):
+                return True
+            return method == "coldstart" and coldstart_unavailable(tools, log_path) is not None
 
-    runnable = [
-        (method, attempts) for index, (method, attempts) in enumerate(entries)
-        if not (index + 1 < len(entries) and skipped(method))
-    ]
-    calls = {"tools": tools, "sample_params": sample_params}
-    if instructions is not None:
-        calls["instructions"] = instructions
-    failed: List[str] = []
-    last: Optional[BaseException] = None
-    for position, (method, attempts) in enumerate(runnable):
-        later = position + 1 < len(runnable)
-        # Only coldstart points to the save, and only warmpi takes the reason.
-        options = ({"log": log} if method == "coldstart"
-                   else {"reason": reason} if method == "warmpi" else {})
-        for attempt in range(1, attempts + 1):
-            try:
-                compactor = factory(model, replace(settings, mode=method), **options)
-                result = compactor.compact(context.copy(), **calls)
-            except Exception as error:
-                if stopping() or _ends_compaction(error, reason=reason, later=later):
-                    raise
-                last = error
-            else:
-                # Callers check the result's type; it matters here only when
-                # the failed attempts are added to it.
-                if failed:
-                    if not isinstance(result, CompactionResult):
-                        raise TypeError(
-                            "compactor must return CompactionResult, got "
-                            f"{type(result).__name__}"
-                        )
-                    result = replace(result, recovery=(*failed, *result.recovery))
-                return result
-            retry = attempt < attempts and _retryable(last)
-            report = CompactionFailure(
-                method=method,
-                error=last,
-                failure=_failure_item(last),
-                attempt=attempt,
-                attempts=attempts,
-                next_method=(
-                    method if retry else runnable[position + 1][0] if later else None
-                ),
-                retry=retry,
-            )
-            failed.append(report.label)
-            if on_failure is not None:
-                on_failure(report)
-            if not retry:
-                break
-    assert last is not None
-    raise last
+        runnable = [
+            (method, attempts) for index, (method, attempts) in enumerate(entries)
+            if not (index + 1 < len(entries) and skipped(method))
+        ]
+        calls = {"tools": tools, "sample_params": sample_params}
+        if instructions is not None:
+            calls["instructions"] = instructions
+        failed: List[str] = []
+        last: Optional[BaseException] = None
+        for position, (method, attempts) in enumerate(runnable):
+            later = position + 1 < len(runnable)
+            # Only coldstart points to the save, and only warmpi takes the reason.
+            options = ({"log": log} if method == "coldstart"
+                       else {"reason": reason} if method == "warmpi" else {})
+            for attempt in range(1, attempts + 1):
+                try:
+                    compactor = factory(model, replace(settings, mode=method), **options)
+                    result = compactor.compact(context.copy(), **calls)
+                except Exception as error:
+                    if stopping() or _ends_compaction(error, reason=reason, later=later):
+                        raise
+                    last = error
+                else:
+                    # Callers check the result's type; it matters here only when
+                    # the failed attempts are added to it.
+                    if failed:
+                        if not isinstance(result, CompactionResult):
+                            raise TypeError(
+                                "compactor must return CompactionResult, got "
+                                f"{type(result).__name__}"
+                            )
+                        result = replace(result, recovery=(*failed, *result.recovery))
+                    return result
+                retry = attempt < attempts and _retryable(last)
+                report = CompactionFailure(
+                    method=method,
+                    error=last,
+                    failure=_failure_item(last),
+                    attempt=attempt,
+                    attempts=attempts,
+                    next_method=(
+                        method if retry else runnable[position + 1][0] if later else None
+                    ),
+                    retry=retry,
+                )
+                failed.append(report.label)
+                if on_failure is not None:
+                    on_failure(report)
+                if not retry:
+                    break
+        assert last is not None
+        raise last
+    finally:
+        # A model may have kept work for the next turn that this compaction
+        # leaves behind: the Claude relay's process that answered pi's or
+        # warmpi's request, or one whose history a checkpoint replaces.
+        retire_model(model)
 
 
 __all__ = [

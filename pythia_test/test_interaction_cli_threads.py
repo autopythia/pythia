@@ -263,7 +263,7 @@ class CliSteeringTests(unittest.IsolatedAsyncioTestCase):
         result = await self._turn(state, Model())
         self.assertEqual(result.final_text, "done")
         self.assertEqual(seen, [["task"], ["task", "stop that"]])
-        self.assertEqual(Model.retires, 2)  # the cancel, then the turn's end
+        self.assertEqual(Model.retires, 1)  # the cancel; the turn ended with a final answer
         self.assertIsNone(state.retry)  # a cancelled sample is not a failure
         self.assertEqual(state.preemption.level, Urgency.QUEUED)
         self.assertIn("[cli] Flushing 1 steer: delivered as soon as the current sample or tool "

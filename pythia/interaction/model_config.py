@@ -34,6 +34,7 @@ from .responses import CodexResponsesModel
 from .responses import ResponsesModel
 from .runtime_config import RENAMED_CONFIG_KEYS
 from .timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS
@@ -46,6 +47,7 @@ _CLAUDE_RELAY_TIMEOUT_DEFAULTS = {
     "parked": DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
     "startup": DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS,
     "stop": DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS,
+    "idle": DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS,
 }
 
 # Invocation-only, never restored from conversation/auto config snapshots.
@@ -54,6 +56,7 @@ CLAUDE_RELAY_FIELDS = (
     "claude_relay_cli_version", "claude_relay_tool_id_pointer",
     "claude_relay_generation_timeout", "claude_relay_parked_timeout",
     "claude_relay_startup_timeout", "claude_relay_stop_timeout",
+    "claude_relay_idle_timeout",
 )
 
 
@@ -90,7 +93,8 @@ def relay_endpoint(args, binding):
         generation_timeout_seconds=deadline("generation"),
         parked_timeout_seconds=deadline("parked"),
         startup_timeout_seconds=deadline("startup"),
-        stop_timeout_seconds=deadline("stop"), binding=binding,
+        stop_timeout_seconds=deadline("stop"),
+        idle_timeout_seconds=deadline("idle"), binding=binding,
     )
 
 
@@ -298,9 +302,12 @@ def add_endpoint_arguments(parser, *, auto=False):
     parser.add_argument("--claude-relay-tool-id-pointer", default=argparse.SUPPRESS,
                         help="JSON pointer into MCP params._meta; default /params/_meta/claudecode~1toolUseId")
     for name, fallback in _CLAUDE_RELAY_TIMEOUT_DEFAULTS.items():
+        what = (f"Claude Relay {name} deadline in seconds" if name != "idle" else
+                "seconds a Claude Relay process waits for the next turn after a final answer, "
+                "counted from the start of the answer's request; 0 keeps none")
         parser.add_argument(f"--claude-relay-{name}-timeout", type=float, default=argparse.SUPPRESS,
-                            help=(f"Claude Relay {name} deadline in seconds (default: the model "
-                                  f"catalog's timeouts.{name}_seconds, else {fallback:g}); launch-only"))
+                            help=(f"{what} (default: the model catalog's timeouts.{name}_seconds, "
+                                  f"else {fallback:g}); launch-only"))
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")

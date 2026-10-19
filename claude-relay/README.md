@@ -260,9 +260,11 @@ UID B: persistent claude_relay.py broker (already started as B)
 ```
 
 The broker persists across CLI invocations; a native process persists only for
-its owning invocation/tool chain. Version probes get separate short invocations.
-Concurrent main/watcher/worker driver instances get separate children and streams,
-not one shared native session. Do not add cross-turn session reuse or reconnect.
+its owning invocation: its tool chain, and the turns after it while Pythia keeps
+it, up to an idle deadline (`doc/claude-relay-warm-delivery-plan.md`). Version
+probes get separate short invocations. Concurrent main/watcher/worker driver
+instances get separate children and streams, not one shared native session. Do
+not add session resume or reconnect.
 
 Pythia, the direct CLI driver, and the stdlib MCP endpoint remain under A. The
 broker under B owns **process launch and cleanup only**: no SDK dependency,

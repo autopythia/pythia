@@ -472,9 +472,11 @@ def retire_model(model) -> None:
     That is a Claude relay continuation, or an HTTP model's request in flight.
     Any thread may call it, also while a sample runs; that sample then fails
     soon. The model stays usable: its next sample starts a new continuation or
-    request. The turn loop retires at each turn's end, and to cancel the
-    sample in flight for a preempting steer or stop; a preempting stop also
-    closes the model (see ``close_model``).
+    request. The turn loop retires at each turn's end except after a final
+    answer, when the Claude relay keeps its process for the next turn; at the
+    end of each compaction; and to cancel the sample in flight for a
+    preempting steer or stop. A preempting stop also closes the model (see
+    ``close_model``).
     """
     retire = getattr(model, "retire", None)
     if callable(retire):

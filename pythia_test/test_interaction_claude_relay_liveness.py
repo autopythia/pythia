@@ -75,12 +75,15 @@ class PingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         rt._failure.assert_not_called()
         for records, initialized, message in (
                 ([PING, *dispatch.FINAL], False, 'before verified initialization'),
-                ([*dispatch.FINAL, PING], True, 'after terminal result'),
                 ([{**PING, 'parent_tool_use_id': 'subagent'}, *dispatch.FINAL], True, 'subagent'),
                 ([{**PING, 'error': {'type': 'overloaded_error'}}, *dispatch.FINAL], True, 'model error')):
             with self.subTest(message=message):
                 rt = await self.run_records(records, initialize=initialized)
                 self.assertIn(message, str(rt._failure.call_args.args[0]))
+        # After a result the process is idle: a ping then ends it, failing no sample.
+        rt = await self.run_records([*dispatch.FINAL, PING])
+        rt._failure.assert_not_called()
+        self.assertEqual(rt.idle_end, 'idle_record')
 
 
 class RegistrationWaitTests(unittest.TestCase):

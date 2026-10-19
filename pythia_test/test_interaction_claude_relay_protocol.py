@@ -498,6 +498,7 @@ class SystemEventTests(unittest.TestCase):
     def runtime(self):
         value = Runtime.__new__(Runtime)  # no subprocesses, threads, or sockets
         value.initialized, value.names = False, {}
+        value._init_turns()
         return value
 
     def test_narrow_telemetry_after_init_only(self):

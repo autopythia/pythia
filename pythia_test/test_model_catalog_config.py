@@ -529,7 +529,7 @@ timeouts.stop_seconds = 2.5
             entry = json.loads(path.read_text())["bindings"]["main"]
         self.assertEqual(entry["timeouts"], {
             "request_seconds": 1800.0, "generation_seconds": None, "parked_seconds": None,
-            "startup_seconds": None, "stop_seconds": None,
+            "startup_seconds": None, "stop_seconds": None, "idle_seconds": None,
         })
 
     def test_sample_params_on_new_and_override_entries(self):

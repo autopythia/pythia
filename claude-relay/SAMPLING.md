@@ -198,6 +198,71 @@ runtime, frontend validation, broker and wrapper code. Requested generation and
 summary caps still fail before launch; catalog capacity metadata is unaffected.
 See [SETUP.md](SETUP.md#opt-in-live-regression-checks) to rerun the live tests.
 
+### Multi-turn and mid-turn input probes (CLI 2.1.289, October 18)
+
+Probes P1 and P2 of `doc/claude-relay-warm-delivery-plan.md`, scripted in
+`doc/claude-relay-warm-delivery-probes.py`, ran through the live relay with an
+observational reader, **not the production adapter**: the same argv, MCP
+endpoint and version check as `Runtime`, one in-memory MCP tool, default
+effort, and stream-json user records written to the CLI's open stdin. Nine
+disposable processes cost $0.54 by the CLI's own figures.
+
+| Observed | Detail |
+| --- | --- |
+| Turns in one process | After `result`, with stdin left open, each user record written starts a turn: five in one process, each answered correctly. Closing stdin ends the process with code 0 |
+| Records of a turn | For a record with a `uuid`: `command_lifecycle` (`command_uuid` naming it, `state` `queued`, then `started`); a new `system/init` (the same tools, MCP servers, model, session and capabilities, with a new `uuid`); `system/status`; the reply; `result`; `command_lifecycle` `completed`, before or after `result` |
+| Without a `uuid` | No `command_lifecycle` records, as in every production trace so far |
+| Echo | `user_message_uuid` and `user_message_uuids` on each turn's `message_start`, first `assistant` record, `system/thinking_tokens` records and `result`; not on later replies in the turn |
+| Result numbering | `result_index` 0, 1, 2, … across the process's turns |
+| Records written back to back | Not merged: each ran as a turn of its own |
+| Cache across turns | After a 51,270-token cold import, the next turn read 51,686 tokens from cache and wrote 214; the one after read 51,900 and wrote 18 |
+| A record while an MCP call waits | `queued` 6–8 ms after the write. Queued before the tool result arrives, it is `started` with the result and reaches the model in the same turn, framed as "The user sent a new message while you were working: …" and "Address the message above as you continue this turn." Queued after, it runs as a turn of its own after `result` |
+| `--replay-user-messages` | A mid-turn record's replay comes when the record is taken up, with the tool result, not when it is read |
+| `@path` in user text | Not expanded: in the cold import, or in later records with or without `client_composed` |
+| `crossSessionInbound` `refuse` | Accepted in `--settings`; turns ran as usual |
+| Idle | After 31 minutes with stdin open, still running and silent; the next turn read its whole 1,128-token request from cache |
+
+### Kept processes (`claude-stream-json-v9`, October 18)
+
+The production adapter now keeps a process between turns, as the
+warm-delivery plan's Parts 1 and 2 describe, and checks every turn the way the
+probes saw them:
+
+- **Every user record has a `uuid`**, the cold import's too. Its
+  `command_lifecycle` records must name a uuid the relay wrote, each state
+  once and in order (`queued`, `started`, `completed`). `started` comes only
+  for the record that starts the turn, or for one written while the turn's
+  results were pending.
+- **A turn's first reply** must follow its record's `started` and echo its
+  uuid (`user_message_uuid`). A delivered turn's `system/init` must repeat the
+  first one's tools, MCP servers, model and session.
+- **Its `result`** must have the next `result_index` and name every record
+  the turn took up (`user_message_uuids`). The final message then goes to the
+  sample at once; stdin stays open and the exit code is no longer checked.
+- **While idle,** any record but a `completed` ends the process (a compaction
+  status, telemetry), and so does an exit. Neither fails a sample: the next
+  sample starts a new process.
+- **A delivery** is one user record with `client_composed: true` and one text
+  block per Pythia message. After a final answer it starts the next turn. With
+  pending results, the relay waits for its `queued` before releasing them, and
+  the CLI must take it up (`started`) before its next reply.
+- **A delivery the CLI doesn't take up** (no `queued` within the startup
+  deadline, no echo or `started` in time, or the process ending first) is no
+  failure: the relay adopts nothing, retires the process and answers the same
+  sample from a cold import, with `recovery=delivery_unacknowledged`.
+- **`--settings`** always carries `crossSessionInbound` `refuse`, and
+  `MCP_TOOL_TIMEOUT` with MCP tools.
+
+A kept process waits at most `timeouts.idle_seconds` or
+`--claude-relay-idle-timeout` (3595 s, 59 minutes, by default), counted from
+the start of the final answer's request (its `system/status` `requesting`),
+where its prompt-cache lifetime starts. After a reply that wrote 5-minute
+cache entries (`cache_creation.ephemeral_5m_input_tokens` in its
+`message_start`) the limit is 305 s, or the configured one if shorter. 0 keeps
+no process: the old behavior. The turn loop retires the process at a turn's
+end unless the turn ended with a final answer, and every compaction retires
+it when it ends.
+
 ## 3. Catalog and request semantics
 
 ### Effort: one narrowly supported extra

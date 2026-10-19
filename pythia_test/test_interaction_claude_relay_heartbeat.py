@@ -14,7 +14,7 @@ from pythia.interaction._debug_trace import DebugTrace
 from pythia.interaction.claude_relay import ClaudeRelayModel
 from pythia.interaction.claude_relay._diagnostics import Diagnostics
 from pythia.interaction.claude_relay._mcp import Mailbox
-from pythia.interaction.claude_relay._runtime import Runtime
+from pythia.interaction.claude_relay._runtime import Runtime, _Turn
 from pythia.interaction.claude_relay._trace import RelayTrace
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.items import Message, ToolResult
@@ -31,7 +31,8 @@ def heartbeat(**fields):
 FINAL = [
     {'type': 'assistant', 'message': {'id': 'm', 'content': [{'type': 'text', 'text': 'done'}],
                                      'stop_reason': 'end_turn', 'usage': {'input_tokens': 1, 'output_tokens': 2}}},
-    {'type': 'result', 'subtype': 'success', 'is_error': False},
+    {'type': 'result', 'subtype': 'success', 'is_error': False,
+     'result_index': 0, 'user_message_uuid': 'import', 'user_message_uuids': ['import']},
 ]
 
 
@@ -62,7 +63,13 @@ class HeartbeatDispatchTests(unittest.IsolatedAsyncioTestCase):
         rt.proc = SimpleNamespace(stdout=asyncio.StreamReader(), stdin=mock.Mock(), wait=mock.AsyncMock(return_value=0))
         rt._put = mock.Mock()
         rt._failure = mock.Mock()
+        rt._stop_process = mock.AsyncMock()
         rt.tasks = [None, asyncio.create_task(asyncio.sleep(0))]
+        # The cold import's turn, its record taken up and its first reply
+        # checked (the echo is tested in test_interaction_claude_relay_warm).
+        rt._init_turns()
+        rt.turn = _Turn('import', live=False, taken=['import'], replied=True)
+        rt.lifecycle = {'import': 'started'}
         initial = [{'type': 'system', 'subtype': 'init', 'tools': list(rt.names),
                     'mcp_servers': [{'name': 'pythia', 'status': 'connected'}]}] if initialize else []
         for record in initial + records:
@@ -121,8 +128,10 @@ class HeartbeatDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_heartbeat_does_not_bypass_init_terminal_or_native_errors(self):
         rt = await self.run_records([heartbeat(), *FINAL], initialize=False)
         self.assertIn('before verified initialization', str(rt._failure.call_args.args[0]))
+        # After a result the process is idle: a record then ends it, failing no sample.
         rt = await self.run_records([*FINAL, heartbeat()])
-        self.assertIn('after terminal result', str(rt._failure.call_args.args[0]))
+        rt._failure.assert_not_called()
+        self.assertEqual(rt.idle_end, 'idle_record')
         rt = await self.run_records([heartbeat(error={'type': 'overloaded_error'}), *FINAL])
         self.assertIn('Native CLI reported a model error', str(rt._failure.call_args.args[0]))
 
@@ -172,12 +181,15 @@ class ApiRetryDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_init_parent_terminal_and_exact_discriminator_guards_remain(self):
         cases = (([api_retry(), *FINAL], False, 'Unexpected system event'),
                  ([api_retry(parent_tool_use_id='parent'), *FINAL], True, 'subagent'),
-                 ([*FINAL, api_retry()], True, 'after terminal result'),
                  ([{'type': 'system', 'subtype': 'unknown_retry'}, *FINAL], True, 'Unexpected system event'))
         for records, initialize, expected in cases:
             with self.subTest(expected=expected):
                 rt = await self.run_records(records, initialize=initialize)
                 self.assertIn(expected, str(rt._failure.call_args.args[0]))
+        # After a result the process is idle: a record then ends it, failing no sample.
+        rt = await self.run_records([*FINAL, api_retry()])
+        rt._failure.assert_not_called()
+        self.assertEqual(rt.idle_end, 'idle_record')
         rt = await self.run_records([api_retry(type='assistant'), *FINAL])
         self.assertIsInstance(rt._failure.call_args.args[0], ModelAuthenticationError)
 
@@ -233,7 +245,8 @@ class HeartbeatHandoffTests(unittest.TestCase):
                 self.assertEqual(final.last_assistant_text, 'fast|slow')
                 self.assertEqual(final.usage.total_tokens, 9)
                 self.assertTrue(old.mailbox.all_returned())
-                self.assertIsNone(self.model._runtime)
+                self.assertIs(self.model._runtime, old)  # kept for the next turn
+                self.assertTrue(old.idle)
                 if trace:
                     trace.close()
                     events = [json.loads(line) for line in trace.event_path.read_text().splitlines()]

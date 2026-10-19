@@ -1301,7 +1301,7 @@ class CLIControllerTests(_ControllerTestCase):
             self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
         finally:
             release.set()
-        self.assertEqual(len(retires), 1)  # only the turn's end: the press cancelled nothing
+        self.assertEqual(len(retires), 0)  # the press cancelled nothing, and the turn ended
         saved = load_interaction_save(self.path)
         self.assertIn(Message("assistant", "finished anyway"), saved.items)
 

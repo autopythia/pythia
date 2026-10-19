@@ -17,7 +17,7 @@ from unittest import mock
 from pythia.interaction.claude_relay import ClaudeRelayEndpoint, ClaudeRelayModel
 from pythia.interaction.claude_relay._recovery import NativeMCPTimeout
 from pythia.interaction.claude_relay._runtime import Runtime
-from pythia.interaction.compaction import PiCompactor, auto_compaction_due
+from pythia.interaction.compaction import CompactionSettings, auto_compaction_due, run_compaction
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.environment import Environment, Tool, ToolOutcome, ToolSpec
 from pythia.interaction.items import ContextPrefix, Instructions, Message, ModelSampleBoundary, ToolResult
@@ -105,7 +105,7 @@ class LiveRelayTests(unittest.TestCase):
         self.assertEqual(sample.last_assistant_text.strip(), self.receipt)
         self.assertGreater(sample.usage.output_tokens, 0)
         self.assertEqual(self.executions, 1)
-        self.assertIsNone(self.model._runtime)
+        self.assertTrue(self.model._runtime.idle)  # kept for the next turn
         context.extend(sample.context_items())
         self.checkpoint(context)
 
@@ -118,7 +118,7 @@ class LiveRelayTests(unittest.TestCase):
                 self.assertEqual(sample.last_assistant_text.strip(), '437')
                 self.assertEqual(sample.stop_reason, 'end_turn')
                 self.assertGreater(sample.usage.output_tokens, 0)
-                self.assertIsNone(self.model._runtime)
+                self.assertTrue(self.model._runtime.idle)  # kept for the next turn
 
     def test_mcp_auth_native_id_park_and_warm_handoff(self):
         context, old = self.parked()
@@ -127,7 +127,26 @@ class LiveRelayTests(unittest.TestCase):
             self.final(context, sample_params=SampleParams(extra={'output_config': {'effort': 'max'}}))
             starts.assert_not_called()
         self.assertTrue(old.mailbox.all_returned())
-        self.assertTrue(old.closed.is_set())
+        self.assertIs(self.model._runtime, old)
+
+    def test_a_later_turn_and_a_mid_turn_steer_reach_the_same_process(self):
+        # doc/claude-relay-warm-delivery-plan.md: Part 2, then Part 1.
+        context, old = self.parked()
+        context.append(Message('user', 'Also: after the receipt, add one more line with only the word STEERED.'))
+        with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=Runtime) as starts:
+            steered = self.model.sample(context, tools=self.environment.tool_specs)
+            context.extend(steered.context_items())
+            context.append(Message('user', 'Reply with exactly: TWO'))
+            second = self.model.sample(context, tools=self.environment.tool_specs)
+            starts.assert_not_called()
+        self.assertEqual(steered.recovery, ())
+        self.assertIn(self.receipt, steered.last_assistant_text)
+        self.assertIn('STEERED', steered.last_assistant_text)
+        self.assertEqual(second.last_assistant_text.strip(), 'TWO')
+        # The history came from the cache, not a new import.
+        self.assertGreater(second.usage.cached_input_tokens, second.usage.input_tokens // 2)
+        self.assertIs(self.model._runtime, old)
+        self.assertEqual(self.executions, 1)
 
     def test_native_heartbeat_while_real_result_is_withheld(self):
         context, old = self.parked()
@@ -206,8 +225,9 @@ class LiveRelayTests(unittest.TestCase):
             summaries.append(runtime)
             return runtime
         with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=start):
-            compacted = PiCompactor(self.model, keep_recent_tokens=1).compact(
-                context, tools=self.environment.tool_specs)
+            # As the turn loop and /compact do: the sequence retires the model when it ends.
+            compacted = run_compaction(context, self.model, CompactionSettings(mode='pi', keep_recent_tokens=1),
+                                       tools=self.environment.tool_specs)
         self.assertEqual(context.items, before)
         self.assertTrue(old.closed.is_set())
         self.assertTrue(all(slot['result'] is None for slot in old.mailbox.slots.values()))

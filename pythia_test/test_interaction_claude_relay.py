@@ -28,7 +28,8 @@ from pythia.interaction.claude_relay._cli_protocol import Assembler, decode
 from pythia.interaction.claude_relay._context import Snapshot
 from pythia.interaction.claude_relay._mcp import Mailbox, MCPServer
 from pythia.interaction.claude_relay._runtime import PREAMBLE, Runtime, system_prompt
-from pythia.interaction.compaction import PiCompactor, CompactionError, auto_compaction_due
+from pythia.interaction.compaction import PiCompactor, CompactionError, CompactionSettings, auto_compaction_due
+from pythia.interaction.compaction import run_compaction
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.model_catalog import EndpointSpec, BUILTIN_MODEL_CATALOG
 from pythia.interaction.model_config import build_parser, build_model, prepare_namespace, relay_endpoint
@@ -415,10 +416,12 @@ class ModelTests(unittest.TestCase):
         context.append(SampleMetadata(TokenUsage()))  # audit-only edits do not invalidate a handoff
         time.sleep(.03)
         context.extend([ToolResult(sample.tool_calls[0].call_id, 'one'), ToolResult(sample.tool_calls[1].call_id, 'two', False)])
+        runtime = self.model._runtime
         final = self.model.sample(context, tools=TOOLS)
         self.assertEqual(final.last_assistant_text, 'one|two')
         self.assertEqual(final.usage.total_tokens, 9)
-        self.assertIsNone(self.model._runtime)
+        self.assertIs(self.model._runtime, runtime)  # kept for the next turn
+        self.assertTrue(runtime.idle)
 
     def test_tool_batches_carry_results_due_but_never_save_it(self):
         context = InteractionContext((Instructions(''), Message('user', 'two')))
@@ -457,7 +460,7 @@ class ModelTests(unittest.TestCase):
         context.extend(sample.context_items())
         context.extend([ToolResult(sample.tool_calls[0].call_id, 'one'), ToolResult(sample.tool_calls[1].call_id, 'two')])
         self.assertEqual(self.model.sample(context, tools=TOOLS).last_assistant_text, 'one|two')
-        self.assertIsNone(self.model._runtime)
+        self.assertTrue(self.model._runtime.idle)  # kept for the next turn
 
     def test_a_refusal_fails_with_its_reason(self):
         for prompt, expected in (('refused', 'Request refused (category=cyber): Synthetic refusal explanation.'),
@@ -475,7 +478,8 @@ class ModelTests(unittest.TestCase):
         sample = self.model.sample(context, tools=TOOLS)
         context.extend(sample.context_items())
         context.extend(ToolResult(call.call_id, 'done') for call in sample.tool_calls)
-        context.append(Message('user', 'after results'))  # a new message: a cold import
+        context.append(Message('user', 'after results'))
+        self.model.retire()  # a new process: a cold import
         final = self.model.sample(context, tools=TOOLS)
         self.assertEqual(final.last_assistant_text, 'cold:after results')
         state = self.fixture_state()
@@ -517,7 +521,7 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(sample.last_assistant_text, 'cold:' + prompt)
                 self.assertNotIn('cut thinking', repr(sample.items))  # nothing from the cut message
                 self.assertEqual(sample.usage.total_tokens, 9)
-                self.assertIsNone(self.model._runtime)
+                self.assertTrue(self.model._runtime.idle)  # kept for the next turn
 
     def sample_through_rewrite(self, context, **options):
         """Sample 'rewritten-tool-input', holding the retirement until the CLI's
@@ -603,7 +607,7 @@ class ModelTests(unittest.TestCase):
         self.assertIsInstance(prefix, ContextPrefix)
         self.assertTrue(any('fixture summary' in item.content_text
                             for item in prefix.prefix_items if isinstance(item, Message)))
-        self.assertIsNone(self.model._runtime)
+        self.assertTrue(self.model._runtime.idle)  # kept, as after any answer; run_compaction retires it
 
     def test_two_long_waits_in_one_batch_are_answered_before_the_native_deadline(self):
         # Scaled down: the native client gives up 3 s after sending a call, so
@@ -779,7 +783,9 @@ class ModelTests(unittest.TestCase):
             summaries.append(value)
             return value
         with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=construct):
-            compacted = PiCompactor(self.model, keep_recent_tokens=1).compact(context, tools=TOOLS)
+            # As the turn loop and /compact do: the sequence retires the model when it ends.
+            compacted = run_compaction(context, self.model, CompactionSettings(mode='pi', keep_recent_tokens=1),
+                                       tools=TOOLS)
         self.assertEqual(context.items, before)  # caller, not adapter, installs the checkpoint
         self.assertTrue(old.closed.is_set())
         self.assertTrue(all(slot['result'] is None for slot in old.mailbox.slots.values()))
@@ -810,13 +816,16 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(context.items, before)
         self.assertIsNone(self.model._runtime)
 
-    def test_synthetic_user_message_after_results_forces_cold_import(self):
+    def test_a_user_message_after_results_goes_to_the_same_process(self):
+        # It goes with the results (doc/claude-relay-warm-delivery-plan.md, Part 2).
         context = InteractionContext((Message('user', 'two'),))
         sample = self.model.sample(context, tools=TOOLS)
+        runtime = self.model._runtime
         context.extend(sample.context_items())
         context.extend([*(ToolResult(call.call_id, 'done') for call in sample.tool_calls), Message('user', 'new context')])
         result = self.model.sample(context, tools=TOOLS)
-        self.assertEqual(result.last_assistant_text, 'cold:new context')
+        self.assertEqual(result.last_assistant_text, 'done|done +new context')
+        self.assertIs(self.model._runtime, runtime)
 
     def launch_options(self):
         return ['--endpoint-api', 'claude-relay', '--model', 'fixture-model',

@@ -604,6 +604,23 @@ class RunCompactionTests(unittest.TestCase):
         self.assertEqual(reports[0].failure, ModelFailure(
             "CompactionError", "summary request for the history returned no text"))
 
+    def test_the_model_is_retired_when_the_sequence_ends(self):
+        # A compaction leaves behind what a model kept for the next turn: the
+        # Claude relay's process that answered pi's or warmpi's request, or one
+        # whose history a checkpoint replaces. The turn loop and /compact alike.
+        class Retiring(_Model):
+            retired = 0
+
+            def retire(self):
+                self.retired += 1
+        model = Retiring()
+        self.run_sequence("pi", _Script(_result()), model=model)
+        self.assertEqual(model.retired, 1)
+        model = Retiring()
+        with self.assertRaises(ModelTransportError):
+            self.run_sequence("pi", _Script(_timeout()), model=model)
+        self.assertEqual(model.retired, 1)
+
     def test_a_log_error_moves_on_at_once(self):
         script = _Script(CompactionLogError("the save run.jsonl was not found"), _result())
         reports = []

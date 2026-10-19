@@ -77,7 +77,9 @@ MAX_EXTRA_SAMPLE_PARAMS_BYTES = 65_536
 # module stays dependency-free; ``timeouts`` re-exports it with the defaults.
 MAX_TIMEOUT_SECONDS = 86_400.0
 # ModelTimeouts fields; all but request_seconds are Claude Relay deadlines.
-_RELAY_TIMEOUT_FIELDS = ("generation_seconds", "parked_seconds", "startup_seconds", "stop_seconds")
+# idle_seconds alone may be 0 (validate_idle_seconds).
+_RELAY_TIMEOUT_FIELDS = ("generation_seconds", "parked_seconds", "startup_seconds", "stop_seconds",
+                         "idle_seconds")
 MODEL_TIMEOUT_FIELDS = ("request_seconds", *_RELAY_TIMEOUT_FIELDS)
 
 
@@ -133,6 +135,21 @@ def validate_timeout_seconds(value, name):
             or not 0 < value <= MAX_TIMEOUT_SECONDS):
         raise ValueError(
             f"{name} must be positive and finite, at most "
+            f"{MAX_TIMEOUT_SECONDS:g} seconds"
+        )
+    return float(value)
+
+
+def validate_idle_seconds(value, name):
+    """Return ``value`` as float seconds, or raise ``ValueError`` naming ``name``.
+
+    For a wait that may be skipped: 0, or what ``validate_timeout_seconds``
+    accepts. The message never echoes the value.
+    """
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not 0 <= value <= MAX_TIMEOUT_SECONDS):
+        raise ValueError(
+            f"{name} must be 0 or positive and finite, at most "
             f"{MAX_TIMEOUT_SECONDS:g} seconds"
         )
     return float(value)
@@ -316,8 +333,9 @@ class ModelTimeouts:
 
     ``request_seconds`` is the HTTP blocking-I/O timeout of an HTTP API's model
     requests, per operation and per attempt. The others are Claude Relay's
-    generation, parked, startup, and stop deadlines. Launch options, ``/config``,
-    and per-call params take precedence; account commands never use these.
+    generation, parked, startup, stop, and idle deadlines; ``idle_seconds`` 0
+    keeps no native process between turns. Launch options, ``/config``, and
+    per-call params take precedence; account commands never use these.
     """
 
     request_seconds: Optional[float] = None
@@ -325,12 +343,14 @@ class ModelTimeouts:
     parked_seconds: Optional[float] = None
     startup_seconds: Optional[float] = None
     stop_seconds: Optional[float] = None
+    idle_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
         for name in MODEL_TIMEOUT_FIELDS:
             value = getattr(self, name)
             if value is not None:
-                object.__setattr__(self, name, validate_timeout_seconds(value, name))
+                validate = validate_idle_seconds if name == "idle_seconds" else validate_timeout_seconds
+                object.__setattr__(self, name, validate(value, name))
 
 
 # The SampleParams fields that a catalog entry may set (sample_params.<name>).
@@ -498,7 +518,7 @@ class ModelSpec:
             if self.timeouts.request_seconds is not None:
                 raise ValueError("Claude Relay sends no HTTP model requests; use its relay timeouts")
         elif any(getattr(self.timeouts, name) is not None for name in _RELAY_TIMEOUT_FIELDS):
-            raise ValueError("Generation, parked, startup, and stop timeouts require Claude Relay")
+            raise ValueError("Generation, parked, startup, stop, and idle timeouts require Claude Relay")
         if not isinstance(self.compaction, CompactionDefaults):
             raise TypeError("compaction must be CompactionDefaults")
         error = compaction_route_error(self.endpoint, self.compaction.mode)

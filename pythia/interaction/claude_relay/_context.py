@@ -1,4 +1,10 @@
-"""Text-only cold import and exact warm-handoff comparison. No provider state in saves."""
+"""Text-only cold import and exact warm-handoff comparison. No provider state in saves.
+
+A live native process acknowledged some records (``acknowledged``): its
+history. A sample whose records extend them by exactly the pending results,
+then user messages, goes to that process (``handoff``); anything else starts a
+new process with a cold import of every record.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -88,14 +94,45 @@ class Snapshot:
         return canonical({'format': CODEC, 'history': history})
 
 
+@dataclass(frozen=True)
+class Delivery:
+    """What a sample sends the live native process instead of a cold import.
+
+    ``results`` maps each pending native call ID to its (output, success), and
+    ``messages`` are the texts of the user messages that follow them.
+    """
+
+    results: dict
+    messages: tuple
+
+
 def handoff(snapshot, acknowledged, pending):
-    """None means cold restart. An unchanged but incomplete handoff is an error."""
+    """The ``Delivery`` for the live process, or None for a cold restart.
+
+    The new records must be the complete results of the ``pending`` calls,
+    then text-only user messages: after a tool batch, the results, and any
+    steers or tools' messages that followed them (doc/claude-relay-warm-delivery-plan.md,
+    Part 2); after a final answer, when nothing is pending, the next turn's
+    user messages (Part 1). Anything else is a cold restart: an assistant
+    message, a result after a message, a blank message, or nothing new at all,
+    as ``/continue`` after a final answer. Results alone that are incomplete
+    are an error, as before: an unchanged but incomplete handoff.
+    """
     if snapshot.records[:len(acknowledged)] != acknowledged:
         return None
     suffix = [json.loads(row) for row in snapshot.records[len(acknowledged):]]
-    if any(row['kind'] != 'result' for row in suffix):
-        return None  # e.g. synthetic user context after the real results
-    ids = [row['id'] for row in suffix]
-    if len(ids) != len(set(ids)) or set(ids) != set(pending):
-        raise ModelResponseError('Claude Relay handoff requires exactly the complete outstanding result set')
-    return {pending[row['id']]: (row['output'], row['success']) for row in suffix}
+    count = next((index for index, row in enumerate(suffix) if row['kind'] != 'result'), len(suffix))
+    results, messages = suffix[:count], suffix[count:]
+    if any(row['kind'] != 'message' or row['role'] != 'user' or not row['text'].strip() for row in messages):
+        return None  # CLI 2.1.289's requests carry no blank text blocks
+    ids = [row['id'] for row in results]
+    complete = len(ids) == len(set(ids)) and set(ids) == set(pending)
+    if not messages:
+        if not pending:
+            return None  # nothing to deliver
+        if not complete:
+            raise ModelResponseError('Claude Relay handoff requires exactly the complete outstanding result set')
+    elif not complete:
+        return None
+    return Delivery({pending[row['id']]: (row['output'], row['success']) for row in results},
+                    tuple(row['text'] for row in messages))

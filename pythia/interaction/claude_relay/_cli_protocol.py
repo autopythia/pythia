@@ -25,7 +25,12 @@ from ._diagnostics import identifier
 # messages, callable tool names in the cold import, native tool-name rejections.
 # v8 adds, since v7: the CLI's rewrite of \uXXXX text in tool input, accepted in
 # its snapshots and MCP calls but never executed (native_input_rewrite).
-PROFILE = 'claude-stream-json-v8'
+# v9 adds, since v8: kept processes (doc/claude-relay-warm-delivery-plan.md).
+# Each user record written has a uuid; the CLI reports it read, taken up and
+# completed (command_lifecycle), writes a system/init at each turn's start,
+# echoes the uuid on the turn's first reply, and numbers its results
+# (result_index). A record read while tool calls wait goes with their results.
+PROFILE = 'claude-stream-json-v9'
 # CLI 2.1.289 gives up on an MCP tools/call MCP_TOOL_TIMEOUT milliseconds after
 # sending it, and answers the call itself (_recovery.native_timeout_texts).
 # Unset, it aborts the call's HTTP request after 60 s instead. The relay sets it
