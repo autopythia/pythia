@@ -302,15 +302,22 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         await self.wait_output(b"[assistant] answer-1")
         await self.wait_output(b"idle")
         os.write(self.master, b"/compact\r")
-        await self.wait_output_after(b"Rebooted after a coldstart compaction", b"idle")
-        os.write(self.master, b"next\r")
-        await self.wait_output(b"[assistant] answer-2")
+        # The restarted CLI has the model follow the pointer at once, without a new message.
+        restarted = (b"Rebooted after a coldstart compaction (compaction_coldstart_reboot): "
+                     b"this is the current code; the model follows the coldstart pointer.")
+        await self.wait_output_after(restarted, b"[assistant] answer-1")
+        await self.wait_output_after(restarted, b"idle")
         os.write(self.master, b"/quit\r")
         await self.wait_exit()
         saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["compact"])
+        self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
+                         [Message("user", "initial")])
+        self.assertIsInstance(saved.items[-1], TurnSummary)
         self.assertTrue((self.root / "interaction.summary.md").is_file())
         self.assertEqual(self.output.count(b"[user] initial"), 1)
+        self.assertIn(b"Rebooting: the CLI restarts on the current code, and the model follows "
+                      b"the coldstart pointer.", self.output)
 
     async def test_save_path_stays_in_launch_directory_not_tool_workspace(self):
         workspace = self.root / "tools"

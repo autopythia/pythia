@@ -408,6 +408,18 @@ class _RebootCase(unittest.IsolatedAsyncioTestCase):
             Message("assistant", "old answer"), SampleMetadata(TokenUsage(90, 10, 100, 20)),
             ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100))))
 
+    def _compacted(self, protocol="coldstart"):
+        """A finished turn, then /compact's checkpoint (a coldstart one by default)."""
+        call = ToolCall("compact", "user_1", "{}")
+        original = (Init("saved"), Tools(), Message("user", "old query"),
+                    UserInteractionBoundary(), Message("assistant", "old answer"),
+                    ModelSampleBoundary(), TurnSummary(sample_count=1), UserToolCall(call),
+                    UserToolResult(ToolResult("user_1", "compacted")),
+                    ContextPrefix((Message("user", "a pointer to the log"),)),
+                    CompactionMetadata(TokenUsage(), protocol))
+        save_interaction_save(self.path, InteractionContext(original))
+        return original
+
 
 class RebootFlowTests(_RebootCase):
     async def test_reboot_while_idle_restarts_at_once(self):
@@ -571,10 +583,62 @@ class RebootFlowTests(_RebootCase):
                                              return_value=_Compactor()):
             carried = await self._rebooted(model, terminal, [
                 "--resume", "--compaction-coldstart-reboot"])
+        # The restarted CLI reads the save to decide that the model follows the pointer.
         self.assertEqual((carried["cause"], carried["continues"]), ("coldstart", False))
         items = load_interaction_save(self.path).items
         self.assertEqual([type(item) for item in items[-4:-1]],
                          [UserToolCall, UserToolResult, ContextPrefix])
+        self.assertIn("Rebooting: the CLI restarts on the current code, and the model follows "
+                      "the coldstart pointer.", _notices(terminal.items))
+
+    async def test_a_reboot_typed_during_compact_becomes_the_coldstart_one(self):
+        self._resumable()
+        gate = threading.Event()
+        compactor = _Compactor(gate)
+        terminal = _Terminal(_steps(
+            (lambda t, s: s == "idle", lambda t: t.submit("/compact")),
+            (lambda t, s: compactor.entered.is_set(), lambda t: t.submit("/reboot")),
+            (lambda t, s: _has(t, "Rebooting once"), lambda t: gate.set())))
+        model = _Model(self.path)
+        try:
+            with _rebootable(), patch_compaction(cli, "create_default_compactor",
+                                                 return_value=compactor):
+                carried = await self._rebooted(model, terminal, [
+                    "--resume", "--compaction-coldstart-reboot"])
+        finally:
+            gate.set()
+        self.assertEqual((carried["cause"], carried["continues"]), ("coldstart", False))
+        self.assertIn("Rebooting: the CLI restarts on the current code, and the model follows "
+                      "the coldstart pointer.", _notices(terminal.items))
+
+    async def test_a_failed_start_check_after_compact_has_the_model_follow_the_pointer_here(self):
+        self._resumable()
+        model = _Model(self.path, _answer("summary updated"))
+        terminal = _Terminal(_steps(
+            (lambda t, s: s == "idle", lambda t: t.submit("/compact")),
+            (_idle_with("[assistant] summary updated"), _exit)))
+        failure = "the restarted CLI would fail to start (its start check exited with status 1)"
+        with _rebootable(check=failure), patch_compaction(cli, "create_default_compactor",
+                                                          return_value=_Compactor()):
+            self.assertEqual(await self._session(model, terminal, [
+                "--resume", "--compaction-coldstart-reboot"]), 0)
+        self.assertIn(f"Reboot cancelled: {failure}. The model follows the coldstart pointer "
+                      "here.", _notices(terminal.items))
+        [(context, _, _)] = model.calls
+        self.assertIsInstance(context.items[-1], CompactionMetadata)  # no new message
+        saved = load_interaction_save(self.path)
+        self.assertEqual(_users(saved), ["old request"])
+        self.assertIsInstance(saved.items[-1], TurnSummary)
+
+    async def test_a_typed_continue_still_refuses_the_pointer(self):
+        saved = self._compacted()
+        model = _Model(self.path)
+        refusal = "Nothing to continue: the last turn ended. Enter a query instead."
+        terminal = _Terminal(_steps((lambda t, s: s == "idle", lambda t: t.submit("/continue")),
+                                    (_idle_with(refusal), _exit)))
+        self.assertEqual(await self._session(model, terminal, ["--resume"]), 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(load_interaction_save(self.path).items, saved)
 
 
 class RestartedCLITests(_RebootCase):
@@ -613,6 +677,33 @@ class RestartedCLITests(_RebootCase):
         self.assertIn("Rebooted after a coldstart compaction (compaction_coldstart_reboot): "
                       "this is the current code; the turn continues.", notices)
         self.assertFalse(any(text.startswith("Note: resumed save") for text in notices))
+
+    async def test_after_compact_the_model_follows_the_coldstart_pointer(self):
+        # As the replaced process left it: a /compact between turns continues nothing.
+        original = self._compacted()
+        model = _Model(self.path, _answer("summary updated"))
+        terminal = _Terminal(_steps((_idle_with("[assistant] summary updated"), _exit)))
+        self.assertEqual(await self._session(
+            model, terminal, rebooted=cli._Rebooted(cause="coldstart")), 0)
+        [(context, _, _)] = model.calls
+        self.assertEqual(context.items, original)  # no new message
+        self.assertIn("Rebooted after a coldstart compaction (compaction_coldstart_reboot): "
+                      "this is the current code; the model follows the coldstart pointer.",
+                      _notices(terminal.items))
+        self.assertIsInstance(load_interaction_save(self.path).items[-1], TurnSummary)
+
+    async def test_it_follows_only_the_coldstart_pointer_that_caused_the_reboot(self):
+        for cause, protocol in (("/reboot", "coldstart"), ("coldstart", "pi")):
+            with self.subTest(cause=cause, protocol=protocol):
+                self._compacted(protocol)
+                model = _Model(self.path)
+                terminal = _Terminal(_steps((lambda t, s: s == "idle", _exit)))
+                self.assertEqual(await self._session(
+                    model, terminal, rebooted=cli._Rebooted(cause=cause)), 0)
+                self.assertEqual(model.calls, [])
+                self.assertTrue(any(text.startswith("Rebooted after ") and
+                                    text.endswith(": this is the current code.")
+                                    for text in _notices(terminal.items)))
 
     async def test_a_lost_state_still_resumes_without_continuing(self):
         self._unfinished()
