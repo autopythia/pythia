@@ -23,13 +23,16 @@ from dataclasses import field
 from datetime import datetime
 from datetime import time as day_time
 from datetime import timedelta
+import importlib
 import json
 import os
 from pathlib import Path
 import queue
 import re
 import signal
+import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -111,7 +114,10 @@ from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
 from ._model_binding_debug import debug_model_binding_path
 from ._model_binding_debug import save_debug_model_bindings
+from .runtime_config import ConfigError
 from .runtime_config import InteractionConfig
+from .save import interaction_item_from_dict
+from .save import interaction_item_to_dict
 from .save import InteractionSaveWriter
 from .save import resume_interaction_save
 from .user import UserInteraction
@@ -165,6 +171,38 @@ class _Submission:
     text: str
     message: Message
     steers: bool = True
+
+
+@dataclass
+class _Reboot:
+    """A requested reboot: the CLI restarts on the current code (see _reboot_ready).
+
+    ``cause`` is "/reboot", or "coldstart" for a coldstart compaction with
+    compaction_coldstart_reboot. ``continues`` is set once the reboot ends a
+    running turn, which the restarted CLI then continues; ``ready`` once the
+    session shuts down for it.
+    """
+
+    cause: str
+    continues: bool = False
+    ready: bool = False
+
+
+@dataclass(frozen=True)
+class _Rebooted:
+    """What a restarted CLI (--rebooted) carries over from the process it replaced.
+
+    ``cause`` is that process's _Reboot.cause, and None when the state was
+    lost (``warning`` says why): then nothing else carries over.
+    """
+
+    cause: Optional[str] = None
+    continues: bool = False
+    config: dict = field(default_factory=dict)  # the /config changes: key -> value
+    draft: Editor = field(default_factory=Editor)
+    queue: tuple = ()  # queued input, as _Submission, UserToolIntent, and _ContinueIntent
+    exit_code: int = 0
+    warning: Optional[str] = None
 
 
 def _plain_message(text: str) -> Message:
@@ -233,6 +271,12 @@ class _UIState:
     cron_entries: dict = field(default_factory=dict)
     icron_resumes: int = 0
     icron_auth_noticed: bool = False
+    # A requested reboot (/reboot, compaction_coldstart_reboot), or None; set
+    # on the event loop thread, and read by the context thread at a turn's
+    # interrupt point. rebooted is what this process carries over from the
+    # one it replaced, when it is a restarted CLI.
+    reboot: Optional[_Reboot] = None
+    rebooted: Optional[_Rebooted] = field(default=None, repr=False)
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -393,6 +437,9 @@ class _UIState:
                 else:
                     self._submit_text(parts[1], draft=text, flush=steer)
                 return
+            elif head == "/reboot":
+                self._request_reboot(text)
+                return
             elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
                 self._icron_command(head, text)
                 return
@@ -512,6 +559,31 @@ class _UIState:
         else:
             self.notice(f"Flushing {steers}: delivered as soon as the current sample or tool "
                         "call ends; a sample or command wait is cancelled where possible.")
+
+    def _request_reboot(self, text: str) -> None:
+        """/reboot: restart the CLI on the current code, at once while idle.
+
+        Like /exit, it waits for a running turn's tool batch: the turn ends
+        before its next sample, once it takes the steers queued so far, and
+        the restarted CLI continues it. It waits for a running command too.
+        Handled at once, like /exit: it is never queued.
+        """
+        self.editor = Editor()
+        if text.strip() != "/reboot" or "\n" in text or "\r" in text:
+            self.notice("Usage: /reboot (no arguments; single line).")
+            return
+        if self.reboot is not None:
+            self.notice("A reboot is already pending.")
+            return
+        refusal = _reboot_refusal(self)
+        if refusal is not None:
+            self.notice(f"Cannot reboot: {refusal}.")
+            return
+        self.reboot = _Reboot("/reboot")
+        if self.phase not in {"idle", "failed", "auth needed"}:
+            self.notice("Rebooting once the current operation allows: a running turn finishes "
+                        "its tool batch and continues after the restart. /exit exits instead.")
+        self.changed.set()
 
     def _icron_command(self, head: str, text: str) -> None:
         """/cron, /crontab, and /py (--enable-experimental-icron): handled at
@@ -864,6 +936,7 @@ async def _compact_user_tool(
         return model
 
     state.set_phase("compacting")
+    rebooting = False  # a coldstart compaction with compaction_coldstart_reboot
     try:
         if model is None:
             result_item = UserToolResult(
@@ -939,6 +1012,8 @@ async def _compact_user_tool(
                     result_item,
                     *compaction.context_items(),
                 )
+                rebooting = (compaction.protocol == "coldstart"
+                             and snapshot.compaction_coldstart_reboot)
 
         await _append(context, contribution, state, writer)
         state.displays.extend(
@@ -947,6 +1022,8 @@ async def _compact_user_tool(
                 source_user_calls=(call,),
             )
         )
+        if rebooting:
+            _coldstart_reboot(state)
     finally:
         state.active_user_call = None
     return model
@@ -1322,6 +1399,267 @@ def _safe_notice(state: _UIState, text: str) -> None:
         state.notice(text)
 
 
+# Reboots (/reboot, compaction_coldstart_reboot): the CLI shuts down as on
+# exit, then runs its own command line again, with --rebooted. The restarted
+# CLI resumes the save on the code as it is now, and goes on where this one
+# stopped (see _Rebooted).
+
+# Ends a restarted CLI's command line. With "=check", the CLI only loads its
+# code and parses its options, then exits: the start check (_check_reboot).
+_REBOOTED_OPTION = "--rebooted"
+# Names the descriptor of an unlinked file that holds what a restarted CLI
+# carries over (_reboot_state): it survives exec and leaves nothing behind.
+_REBOOT_STATE_FD = "PYTHIA_INTERACTION_REBOOT_FD"
+_REBOOT_STATE_VERSION = 1
+_REBOOT_CHECK_SECONDS = 60
+_REBOOT_CAUSES = ("/reboot", "coldstart")
+# This process's command line (_command_line), set by main() when it parses
+# the process's own arguments; otherwise None, and the CLI can't reboot.
+_reboot_argv: Optional[list] = None
+
+
+def _command_line() -> Optional[list]:
+    """This process's command line, interpreter options included, without
+    the --rebooted that a reboot appended; None if it can't be known.
+
+    Python 3.9 has no ``sys.orig_argv``: there, only a module run with -m or
+    a script runs again, without interpreter options.
+    """
+    if not sys.executable:
+        return None
+    original = getattr(sys, "orig_argv", None)
+    if original:
+        argv = [sys.executable, *original[1:]]
+    else:
+        spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+        if spec is not None and spec.name:
+            argv = [sys.executable, "-m", spec.name, *sys.argv[1:]]
+        elif sys.argv and sys.argv[0] not in ("", "-c"):
+            argv = [sys.executable, *sys.argv]
+        else:
+            return None
+    if len(argv) > 1 and argv[-1] == _REBOOTED_OPTION:
+        argv.pop()
+    return argv
+
+
+def _reboot_command() -> Optional[list]:
+    """The restarted CLI's command line, or None (see _reboot_argv)."""
+    return None if _reboot_argv is None else [*_reboot_argv, _REBOOTED_OPTION]
+
+
+def _reboot_refusal(state: _UIState) -> Optional[str]:
+    """Why the CLI can't reboot now, as a clause, or None.
+
+    It never reboots while icron has jobs or wake-ups: they live only in this
+    process. (icron's Python state goes, as on any restart.)
+    """
+    if _reboot_command() is None:
+        return "this process's command line isn't known, so it can't be run again"
+    if state.persistence_failed:
+        return "a checkpoint failed, and unsaved state remains in memory"
+    if state.icron is not None:
+        status = state.icron.status()
+        if status.jobs:
+            count = len(status.jobs)
+            return (f"icron has {count} pending job{'s' if count != 1 else ''}, and jobs "
+                    "live only in this process (/cron lists them)")
+        if status.undelivered or status.main_state == "suspended":
+            return "main waits for an icron wake-up, which lives only in this process"
+    return None
+
+
+def _coldstart_reboot(state: _UIState) -> None:
+    """compaction_coldstart_reboot, after a coldstart compaction: request a
+    reboot, unless one is pending, an exit is, or _reboot_refusal objects."""
+    if state.closing or state.reboot is not None:
+        return
+    refusal = _reboot_refusal(state)
+    if refusal is not None:
+        state.notice(f"compaction_coldstart_reboot: not rebooting, since {refusal}.")
+        return
+    state.reboot = _Reboot("coldstart")
+
+
+def _check_reboot() -> Optional[str]:
+    """The start check: the restarted CLI's command line with --rebooted=check,
+    which loads the current code and parses the options. None if it passes,
+    else why not, as a clause. It blocks: run it off the event loop."""
+    command = _reboot_command()
+    if command is None:
+        return "this process's command line isn't known"
+    try:
+        check = subprocess.run([*command[:-1], f"{_REBOOTED_OPTION}=check"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, timeout=_REBOOT_CHECK_SECONDS)
+    except subprocess.TimeoutExpired:
+        return f"the restarted CLI's start check didn't finish within {_REBOOT_CHECK_SECONDS} s"
+    except OSError as exc:
+        return f"the restarted CLI's start check couldn't run ({exc.strerror or type(exc).__name__})"
+    if check.returncode == 0:
+        return None
+    lines = [line for line in check.stderr.decode("utf-8", "replace").splitlines()
+             if line.strip()]
+    detail = f": {_one_line(lines[-1], 240)}" if lines else ""
+    return (f"the restarted CLI would fail to start (its start check exited with status "
+            f"{check.returncode}{detail})")
+
+
+async def _reboot_ready(state: _UIState) -> bool:
+    """Whether the session shuts down now for its requested reboot.
+
+    The reboot is dropped, with a notice, if _reboot_refusal now objects (as
+    when main scheduled an icron job meanwhile), or if the start check fails.
+    A turn that it ended then continues here.
+    """
+    reboot, phase = state.reboot, state.phase
+    refusal = _reboot_refusal(state)
+    if refusal is None:
+        state.set_phase("rebooting")
+        try:
+            refusal = await asyncio.get_running_loop().run_in_executor(None, _check_reboot)
+        except Exception as exc:  # dropped below, so that the loop never retries it
+            refusal = f"the restarted CLI's start check failed ({type(exc).__name__})"
+    if state.closing:
+        return False  # an exit came meanwhile: it wins
+    if refusal is None:
+        reboot.ready = True
+        state.notice("Rebooting: the CLI restarts on the current code"
+                     + (" and continues the turn." if reboot.continues else "."))
+        return True
+    state.reboot = None
+    state.set_phase(phase)
+    state.notice(f"Reboot cancelled: {refusal}."
+                 + (" The turn continues here." if reboot.continues else ""))
+    if reboot.continues:
+        state.pending.appendleft(_ContinueIntent())
+    if state.pending:
+        state.changed.set()  # run the queue: the continuation first, if any
+    return False
+
+
+def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> dict:
+    """What the restarted CLI carries over (_Rebooted), as JSON. ``queued`` is
+    the queue as it was before the session's last stop, by default the queue."""
+    initial = config.initial_values()
+    changes = {key: value for key, value in config.values().items() if value != initial[key]}
+    queue = []
+    for entry in (state.pending if queued is None else queued):
+        if isinstance(entry, _Submission):
+            queue.append({"kind": "text", "text": entry.text, "steers": entry.steers,
+                          "message": interaction_item_to_dict(entry.message)})
+        elif isinstance(entry, UserToolIntent):
+            queue.append({"kind": "command", "name": entry.name,
+                          "arguments_json": entry.arguments_json})
+        elif isinstance(entry, (_ContinueIntent, _RetryIntent)):
+            # A retry's ticket belongs to this process; /continue reads the
+            # log, which has the failure too.
+            queue.append({"kind": "continue"})
+        # icron has no wake-ups to carry (_reboot_refusal).
+    return {
+        "version": _REBOOT_STATE_VERSION, "cause": state.reboot.cause,
+        "continues": state.reboot.continues, "config": changes,
+        "draft": {"text": state.editor.text, "cursor": state.editor.cursor},
+        "queue": queue, "exit_code": state.exit_code,
+    }
+
+
+def _parse_reboot_state(data) -> _Rebooted:
+    """The _Rebooted of _reboot_state's JSON. Raises KeyError, TypeError, or
+    ValueError for anything else."""
+    if not isinstance(data, dict) or data.get("version") != _REBOOT_STATE_VERSION:
+        raise ValueError("unknown reboot state")
+    cause, config, draft, queued = data["cause"], data["config"], data["draft"], []
+    text, cursor, exit_code = draft["text"], draft["cursor"], data["exit_code"]
+    if (cause not in _REBOOT_CAUSES or not isinstance(config, dict)
+            or not isinstance(text, str) or not _is_int(cursor) or not _is_int(exit_code)):
+        raise ValueError("invalid reboot state")
+    for entry in data["queue"]:
+        kind = entry["kind"]
+        if kind == "text":
+            message = interaction_item_from_dict(entry["message"])
+            if not (isinstance(entry["text"], str) and isinstance(message, Message)
+                    and message.role == "user"):
+                raise ValueError("invalid queued text")
+            queued.append(_Submission(entry["text"], message, entry["steers"] is True))
+        elif kind == "command":
+            if not (isinstance(entry["name"], str) and isinstance(entry["arguments_json"], str)):
+                raise ValueError("invalid queued command")
+            queued.append(UserToolIntent(entry["name"], entry["arguments_json"]))
+        elif kind == "continue":
+            queued.append(_ContinueIntent())
+        else:
+            raise ValueError("invalid queued input")
+    return _Rebooted(cause=cause, continues=data["continues"] is True, config=config,
+                     draft=Editor(text, min(max(cursor, 0), len(text))),
+                     queue=tuple(queued), exit_code=exit_code)
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _take_reboot_state() -> _Rebooted:
+    """What the replaced process left this restarted CLI (_reboot_exec). It
+    closes the descriptor that the state came in, and never raises."""
+    name = os.environ.pop(_REBOOT_STATE_FD, None)  # command sessions don't inherit it
+    if name is None:
+        return _Rebooted(warning="it got no state from the process it replaced")
+    try:
+        descriptor = int(name)
+        if descriptor < 3:
+            raise ValueError("not a state file's descriptor")
+        with os.fdopen(descriptor, "rb") as file:
+            file.seek(0)
+            return _parse_reboot_state(json.loads(file.read().decode("utf-8")))
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return _Rebooted(warning=f"its state couldn't be read ({type(exc).__name__})")
+
+
+def _rebooted_notice(rebooted: _Rebooted, continuing: bool) -> str:
+    """The restarted CLI's startup line."""
+    if rebooted.cause is None:
+        return (f"Note: this CLI restarted for a reboot, but {rebooted.warning}: the draft, "
+                "queued input, and /config changes were not carried over.")
+    cause = ("/reboot" if rebooted.cause == "/reboot"
+             else "a coldstart compaction (compaction_coldstart_reboot)")
+    return (f"Rebooted after {cause}: this is the current code"
+            + ("; the turn continues." if continuing else "."))
+
+
+class _Rebooting(Exception):
+    """Raised by _run and _run_headless once the session has shut down for a
+    reboot, with what the restarted CLI carries over; main() then runs it."""
+
+    def __init__(self, state: dict) -> None:
+        super().__init__("rebooting")
+        self.state = state
+
+
+def _reboot_exec(state: dict) -> int:
+    """Replace this process with the restarted CLI; returns only on failure."""
+    command = _reboot_command()
+    if command is None:  # _reboot_refusal checked it
+        print("interaction CLI failed: the reboot can't run this process's command line "
+              "again; rerun it with --resume to continue from the save.", file=sys.stderr)
+        return 1
+    with tempfile.TemporaryFile() as file:
+        file.write(json.dumps(state, ensure_ascii=False).encode("utf-8"))
+        file.flush()
+        os.set_inheritable(file.fileno(), True)
+        environment = {**os.environ, _REBOOT_STATE_FD: str(file.fileno())}
+        with suppress(OSError, ValueError):
+            sys.stdout.flush()
+            sys.stderr.flush()
+        try:
+            os.execve(command[0], command, environment)
+        except OSError as exc:
+            print(f"interaction CLI failed: the reboot couldn't run {command[0]} "
+                  f"({exc.strerror or type(exc).__name__}); rerun the command with --resume "
+                  "to continue from the save.", file=sys.stderr)
+            return 1
+
+
 class _CliHost(TurnHost):
     """The CLI's side of the shared turn loop.
 
@@ -1332,9 +1670,10 @@ class _CliHost(TurnHost):
     """
 
     def __init__(self, state: _UIState, writer: InteractionSaveWriter, loop,
-                 steering=False) -> None:
+                 steering=False, config=None) -> None:
         self._state, self._writer, self._loop = state, writer, loop
         self._steering = steering
+        self._config = config  # the turn's InteractionConfigSnapshot
 
     def _post(self, function, *args) -> None:
         self._loop.call_soon_threadsafe(function, *args)
@@ -1399,6 +1738,15 @@ class _CliHost(TurnHost):
     def should_steer(self) -> bool:
         return self._steering and self._state.preemption.due()
 
+    def reboot_requested(self) -> bool:
+        return self._state.reboot is not None
+
+    def compacted(self, result) -> None:
+        if (result.protocol == "coldstart" and self._config is not None
+                and self._config.compaction_coldstart_reboot):
+            # Synchronously: the interrupt point that follows must see it.
+            self._on_loop(_coldstart_reboot, self._state)
+
     def preemptible(self, cancel):
         return self._state.preemption.operation(cancel)
 
@@ -1444,14 +1792,15 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.
     state.retry = None
-    host = _CliHost(state, writer, asyncio.get_running_loop(), steering)
+    snapshot = config.snapshot()
+    host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot)
     state.turn_active = not state.pending  # a steer never overtakes older input
     icron = state.icron
     if icron is not None:
         icron.begin_turn()
     try:
         result = await _on_context_thread(
-            state, run_turn, context, model, environment, config.snapshot(), host,
+            state, run_turn, context, model, environment, snapshot, host,
             control=icron)
     except Exception as exc:
         if icron is not None:
@@ -1599,18 +1948,22 @@ async def _drive_interaction_body(
     if existing:
         context, writer, incomplete_line = await _on_context_thread(
             state, resume_interaction_save, path)
-        state.displays.extend(render_interaction_items(context.items))
+        if state.rebooted is None:
+            # A restarted CLI's terminal shows them already, from the process
+            # it replaced.
+            state.displays.extend(render_interaction_items(context.items))
         if incomplete_line is not None:
             state.notice(incomplete_line.warning(path.name))
         state.notice(
             "Note: command sessions and plan state were not restored. "
             "Old command session IDs are not resumable; use only IDs from this run."
         )
-        if any(
+        if state.rebooted is None and any(
             isinstance(item, UserToolCall)
             and item.call.name == "config"
             for item in context.items
         ):
+            # (A reboot carries the /config changes over.)
             state.notice(
                 "Note: in-memory configuration was reset from the current launch "
                 "arguments; saved config commands were not replayed."
@@ -1670,9 +2023,16 @@ async def _drive_interaction_body(
                     if warning is not None:
                         state.notice(warning)
                 query = initial_query
+                rebooted = state.rebooted
+                # A turn that the reboot ended continues, where it can.
+                continues = (rebooted is not None and rebooted.continues and existing
+                             and turn_tail(context.items).unfinished
+                             and not Icron.yield_recorded_in(context.items))
                 should_sample = model is not None and (query is not None or (
                     existing and args.instructions is not None
-                ))
+                ) or continues)
+                if rebooted is not None:
+                    state.notice(_rebooted_notice(rebooted, should_sample))
                 # A save that used icron says so, with the flag or without it.
                 icron_note = icron_log_state(context.items) if existing else None
                 if existing and not should_sample:
@@ -1687,11 +2047,15 @@ async def _drive_interaction_body(
                     state.notice(
                         f"{state.auth_notice} No model query was submitted."
                     )
-                else:
+                elif state.rebooted is None:
+                    # The prompt is submitted (a restarted CLI's editor holds
+                    # the draft it carried over instead).
                     state.editor = Editor()
                 state.ready = True
                 startup = False
             else:
+                if state.reboot is not None and await _reboot_ready(state):
+                    return
                 _queue_wake(state)  # due wake-ups that a failure or a missing model held
                 if state.headless:
                     # A headless run goes on only while main waits for icron.
@@ -1705,6 +2069,8 @@ async def _drive_interaction_body(
                 state.changed.clear()
                 if state.closing:
                     return
+                if state.reboot is not None:
+                    continue  # it goes before queued input: the next iteration reboots
                 if not state.pending:
                     continue
                 query = state.pending.popleft()
@@ -1832,6 +2198,12 @@ async def _drive_interaction_body(
             else:
                 result = None
             state.set_phase("auth needed" if state.auth_required else "idle")
+            if state.reboot is not None:
+                # Only a reboot ends a turn as stopped without an exit; the
+                # restarted CLI continues it. The next iteration reboots.
+                state.reboot.continues = (result is not None and result.kind == "stopped"
+                                          and not state.closing)
+                continue
             if state.headless and not (result is not None and result.kind == "yielded"
                                        and _waits_for_icron(state)):
                 return
@@ -1951,7 +2323,22 @@ def _startup_notices(state, args, path, config=None):
         )
 
 
-async def _run_headless(model, environment, args, path, *, trace=None, icron=None):
+def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted) -> None:
+    """Restore what a restarted CLI carries over, but the draft (see _run):
+    the /config changes, the queued input, and the exit status."""
+    for key, value in rebooted.config.items():
+        try:
+            config.set(key, value)
+        except (ConfigError, TypeError, ValueError) as exc:
+            state.notice(f"Note: the reboot didn't carry over {key} = {value!r}: {exc}")
+    state.pending.extend(rebooted.queue)
+    if state.pending:
+        state.changed.set()
+    state.exit_code = rebooted.exit_code
+
+
+async def _run_headless(model, environment, args, path, *, trace=None, icron=None,
+                        rebooted=None):
     """One explicit task, quiet context display, and orderly effect draining."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
@@ -1962,8 +2349,11 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
+        rebooted=rebooted,
     )
     _startup_notices(state, args, path, config)
+    if rebooted is not None:
+        _carry_over(state, config, rebooted)
     loop = asyncio.get_running_loop()
     interrupted = False
     previous_sigint = None
@@ -1986,6 +2376,9 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
             await asyncio.wait((worker,), timeout=0.05)
         worker.result()
     finally:
+        # A reboot that the session shut down for, unless a stop came first.
+        rebooting = state.reboot is not None and state.reboot.ready and state.stop_level is None
+        queued = tuple(state.pending)  # before the stop below drops it
         try:
             state.request_stop(Urgency.IMMEDIATE)  # never lowers a stop
             # Cancellation/SIGINT must not close command resources before an
@@ -1995,6 +2388,8 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         finally:
             if previous_sigint is not None:
                 signal.signal(signal.SIGINT, previous_sigint)
+    if rebooting:
+        raise _Rebooting(_reboot_state(state, config, queued))
     return 130 if interrupted else state.exit_code
 
 
@@ -2007,23 +2402,29 @@ async def _run(
     *,
     trace: Optional[DebugTrace] = None,
     icron: Optional[Icron] = None,
+    rebooted: Optional[_Rebooted] = None,
 ) -> int:
     path = Path(path).absolute()
     config = _runtime_config(environment, args, path)
     prompt = args.prompt or ""
     state = _UIState(
-        editor=Editor(prompt, len(prompt)), auth_required=model is None,
+        editor=Editor(prompt, len(prompt)) if rebooted is None else rebooted.draft,
+        auth_required=model is None,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
+        rebooted=rebooted,
     )
     state.notice(
         "pythia.interaction — /retry, /continue, /steer [text], /task <text>, /compact [focus], "
-        "/config, /config.json, /login, /quota, /exit or /quit. /steer and /exit wait for the "
-        "current tool batch; with ! they wait only for the current operation, and with !! they "
-        "also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
+        "/config, /config.json, /login, /quota, /reboot, /exit or /quit. /steer and /exit wait "
+        "for the current tool batch; with ! they wait only for the current operation, and with "
+        "!! they also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press "
+        "/exit!!."
     )
     _startup_notices(state, args, path, config)
+    if rebooted is not None:
+        _carry_over(state, config, rebooted)
     worker = None
     frame = 0
     with terminal:
@@ -2078,10 +2479,16 @@ async def _run(
                 frame += 1
                 await asyncio.sleep(FRAME_INTERVAL)
         finally:
+            # A reboot that the session shut down for, unless an exit came first.
+            rebooting = (state.reboot is not None and state.reboot.ready
+                         and state.stop_level is None)
+            queued = tuple(state.pending)  # before the stop below drops it
             state.request_stop(Urgency.IMMEDIATE)  # never lowers a stop
             if worker is not None:
                 # Do not cancel a thread-backed effect or close its environment early.
                 await asyncio.shield(worker)
+    if rebooting:
+        raise _Rebooting(_reboot_state(state, config, queued))
     return state.exit_code
 
 
@@ -2140,20 +2547,52 @@ def _build_parser() -> argparse.ArgumentParser:
             "A bare flag means True (default: %(default)s)"
         ),
     )
+    parser.add_argument(
+        "--compaction-coldstart-reboot",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "restart the CLI on the current code after each coldstart compaction, as /reboot "
+            "does, to load code changed during the session; tunable with /config "
+            "compaction_coldstart_reboot. A bare flag means True (default: %(default)s)"
+        ),
+    )
+    # Appended by a reboot (_reboot_command): this run replaces a process that
+    # rebooted. --rebooted=check only loads the code and parses the options.
+    parser.add_argument("--rebooted", nargs="?", const="restart", default=None,
+                        choices=("restart", "check"), help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    global _reboot_argv
     args = _build_parser().parse_args(argv)
+    # Only a CLI run on the process's own arguments can run them again.
+    _reboot_argv = _command_line() if argv is None else None
     model = None
     trace = None
     icron = None
+    rebooted = None
+    reboot_state = None
     try:
         catalog = frontend_catalog(args)
         if args.list_models:
             print(render_model_catalog(catalog))
             return 0
+        if args.rebooted is not None:
+            # A restarted CLI continues its save. The first launch used the
+            # prompt and the instructions already.
+            args.resume, args.prompt, args.prompt_file, args.instructions = True, None, None, None
         args = prepare_namespace(args, catalog)
+        if args.rebooted == "check":
+            if not args.headless:
+                importlib.import_module("pythia.term_input")  # the terminal imports it late
+            return 0  # the start check (_check_reboot): the code loads, and the options parse
+        if args.rebooted is not None:
+            rebooted = _take_reboot_state()
         args.prompt = load_prompt(args)
         if not args.headless and (os.name != "posix" or not sys.stdin.isatty() or not sys.stdout.isatty()):
             raise ValueError(
@@ -2167,7 +2606,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.max_output_tokens is not None:
             SampleParams(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
-        if (args.headless and args.prompt is None
+        if (args.headless and args.prompt is None and rebooted is None
                 and not (args.resume and args.instructions is not None and save_path.is_file())):
             raise ValueError(
                 "--headless requires --prompt or --prompt-file, or "
@@ -2193,11 +2632,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.headless:
                 return asyncio.run(_run_headless(
                     model, environment, args, path=save_path, trace=trace, icron=icron,
+                    rebooted=rebooted,
                 ))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(
                 model, environment, terminal, args, path=save_path, trace=trace, icron=icron,
+                rebooted=rebooted,
             ))
+    except _Rebooting as rebooting:
+        reboot_state = rebooting.state  # the session has shut down: restart once it's closed
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
@@ -2217,6 +2660,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if warning:
                     with suppress(OSError, ValueError):
                         print(warning, file=sys.stderr)
+    return _reboot_exec(reboot_state)
 
 
 if __name__ == "__main__":

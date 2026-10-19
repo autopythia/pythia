@@ -44,6 +44,7 @@ CONFIG_KEYS = (
     "compaction_mode",
     "compaction_pi_keep_recent_tokens",
     "compaction_pi_max_output_tokens",
+    "compaction_coldstart_reboot",
     "extra_sample_params",
 )
 # Keys renamed in October 2026, from their old names. The old names keep
@@ -56,7 +57,9 @@ RENAMED_CONFIG_KEYS = {
     "compaction_keep_recent_tokens": "compaction_pi_keep_recent_tokens",
     "compaction_max_output_tokens": "compaction_pi_max_output_tokens",
 }
-_BOOLEAN_KEYS = frozenset(("enable_workspace", "enable_auto_compaction"))
+_BOOLEAN_KEYS = frozenset((
+    "enable_workspace", "enable_auto_compaction", "compaction_coldstart_reboot",
+))
 _OPTIONAL_POSITIVE_INTEGER_KEYS = frozenset((
     "max_samples",
     "max_output_tokens",
@@ -364,6 +367,10 @@ class InteractionConfigSnapshot:
     request's HTTP timeout. ``None`` leaves the model endpoint's own timeout;
     namespace-bound configs always resolve it except on Claude Relay, where it
     does not apply.
+
+    ``compaction_coldstart_reboot`` has the CLI restart itself on the current
+    code after each coldstart compaction, as ``/reboot`` does. Only the CLI
+    reboots; other hosts leave it False.
     """
 
     enable_workspace: bool = True
@@ -376,6 +383,7 @@ class InteractionConfigSnapshot:
     compaction_mode: Optional[str] = None
     compaction_pi_keep_recent_tokens: Optional[int] = DEFAULT_KEEP_RECENT_TOKENS
     compaction_pi_max_output_tokens: Optional[int] = None
+    compaction_coldstart_reboot: bool = False
     extra_sample_params: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -648,6 +656,8 @@ class InteractionConfig:
                 compaction_pi_max_output_tokens=getattr(
                     args, "compaction_pi_max_output_tokens", None,
                 ),
+                # A CLI option: other frontends' namespaces have none.
+                compaction_coldstart_reboot=getattr(args, "compaction_coldstart_reboot", False),
                 extra_sample_params=binding.extra_sample_params,
             ),
             on_enable_workspace=on_enable_workspace,

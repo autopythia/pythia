@@ -28,6 +28,11 @@ stopped. A compaction runs the config's sequence of methods
 A stop ends the turn at one of three levels (``Urgency``): at the next
 interrupt point, after the tool batch (``stop_requested``); once the operation
 in flight ends (``should_stop``); or by also cancelling it.
+
+A reboot (``reboot_requested``) also ends the turn at the interrupt point, but
+only once the steers taken there are saved, so that the restarted program,
+which continues the turn, has them. The CLI reboots for ``/reboot``, and after
+a coldstart compaction with ``compaction_coldstart_reboot`` (``compacted``).
 """
 
 from __future__ import annotations
@@ -198,6 +203,24 @@ class TurnHost:
         """
         return False
 
+    def reboot_requested(self) -> bool:
+        """True once the host will restart its program on the current code.
+
+        The turn then ends at its next interrupt point, as ``stopped``, right
+        after it saves the steers taken there: the restarted program continues
+        the turn from the save. Unlike a stop, a reboot neither drops the
+        steers nor stops the tool batch in flight. The default host never
+        reboots.
+        """
+        return False
+
+    def compacted(self, result: CompactionResult) -> None:
+        """Called after an automatic compaction is saved and shown.
+
+        It may request a reboot (:meth:`reboot_requested`), as the CLI does
+        after a coldstart compaction with ``compaction_coldstart_reboot``.
+        """
+
     def preemptible(self, cancel):
         """Bracket one sample or tool call; ``cancel`` (or None) ends it early.
 
@@ -277,6 +300,8 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
         if isinstance(answer, Steer):
             host.append(context, answer.messages)
             host.show(render_interaction_items(answer.messages))
+        if host.reboot_requested():
+            return STOPPED  # the restarted program continues the turn
         operation = host.preemptible(_retirer(model))
         try:
             with operation:
@@ -398,6 +423,7 @@ def compact(context, model, environment, config, host, sample_params, *,
     docstring). A compaction that fails while the host is stopping (as when a
     preempting stop closes the model) raises ``_CompactionStopped``, which the
     turn loop treats as a stop, not a failure.
+    A compaction that succeeds is reported to ``host.compacted``.
     """
     host.phase("compacting")
 
@@ -428,6 +454,7 @@ def compact(context, model, environment, config, host, sample_params, *,
         raise TypeError("Expected CompactionResult.")
     host.append(context, result.context_items())
     host.show(result.display_items())
+    host.compacted(result)
     return True
 
 

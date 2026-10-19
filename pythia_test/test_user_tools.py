@@ -131,6 +131,7 @@ class UserToolValueTests(unittest.TestCase):
             "compaction_mode = 'pi'",
             "compaction_pi_keep_recent_tokens = 20000",
             "compaction_pi_max_output_tokens = None",
+            "compaction_coldstart_reboot = False",
             "extra_sample_params = {}",
         )))
         json_dump = execute("/config.json")
@@ -492,6 +493,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "compaction_mode": "warmpi:2",
             "compaction_pi_keep_recent_tokens": 20000,
             "compaction_pi_max_output_tokens": None,
+            "compaction_coldstart_reboot": False,
             "extra_sample_params": {},
         }
         self.assertEqual(

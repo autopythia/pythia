@@ -49,6 +49,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "compaction_mode = 'pi'",
                 "compaction_pi_keep_recent_tokens = 20000",
                 "compaction_pi_max_output_tokens = None",
+                "compaction_coldstart_reboot = False",
                 "extra_sample_params = {}",
             )),
         )
@@ -64,6 +65,7 @@ class InteractionConfigTests(unittest.TestCase):
             "compaction_mode": "pi",
             "compaction_pi_keep_recent_tokens": 20000,
             "compaction_pi_max_output_tokens": None,
+            "compaction_coldstart_reboot": False,
             "extra_sample_params": {},
         }
         self.assertEqual(json.loads(rendered_json), {**defaults, "__init__": defaults})
@@ -99,6 +101,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "compaction_mode = 'pi'",
                 "compaction_pi_keep_recent_tokens = 20000",
                 "compaction_pi_max_output_tokens = None",
+                "compaction_coldstart_reboot = False",
                 "extra_sample_params = {}",
             )),
         )
@@ -119,6 +122,7 @@ class InteractionConfigTests(unittest.TestCase):
             "--max-context-tokens", "1000000",
             "--compaction-pi-keep-recent-tokens", "0",
             "--compaction-pi-max-output-tokens", "4096",
+            "--compaction-coldstart-reboot",
         ])
 
         config = InteractionConfig.from_namespace(args)
@@ -134,6 +138,7 @@ class InteractionConfigTests(unittest.TestCase):
             "compaction_mode": "coldstart,warmpi:2",
             "compaction_pi_keep_recent_tokens": 0,
             "compaction_pi_max_output_tokens": 4096,
+            "compaction_coldstart_reboot": True,
             "extra_sample_params": {},
         })
         self.assertEqual(

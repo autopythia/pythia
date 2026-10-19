@@ -88,6 +88,8 @@ class Model:
             {"exec_command", "write_stdin", "apply_patch", "update_plan"}
             if self.enable_default_tools else set()
         )
+        if any(isinstance(i, ToolCall) and i.call_id == "plan-1" for i in context):
+            self.tool_done = True  # a CLI that a reboot restarted: the replaced one called it
         if "PYTHIA_TEST_RELEASE_FD" in os.environ:
             os.read(int(os.environ["PYTHIA_TEST_RELEASE_FD"]), 1)
             return ModelSample(items=(ToolCall(
@@ -210,6 +212,18 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleanup["terminated"])
         self.assertTrue(cleanup["pipes_closed"])
 
+    async def wait_output_after(self, marker, text, timeout=8):
+        """Wait for ``text`` after the latest ``marker``, such as a restarted CLI's status."""
+        async def wait():
+            while marker not in self.output or text not in self.output[self.output.rindex(marker):]:
+                self.changed.clear()
+                await self.changed.wait()
+        try:
+            await asyncio.wait_for(wait(), timeout)
+        except asyncio.TimeoutError:
+            self.fail(f"did not see {text!r} after {marker!r}; terminal tail: "
+                      f"{bytes(self.output[-2000:])!r}")
+
     async def asyncTearDown(self):
         if self.release is not None:
             os.close(self.release)
@@ -262,6 +276,41 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual(len(saved.items), 2)
         self.assertIsInstance(saved.items[1], Tools)
+
+    async def test_reboot_reruns_the_command_line_and_resumes_the_save(self):
+        # A real exec: the start check runs this command line, then the CLI
+        # replaces itself. --resume=False and --prompt must not apply again.
+        self.start("--prompt", "initial", "--resume=False")
+        await self.wait_output(b"[assistant] answer-1")
+        await self.wait_output(b"idle")
+        os.write(self.master, b"/reboot\r")
+        await self.wait_output_after(b"Rebooted after /reboot: this is the current code.", b"idle")
+        os.write(self.master, b"next\r")
+        await self.wait_output(b"[assistant] answer-2")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit()
+        saved = load_interaction_save(self.root / "interaction.jsonl")
+        self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
+                         [Message("user", "initial"), Message("user", "next")])
+        self.assertEqual(sum(isinstance(i, Init) for i in saved), 1)
+        self.assertIn(b"Rebooting: the CLI restarts on the current code.", self.output)
+        self.assertEqual(self.output.count(b"[user] initial"), 1)  # the log isn't shown again
+
+    async def test_coldstart_compaction_reboots_with_compaction_coldstart_reboot(self):
+        self.start("--prompt", "initial", "--compaction-mode", "coldstart",
+                   "--compaction-coldstart-reboot")
+        await self.wait_output(b"[assistant] answer-1")
+        await self.wait_output(b"idle")
+        os.write(self.master, b"/compact\r")
+        await self.wait_output_after(b"Rebooted after a coldstart compaction", b"idle")
+        os.write(self.master, b"next\r")
+        await self.wait_output(b"[assistant] answer-2")
+        os.write(self.master, b"/quit\r")
+        await self.wait_exit()
+        saved = load_interaction_save(self.root / "interaction.jsonl")
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["compact"])
+        self.assertTrue((self.root / "interaction.summary.md").is_file())
+        self.assertEqual(self.output.count(b"[user] initial"), 1)
 
     async def test_save_path_stays_in_launch_directory_not_tool_workspace(self):
         workspace = self.root / "tools"
