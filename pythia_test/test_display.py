@@ -584,6 +584,23 @@ class InteractionItemRendererTests(unittest.TestCase):
             ),
         )
 
+    def test_icron_calls_show_as_the_python_calls_they_stand_for(self):
+        schedule = ToolCall("icron", "c1", json.dumps(
+            {"action": "schedule", "message": "Check CI run 123.", "after": 600}))
+        execute = ToolCall("icron", "c2", json.dumps(
+            {"action": "exec", "code": "import subprocess\nprint(1)\n", "wait": 30}))
+        yielded = ToolCall("icron", "c3", json.dumps({"action": "yield", "note": "Waiting."}))
+        rendered = render_interaction_items((schedule, execute, yielded), color=False)
+        self.assertEqual([(item.label, item.text) for item in rendered], [
+            ("tool-call", "[tool-call] icron (c1)\n"
+                          "icron.schedule(message='Check CI run 123.', after=600)"),
+            ("tool-call", "[tool-call] icron (c2)\nicron.exec(wait=30)"),
+            (None, "import subprocess\nprint(1)"),  # the code, whole, as a literal block
+            ("tool-call", "[tool-call] icron (c3)\nicron.yield_(note='Waiting.')")])
+        # A call that isn't an object shows as other tools' calls do.
+        self.assertEqual(render_interaction_items((ToolCall("icron", "c4", "[1]"),))[0].text,
+                         "[tool-call] icron (c4)")
+
     def test_git_diff_output_color_requires_git_diff_command(self):
         diff = "\n".join(
             (

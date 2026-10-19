@@ -104,6 +104,11 @@ from .loop import Steer
 from .loop import YIELD_KINDS
 from .loop import run_supervised_task
 from .loop import supervised_turn
+from .loop import turn_yield
+from .loop import Icron
+from .loop import IcronError
+from .loop import IcronLimits
+from .loop import IcronStatus
 from .loop import TurnTail
 from .loop import turn_tail
 from .loop import unfinished_turn
@@ -184,6 +189,10 @@ __all__ = [
     "CodexResponsesModel",
     "CommandRuntime",
     "Fault",
+    "Icron",
+    "IcronError",
+    "IcronLimits",
+    "IcronStatus",
     "Interrupt",
     "MissingFinalText",
     "SampleLimitExceeded",
@@ -199,6 +208,7 @@ __all__ = [
     "YIELD_KINDS",
     "run_supervised_task",
     "supervised_turn",
+    "turn_yield",
     "TurnTail",
     "turn_tail",
     "unfinished_turn",

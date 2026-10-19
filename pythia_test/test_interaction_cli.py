@@ -211,6 +211,7 @@ for module in (cli, demo):
             self.assertTrue(cli_args.pop("enable_default_tools"))
             self.assertFalse(cli_args.pop("headless"))
             self.assertFalse(cli_args.pop("debug_trace"))
+            self.assertFalse(cli_args.pop("enable_experimental_icron"))
             self.assertIsNone(cli_args.pop("prompt_file"))
             # Same option, different defaults: only the CLI resumes unless told otherwise.
             self.assertTrue(cli_args.pop("resume"))

@@ -13,6 +13,11 @@ from .supervision import YieldTool
 from .supervision import run_supervised_task
 from .supervision import supervise
 from .supervision import supervised_turn
+from .supervision import turn_yield
+from .icron import Icron
+from .icron import IcronError
+from .icron import IcronLimits
+from .icron import IcronStatus
 from .kernel import Interrupt
 from .kernel import MissingFinalText
 from .kernel import SampleLimitExceeded
@@ -30,6 +35,10 @@ from .tail import unfinished_turn
 
 __all__ = [
     "Fault",
+    "Icron",
+    "IcronError",
+    "IcronLimits",
+    "IcronStatus",
     "Interrupt",
     "MissingFinalText",
     "Preemption",
@@ -51,5 +60,6 @@ __all__ = [
     "supervise",
     "supervised_turn",
     "turn_tail",
+    "turn_yield",
     "unfinished_turn",
 ]

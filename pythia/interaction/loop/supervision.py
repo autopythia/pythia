@@ -514,6 +514,36 @@ def decide(yield_: Yield, context, model, environment, config, host,
 
 # The supervised side: one task's turns, each ending in a handoff.
 
+def turn_yield(outcome, context, *, job_text: str, job_id: Optional[str] = None,
+               context_id: int = 1, resumes: int = 0,
+               steers: Sequence[Tuple[str, bool]] = (),
+               first_user_text: Optional[str] = None,
+               steer_target_text: Optional[str] = None,
+               continued: bool = False, attachments: bool = False) -> Yield:
+    """The Yield that says how a turn's loop stopped.
+
+    ``outcome`` is the turn's ``TurnResult``, or the exception that ended it.
+    Any failure becomes a ``failed`` Yield, resumable unless the log is unsafe
+    to continue (unsaved state or unanswered tool calls). The other keywords
+    are copied into the Yield. Auto's supervised task loop and the CLI's
+    icron both describe their turns with it.
+    """
+    fields = {"context": context_id, "job_id": job_id, "job_text": job_text,
+              "resumes": resumes, "steers": tuple(steers), "first_user_text": first_user_text,
+              "steer_target_text": steer_target_text, "continued": continued,
+              "attachments": attachments, "revision": len(context)}
+    if isinstance(outcome, BaseException):
+        resumable = not (isinstance(outcome, SaveError) or context.pending_tool_calls())
+        return Yield(kind="failed", resumable=resumable, reason=type(outcome).__name__,
+                     failure=outcome.failure if isinstance(outcome, ModelError) else None,
+                     **fields)
+    if outcome.kind == "stopped":
+        return Yield(kind="stopped", resumable=False, **fields)
+    if outcome.kind == "yielded":
+        return Yield(kind="yielded", resumable=True, yield_text=outcome.note, **fields)
+    return Yield(kind="ended", resumable=True, final_text=outcome.final_text, **fields)
+
+
 def supervised_turn(text: str, resumes: int, context, model, environment, config, host, *,
                     job_text: str, job_id: Optional[str] = None, context_id: int = 1,
                     control: Optional[YieldTool] = None,
@@ -538,7 +568,7 @@ def supervised_turn(text: str, resumes: int, context, model, environment, config
     resumable unless the log is unsafe to continue (unsaved state or
     unanswered tool calls).
     """
-    fields = {"context": context_id, "job_id": job_id, "job_text": job_text,
+    fields = {"context_id": context_id, "job_id": job_id, "job_text": job_text,
               "resumes": resumes, "first_user_text": first_user_text,
               "steer_target_text": steer_target_text, "continued": continued,
               "attachments": attachments}
@@ -559,19 +589,11 @@ def supervised_turn(text: str, resumes: int, context, model, environment, config
             if control is not None:
                 control.end()  # A request never leaks into the next turn.
     except Exception as exc:
-        fields["steers"] = () if steers is None else tuple(steers())
-        resumable = not (isinstance(exc, SaveError) or context.pending_tool_calls())
-        return Yield(kind="failed", resumable=resumable, reason=type(exc).__name__,
-                     failure=exc.failure if isinstance(exc, ModelError) else None,
-                     revision=len(context), **fields)
-    fields["steers"] = () if steers is None else tuple(steers())  # the turn has stopped
-    if result.kind == "stopped":
-        return Yield(kind="stopped", resumable=False, revision=len(context), **fields)
-    if result.kind == "yielded":
-        return Yield(kind="yielded", resumable=True, yield_text=result.note,
-                     revision=len(context), **fields)
-    return Yield(kind="ended", resumable=True, final_text=result.final_text,
-                 revision=len(context), **fields)
+        return turn_yield(exc, context, steers=() if steers is None else tuple(steers()),
+                          **fields)
+    # The turn has stopped: its steers are final.
+    return turn_yield(result, context, steers=() if steers is None else tuple(steers()),
+                      **fields)
 
 
 def run_supervised_task(job_text: str, context, model, environment, config, host,
@@ -627,4 +649,4 @@ def run_supervised_task(job_text: str, context, model, environment, config, host
 
 __all__ = ["Fault", "SupervisedHandle", "SupervisorTools", "Yield", "YieldChannel", "YieldTool",
            "YIELD_KINDS", "YIELD_MAX_CHARS", "decide", "read_items", "report_text",
-           "run_supervised_task", "supervise", "supervised_turn"]
+           "run_supervised_task", "supervise", "supervised_turn", "turn_yield"]

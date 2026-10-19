@@ -20,12 +20,17 @@ from contextlib import nullcontext
 from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
+from datetime import time as day_time
+from datetime import timedelta
 import json
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import sys
+import textwrap
 import threading
 import time
 import uuid
@@ -51,6 +56,7 @@ from .compaction import run_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
+from .display import message_summary
 from .display import render_interaction_items
 from .environment import Environment
 from .items import CompactionMetadata
@@ -75,6 +81,8 @@ from .media import parse_user_prompt
 from .media import require_media_api
 from .media import split_leading_references
 from .loop import Interrupt
+from .loop import Icron
+from .loop import IcronError
 from .loop import Preemption
 from .loop import Steer
 from .loop import TurnHost
@@ -82,6 +90,9 @@ from .loop import Urgency
 from .loop import command_urgency
 from .loop import escalated_stop
 from .loop import run_turn
+from .loop import turn_yield
+from .loop.icron import Job as IcronJob
+from .loop.icron import log_state as icron_log_state
 from .loop.tail import describe_tail
 from .loop.tail import turn_tail
 from .model import Model
@@ -132,6 +143,17 @@ class _ContinueIntent:
 
 
 @dataclass(frozen=True, eq=False)
+class _WakeIntent:
+    """icron's due wake-ups, queued as text the user typed then would be.
+
+    One marker stands for every due wake-up: a running turn takes it as a
+    steer, and otherwise it starts a turn, both with icron's message (see
+    _take_interrupt and the outer loop). It isn't the user's input: it never
+    counts toward the queue's limit or its counts (_queued_input).
+    """
+
+
+@dataclass(frozen=True, eq=False)
 class _Submission:
     """Submitted text and its user message, read when Enter accepted the text.
 
@@ -156,8 +178,8 @@ def _reads_no_files(text: str) -> bool:
 @dataclass
 class _UIState:
     editor: Editor = field(default_factory=Editor)
-    pending: deque[Union[_Submission, UserToolIntent, _RetryIntent, _ContinueIntent]] = field(
-        default_factory=deque)
+    pending: deque[Union[_Submission, UserToolIntent, _RetryIntent, _ContinueIntent,
+                         _WakeIntent]] = field(default_factory=deque)
     retry: Optional[_RetryIntent] = None
     headless: bool = False
     displays: deque[DisplayItem] = field(default_factory=deque)
@@ -202,6 +224,15 @@ class _UIState:
             max_workers=1, thread_name_prefix="interaction-context"),
         repr=False,
     )
+    # icron (--enable-experimental-icron), or None. cron_entries maps the
+    # jobs that /cron made to their entries as typed, for /crontab;
+    # icron_resumes counts the turns that icron started since the user's
+    # last input; icron_auth_noticed is true once the notice that due
+    # wake-ups wait for a model has been shown.
+    icron: Optional[Icron] = field(default=None, repr=False)
+    cron_entries: dict = field(default_factory=dict)
+    icron_resumes: int = 0
+    icron_auth_noticed: bool = False
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -239,6 +270,8 @@ class _UIState:
         self.retry = None
         self.pending.clear()
         self.login_cancel.set()
+        if self.icron is not None:
+            self.icron.stop()  # every stop cancels running code
         self.changed.set()
         if self.stop_level >= Urgency.PREEMPT and callable(
                 getattr(self.active_model, "close", None)):
@@ -360,6 +393,9 @@ class _UIState:
                 else:
                     self._submit_text(parts[1], draft=text, flush=steer)
                 return
+            elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
+                self._icron_command(head, text)
+                return
             elif head.startswith("/"):
                 try:
                     intent = parse_user_tool(text)
@@ -374,7 +410,7 @@ class _UIState:
             else:
                 self._submit_text(text)
                 return
-            if len(self.pending) >= _MAX_PENDING_QUERIES:
+            if _queued_input(self) >= _MAX_PENDING_QUERIES:
                 self.notice("Query queue is full; the draft has not been submitted.")
             else:
                 self.pending.append(intent)
@@ -396,7 +432,7 @@ class _UIState:
         queued, and ``steers`` false for ``/task <text>`` (see _Submission).
         """
         draft = text if draft is None else draft
-        if len(self.pending) >= _MAX_PENDING_QUERIES:
+        if _queued_input(self) >= _MAX_PENDING_QUERIES:
             self.notice("Query queue is full; the draft has not been submitted.")
             return
         if self.reads_files(text):
@@ -429,7 +465,7 @@ class _UIState:
 
     def _queue_submission(self, submission: _Submission, draft: str,
                           flush: Optional[Urgency] = None) -> None:
-        if len(self.pending) >= _MAX_PENDING_QUERIES:
+        if _queued_input(self) >= _MAX_PENDING_QUERIES:
             self.notice("Query queue is full; the draft has not been submitted.")
             return
         self.pending.append(submission)
@@ -439,7 +475,7 @@ class _UIState:
         if not submission.steers and self.phase not in {"idle", "failed", "auth needed"}:
             self.notice("Queued as the next query; it waits for the current turn to end.")
         if flush is not None:
-            steered = _steer_count(self) == len(self.pending)
+            steered = _steer_count(self) == _queued_input(self)
             if not steered:
                 # Older input is queued ahead of it, or no turn is running.
                 self.notice("No running turn can take a steer now; queued as the next query.")
@@ -476,6 +512,109 @@ class _UIState:
         else:
             self.notice(f"Flushing {steers}: delivered as soon as the current sample or tool "
                         "call ends; a sample or command wait is cancelled where possible.")
+
+    def _icron_command(self, head: str, text: str) -> None:
+        """/cron, /crontab, and /py (--enable-experimental-icron): handled at
+        once, on the event loop, even while main is busy or needs
+        authentication; never queued or saved. A command that fails leaves
+        its draft in the editor."""
+        command = {"/cron": self._cron, "/crontab": self._crontab, "/py": self._py}[head]
+        try:
+            used = command(text)
+        except IcronError as exc:
+            self.notice(f"{exc} Draft preserved.")
+            return
+        if used:
+            self.editor = Editor()
+
+    def _cron(self, text: str) -> bool:
+        """/cron: schedule the user's message, cancel jobs, or list them."""
+        icron, words = self.icron, text.split(maxsplit=3)
+        if len(words) == 1:
+            self.notice(_cron_list(icron))
+            return True
+        form = words[1]
+        if form == "cancel" and len(words) == 3:
+            return self._cron_cancel(words[2])
+        seconds = at = None
+        if form in ("in", "every") and len(words) == 4:
+            seconds = _parse_duration(words[2])
+        elif form == "at" and len(words) == 4:
+            at = _next_clock_time(words[2], icron.clock())
+        if (seconds is None and at is None) or not words[3].strip():
+            self.notice(f"{_CRON_USAGE} Draft preserved.")
+            return False
+        when, message, now = words[2], words[3].rstrip(), icron.clock()
+        if form == "in":
+            job = icron.schedule(message, after=seconds, by="user")
+            text = f"at {_hms(job.due)} (in {_span(job.due - now)})"
+        elif form == "every":
+            job = icron.schedule(message, every=seconds, by="user")
+            text = f"every {when}, first at {_hms(job.due)}"
+        else:
+            job = icron.schedule(message, at=at, by="user")
+            tomorrow = " tomorrow" if at.date() != datetime.fromtimestamp(now).date() else ""
+            text = f"at {_hms(job.due)}{tomorrow} (in {_span(job.due - now)})"
+        self.cron_entries[job.job_id] = f"{form} {when} {message}"
+        self.notice(f"cron: job {job.job_id} sends your message {text}.")
+        return True
+
+    def _cron_cancel(self, target: str) -> bool:
+        icron = self.icron
+        suspended = icron.main.state == "suspended"
+        if target == "all":
+            jobs = [job for job in icron.jobs(by="user") if job.pending]
+            for job in jobs:
+                with suppress(IcronError):  # it ended meanwhile
+                    icron.cancel(job.job_id, by="user")
+            text = (f"cron: cancelled {len(jobs)} job{'s' if len(jobs) != 1 else ''}" if jobs
+                    else "cron: no pending jobs to cancel")
+        else:
+            job = icron.cancel(target, by="user")
+            text = f"cron: cancelled job {job.job_id} ({_OWNER[job.origin]})"
+        if suspended and icron.main.state != "suspended":
+            text += "; main now waits for your message"
+        self.notice(text + ".")
+        return True
+
+    def _crontab(self, text: str) -> bool:
+        """/crontab: the user's /cron jobs as one table; /crontab clear cancels them."""
+        icron, words = self.icron, text.split()
+        pending = {job.job_id for job in icron.jobs(by="user") if job.pending}
+        for job_id in [job_id for job_id in self.cron_entries if job_id not in pending]:
+            del self.cron_entries[job_id]
+        if words == ["/crontab"]:
+            self.notice(_crontab_table(icron, self.cron_entries))
+            return True
+        if words != ["/crontab", "clear"]:
+            self.notice(f"{_CRONTAB_USAGE} Draft preserved.")
+            return False
+        suspended, cancelled = icron.main.state == "suspended", 0
+        for job_id in list(self.cron_entries):
+            with suppress(IcronError):  # it ended meanwhile
+                icron.cancel(job_id, by="user")
+                cancelled += 1
+            del self.cron_entries[job_id]
+        text = (f"crontab: cancelled {cancelled} job{'s' if cancelled != 1 else ''}" if cancelled
+                else "crontab: your table is empty; nothing to cancel")
+        if suspended and icron.main.state != "suspended":
+            text += "; main now waits for your message"
+        self.notice(text + ".")
+        return True
+
+    def _py(self, text: str) -> bool:
+        """/py <code>: run the user's code on icron's watcher thread, without
+        waiting; its output, value, and traceback come as notices."""
+        code = _command_body(text, "/py")
+        if not code.strip():
+            self.notice(f"{_PY_USAGE} Draft preserved.")
+            return False
+        result = self.icron.exec(code, wait=0, by="user")
+        if result.job is None:  # it didn't compile
+            self.notice(f"py: failed:\n{textwrap.indent(result.error or '', '  ')}\n"
+                        "Draft preserved.")
+            return False
+        return True
 
 
 def _build_model(args: argparse.Namespace, trace: Optional[DebugTrace]) -> Model:
@@ -935,19 +1074,25 @@ def _reads_files(text: str, args) -> bool:
 
 def _steer_count(state: _UIState) -> int:
     """Leading steering submissions in the queue: a running turn takes them as
-    steers. A command, or a /task submission, ends the run (see _Submission)."""
+    steers. A command, or a /task submission, ends the run (see _Submission).
+    A wake-up marker in the run is taken with them, but isn't counted."""
     if not state.turn_active:
         return 0
     count = 0
     for entry in state.pending:
         if not _steers(entry):
             break
-        count += 1
+        count += isinstance(entry, _Submission)
     return count
 
 
 def _steers(entry) -> bool:
-    return isinstance(entry, _Submission) and entry.steers
+    return isinstance(entry, _WakeIntent) or (isinstance(entry, _Submission) and entry.steers)
+
+
+def _queued_input(state: _UIState) -> int:
+    """The user's queued entries: a wake-up marker isn't one."""
+    return sum(not isinstance(entry, _WakeIntent) for entry in state.pending)
 
 
 def _take_steers(state: _UIState) -> tuple:
@@ -958,6 +1103,218 @@ def _take_steers(state: _UIState) -> tuple:
         submissions.append(state.pending.popleft())
     state.preemption.take()
     return tuple(submissions)
+
+
+def _take_interrupt(state: _UIState) -> tuple:
+    """The user messages a running turn takes at its interrupt point: its
+    steers, with icron's message in a wake-up marker's place among them."""
+    messages = []
+    for entry in _take_steers(state):
+        if not isinstance(entry, _WakeIntent):
+            messages.append(entry.message)
+            continue
+        wakeup = None if state.icron is None else state.icron.take_wakes()
+        if wakeup is not None:  # None: withdrawn since it was queued
+            messages.append(Message("user", wakeup.text()))
+    return tuple(messages)
+
+
+# icron (--enable-experimental-icron): its wake-ups, its commands, and its notices.
+
+_CRON_USAGE = ("Usage: /cron in 10m <text>, /cron at 14:30 <text>, /cron every 1h <text>, "
+               "/cron cancel <job-id>|all, or /cron alone to list jobs (units: s, m, h, d).")
+_CRONTAB_USAGE = ("Usage: /crontab shows your /cron jobs as a table, and /crontab clear "
+                  "cancels them.")
+_PY_USAGE = ("Usage: /py <code> runs Python in this process, on icron's watcher thread, with "
+             "icron, main, asyncio, and print.")
+_DURATION = re.compile(r"([1-9][0-9]*)([smhd])")
+_CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_OWNER = {"main": "main's", "user": "yours", "host": "the host's"}
+_ICRON_YIELD_NOTICE = ("Note: the save ends with main yielded to icron. Jobs are not saved, so no "
+                       "wake-up will resume it; enter a message to continue.")
+_ICRON_RESTART_NOTICE = ("Note: icron jobs, running code, and Python state from before the "
+                         "restart were not restored.")
+_ICRON_CONTINUE_REFUSAL = ("Nothing to continue: main's last turn yielded to icron, which still "
+                           "needs a wake-up. Enter a message instead.")
+
+
+def _hms(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds).strftime("%H:%M:%S")
+
+
+def _span(seconds: float) -> str:
+    """A duration such as 10m, 1h 30m, or 23h 59m 10s."""
+    seconds = max(0, int(round(seconds)))
+    parts = []
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        if seconds >= size:
+            parts.append(f"{seconds // size}{unit}")
+            seconds %= size
+    return " ".join(parts[:3]) or "0s"
+
+
+def _one_line(text: str, limit: int = 120) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _parse_duration(word: str) -> Optional[int]:
+    """/cron's <duration>: a positive whole number and one unit (s, m, h, d)."""
+    match = _DURATION.fullmatch(word)
+    return None if match is None else int(match.group(1)) * _UNIT_SECONDS[match.group(2)]
+
+
+def _next_clock_time(word: str, now: float) -> Optional[datetime]:
+    """/cron's <HH:MM>: the next such local time, tomorrow once it has passed today."""
+    match = _CLOCK_TIME.fullmatch(word)
+    if match is None:
+        return None
+    clock = day_time(int(match.group(1)), int(match.group(2)))
+    today = datetime.fromtimestamp(now).date()
+    when = datetime.combine(today, clock).astimezone()
+    if when.timestamp() <= now:
+        when = datetime.combine(today + timedelta(days=1), clock).astimezone()
+    return when
+
+
+def _command_body(text: str, head: str) -> str:
+    """What follows a command's word, dedented: /py's code."""
+    body = text.lstrip()[len(head):].lstrip(" \t")
+    if body.startswith("\n"):
+        body = body[1:]
+    return textwrap.dedent(body)
+
+
+def _job_timing(job: IcronJob, now: float) -> str:
+    repeat = "once" if job.every is None else f"every {_span(job.every)}"
+    if job.state != "running":
+        return f"{_hms(job.due)}, in {_span(job.due - now)}, {repeat}"
+    if job.kind == "message":
+        text = "sent" if job.started is None else f"sent at {_hms(job.started)}"
+    else:
+        text = ("code waiting to start" if job.started is None
+                else f"running code since {_hms(job.started)}")
+    return text if job.due is None else f"{text}, next {_hms(job.due)}"
+
+
+def _job_line(job: IcronJob, now: float) -> str:
+    """One pending job, as /cron lists it and /crontab's comments show it."""
+    what = job.message if job.message is not None else job.code or ""
+    return f"{job.job_id} ({_OWNER[job.origin]}) {_job_timing(job, now)}: {_one_line(what)}"
+
+
+def _cron_list(icron: Icron) -> str:
+    now = icron.clock()
+    jobs = [job for job in icron.jobs(by="user") if job.pending]
+    if not jobs:
+        return "cron: no pending jobs."
+    lines = [f"cron: {len(jobs)} pending job{'s' if len(jobs) != 1 else ''} (now {_hms(now)}):"]
+    lines += [f"  {_job_line(job, now)}" for job in jobs]
+    return "\n".join(lines)
+
+
+def _crontab_table(icron: Icron, entries: dict) -> str:
+    """The user's /cron jobs as entries, each under a comment with its ID and
+    next firing, and the other pending jobs as comments."""
+    now = icron.clock()
+    pending = [job for job in icron.jobs(by="user") if job.pending]
+    mine = [job for job in pending if job.job_id in entries]
+    others = [job for job in pending if job.job_id not in entries]
+    head = f"crontab (now {_hms(now)}): "
+    if mine:
+        head += (f"{len(mine)} job{'s' if len(mine) != 1 else ''} of yours; /crontab clear "
+                 "cancels them.")
+    else:
+        head += "no jobs of yours; /cron schedules one."
+    lines = [head]
+    for job in mine:
+        if job.state == "scheduled":
+            repeat = "once" if job.every is None else f"every {_span(job.every)}"
+            when = f"next {_hms(job.due)} (in {_span(job.due - now)}), {repeat}"
+        else:
+            when = _job_timing(job, now)
+        lines += [f"# {job.job_id}: {when}", _one_line(entries[job.job_id])]
+    if others:
+        lines.append("# Not in your table (/cron cancel ends them):")
+        lines += [f"#   {_job_line(job, now)}" for job in others]
+    return "\n".join(lines)
+
+
+def _icron_status(icron: Icron) -> str:
+    """icron's part of the status line, or nothing."""
+    status = icron.status()
+    if status.stalled is not None:
+        job_id, seconds = status.stalled
+        return f"icron: {job_id} has held the watcher for {int(seconds)}s"
+    if status.main_state == "suspended" and not status.undelivered:
+        job = status.suspended_on
+        if job is None:
+            return "icron: main waits for a wake-up"
+        if job.due is None or job.state == "running":
+            return f"icron: main waits for {job.job_id} (running)"
+        return f"icron: main waits for {job.job_id} at {_hms(job.due)}"
+    if status.undelivered:
+        return f"icron: {status.undelivered} due"
+    running = sum(job.state == "running" and job.kind != "message" for job in status.jobs)
+    dues = [job.due for job in status.jobs if job.due is not None]
+    parts = [f"{running} running"] if running else []
+    if dues:
+        parts.append(f"{len(dues)} job{'s' if len(dues) != 1 else ''}, next {_hms(min(dues))}")
+    return f"icron: {', '.join(parts)}" if parts else ""
+
+
+def _yield_notice(job: Optional[IcronJob], now: float) -> str:
+    if job is None:
+        return ("main yielded to icron, but nothing that could resume it is pending; it waits "
+                "for your message.")
+    if job.due is None or job.state == "running":
+        return (f"main yielded to icron; it waits for job {job.job_id} (running code), unless "
+                "you write first.")
+    return (f"main yielded to icron; job {job.job_id} resumes it at {_hms(job.due)} "
+            f"(in {_span(job.due - now)}), unless you write first.")
+
+
+def _queue_wake(state: _UIState) -> None:
+    """On the event loop: queue the delivery of icron's due wake-ups, as text
+    the user typed now would be. One marker stands for all of them. While
+    the CLI needs authentication they wait in icron, with one notice."""
+    icron = state.icron
+    if icron is None or state.closing or state.persistence_failed:
+        return
+    count = icron.undelivered()
+    if not count or any(isinstance(entry, _WakeIntent) for entry in state.pending):
+        return
+    if state.auth_required:
+        if not state.icron_auth_noticed:
+            state.icron_auth_noticed = True
+            due = "1 wake-up is" if count == 1 else f"{count} wake-ups are"
+            state.notice(f"icron: {due} due; delivered once the model is ready (/login).")
+        return
+    state.icron_auth_noticed = False
+    state.pending.append(_WakeIntent())
+    state.changed.set()
+
+
+def _waits_for_icron(state: _UIState) -> bool:
+    """True while main is suspended: its last turn yielded to icron."""
+    return state.icron is not None and state.icron.main.state == "suspended"
+
+
+def _post(loop, function, *args) -> None:
+    """Run function on the event loop thread, from any thread."""
+    try:
+        loop.call_soon_threadsafe(function, *args)
+    except RuntimeError:
+        pass  # the event loop has closed
+
+
+def _last_user_text(context: InteractionContext) -> str:
+    """The raw log's last user message, as the report of a turn without one."""
+    for item in reversed(context.items):
+        if isinstance(item, Message) and item.role == "user":
+            return message_summary(item)
+    return ""
 
 
 def _safe_notice(state: _UIState, text: str) -> None:
@@ -1000,16 +1357,17 @@ class _CliHost(TurnHost):
 
         Slash commands and /retry wait for the turn to end, and a steer never
         overtakes one queued before it. Each steer's attachments were read
-        when Enter accepted it.
+        when Enter accepted it. icron's due wake-ups among the steers come as
+        its message (_take_interrupt).
         """
         if not self._steering or self._state.closing:
             return super().interrupt()
-        submissions = self._on_loop(_take_steers, self._state)
+        messages = self._on_loop(_take_interrupt, self._state)
         if self._state.closing:
             return Interrupt.STOP
-        if not submissions:
+        if not messages:
             return Interrupt.CONTINUE
-        return Steer(tuple(submission.message for submission in submissions))
+        return Steer(messages)
 
     def append(self, context, items) -> None:
         context.extend(items)
@@ -1073,23 +1431,42 @@ class _CliHost(TurnHost):
         self._post(_arm_retry, self._state)
 
 
-async def _turn(context, model, environment, state, writer, config, *, steering=False):
+async def _turn(context, model, environment, state, writer, config, *, steering=False,
+                job_text="", resumes=0):
     """One turn of the shared loop, on the context thread.
 
     With ``steering``, text submitted during the turn reaches it right before
-    the next sample.
+    the next sample. With icron, main's tool can end the turn with a yield,
+    and the turn's end is main's handoff to icron: a Yield of ``job_text``,
+    the turn's input as typed, after ``resumes`` turns that icron started
+    since the user's last input.
     """
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.
     state.retry = None
     host = _CliHost(state, writer, asyncio.get_running_loop(), steering)
     state.turn_active = not state.pending  # a steer never overtakes older input
+    icron = state.icron
+    if icron is not None:
+        icron.begin_turn()
     try:
-        return await _on_context_thread(
-            state, run_turn, context, model, environment, config.snapshot(), host)
+        result = await _on_context_thread(
+            state, run_turn, context, model, environment, config.snapshot(), host,
+            control=icron)
+    except Exception as exc:
+        if icron is not None:
+            icron.handoff(turn_yield(exc, context, job_text=job_text, resumes=resumes),
+                          context.items)
+        raise
     finally:
         state.turn_active = False
         state.preemption.take()  # steers left over become the next query
+    if icron is not None:
+        waits_for = icron.handoff(
+            turn_yield(result, context, job_text=job_text, resumes=resumes), context.items)
+        if result.kind == "yielded":
+            state.notice(_yield_notice(waits_for, icron.clock()))
+    return result
 
 
 async def _reload_retry_model(
@@ -1183,9 +1560,22 @@ def _resume_notice(context: InteractionContext) -> Optional[str]:
 
 async def _drive_interaction(model, environment, state, args, path, config):
     state.active_model = model
+    icron = state.icron
+    if icron is not None:
+        # icron posts its deliveries and notices to this event loop.
+        loop = asyncio.get_running_loop()
+        icron.start(functools.partial(_post, loop, _queue_wake, state),
+                    functools.partial(_post, loop, _safe_notice, state))
     try:
         return await _drive_interaction_body(model, environment, state, args, path, config)
     finally:
+        if icron is not None:
+            # Before the model and the environment: no code runs after this.
+            dropped = await _on_context_thread(state, icron.close)
+            if dropped:
+                _safe_notice(state, f"icron: dropped {len(dropped)} pending "
+                                    f"job{'s' if len(dropped) != 1 else ''}; jobs and Python "
+                                    "state live only in this process.")
         if callable(getattr(state.active_model, "close", None)):
             await _on_context_thread(state, close_model, state.active_model)
 
@@ -1242,6 +1632,7 @@ async def _drive_interaction_body(
     startup = True
     while not state.closing:
         sampling_attempt = False
+        wake_turn = False  # this iteration's turn takes icron's wake-up as its input
         try:
             if startup:
                 if existing:
@@ -1282,10 +1673,15 @@ async def _drive_interaction_body(
                 should_sample = model is not None and (query is not None or (
                     existing and args.instructions is not None
                 ))
+                # A save that used icron says so, with the flag or without it.
+                icron_note = icron_log_state(context.items) if existing else None
                 if existing and not should_sample:
-                    notice = _resume_notice(context)
+                    notice = (_ICRON_YIELD_NOTICE if icron_note == "yielded"
+                              else _resume_notice(context))
                     if notice is not None:
                         state.notice(notice)
+                if icron_note == "jobs":
+                    state.notice(_ICRON_RESTART_NOTICE)
                 if model is None:
                     query = None
                     state.notice(
@@ -1296,7 +1692,16 @@ async def _drive_interaction_body(
                 state.ready = True
                 startup = False
             else:
-                await state.changed.wait()
+                _queue_wake(state)  # due wake-ups that a failure or a missing model held
+                if state.headless:
+                    # A headless run goes on only while main waits for icron.
+                    while not state.changed.is_set():
+                        if not _waits_for_icron(state):
+                            return
+                        with suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(state.changed.wait(), 0.5)
+                else:
+                    await state.changed.wait()
                 state.changed.clear()
                 if state.closing:
                     return
@@ -1305,6 +1710,15 @@ async def _drive_interaction_body(
                 query = state.pending.popleft()
                 if state.pending:
                     state.changed.set()
+                if isinstance(query, _WakeIntent):
+                    # Between turns, icron's due wake-ups start one, as text
+                    # the user typed would.
+                    wakeup = (state.icron.take_wakes()
+                              if state.icron is not None and model is not None else None)
+                    if wakeup is None:
+                        continue  # withdrawn since it was queued, or no model: they stay due
+                    text = wakeup.text()
+                    query, wake_turn = _Submission(text, Message("user", text)), True
                 if isinstance(query, _RetryIntent):
                     # Recheck on the owner: an earlier queued query may have
                     # superseded the failure since Enter accepted this ticket.
@@ -1329,6 +1743,9 @@ async def _drive_interaction_body(
                     # it also works after a restart.
                     if context.pending_tool_calls() or context.pending_user_tool_calls():
                         state.notice("Cannot continue with unresolved tool outcomes.")
+                        continue
+                    if Icron.yield_recorded_in(context.items):
+                        state.notice(_ICRON_CONTINUE_REFUSAL)
                         continue
                     refusal = turn_tail(context.items).refusal
                     if refusal is not None:
@@ -1379,6 +1796,7 @@ async def _drive_interaction_body(
             if query is not None:
                 if isinstance(query, _Submission):
                     message = query.message  # read when Enter accepted it
+                    turn_text = query.text
                 else:  # the startup prompt
                     try:
                         message = _query_message(query, args, attachment_cwd, config)
@@ -1391,12 +1809,16 @@ async def _drive_interaction_body(
                         state.editor = Editor(query, len(query))
                         state.set_phase("idle")
                         continue
+                    turn_text = query
                 user = UserInteraction((message,))
                 await _append(context, user.context_items(), state, writer)
                 state.displays.extend(user.display_items())
+            else:  # /retry, /continue, or a resumed save's new instructions
+                turn_text = _last_user_text(context)
             if should_sample:
                 sampling_attempt = True
-                await _turn(
+                state.icron_resumes = state.icron_resumes + 1 if wake_turn else 0
+                result = await _turn(
                     context,
                     model,
                     environment,
@@ -1404,9 +1826,14 @@ async def _drive_interaction_body(
                     writer,
                     config,
                     steering=True,
+                    job_text=turn_text,
+                    resumes=state.icron_resumes,
                 )
+            else:
+                result = None
             state.set_phase("auth needed" if state.auth_required else "idle")
-            if state.headless:
+            if state.headless and not (result is not None and result.kind == "yielded"
+                                       and _waits_for_icron(state)):
                 return
         except Exception as exc:
             state.exit_code = 1
@@ -1423,7 +1850,7 @@ async def _drive_interaction_body(
                 state.active_model = None
                 _mark_auth_required(state, exc)
             state.notice(f"{type(exc).__name__}: {exc}")
-            if state.pending:
+            if _queued_input(state):
                 state.notice(
                     "Queued queries discarded after failure; submit again explicitly."
                 )
@@ -1508,6 +1935,13 @@ def _startup_notices(state, args, path, config=None):
     else:
         state.notice("Note: default model tools are disabled; user commands remain available."
                      if not state.headless else "Note: default model tools are disabled.")
+    if state.icron is not None:
+        state.notice("icron (experimental): main can schedule work and run Python in this "
+                     "process, unsandboxed, with the icron tool"
+                     + ("." if state.headless else
+                        "; /cron schedules your messages, /crontab shows them, and /py runs "
+                        "your code.")
+                     + " Jobs and Python state live only in this process.")
     dropped = None if config is None else config.coldstart_dropped
     if dropped is not None:
         state.notice(
@@ -1517,7 +1951,7 @@ def _startup_notices(state, args, path, config=None):
         )
 
 
-async def _run_headless(model, environment, args, path, *, trace=None):
+async def _run_headless(model, environment, args, path, *, trace=None, icron=None):
     """One explicit task, quiet context display, and orderly effect draining."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
@@ -1527,6 +1961,7 @@ async def _run_headless(model, environment, args, path, *, trace=None):
         headless=True,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
+        icron=icron,
     )
     _startup_notices(state, args, path, config)
     loop = asyncio.get_running_loop()
@@ -1571,6 +2006,7 @@ async def _run(
     path: Path = DEFAULT_SAVE_PATH,
     *,
     trace: Optional[DebugTrace] = None,
+    icron: Optional[Icron] = None,
 ) -> int:
     path = Path(path).absolute()
     config = _runtime_config(environment, args, path)
@@ -1579,6 +2015,7 @@ async def _run(
         editor=Editor(prompt, len(prompt)), auth_required=model is None,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
+        icron=icron,
     )
     state.notice(
         "pythia.interaction — /retry, /continue, /steer [text], /task <text>, /compact [focus], "
@@ -1622,8 +2059,13 @@ async def _run(
                     if level >= Urgency.IMMEDIATE:
                         status += (" (preempting)" if level >= Urgency.PREEMPT
                                    else " (immediate)")
-                if len(state.pending) > steers:
-                    status += f" | queued={len(state.pending) - steers}"
+                queued = _queued_input(state) - steers
+                if queued > 0:
+                    status += f" | queued={queued}"
+                if state.icron is not None and state.stop_level is None:
+                    part = _icron_status(state.icron)
+                    if part:
+                        status += f" | {part}"
                 prompt = (
                     f"{_SPINNER[(frame // 16) % len(_SPINNER)]}> "
                     if busy else ":> "
@@ -1683,6 +2125,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "never truncated, even when --resume=False replaces the save; launch-only"
         ),
     )
+    parser.add_argument(
+        "--enable-experimental-icron",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "experimental: run icron, an in-process scheduler. The model gets the icron "
+            "tool, which schedules wake-ups and runs Python in this process, unsandboxed; "
+            "/cron and /crontab schedule and show your messages, and /py runs your code. "
+            "Jobs and Python state live only in memory. Launch-only: repeat when resuming. "
+            "A bare flag means True (default: %(default)s)"
+        ),
+    )
     return parser
 
 
@@ -1690,6 +2147,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     model = None
     trace = None
+    icron = None
     try:
         catalog = frontend_catalog(args)
         if args.list_models:
@@ -1723,18 +2181,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise
             model = None
         cwd = Path(args.cwd).expanduser().resolve()
+        if args.enable_experimental_icron:
+            icron = Icron()
+        tools = () if icron is None else (icron.tool(),)
         environment_manager = (
-            DefaultEnvironment(cwd=cwd, enable_workspace=args.enable_workspace)
-            if args.enable_default_tools else nullcontext(Environment())
+            DefaultEnvironment(cwd=cwd, enable_workspace=args.enable_workspace,
+                               **({"extra_tools": tools} if tools else {}))
+            if args.enable_default_tools else nullcontext(Environment(tools))
         )
         with environment_manager as environment:
             if args.headless:
                 return asyncio.run(_run_headless(
-                    model, environment, args, path=save_path, trace=trace,
+                    model, environment, args, path=save_path, trace=trace, icron=icron,
                 ))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(
-                model, environment, terminal, args, path=save_path, trace=trace,
+                model, environment, terminal, args, path=save_path, trace=trace, icron=icron,
             ))
     except KeyboardInterrupt:
         return 130
@@ -1743,7 +2205,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     finally:
         try:
-            close_model(model)
+            try:
+                if icron is not None:
+                    icron.close()  # idempotent: the run closes it first
+            finally:
+                close_model(model)
         finally:
             if trace is not None:
                 trace.close()

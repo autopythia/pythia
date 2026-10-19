@@ -281,6 +281,12 @@ class InteractionItemRenderer:
         parsed, raw_arguments = _parse_tool_arguments(item.arguments_json)
         payload = parsed if isinstance(parsed, Mapping) else {}
 
+        if item.name == "icron" and not user and isinstance(parsed, Mapping):
+            # The call it stands for, then its code, whole, as apply_patch
+            # shows its patch.
+            call, code = _format_icron_call(parsed)
+            return (f"{label}\n{call}",) if code is None else (f"{label}\n{call}", code)
+
         command = _extract_shell_command(item.name, payload)
         if command is not None:
             return (f"{label}\n{command}",)
@@ -675,6 +681,22 @@ def _format_generic_arguments(
 
 def _format_tool_call_label(name: str, call_id: str) -> str:
     return f"[tool-call] {name} ({call_id})"
+
+
+def _format_icron_call(arguments: Mapping[str, object]) -> Tuple[str, Optional[str]]:
+    """An icron tool call as the Python call it stands for, and its code.
+
+    ``{"action": "schedule", "message": "Hi", "after": 600}`` reads
+    ``icron.schedule(message='Hi', after=600)``. The ``yield`` action is the
+    method ``yield_``. Values are Python literals, messages in full.
+    """
+    action = arguments.get("action")
+    method = ("yield_" if action == "yield" else action) if isinstance(action, str) else "?"
+    code = arguments.get("code")
+    code = _normalize_tool_payload(code)
+    keywords = ", ".join(f"{key}={value!r}" for key, value in arguments.items()
+                         if key not in ("action", "code"))
+    return f"icron.{method}({keywords})", code
 
 
 def _format_tool_result_label(
