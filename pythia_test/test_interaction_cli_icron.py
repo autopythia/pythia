@@ -555,7 +555,7 @@ class CronCommandTests(_CommandCase):
                 self.assert_kept(text, usage)
         self.assert_kept("/cron in 8d x", "icron.schedule(): after must be from 1 to 604800 "
                                           "seconds. Draft preserved.")
-        self.assert_kept("/cron every 30s x", "icron.schedule(): every must be from 60 to "
+        self.assert_kept("/cron every 29s x", "icron.schedule(): every must be from 30 to "
                                               "604800 seconds. Draft preserved.")
         self.assertEqual(self.icron.jobs(), ())
 

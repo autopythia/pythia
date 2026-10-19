@@ -92,8 +92,8 @@ class ScheduleTests(_IcronCase):
         self.assertAlmostEqual(icron.schedule("c", at=local).due, NOW + 7200, delta=3600)
         every = icron.schedule("d", every=3600)
         self.assertEqual((every.due, every.every, every.remaining), (NOW + 3600, 3600.0, None))
-        counted = icron.schedule("e", after=10, every=60, count=3)
-        self.assertEqual((counted.due, counted.remaining), (NOW + 10, 3))
+        counted = icron.schedule("e", after=10, every=30, count=3)  # the shortest repeat
+        self.assertEqual((counted.due, counted.every, counted.remaining), (NOW + 10, 30.0, 3))
         once = icron.schedule(code="pass", after=5)
         self.assertEqual((once.kind, once.state, once.remaining, once.code),
                          ("code", "scheduled", 1, "pass"))
@@ -103,7 +103,7 @@ class ScheduleTests(_IcronCase):
         cases = [
             (dict(message="x", after=5, at="2027-01-15T09:00:00Z"), "give after or at, not both"),
             (dict(message="x"), "give after, at, or every"),
-            (dict(message="x", every=59), "every must be from 60"),
+            (dict(message="x", every=29), "every must be from 30"),
             (dict(message="x", after=0.5), "after must be from 1"),
             (dict(message="x", after=8 * 86400), "after must be from 1"),
             (dict(message="x", after=True), "after must be a number"),

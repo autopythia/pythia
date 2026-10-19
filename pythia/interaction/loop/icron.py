@@ -93,7 +93,7 @@ class IcronLimits:
     max_jobs: int = 16                  # per origin: pending jobs, and undelivered wake-ups
     min_delay: float = 1.0              # earliest first firing for after=, in seconds
     max_delay: float = 7 * 24 * 3600.0  # latest first firing, and longest repeat
-    min_every: float = 60.0             # shortest repeat
+    min_every: float = 30.0             # shortest repeat
     max_chars: int = 8000               # a message or a note, like YIELD_MAX_CHARS
     max_wait: float = 59.0              # exec's wait from main's tool, like COMMAND_WAIT_CAP_SECONDS
     max_output: int = 16000             # characters of a run's output that are kept
@@ -1559,7 +1559,7 @@ _DESCRIPTION = (
     "work.\n"
     "- schedule(message=None, code=None, after=None, at=None, every=None, count=None): run "
     "code later: `after` seconds from now, or at `at` (ISO 8601 with a UTC offset); with "
-    "neither, `every` seconds from now. With every (60 or more), it repeats; count is how "
+    "neither, `every` seconds from now. With every (30 or more), it repeats; count is how "
     "many times in all (default 1, or no limit with every). A message is the default code, "
     "await main.resume(message). A job runs once at a time, and firings during a run merge "
     "into it.\n"
@@ -1585,7 +1585,7 @@ _PARAMETERS = {
         "code": {"type": "string"},
         "after": {"type": "number", "minimum": 1, "maximum": 604800},
         "at": {"type": "string"},
-        "every": {"type": "number", "minimum": 60, "maximum": 604800},
+        "every": {"type": "number", "minimum": 30, "maximum": 604800},
         "count": {"type": "integer", "minimum": 1},
         "wait": {"type": "number", "minimum": 0, "maximum": 59},
         "note": {"type": "string", "maxLength": IcronLimits.max_chars},
