@@ -42,9 +42,9 @@ PROFILE = 'claude-stream-json-v9'
 # cache lives, and still come after the relay's own deadline for that wait,
 # 3,595 s from the start of the request that made the call, which the CLI
 # sends later (doc/claude-relay-warm-yield-plan.md, 4.2). Measured through the
-# relay from 20 to 240 s, and held for 91 s and 6 minutes at this value, with
-# the CLI's 300 s idle abort off (probe P5, October 20); re-measure after
-# changing the pinned version.
+# relay from 20 to 240 s, and held for 91 s, 6 minutes and 58 minutes at this
+# value, with the CLI's 300 s idle abort off (probe P5, October 20); re-measure
+# after changing the pinned version.
 DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS = 3600
 MAX_RECORD = 8 * 1024 * 1024
 # A message the CLI closes without its final message_delta (no stop reason, no
