@@ -57,6 +57,7 @@ from ..items import InteractionItem
 from ..items import ToolCall
 from ..items import ToolResult
 from ..items import UserInteractionBoundary
+from ..timeouts import DEFAULT_TOOL_TIMEOUT_SECONDS
 from .supervision import Yield
 
 
@@ -95,7 +96,7 @@ class IcronLimits:
     max_delay: float = 7 * 24 * 3600.0  # latest first firing, and longest repeat
     min_every: float = 30.0             # shortest repeat
     max_chars: int = 8000               # a message or a note, like YIELD_MAX_CHARS
-    max_wait: float = 59.0              # exec's wait from main's tool, like COMMAND_WAIT_CAP_SECONDS
+    max_wait: float = DEFAULT_TOOL_TIMEOUT_SECONDS  # exec's wait, within main's tool call
     max_output: int = 16000             # characters of a run's output that are kept
     stall_seconds: float = 5.0          # how long code may hold the watcher loop before status() says so
 
@@ -771,7 +772,7 @@ class Icron:
         """Main's icron tool: each call is one call of this API."""
         if self._tool is None:
             self._tool = Tool(ToolSpec(TOOL_NAME, _DESCRIPTION, _PARAMETERS), self._handle,
-                              timeout_seconds=60)
+                              timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS)
         return self._tool
 
     @staticmethod
@@ -1552,7 +1553,8 @@ _DESCRIPTION = (
     "the other fields are its keyword arguments.\n"
     "- exec(code, wait=10): run Python now, in this process, on icron's event loop; "
     "top-level await works. Returns what it printed, a final expression's value, or the "
-    "traceback. After `wait` seconds (at most 59), it keeps running as a job. Variables "
+    f"traceback. After `wait` seconds (at most {IcronLimits.max_wait:g}), it keeps running "
+    "as a job. Variables "
     "persist between calls. Code sees icron (schedule, cancel, jobs, now, current), main "
     "(you: main.resume(text) sends you text as a message, and awaiting it waits for the end "
     "of the turn that receives it), asyncio, and print. Use asyncio.to_thread for blocking "
@@ -1587,7 +1589,7 @@ _PARAMETERS = {
         "at": {"type": "string"},
         "every": {"type": "number", "minimum": 30, "maximum": 604800},
         "count": {"type": "integer", "minimum": 1},
-        "wait": {"type": "number", "minimum": 0, "maximum": 59},
+        "wait": {"type": "number", "minimum": 0, "maximum": IcronLimits.max_wait},
         "note": {"type": "string", "maxLength": IcronLimits.max_chars},
         "job_id": {"type": "string"},
     },

@@ -454,7 +454,8 @@ so that a process can wait after a yield as long as its prompt cache lives
 ([warm yield plan](../doc/claude-relay-warm-yield-plan.md)). It recognizes the
 CLI's own timeout result for recovery, and makes a relay tool batch's results
 due 3,595 s after its first call arrived, so command waits end by then;
-`DefaultEnvironment` caps any wait at 59 s. After changing
+tool waits are at most 59 s on every route (`DEFAULT_TOOL_TIMEOUT_SECONDS`).
+After changing
 `CLAUDE_RELAY_CLI_VERSION`, run the live native-tool-timeout check above, and
 the warm yield plan's probe P5 (`doc/claude-relay-warm-yield-probes.py`), which
 holds a call for up to 58 minutes. See the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md)

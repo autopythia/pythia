@@ -22,6 +22,7 @@ from pythia.interaction import CodexResponsesModel
 from pythia.interaction import CommandRuntime
 from pythia.interaction import DEFAULT_LOGIN_TIMEOUT_SECONDS
 from pythia.interaction import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from pythia.interaction import DEFAULT_TOOL_TIMEOUT_SECONDS
 from pythia.interaction import InteractionConfig
 from pythia.interaction import MAX_TIMEOUT_SECONDS
 from pythia.interaction import Message
@@ -374,11 +375,12 @@ class InteractionTimeoutTests(unittest.TestCase):
             codex_quota.query_quota(CodexAuth("FAKE_SECRET"), opener=opener)
         self.assertNotIn("FAKE_SECRET", str(raised.exception))
 
-    def test_command_and_ui_timings_remain_independent(self):
+    def test_command_waits_follow_the_tool_timeout_and_ui_timings_stay_independent(self):
+        self.assertEqual(DEFAULT_TOOL_TIMEOUT_SECONDS, 59.0)
         defaults = inspect.signature(CommandRuntime).parameters
         self.assertEqual(defaults["default_exec_yield_time_ms"].default, 10_000)
         self.assertEqual(defaults["default_write_yield_time_ms"].default, 250)
-        self.assertEqual(defaults["max_yield_time_ms"].default, 60_000)
+        self.assertEqual(defaults["max_yield_time_ms"].default, 59_000)
         self.assertEqual(cli.FRAME_INTERVAL, 1 / 128)
         self.assertIsNone(Tool(ToolSpec("tool", "A tool.", {}), mock.Mock()).timeout_seconds)
 

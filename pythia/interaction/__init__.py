@@ -173,6 +173,7 @@ from .save import resume_interaction_save
 from .save import save_interaction_save
 from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
+from .timeouts import DEFAULT_TOOL_TIMEOUT_SECONDS
 from .timeouts import MAX_TIMEOUT_SECONDS
 from .user import UserInteraction
 
@@ -242,6 +243,7 @@ __all__ = [
     "DEFAULT_KEEP_RECENT_TOKENS",
     "DEFAULT_LOGIN_TIMEOUT_SECONDS",
     "DEFAULT_REQUEST_TIMEOUT_SECONDS",
+    "DEFAULT_TOOL_TIMEOUT_SECONDS",
     "DisplayItem",
     "Environment",
     "EnvironmentError",

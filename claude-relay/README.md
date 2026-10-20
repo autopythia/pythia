@@ -117,8 +117,9 @@ by these short tests.
   batch's calls one at a time and none is answered before the whole batch has
   run, so the first call's clock covers the batch: each relay tool batch carries
   `ModelSample.results_due`, 3,595 s after its first call arrived, and command
-  waits end by then. `DefaultEnvironment` also caps any wait at 59 s. A-side
-  only; see the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md).
+  waits end by then. Tool waits are also at most 59 s on every route
+  (`DEFAULT_TOOL_TIMEOUT_SECONDS`). A-side only; see the
+  [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md).
 - The MCP endpoint implements stateless JSON-response Streamable HTTP with
   initialization, tools/list, tools/call and ping, using the explicitly supported
   protocol dates 2025-03-26, 2025-06-18 and 2025-11-25. GET/SSE and DELETE return

@@ -16,17 +16,15 @@ from .local_tools import create_exec_command_tool
 from .local_tools import create_update_plan_tool
 from .local_tools import create_write_stdin_tool
 from .local_tools._workspace import WorkspacePolicy
-
-
-# Command tools stop waiting for output after this, whatever wait the call asked
-# for (up to their 60 s maximum). Claude Code 2.1.289 gives up on an MCP tool
-# call 60 s after sending it unless told otherwise. The Claude relay raises that
-# deadline, so this is a backstop; see doc/claude-relay-tool-deadline-plan.md.
-COMMAND_WAIT_CAP_SECONDS = 59.0
+from .timeouts import DEFAULT_TOOL_TIMEOUT_SECONDS
 
 
 class DefaultEnvironment(Environment):
-    """Unsandboxed local tools, optionally extended with caller-supplied tools."""
+    """Unsandboxed local tools, optionally extended with caller-supplied tools.
+
+    The command tools' timeout is ``DEFAULT_TOOL_TIMEOUT_SECONDS``, the most
+    that their runtime lets a call wait for output by default.
+    """
 
     def __init__(
         self,
@@ -66,10 +64,10 @@ class DefaultEnvironment(Environment):
         tools = []
         if enable_exec_command:
             tools.append(create_exec_command_tool(
-                self._command_runtime, timeout_seconds=COMMAND_WAIT_CAP_SECONDS))
+                self._command_runtime, timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS))
         if enable_write_stdin:
             tools.append(create_write_stdin_tool(
-                self._command_runtime, timeout_seconds=COMMAND_WAIT_CAP_SECONDS))
+                self._command_runtime, timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS))
         if enable_update_plan:
             tools.append(create_update_plan_tool(self._plan_store))
         if enable_apply_patch:

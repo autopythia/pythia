@@ -15,9 +15,13 @@ The CLI's account commands keep the fixed ``DEFAULT_LOGIN_TIMEOUT_SECONDS``:
 it is the ``/login`` flow budget, which also caps the token exchange, and the
 timeout of each ``/quota`` request. Model timeouts do not apply to them.
 
+A model's tool call waits at most ``DEFAULT_TOOL_TIMEOUT_SECONDS``, on every
+route: a command's wait for output (``yield_time_ms``, at most 59000 by
+default) and icron's ``exec`` wait, and the timeout of the tools that wait.
+
 These constants are startup defaults; change them before starting the
-process. Command waits, UI polling, and cleanup timings are independent and
-intentionally do not use them.
+process. UI polling and cleanup timings are independent and intentionally do
+not use them.
 
 ``MAX_TIMEOUT_SECONDS``, ``validate_timeout_seconds`` and
 ``validate_idle_seconds`` (which also accepts 0) live with the model catalog's
@@ -31,6 +35,12 @@ from .model_catalog import validate_timeout_seconds
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 1200.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 120.0
+# Claude Code 2.1.289 gives up on an MCP tool call 60 s after sending it unless
+# told otherwise. The Claude relay raises that deadline
+# (claude_relay._cli_protocol.DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS), so this is
+# a backstop there, and the same limit on every other route.
+# doc/claude-relay-tool-deadline-plan.md.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 59.0
 DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS = 1200.0
 # How long the relay's MCP server holds a native tool call for its result: just
 # past the CLI's own deadline for the call (DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS,
@@ -59,6 +69,7 @@ __all__ = [
     "DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS",
     "DEFAULT_LOGIN_TIMEOUT_SECONDS",
     "DEFAULT_REQUEST_TIMEOUT_SECONDS",
+    "DEFAULT_TOOL_TIMEOUT_SECONDS",
     "MAX_TIMEOUT_SECONDS",
     "validate_idle_seconds",
     "validate_timeout_seconds",

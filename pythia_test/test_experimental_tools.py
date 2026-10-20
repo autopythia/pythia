@@ -89,7 +89,7 @@ class ExperimentalToolTests(unittest.TestCase):
                     # The command tools describe the runtime's wait limits.
                     runtime.return_value.configure_mock(
                         default_exec_yield_time_ms=10_000, default_write_yield_time_ms=250,
-                        max_yield_time_ms=60_000)
+                        max_yield_time_ms=59_000)
                     with self.assertRaises(exception):
                         DefaultEnvironment(extra_tools=tools)
                     runtime.return_value.close.assert_called_once_with()

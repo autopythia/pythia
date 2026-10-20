@@ -261,7 +261,7 @@ class CommandToolTests(unittest.TestCase):
             ))
             started = time.monotonic()
             result = _execute(environment, "exec_command", "one",
-                              {"cmd": "sleep 30", "yield_time_ms": 60_000})
+                              {"cmd": "sleep 30", "yield_time_ms": 59_000})
             self.assertLess(time.monotonic() - started, 10)
             self.assertTrue(result.success, result.output)
             match = re.search(r"Process running with session ID (\d+)\n", result.output)
@@ -269,14 +269,14 @@ class CommandToolTests(unittest.TestCase):
             self.assertNotIn("interrupted", result.output)
             started = time.monotonic()
             poll = _execute(environment, "write_stdin", "two",
-                            {"session_id": int(match.group(1)), "yield_time_ms": 60_000})
+                            {"session_id": int(match.group(1)), "yield_time_ms": 59_000})
             self.assertLess(time.monotonic() - started, 10)
             self.assertIn(f"Process running with session ID {match.group(1)}", poll.output)
             # The maximum still holds: a longer request fails, as before.
             over = _execute(environment, "exec_command", "three",
-                            {"cmd": "true", "yield_time_ms": 60_001})
+                            {"cmd": "true", "yield_time_ms": 59_001})
             self.assertFalse(over.success)
-            self.assertIn("yield_time_ms must not exceed 60000", over.output)
+            self.assertIn("yield_time_ms must not exceed 59000", over.output)
 
     def test_a_wait_ends_when_the_calls_result_is_due(self):
         with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:
@@ -1149,8 +1149,8 @@ class DefaultEnvironmentTests(unittest.TestCase):
             environment.close()
             self.assertEqual(environment.command_runtime.active_session_ids, ())
 
-    def test_command_waits_are_capped_under_the_relay_deadline(self):
-        self.assertEqual(default_environment.COMMAND_WAIT_CAP_SECONDS, 59.0)
+    def test_command_tools_wait_at_most_the_uniform_tool_timeout(self):
+        self.assertEqual(default_environment.DEFAULT_TOOL_TIMEOUT_SECONDS, 59.0)
         with tempfile.TemporaryDirectory() as tmpdir:
             with DefaultEnvironment(cwd=tmpdir) as environment:
                 descriptions = [
@@ -1158,20 +1158,22 @@ class DefaultEnvironmentTests(unittest.TestCase):
                     for spec in environment.tool_specs
                     if spec.name in ("exec_command", "write_stdin")
                 ]
+                self.assertEqual(environment.command_runtime.max_yield_time_ms, 59_000)
             self.assertEqual(len(descriptions), 2)
+            # The maximum is the tool timeout, so no separate cap is described.
             for text in descriptions:
-                self.assertIn("at most 60000", text)
-                self.assertIn("Waits end after 59000 or sooner", text)
-            # Both command tools get the cap: a longer wait ends at it.
-            with mock.patch.object(default_environment, "COMMAND_WAIT_CAP_SECONDS", 0.2), \
+                self.assertIn("at most 59000", text)
+                self.assertNotIn("Waits end after", text)
+            # Both command tools get the timeout: a longer wait ends at it.
+            with mock.patch.object(default_environment, "DEFAULT_TOOL_TIMEOUT_SECONDS", 0.2), \
                     DefaultEnvironment(cwd=tmpdir) as environment:
                 started = time.monotonic()
                 result = _execute(environment, "exec_command", "one",
-                                  {"cmd": "sleep 30", "yield_time_ms": 60_000})
+                                  {"cmd": "sleep 30", "yield_time_ms": 59_000})
                 match = re.search(r"Process running with session ID (\d+)\n", result.output)
                 self.assertIsNotNone(match, result.output)
                 poll = _execute(environment, "write_stdin", "two",
-                                {"session_id": int(match.group(1)), "yield_time_ms": 60_000})
+                                {"session_id": int(match.group(1)), "yield_time_ms": 59_000})
                 self.assertIn("Process running with session ID", poll.output)
                 self.assertLess(time.monotonic() - started, 10)
 

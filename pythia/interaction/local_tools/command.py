@@ -22,6 +22,7 @@ from ..environment import ToolOutcome
 from ..environment import ToolSpec
 from ..environment import current_cancel
 from ..environment import current_results_due
+from ..timeouts import DEFAULT_TOOL_TIMEOUT_SECONDS
 from ._workspace import WorkspacePolicy
 
 # After stdout reaches EOF, the shell may still be exiting. Wait at least this
@@ -155,7 +156,7 @@ class CommandRuntime:
         default_exec_yield_time_ms: int = 10_000,
         default_write_yield_time_ms: int = 250,
         default_max_output_tokens: Optional[int] = 4_000,
-        max_yield_time_ms: int = 60_000,
+        max_yield_time_ms: int = round(DEFAULT_TOOL_TIMEOUT_SECONDS * 1000),
         _workspace_policy: Optional[WorkspacePolicy] = None,
     ) -> None:
         root = Path(cwd).expanduser().resolve()

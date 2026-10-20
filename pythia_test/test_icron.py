@@ -448,7 +448,9 @@ class ToolTests(_IcronCase):
     def test_each_action_is_one_api_call(self):
         self.start()
         tool = self.icron.tool()
-        self.assertEqual((tool.spec.name, tool.timeout_seconds), ("icron", 60.0))
+        # The tool timeout, as the command tools': its exec waits end before it.
+        self.assertEqual((tool.spec.name, tool.timeout_seconds), ("icron", 59.0))
+        self.assertEqual(tool.spec.parameters["properties"]["wait"]["maximum"], 59)
         self.assertEqual(tool.spec.parameters["properties"]["action"]["enum"],
                          ["schedule", "exec", "yield", "cancel", "jobs"])
         ok, scheduled = self.call(action="schedule", message="Check CI run 123.", after=600)
