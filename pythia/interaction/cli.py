@@ -152,12 +152,11 @@ class _RetryIntent:
 class _ContinueIntent:
     """/continue: sample the saved context without a user message; never model input.
 
-    ``pointer`` also samples after the last turn ended when the log ends with
-    /compact's coldstart pointer, which /continue refuses. Only a cancelled
-    reboot queues one, for compaction_coldstart_reboot (_reboot_ready).
+    It also samples when the log ends with /compact's coldstart pointer, even
+    after a finished turn (_ends_with_coldstart_compact): the model then
+    follows the pointer. /compact queues one for that itself (_follow_pointer),
+    as does a cancelled reboot that was to follow it (_reboot_ready).
     """
-
-    pointer: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -1057,6 +1056,8 @@ async def _compact_user_tool(
             state.notice(note)
         if rebooting:
             _coldstart_reboot(state, pointer=True)
+        if coldstart:
+            _follow_pointer(state, context)
     finally:
         state.active_user_call = None
     return model
@@ -1524,6 +1525,36 @@ def _coldstart_reboot(state: _UIState, *, pointer: bool = False) -> None:
     state.reboot = _Reboot("coldstart", pointer=pointer)
 
 
+_POINTER_RESUME_NOTICE = (
+    "Note: resumed save ends with /compact's coldstart pointer, which the model hasn't "
+    "followed yet. No model request was started; enter /continue to have the model "
+    "follow it, or a query to continue with a new message.")
+_ICRON_POINTER_NOTICE = ("Note: main yielded to icron, so the model follows the coldstart "
+                         "pointer when a wake-up or your message resumes it.")
+
+
+def _follow_pointer(state: _UIState, context: InteractionContext) -> None:
+    """After /compact's coldstart compaction: the model follows the pointer at
+    once, as within the turn of an automatic compaction. The pointer is a user
+    message that asks the model to update the summary and pick up where the
+    log left off, so a continuation (/continue) goes first in the queue. Input
+    typed meanwhile waits for that turn to end, as input queued before any turn
+    does (a steer never overtakes older input).
+
+    An exit wins, and a reboot that is to follow the pointer does so itself
+    (_coldstart_reboot). After an icron yield, a wake-up or the user's message
+    resumes main instead, and its turn starts with the pointer, as after a
+    coldstart reboot (_rebooted_goes_on).
+    """
+    if state.closing or (state.reboot is not None and state.reboot.pointer):
+        return
+    if Icron.yield_recorded_in(context.items):
+        state.notice(_ICRON_POINTER_NOTICE)
+        return
+    state.pending.appendleft(_ContinueIntent())
+    state.changed.set()
+
+
 def _check_reboot() -> Optional[str]:
     """The start check: the restarted CLI's command line with --rebooted=check,
     which loads the current code and parses the options. None if it passes,
@@ -1578,7 +1609,7 @@ async def _reboot_ready(state: _UIState) -> bool:
                  + (" The model follows the coldstart pointer here." if reboot.pointer
                     else " The turn continues here." if reboot.continues else ""))
     if reboot.continues or reboot.pointer:
-        state.pending.appendleft(_ContinueIntent(pointer=reboot.pointer))
+        state.pending.appendleft(_ContinueIntent())
     if state.pending:
         state.changed.set()  # run the queue: the continuation first, if any
     return False
@@ -1956,9 +1987,11 @@ def _ends_with_coldstart_compact(context: InteractionContext) -> bool:
     (its CompactionMetadata says so, as for compaction_coldstart_reboot).
 
     Its pointer is a user message that asks the model to update the summary
-    and pick up where the log left off. /continue still refuses it after a
-    finished turn (turn_tail skips checkpoints); only a coldstart reboot
-    follows it (_rebooted_goes_on).
+    and pick up where the log left off, and nothing has answered it yet.
+    /compact has the model follow it at once (_follow_pointer), and /continue
+    follows it too, even after a finished turn: turn_tail skips checkpoints,
+    so for it the records before this one decide. A coldstart reboot's
+    restarted CLI follows it as well (_rebooted_goes_on).
     """
     if not _ends_with_completed_manual_compaction(context):
         return False
@@ -1969,6 +2002,8 @@ def _ends_with_coldstart_compact(context: InteractionContext) -> bool:
 def _resume_notice(context: InteractionContext) -> Optional[str]:
     # Inspect the raw tail, not the model context established by a ContextPrefix.
     # A sample boundary does not record stop_reason or turn completion.
+    if _ends_with_coldstart_compact(context):
+        return _POINTER_RESUME_NOTICE
     if _ends_with_completed_manual_compaction(context):
         return None
     for item in reversed(context.items):
@@ -2131,8 +2166,10 @@ async def _drive_interaction_body(
                 # A save that used icron says so, with the flag or without it.
                 icron_note = icron_log_state(context.items) if existing else None
                 if existing and not should_sample:
+                    # A continuation that a reboot carried over goes on by itself.
+                    continues = any(isinstance(entry, _ContinueIntent) for entry in state.pending)
                     notice = (_ICRON_YIELD_NOTICE if icron_note == "yielded"
-                              else _resume_notice(context))
+                              else None if continues else _resume_notice(context))
                     if notice is not None:
                         state.notice(notice)
                 if icron_note == "jobs":
@@ -2209,8 +2246,7 @@ async def _drive_interaction_body(
                         state.notice(_ICRON_CONTINUE_REFUSAL)
                         continue
                     refusal = turn_tail(context.items).refusal
-                    if refusal is not None and not (query.pointer
-                                                    and _ends_with_coldstart_compact(context)):
+                    if refusal is not None and not _ends_with_coldstart_compact(context):
                         state.notice(f"Nothing to continue: {refusal}. Enter a query instead.")
                         continue
                     if model is None:

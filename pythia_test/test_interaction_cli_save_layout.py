@@ -777,10 +777,10 @@ class CLISaveLayoutTests(_ControllerTestCase):
                                          [*argv, "--prompt", "one"], environment), 0)
         with self.path.open("ab") as file:
             file.write(b'{"note": "added by hand"}\n')
-        terminal = _Terminal(_submit_then_quit(
-            "/compact", "Context compacted using a coldstart pointer"))
-        self.assertEqual(await self._run(_Model(self.path), terminal, [*argv, "--resume"],
-                                         environment), 0)
+        # The model then follows the pointer at once.
+        terminal = _Terminal(_submit_then_quit("/compact", "[assistant] summary updated"))
+        self.assertEqual(await self._run(_Model(self.path, _answer("summary updated")), terminal,
+                                         [*argv, "--resume"], environment), 0)
         saved = load_interaction_save(self.full).items
         lines = next(index for index, item in enumerate(saved) if isinstance(item, UserToolCall))
         checkpoint = next(item for item in reversed(saved) if isinstance(item, ContextPrefix))

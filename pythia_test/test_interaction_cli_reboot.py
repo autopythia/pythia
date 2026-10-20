@@ -630,16 +630,6 @@ class RebootFlowTests(_RebootCase):
         self.assertEqual(_users(saved), ["old request"])
         self.assertIsInstance(saved.items[-1], TurnSummary)
 
-    async def test_a_typed_continue_still_refuses_the_pointer(self):
-        saved = self._compacted()
-        model = _Model(self.path)
-        refusal = "Nothing to continue: the last turn ended. Enter a query instead."
-        terminal = _Terminal(_steps((lambda t, s: s == "idle", lambda t: t.submit("/continue")),
-                                    (_idle_with(refusal), _exit)))
-        self.assertEqual(await self._session(model, terminal, ["--resume"]), 0)
-        self.assertEqual(model.calls, [])
-        self.assertEqual(load_interaction_save(self.path).items, saved)
-
 
 class RestartedCLITests(_RebootCase):
     def _unfinished(self):

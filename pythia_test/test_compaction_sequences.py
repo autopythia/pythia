@@ -964,11 +964,14 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         return [item.result for item in saved if isinstance(item, UserToolResult)]
 
     async def test_compact_with_coldstart_points_to_the_save(self):
-        model = _Model()
+        model = _Model(_answer("Summary updated."))
         with DefaultEnvironment(cwd=self.path.parent) as environment:
             _texts, saved = await self.run_cli(
                 model, ["/compact"], ["--compaction-mode", "coldstart"], environment)
-        self.assertEqual(model.calls, [])
+        # No request compacts; the model then follows the pointer at once.
+        [request] = model.calls
+        [pointer] = request.model_items()
+        self.assertTrue(is_coldstart_pointer(pointer))
         call = next(i for i, item in enumerate(saved) if isinstance(item, UserToolCall))
         [result] = self.user_results(saved)
         self.assertEqual(result.output, (
@@ -984,10 +987,11 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
             "Covers no lines yet of old.\n\n## Goal\n"))
 
     async def test_compact_with_the_default_compacts_cold(self):
-        model = _Model()
+        model = _Model(_answer("Summary updated."))
         with DefaultEnvironment(cwd=self.path.parent) as environment:
             _texts, saved = await self.run_cli(model, ["/compact"], [], environment)
-        self.assertEqual(model.calls, [])
+        [request] = model.calls  # the pointer's turn
+        self.assertTrue(is_coldstart_pointer(request.model_items()[-1]))
         [result] = self.user_results(saved)
         self.assertTrue(result.output.startswith("Context compacted using a coldstart pointer"),
                         result.output)
@@ -1026,12 +1030,12 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata.protocol, "coldstart")
 
     async def test_compact_lists_failed_attempts_in_its_result_only(self):
-        model = _Model(_timeout())
+        model = _Model(_timeout(), _answer("Summary updated."))
         with DefaultEnvironment(cwd=self.path.parent) as environment:
             _texts, saved = await self.run_cli(
                 model, ["/compact"], ["--compaction-mode", "pi,coldstart",
                                       "--compaction-pi-keep-recent-tokens", "0"], environment)
-        self.assertEqual(len(model.calls), 1)  # pi's summary request
+        self.assertEqual(len(model.calls), 2)  # pi's summary request, then the pointer's turn
         call = next(i for i, item in enumerate(saved) if isinstance(item, UserToolCall))
         [result] = self.user_results(saved)
         self.assertTrue(result.success)
@@ -1040,7 +1044,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
             f"Context compacted using a coldstart pointer to the log (lines 1\u2013{call}); "
             "no model request was made."))
         self.assertFalse(any(isinstance(item, ModelFailure) for item in saved))
-        # The finished turn still looks finished: /continue stays refused.
+        # Nothing but the pointer's turn followed: no failure made it look unfinished.
         self.assertEqual(turn_tail(saved.items).refusal, "the last turn ended")
 
     async def test_a_summary_it_cant_create_is_shown_and_the_next_method_runs(self):
