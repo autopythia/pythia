@@ -125,6 +125,7 @@ from .runtime_config import InteractionConfig
 from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
 from .save import InteractionSaveWriter
+from .save import PUBLIC_LOG_REASONING
 from .user import UserInteraction
 from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
@@ -2069,12 +2070,16 @@ async def _drive_interaction_body(
                                          config=config)
     state.reads_files = functools.partial(_reads_files, args=args)
     tools_snapshot = Tools(environment.tool_specs)
+    # The save log shows reasoning as save_log_reasoning says while each line
+    # is written, so a /config change applies from the next line on.
+    reasoning = functools.partial(config.get, "save_log_reasoning")
+    thinking = _relay_thinking(args)
     # Resuming reads the full log alone; the public log is brought up to date.
     existing = args.resume and await _on_context_thread(state, save.log.exists)
     incomplete_line = None
     if existing:
         context, writer, incomplete_line = await _on_context_thread(
-            state, resume_cli_save, save)
+            state, resume_cli_save, save, reasoning=reasoning, thinking=thinking)
         if state.rebooted is None:
             # A restarted CLI's terminal shows them already, from the process
             # it replaced.
@@ -2100,7 +2105,7 @@ async def _drive_interaction_body(
             state.notice(
                 f"Warning: no existing {save.shown.name} was found; a fresh one was created."
             )
-        writer = CliSaveWriter(save)
+        writer = CliSaveWriter(save, reasoning=reasoning, thinking=thinking)
         initial = [Init(model=args.model or initial_model_name(model))]
         if args.instructions is not None:
             initial.append(Instructions(args.instructions))
@@ -2420,19 +2425,40 @@ def _prepared_save(path, args) -> CliSave:
     if isinstance(path, CliSave):
         return path
     return prepare_cli_save(resolve_save_path(Path(path)), resume=args.resume,
-                            auto_migrate=getattr(args, "auto_migrate_save", True))
+                            auto_migrate=getattr(args, "auto_migrate_save", True),
+                            reasoning=getattr(args, "save_log_reasoning", "nil"))
+
+
+def _relay_thinking(args) -> bool:
+    """Whether the save log may show this session's thinking whole (save.public_log_line).
+
+    Claude Relay's thinking has no summary, and it is text alone, as Chat
+    Completions' full reasoning is, so only the session can tell them apart.
+    """
+    return getattr(args, "model_api", None) == "claude-relay"
 
 
 def _startup_notices(state, args, save, config=None):
     for notice in save.notices:  # what preparing the save did, such as a migration
         state.notice(notice)
+    reasoning = (getattr(args, "save_log_reasoning", "nil") if config is None
+                 else config.get("save_log_reasoning"))
     state.notice(f"Save log: {save.shown}")
-    if save.private is not None:
+    if save.private is None:
+        state.notice(f"Note: this save keeps its original format ({NO_MIGRATION_OPTION}): "
+                     "it has the reasoning, and debug files go next to it.")
+        if reasoning != "nil":
+            state.notice(f"Note: save_log_reasoning = {reasoning!r} has no effect: a save "
+                         "in its original format has no save log.")
+    elif reasoning == "nil":
         state.notice(f"Private: {save.private}/, with the full log, which has the reasoning "
                      "that the save log leaves out, and debug files.")
     else:
-        state.notice(f"Note: this save keeps its original format ({NO_MIGRATION_OPTION}): "
-                     "it has the reasoning, and debug files go next to it.")
+        shown = ("reasoning summaries, and this session's Claude Relay thinking,"
+                 if _relay_thinking(args) else "reasoning summaries")
+        state.notice(f"Private: {save.private}/, with the full log, which resuming reads, "
+                     f"and debug files. The save log shows {shown} as assistant messages "
+                     "(save_log_reasoning).")
     if state.trace is not None:
         state.notice(
             f"Debug trace: {state.trace.request_path} and "
@@ -2659,9 +2685,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "when resuming a save in the original format, one file with reasoning at the "
             "--save path, migrate it: the file becomes PREFIX._private/context.jsonl, its "
-            "debug files move along, and PREFIX.jsonl becomes its public log. A migration "
+            "debug files move along, and PREFIX.jsonl becomes its save log. A migration "
             "that fails is undone, and the CLI exits. False keeps using such a save as it "
             "is. Launch-only. A bare flag means True (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--save-log-reasoning",
+        choices=PUBLIC_LOG_REASONING,
+        default="nil",
+        help=(
+            "how the save log, PREFIX.jsonl, shows each reasoning item, on its line: nil, as "
+            "a {\"type\": \"nil\"} line; assistant, as an assistant message with the item's "
+            "summary, or a nil line when it has none (with Claude Relay, the session's own "
+            "thinking shows whole). The full log keeps the reasoning either way. It applies "
+            "to the lines written while it is in effect; tunable with /config "
+            "save_log_reasoning (default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -2784,7 +2823,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         # Before the trace and the model: a migration that fails ends the CLI here.
         save = prepare_cli_save(save_path, resume=args.resume,
-                                auto_migrate=args.auto_migrate_save)
+                                auto_migrate=args.auto_migrate_save,
+                                reasoning=args.save_log_reasoning)
         trace = (DebugTrace.open_paths(*save.trace_paths, context_id=1, role="main")
                  if args.debug_trace else None)
         try:

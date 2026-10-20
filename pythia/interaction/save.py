@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from typing import BinaryIO
+from typing import Callable
 from typing import Dict
 from typing import Iterable
 from typing import Iterator
@@ -1153,14 +1154,69 @@ def resume_interaction_save_lines(path: SavePath) -> ResumedSaveLines:
     return ResumedSaveLines(read.context, writer, read.incomplete, read.data[:read.complete_size])
 
 
-# Public logs: a full log line for line, with reasoning left out.
+# Public logs: a full log line for line, with its reasoning left out, or shown
+# by its summaries.
 
-# A public log has this line in place of each reasoning item of its full log,
-# so that line N of the public log stands for line N of the full log.
+# A public log has this line in place of each reasoning item of its full log
+# that it doesn't show, so that line N of the public log stands for line N of
+# the full log.
 NIL_LINE = b'{"type": "nil"}\n'
+# How a public log shows reasoning (the CLI's save_log_reasoning): "nil",
+# never, with a NIL_LINE for each reasoning item; "assistant", as an assistant
+# message with the item's summary, and a NIL_LINE for an item without one.
+PUBLIC_LOG_REASONING = ("nil", "assistant")
+# Every form of a public log's reasoning lines, as (reasoning, thinking) (see
+# public_log_line). The form applies to the lines written while it is in
+# effect, so comparisons accept a line in any of them.
+_PUBLIC_LOG_FORMS = (("nil", False), ("assistant", False), ("assistant", True))
 
 
-def _public_line(line: bytes) -> bytes:
+def _require_public_log_reasoning(reasoning: object) -> str:
+    if not isinstance(reasoning, str) or reasoning not in PUBLIC_LOG_REASONING:
+        raise ValueError(f"reasoning must be one of: {', '.join(PUBLIC_LOG_REASONING)}")
+    return reasoning
+
+
+def _reasoning_message(item: Reasoning, reasoning: str, thinking: bool) -> Optional[Message]:
+    """The assistant message that shows a reasoning item, or None for a nil line.
+
+    With ``reasoning`` ``"assistant"``, its text is the item's summary: its
+    parts, trimmed, without empty ones, a blank line apart. With
+    ``thinking``, an item that is text alone, without a summary, encrypted
+    content or a signature, as Claude Relay's thinking is, shows its whole
+    text, ``content``, instead. Encrypted content and signatures never show.
+    """
+    if reasoning != "assistant":
+        return None
+    text = "\n\n".join(part.strip() for part in item.summary if part.strip())
+    if (not text and thinking and item.encrypted_content is None
+            and item.content_signature is None):
+        text = item.content.strip()
+    return Message("assistant", text) if text else None
+
+
+def _shown_record(record: Dict[str, Any], reasoning: str,
+                  thinking: bool) -> Optional[Dict[str, Any]]:
+    """A full log's reasoning record, as a public log shows it; None for a nil line.
+
+    The record is decoded first, so that a legacy one shows as its item does.
+    """
+    if reasoning == "nil":
+        return None
+    try:
+        item = interaction_item_from_dict(record)
+    except (SaveError, TypeError, ValueError):
+        return None
+    message = (_reasoning_message(item, reasoning, thinking)
+               if isinstance(item, Reasoning) else None)
+    return None if message is None else interaction_item_to_dict(message)
+
+
+def _record_line(record: Mapping[str, Any]) -> bytes:
+    return (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _public_line(line: bytes, reasoning: str = "nil", thinking: bool = False) -> bytes:
     """A full log's line, without its newline, as its public log has it."""
     # Only a line that names one of the two types can change: skip parsing
     # the others.
@@ -1171,40 +1227,69 @@ def _public_line(line: bytes) -> bytes:
             value = None
         if isinstance(value, dict):
             if value.get("type") == "reasoning":
-                return NIL_LINE
+                shown = _shown_record(value, reasoning, thinking)
+                return NIL_LINE if shown is None else _record_line(shown)
             items = value.get("prefix_items")
             if value.get("type") == "context_prefix" and isinstance(items, list):
-                kept = [item for item in items
-                        if not (isinstance(item, dict) and item.get("type") == "reasoning")]
-                if len(kept) != len(items):
+                kept, changed = [], False
+                for nested in items:
+                    if isinstance(nested, dict) and nested.get("type") == "reasoning":
+                        changed = True
+                        shown = _shown_record(nested, reasoning, thinking)
+                        if shown is not None:
+                            kept.append(shown)
+                    else:
+                        kept.append(nested)
+                if changed:
                     value["prefix_items"] = kept
-                    return (json.dumps(value, ensure_ascii=False) + "\n").encode("utf-8")
+                    return _record_line(value)
     return line + b"\n"
 
 
-def public_log_lines(data: bytes) -> List[bytes]:
-    """The public log of a full log's complete lines, ``data``: a line for each.
-
-    A reasoning item's line becomes ``{"type": "nil"}``, and a
-    ``context_prefix`` leaves out the reasoning among its items. Every other
-    line is kept byte for byte, blank or not, and each ends with a newline.
-    """
+def _full_log_lines(data: bytes) -> List[bytes]:
+    """A full log's complete lines, ``data``, each without its newline."""
     if not data:
         return []
     pieces = data.split(b"\n")
     if not pieces[-1]:
         pieces.pop()
-    return [_public_line(piece) for piece in pieces]
+    return pieces
 
 
-def public_log_line(item: InteractionItem) -> bytes:
-    """An item's line in a public log, as :func:`public_log_lines` makes it."""
+def public_log_lines(data: bytes, reasoning: str = "nil", *,
+                     thinking: bool = False) -> List[bytes]:
+    """The public log of a full log's complete lines, ``data``: a line for each.
+
+    A reasoning item's line shows it as ``reasoning`` and ``thinking`` say
+    (see :func:`public_log_line`), and a ``context_prefix`` shows the
+    reasoning among its items so, leaving out those it wouldn't show. Every
+    other line is kept byte for byte, blank or not, and each ends with a
+    newline.
+    """
+    _require_public_log_reasoning(reasoning)
+    return [_public_line(piece, reasoning, thinking) for piece in _full_log_lines(data)]
+
+
+def public_log_line(item: InteractionItem, reasoning: str = "nil", *,
+                    thinking: bool = False) -> bytes:
+    """An item's line in a public log, as :func:`public_log_lines` makes it.
+
+    ``reasoning`` says how a reasoning item shows (``PUBLIC_LOG_REASONING``):
+    ``"nil"``, as a ``{"type": "nil"}`` line; ``"assistant"``, as an
+    assistant message with the item's summary, or a nil line when it has
+    none. ``thinking`` also shows the whole text, ``content``, of an item
+    that is text alone; the CLI sets it for Claude Relay's own thinking,
+    which is text alone, as Chat Completions' full reasoning is once saved.
+    Encrypted content and signatures never show.
+    """
+    _require_public_log_reasoning(reasoning)
     if isinstance(item, Reasoning):
-        return NIL_LINE
+        message = _reasoning_message(item, reasoning, thinking)
+        return NIL_LINE if message is None else _encode_items((message,))
     line = _encode_items((item,))
     if isinstance(item, ContextPrefix) and any(
             isinstance(nested, Reasoning) for nested in item.prefix_items):
-        return _public_line(line[:-1])
+        return _public_line(line[:-1], reasoning, thinking)
     return line
 
 
@@ -1222,23 +1307,44 @@ def _same_line(line: bytes, expected: bytes) -> bool:
         return False
 
 
-def _public_log_state(current: bytes, expected: Sequence[bytes]) -> Tuple[Optional[int], bytes]:
-    """Where a public log first differs from ``expected``, and what it lacks.
+def _shown_forms(piece: bytes, reasoning: str, thinking: bool) -> Iterator[bytes]:
+    """A full log's line, ``piece``, in the given form, then in the others."""
+    given = (reasoning, thinking and reasoning != "nil")
+    yield _public_line(piece, *given)
+    for form in _PUBLIC_LOG_FORMS:
+        if form != given:
+            yield _public_line(piece, *form)
 
-    Returns the first differing line's number, or None, and the bytes that
-    complete it: the rest of ``expected`` after the lines it has, and of a
-    line it has only the start of, as an interrupted append leaves it.
+
+def _shows(line: bytes, piece: bytes, reasoning: str, thinking: bool) -> bool:
+    """Whether a public log's line stands for the full log's line ``piece``, in any form."""
+    return any(_same_line(line, shown) for shown in _shown_forms(piece, reasoning, thinking))
+
+
+def _public_log_state(current: bytes, pieces: Sequence[bytes], reasoning: str,
+                      thinking: bool = False) -> Tuple[Optional[int], bytes]:
+    """Where a public log first differs from its full log's lines, ``pieces``, and what it lacks.
+
+    Its lines may show reasoning in any form (``_PUBLIC_LOG_FORMS``), whichever
+    was in effect when they were written. Returns the first differing line's
+    number, or None, and the bytes that complete it: the rest of the full
+    log's lines, in the given form, after the lines it has; and the rest of a
+    line it has only the start of, as an interrupted append leaves it, in the
+    form that the line started in.
     """
-    pieces = current.split(b"\n")
-    partial = pieces.pop()  # b"" when the log is empty or ends with a newline
-    for index, line in enumerate(pieces):
-        if index >= len(expected) or not _same_line(line + b"\n", expected[index]):
+    lines = current.split(b"\n")
+    partial = lines.pop()  # b"" when the log is empty or ends with a newline
+    for index, line in enumerate(lines):
+        if index >= len(pieces) or not _shows(line + b"\n", pieces[index], reasoning, thinking):
             return index + 1, b""
-    rest = list(expected[len(pieces):])
+    rest = [_public_line(piece, reasoning, thinking) for piece in pieces[len(lines):]]
     if partial:
-        if not rest or not rest[0].startswith(partial):
-            return len(pieces) + 1, b""
-        rest[0] = rest[0][len(partial):]
+        started = None if not rest else next(
+            (shown for shown in _shown_forms(pieces[len(lines)], reasoning, thinking)
+             if shown.startswith(partial)), None)
+        if started is None:
+            return len(lines) + 1, b""
+        rest[0] = started[len(partial):]
     return None, b"".join(rest)
 
 
@@ -1268,16 +1374,27 @@ def _ends_with_newline(descriptor: int, size: int) -> bool:
 
 
 class PublicLogWriter:
-    """Best-effort writer of a save's public log: its full log without reasoning.
+    """Best-effort writer of a save's public log: its full log without its reasoning,
+    or with it shown by its summaries.
 
     Line N of the public log stands for item N of the full log
-    (:func:`public_log_line`): each reasoning item is ``{"type": "nil"}``, and
-    a ``context_prefix`` leaves out the reasoning among its items. The full
-    log is the save, which is all that resuming needs; the public log is
+    (:func:`public_log_line`). The full log is the save, which is all that
+    resuming needs; the public log is
     informational, and may be edited out-of-band. So this writer never
     raises. It keeps the file as it finds it, appends after its end, and
     reports a change it finds, or a write that failed, as a warning
     (:meth:`take_warnings`); a failed write is tried again at the next save.
+
+    ``reasoning`` says how a reasoning item shows, ``"nil"`` or ``"assistant"``
+    (``PUBLIC_LOG_REASONING``), or is a function that returns one, read at
+    each save. A change applies to the lines written from then on: lines
+    already written keep their form, and comparisons accept a line in any
+    form. ``thinking`` also shows the whole text of a reasoning item without
+    a summary (Claude Relay's thinking), but only in the lines of the items
+    that this writer's session adds: all of a new save's, or those after a
+    resumed save's (:meth:`sync`). An earlier item may come from another
+    model, whose items of that kind hold its full reasoning, so its line
+    shows only a summary, also when a missing public log is written anew.
 
     A new writer's first :meth:`save` writes the whole public log, replacing
     any file at ``path``, as a new save does; :meth:`sync` continues one
@@ -1287,13 +1404,22 @@ class PublicLogWriter:
     match the full log's.
     """
 
-    def __init__(self, path: SavePath, *, name: Optional[str] = None) -> None:
+    def __init__(self, path: SavePath, *, name: Optional[str] = None,
+                 reasoning: Union[str, Callable[[], str]] = "nil",
+                 thinking: bool = False) -> None:
         self.path = Path(path)
         self._name = self.path.name if name is None else name  # in warnings
+        if callable(reasoning):
+            self._reasoning = reasoning
+        else:
+            fixed = _require_public_log_reasoning(reasoning)
+            self._reasoning = lambda: fixed
+        self._thinking = bool(thinking)
         self._lock = threading.Lock()
         self._warnings_lock = threading.Lock()
         self._warnings: List[str] = []
         self._count = 0  # items of the full log that the public log has
+        self._own = 0  # where the items that this writer's session adds start
         self._fresh = True  # the next save writes the whole public log anew
         # (st_dev, st_ino, st_size) as the last write left the file, or None
         # when that isn't known (then the next append reports no change).
@@ -1322,26 +1448,38 @@ class PublicLogWriter:
     def _missing_note(self) -> str:
         return f"Note: {self._name} was missing; it was written anew from the full log."
 
+    def _lines(self, context: InteractionContext, start: int, reasoning: str) -> bytes:
+        """The public log's lines of ``context``'s items from ``start`` on."""
+        return b"".join(
+            public_log_line(item, reasoning, thinking=self._thinking and index >= self._own)
+            for index, item in enumerate(context[start:], start)
+        )
+
     def sync(self, lines: bytes, count: int) -> None:
         """Continue the public log of a full log of ``count`` items, whose complete lines are ``lines``.
 
         A public log that has the first of its lines, as a crash between the
         two saves or an interrupted append leaves it, gets the rest. One that
         differs is kept as it is, with a warning: later saves append after
-        its end. A missing one is written anew.
+        its end. A missing one is written anew. Lines that show reasoning in
+        another form, as written while another mode was in effect, are no
+        difference. The items after these ``count`` are this session's.
         """
         with self._lock:
-            self._fresh, self._count = False, count
+            self._fresh, self._count, self._own = False, count, count
             try:
-                expected = public_log_lines(lines)
+                reasoning = _require_public_log_reasoning(self._reasoning())
+                pieces = _full_log_lines(lines)
                 try:
                     descriptor = os.open(self.path, os.O_RDWR | os.O_APPEND | _OPEN_FLAGS)
                 except FileNotFoundError:
-                    self._replace(b"".join(expected), note=self._missing_note())
+                    self._replace(b"".join(_public_line(piece, reasoning) for piece in pieces),
+                                  note=self._missing_note())
                     return
                 try:
                     status = os.fstat(descriptor)
-                    differs, rest = _public_log_state(_read_from_start(descriptor), expected)
+                    differs, rest = _public_log_state(
+                        _read_from_start(descriptor), pieces, reasoning)
                     if differs is not None:
                         self._state = None  # appends start on a line of their own
                         self.drifted = True
@@ -1372,12 +1510,14 @@ class PublicLogWriter:
         """Add the items of ``context`` that the public log lacks. Never raises."""
         with self._lock:
             try:
+                reasoning = _require_public_log_reasoning(self._reasoning())
                 if self._fresh:
-                    if self._replace(b"".join(public_log_line(item) for item in context)):
+                    if self._replace(self._lines(context, 0, reasoning)):
                         self._count = len(context)
                     return
-                new = context[self._count:]
-                if new and self._append(context, b"".join(public_log_line(item) for item in new)):
+                if (len(context) > self._count
+                        and self._append(context, self._lines(context, self._count, reasoning),
+                                         reasoning)):
                     self._count = len(context)
             except Exception as exc:
                 self._write_failed(exc)
@@ -1395,12 +1535,11 @@ class PublicLogWriter:
             self._warn(note)
         return True
 
-    def _append(self, context: InteractionContext, data: bytes) -> bool:
+    def _append(self, context: InteractionContext, data: bytes, reasoning: str) -> bool:
         try:
             descriptor = os.open(self.path, os.O_RDWR | os.O_APPEND | _OPEN_FLAGS)
         except FileNotFoundError:
-            return self._replace(
-                b"".join(public_log_line(item) for item in context), note=self._missing_note())
+            return self._replace(self._lines(context, 0, reasoning), note=self._missing_note())
         except OSError as exc:
             self._write_failed(exc)
             return False
@@ -1442,6 +1581,7 @@ __all__ = [
     "IncompleteSaveLine",
     "InteractionSaveWriter",
     "NIL_LINE",
+    "PUBLIC_LOG_REASONING",
     "PublicLogError",
     "PublicLogWriter",
     "ResumedInteractionSave",

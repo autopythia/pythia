@@ -33,10 +33,12 @@ from pythia.interaction.compaction import CompactionLogError
 from pythia.interaction.compaction import is_coldstart_pointer
 from pythia.interaction.save import PublicLogError
 from pythia.interaction.save import PublicLogWriter
+from pythia.interaction.save import interaction_item_from_dict
 from pythia.interaction.save import public_log_line
 from pythia.interaction.save import public_log_lines
 from pythia_test.interaction_helpers import seed_cli_save
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
+from pythia_test.test_interaction_cli_continue import _steps
 
 
 _SECRET = "SECRET-REASONING"
@@ -60,6 +62,11 @@ def _encoded(items):
 
 def _public(items):
     return b"".join(public_log_lines(_encoded(items)))
+
+
+def _said(text):
+    """An assistant message's line, as a public log shows reasoning in ``assistant`` mode."""
+    return _encoded((Message("assistant", text),))
 
 
 def _tree(root):
@@ -139,6 +146,7 @@ class _FilesTestCase(unittest.TestCase):
         self.prefix = self.root / "s"
         self.private = self.root / "s._private"
         self.full = self.private / "context.jsonl"
+        self.journal = self.root / "s._migration.json"
 
 
 class PublicLogTests(_FilesTestCase):
@@ -294,6 +302,128 @@ class PublicLogTests(_FilesTestCase):
         self.assertEqual(writer.take_warnings(),
                          ("Note: s.jsonl was missing; it was written anew from the full log.",))
 
+    def test_assistant_shows_summaries_and_never_full_reasoning(self):
+        summary = Reasoning("FULL-1", ("  **Plan**\n\nfirst  ", " ", "second "),
+                            encrypted_content="CIPHER-1")
+        thought = Reasoning("THOUGHT-2")  # Claude Relay's thinking, or Chat Completions' reasoning
+        raw = Reasoning("RAW-3", encrypted_content="CIPHER-3")  # Responses reasoning text
+        signed = Reasoning("SIGNED-4", content_signature="SIGNATURE-4")  # Messages thinking
+        opaque = Reasoning("", encrypted_content="CIPHER-5")
+        checkpoint = ContextPrefix((Message("user", "summary"), summary, thought, opaque,
+                                    Message("assistant", "kept")))
+        items = (Init("session"), summary, thought, raw, signed, opaque, checkpoint)
+        full = _encoded(items)
+        plan = _said("**Plan**\n\nfirst\n\nsecond")
+        for thinking, thought_line in ((False, _NIL), (True, _said("THOUGHT-2"))):
+            with self.subTest(thinking=thinking):
+                lines = public_log_lines(full, "assistant", thinking=thinking)
+                self.assertEqual(lines, [public_log_line(item, "assistant", thinking=thinking)
+                                         for item in items])
+                # Thinking shows only an item that is text alone.
+                self.assertEqual(lines[:6], [_encoded(items[:1]), plan, thought_line, _NIL,
+                                             _NIL, _NIL])
+                nested = [interaction_item_to_dict(Message("user", "summary")), json.loads(plan),
+                          *([json.loads(thought_line)] if thinking else []),
+                          interaction_item_to_dict(Message("assistant", "kept"))]
+                self.assertEqual(json.loads(lines[6]),
+                                 {"type": "context_prefix", "prefix_items": nested})
+                text = b"".join(lines)
+                for secret in (b"FULL-1", b"RAW-3", b"SIGNED-4", b"CIPHER", b"SIGNATURE"):
+                    self.assertNotIn(secret, text)
+        self.assertEqual(public_log_lines(full, "nil", thinking=True), public_log_lines(full))
+        with self.assertRaisesRegex(ValueError, "reasoning must be one of: nil, assistant"):
+            public_log_lines(full, "summary")
+
+    def test_a_legacy_reasoning_record_shows_as_its_item_does(self):
+        for record, thinking, shown in (
+                ({"type": "reasoning", "text": "OLD", "summary": ["A summary."]}, True,
+                 _said("A summary.")),
+                ({"type": "reasoning", "text": "OLD", "summary": []}, True, _said("OLD")),
+                ({"type": "reasoning", "text": "OLD", "summary": []}, False, _NIL)):
+            with self.subTest(record=record, thinking=thinking):
+                line = json.dumps(record).encode("utf-8") + b"\n"
+                item = interaction_item_from_dict(record)
+                self.assertEqual(public_log_lines(line, "assistant", thinking=thinking), [shown])
+                self.assertEqual(public_log_line(item, "assistant", thinking=thinking), shown)
+
+    def test_a_mode_change_applies_to_the_lines_written_from_then_on(self):
+        mode = ["nil"]
+        writer = PublicLogWriter(self.path, reasoning=lambda: mode[0])
+        context = InteractionContext(_HISTORY)  # its reasoning is on line 5
+        writer.save(context)
+        mode[0] = "assistant"
+        context.extend((Message("user", "more"), _REASONING, Message("assistant", "done")))
+        writer.save(context)
+        lines = self.path.read_bytes().splitlines(keepends=True)
+        self.assertEqual((len(lines), lines[4], lines[9]),
+                         (len(context), _NIL, _said(f"{_SECRET} summary")))
+        self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
+        for reasoning in ("nil", "assistant"):  # resuming finds no difference in either mode
+            with self.subTest(reasoning=reasoning):
+                resumed = PublicLogWriter(self.path, reasoning=reasoning)
+                resumed.sync(_encoded(context.items), len(context))
+                self.assertEqual((resumed.take_warnings(), resumed.drifted), ((), False))
+                self.assertEqual(self.path.read_bytes().splitlines(keepends=True), lines)
+        with self.assertRaises(ValueError):
+            PublicLogWriter(self.path, reasoning="summary")
+        mode[0] = "summary"  # a bad mode from its function is a failed write, never raised
+        context.append(Message("user", "last"))
+        writer.save(context)
+        self.assertEqual(writer.take_warnings(), (
+            "Warning: could not write s.jsonl (reasoning must be one of: nil, assistant). It is "
+            "informational: the save is unaffected, and the next save tries again.",))
+
+    def test_thinking_shows_only_in_the_lines_of_the_sessions_own_items(self):
+        earlier = (*_HISTORY[:4], Reasoning("EARLIER"), Message("assistant", "a"))
+        writer = PublicLogWriter(self.path, reasoning="assistant", thinking=True)
+        writer.sync(_encoded(earlier), len(earlier))  # resumed: the earlier items are history
+        self.assertEqual(writer.take_warnings(),
+                         ("Note: s.jsonl was missing; it was written anew from the full log.",))
+        context = InteractionContext((*earlier, Message("user", "q"), Reasoning("NOW"),
+                                      Message("assistant", "b")))
+        writer.save(context)
+        expected = [*public_log_lines(_encoded(earlier), "assistant"),
+                    _encoded((Message("user", "q"),)), _said("NOW"), _said("b")]
+        self.assertEqual(expected[4], _NIL)
+        self.assertEqual(self.path.read_bytes().splitlines(keepends=True), expected)
+        self.path.unlink()  # written anew: history still shows only summaries
+        context.append(Message("user", "again"))
+        writer.save(context)
+        self.assertEqual(self.path.read_bytes(),
+                         b"".join(expected) + _encoded((Message("user", "again"),)))
+        fresh = self.root / "new.jsonl"  # a new save's items are all its own
+        PublicLogWriter(fresh, reasoning="assistant", thinking=True).save(
+            InteractionContext((Init("n"), Reasoning("FIRST"))))
+        self.assertEqual(fresh.read_bytes(), _encoded((Init("n"),)) + _said("FIRST"))
+
+    def test_resuming_accepts_lines_in_any_form_and_completes_one_in_its_own(self):
+        items = (*_HISTORY, Reasoning("THOUGHT"), Message("assistant", "after"))
+        full = _encoded(items)
+        nil = public_log_lines(full)
+        summaries = public_log_lines(full, "assistant")
+        whole = public_log_lines(full, "assistant", thinking=True)
+        mixed = b"".join([*nil[:4], summaries[4], *nil[5:8], whole[8], nil[9]])
+        for reasoning in ("nil", "assistant"):
+            with self.subTest(reasoning=reasoning):
+                self.path.write_bytes(mixed)
+                writer = PublicLogWriter(self.path, reasoning=reasoning)
+                writer.sync(full, len(items))
+                self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
+                self.assertEqual(self.path.read_bytes(), mixed)
+        # A cut-off line is completed in the form it started in; later lines
+        # follow the mode in effect.
+        self.path.write_bytes(b"".join(nil[:4]) + summaries[4][:25])
+        writer = PublicLogWriter(self.path, reasoning="nil")
+        writer.sync(full, len(items))
+        self.assertEqual(self.path.read_bytes(), b"".join([*nil[:4], summaries[4], *nil[5:]]))
+        self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
+        # A line in no form is a difference.
+        self.path.write_bytes(b"".join([*nil[:4], _said("made up"), *nil[5:]]))
+        writer = PublicLogWriter(self.path, reasoning="assistant")
+        writer.sync(full, len(items))
+        self.assertTrue(writer.drifted)
+        self.assertIn("differs from the full log from line 5 on", writer.take_warnings()[0])
+
 
 class MigrationTests(_FilesTestCase):
     def _original(self, path=None, items=_HISTORY):
@@ -315,8 +445,8 @@ class MigrationTests(_FilesTestCase):
         [notice] = save.notices
         self.assertEqual(notice, (
             f"Migrated the save {self.path} to the current format: its full log, with "
-            f"reasoning, is now {self.full}, and {self.path} is its public log, without "
-            f"reasoning; its debug files moved into {self.private}."))
+            f"reasoning, is now {self.full}, and {self.path} is its save log; its debug "
+            f"files moved into {self.private}."))
         self.assertEqual(self.full.read_bytes(), data)
         self.assertEqual(self.full.stat().st_ino, inode)  # moved, not copied
         self.assertEqual(self.path.read_bytes(), b"".join(public_log_lines(data)))
@@ -381,17 +511,52 @@ class MigrationTests(_FilesTestCase):
                 self.assertEqual(_tree(self.root), before)
                 self.assertEqual(prepare_cli_save(self.path, auto_migrate=False), CliSave(self.path))
 
-    def test_a_public_log_without_its_full_log_is_refused(self):
+    def test_a_save_log_is_never_resumed_as_a_full_log(self):
+        # Once reasoning shows as assistant messages, a save log may load as a
+        # save: its private directory tells it apart.
         self.private.mkdir()
+        self.path.write_bytes(b"".join(public_log_lines(_encoded(_HISTORY), "assistant")))
+        self.assertEqual(len(load_interaction_save(self.path)), len(_HISTORY))
+        before = _tree(self.root)
+        message = (
+            f"the save's full log {self.full} is missing, but its private directory is there, "
+            f"so {self.path} is taken for its save log, not a full log: restore the full log, "
+            f"or copy the save log to {self.full} to resume from it as it is, or start a new "
+            f"save with --resume=False. If {self.path} is a save in the original format, as "
+            f"when a --resume=False launch stopped before its first save, remove "
+            f"{self.private} and rerun")
+        for name, call in (
+                ("migrate", lambda: prepare_cli_save(self.path, reasoning="assistant")),
+                ("keep", lambda: prepare_cli_save(self.path, auto_migrate=False)),
+                ("prefix", lambda: prepare_cli_save(self.prefix)),
+                ("start check", lambda: check_cli_save(self.path))):
+            with self.subTest(call=name):
+                with self.assertRaises(CliSaveError) as caught:
+                    call()
+                self.assertEqual(str(caught.exception), message)
+                self.assertEqual(_tree(self.root), before)
+        check_cli_save(self.path, resume=False)
+        self.assertEqual(prepare_cli_save(self.path, resume=False), CliSave.at(self.prefix))
+
+    def test_a_save_log_without_its_private_directory_is_refused_by_its_nil_lines(self):
         self.path.write_bytes(_public(_HISTORY))
         before = _tree(self.root)
         with self.assertRaises(CliSaveError) as caught:
             prepare_cli_save(self.path)
         self.assertEqual(str(caught.exception), (
-            f"the save's full log {self.full} is missing, and {self.path} is a public log, "
-            "without reasoning, not a full log: restore the full log, or start a new save "
-            "with --resume=False"))
+            f"the save's full log {self.full} is missing, and {self.path} is its save log, not "
+            "a full log: restore the full log, or start a new save with --resume=False"))
         self.assertEqual(_tree(self.root), before)
+
+    def test_a_resume_false_launch_that_stopped_early_leaves_its_private_directory(self):
+        data = self._original()
+        prepare_cli_save(self.path, resume=False)  # then the launch stops before its first save
+        self.assertEqual(os.listdir(self.private), [])
+        with self.assertRaisesRegex(CliSaveError, f"remove {self.private} and rerun$"):
+            prepare_cli_save(self.path)
+        os.rmdir(self.private)
+        prepare_cli_save(self.path)
+        self.assertEqual(self.full.read_bytes(), data)
 
     def test_a_failure_at_any_step_restores_the_original_save_byte_for_byte(self):
         rename, unlink, write_all = os.rename, os.unlink, _cli_save._write_all
@@ -407,11 +572,16 @@ class MigrationTests(_FilesTestCase):
             removed = []
 
             def fail(path, *args, **kwargs):
-                if Path(path).name == "migration.json" and not removed:
+                if Path(path) == self.journal and not removed:
                     removed.append(path)
                     raise OSError(errno.EIO, "Input/output error", str(path))
                 return unlink(path, *args, **kwargs)
             return mock.patch.object(_cli_save.os, "unlink", side_effect=fail)
+
+        def failing_mkdir():
+            def fail(path, *args, **kwargs):
+                raise OSError(errno.EACCES, "Permission denied", str(path))
+            return mock.patch.object(_cli_save.os, "mkdir", side_effect=fail)
 
         def full_disk():
             calls = []
@@ -424,6 +594,8 @@ class MigrationTests(_FilesTestCase):
             return mock.patch.object(_cli_save, "_write_all", side_effect=fail)
 
         steps = {
+            "making the private directory": (failing_mkdir(),
+                                             f"Permission denied: {self.private}"),
             "moving a debug file": (failing_rename(
                 lambda source, destination: destination.name == "trace.res.jsonl"),
                 f"Input/output error: {self.private / 'trace.res.jsonl'}"),
@@ -435,12 +607,12 @@ class MigrationTests(_FilesTestCase):
                 lambda source, destination: destination == self.path),
                 f"Input/output error: {self.path}"),
             "removing the journal": (failing_journal_removal(),
-                                     f"Input/output error: {self.private / 'migration.json'}"),
+                                     f"Input/output error: {self.journal}"),
         }
         for step, (patch, reason) in steps.items():
             with self.subTest(step=step):
                 for path in self.root.glob("s.*"):
-                    path.unlink()
+                    path.unlink() if not path.is_dir() else _remove_tree(path)
                 self._original()
                 before = _tree(self.root)
                 with patch, self.assertRaises(CliSaveError) as caught:
@@ -472,6 +644,8 @@ class MigrationTests(_FilesTestCase):
     def _crash(self, at):
         """Migrate, and die at a step: the journal stays, and nothing is undone."""
         steps = {
+            "before the private directory was made": mock.patch.object(
+                _cli_save.os, "mkdir", side_effect=_Crash),
             "after a debug file moved": mock.patch.object(
                 _cli_save, "_rename_new", side_effect=_after(_cli_save._rename_new, 1)),
             "after the log moved": mock.patch.object(
@@ -482,11 +656,11 @@ class MigrationTests(_FilesTestCase):
         with steps[at], mock.patch.object(_cli_save, "_undo", return_value=[]), \
                 self.assertRaises(_Crash):
             prepare_cli_save(self.path)
-        self.assertTrue((self.private / "migration.json").exists())
+        self.assertTrue(self.journal.exists())
 
     def test_an_interrupted_migration_is_undone_at_the_next_launch(self):
-        for at in ("after a debug file moved", "after the log moved",
-                   "after the public log was written"):
+        for at in ("before the private directory was made", "after a debug file moved",
+                   "after the log moved", "after the public log was written"):
             for auto_migrate in (False, True):
                 with self.subTest(at=at, auto_migrate=auto_migrate):
                     for path in self.root.glob("s.*"):
@@ -502,7 +676,7 @@ class MigrationTests(_FilesTestCase):
                     if auto_migrate:  # then migrated again
                         self.assertTrue(save.notices[1].startswith("Migrated the save"))
                         self.assertEqual(self.full.read_bytes(), data)
-                        self.assertFalse((self.private / "migration.json").exists())
+                        self.assertFalse(self.journal.exists())
                     else:
                         self.assertEqual(save, CliSave(self.path, notices=save.notices))
                         self.assertEqual(_tree(self.root), before)
@@ -520,12 +694,12 @@ class MigrationTests(_FilesTestCase):
             self.assertIn("rerun with --auto-migrate-save=False", message)
             self.assertEqual(self.full.read_bytes(), data)
             self.assertEqual(self.path.read_bytes(), b"edited by hand\n")
-            self.assertTrue((self.private / "migration.json").exists())
+            self.assertTrue(self.journal.exists())
 
     def test_a_journal_that_names_other_files_is_refused(self):
         self._original()
         self._crash("after the log moved")
-        journal = self.private / "migration.json"
+        journal = self.journal
         record = json.loads(journal.read_text())
         record["moves"].append(["../../elsewhere", "context.jsonl"])
         journal.write_text(json.dumps(record))
@@ -538,14 +712,14 @@ class MigrationTests(_FilesTestCase):
 
     def test_a_crash_while_the_journal_was_written_leaves_nothing_to_undo(self):
         # The journal goes into place whole: a crash before that leaves only
-        # its temporary file, and nothing moved.
+        # its temporary file, and nothing moved or made.
         data = self._original()
-        self.private.mkdir(mode=0o700)
-        (self.private / "migration.json.tmp").write_bytes(b'{"version": 1, "sou')
+        (self.root / "s._migration.json.tmp").write_bytes(b'{"version": 1, "sou')
         save = prepare_cli_save(self.path)
         self.assertEqual(len(save.notices), 1)
         self.assertTrue(save.notices[0].startswith("Migrated the save"))
         self.assertEqual(self.full.read_bytes(), data)
+        self.assertEqual(sorted(os.listdir(self.root)), ["s._private", "s.jsonl"])
         self.assertEqual(sorted(os.listdir(self.private)), ["context.jsonl", *_DEBUG_FILES])
 
     def test_a_private_directory_that_is_a_link_is_refused(self):
@@ -612,6 +786,29 @@ class MigrationTests(_FilesTestCase):
         prepare_cli_save(self.path)
         self.path.unlink()  # the public log is informational
         self.assertTrue(cli_save_exists(self.path) and cli_save_exists(self.prefix))
+
+    def test_a_migration_writes_the_save_log_in_the_given_mode(self):
+        items = (*_HISTORY, Reasoning("THOUGHT"), Message("assistant", "after"))
+        data = self._original(items=items)
+        before = _tree(self.root)
+        # Undoing a migration that a crash interrupted after it wrote the save
+        # log knows that save log by its digest.
+        with mock.patch.object(_cli_save, "_write_public",
+                               side_effect=_after(_cli_save._write_public, 1)), \
+                mock.patch.object(_cli_save, "_undo", return_value=[]), \
+                self.assertRaises(_Crash):
+            prepare_cli_save(self.path, reasoning="assistant")
+        self.assertEqual(self.path.read_bytes(), b"".join(public_log_lines(data, "assistant")))
+        prepare_cli_save(self.path, auto_migrate=False)
+        self.assertEqual(_tree(self.root), before)
+        save = prepare_cli_save(self.path, reasoning="assistant")
+        self.assertEqual(self.full.read_bytes(), data)
+        lines = self.path.read_bytes().splitlines(keepends=True)
+        # The save's items are history: thinking that is text alone stays nil.
+        self.assertEqual((lines[4], lines[8]), (_said(f"{_SECRET} summary"), _NIL))
+        self.assertEqual(lines, public_log_lines(data, "assistant"))
+        _context, writer, _incomplete = resume_cli_save(save, reasoning="nil", thinking=True)
+        self.assertEqual(writer.take_warnings(), ())
 
 
 def _after(function, count):
@@ -823,6 +1020,89 @@ class CLISaveLayoutTests(_ControllerTestCase):
         self.assertEqual(pairs[4][0] + b"\n", _NIL)
         self.assertTrue(any(text.startswith(f"[cli] Migrated the save {self.path} ")
                             for text in self.notices(terminal)))
+
+    async def test_assistant_mode_shows_summaries_but_never_full_reasoning(self):
+        summary = Reasoning("FULL-TEXT", ("A summary.",), encrypted_content="CIPHER")
+        thought = Reasoning("THOUGHT")  # as a Chat Completions model's full reasoning
+        model = _Model(self.path, ModelSample(items=(summary, thought,
+                                                     Message("assistant", "done"))))
+        terminal = _Terminal(_quit_when_idle)
+        self.assertEqual(await self._run(model, terminal, [
+            "--prompt", "hello", "--save-log-reasoning", "assistant"]), 0)
+        full, public = self.full.read_bytes(), self.path.read_bytes()
+        self.assertEqual(public, b"".join(public_log_lines(full, "assistant")))
+        self.assertIn(_said("A summary."), public)
+        for secret in (b"FULL-TEXT", b"THOUGHT", b"CIPHER"):
+            self.assertNotIn(secret, public)
+        self.assertIn(thought, load_interaction_save(self.full).items)
+        self.assertIn(f"[cli] Private: {self.private}/, with the full log, which resuming reads, "
+                      "and debug files. The save log shows reasoning summaries as assistant "
+                      "messages (save_log_reasoning).", self.notices(terminal))
+
+    async def test_claude_relay_thinking_shows_whole_in_the_sessions_own_lines(self):
+        seed_cli_save(self.path, InteractionContext((
+            Init("old"), Tools(), Message("user", "q"), UserInteractionBoundary(),
+            Reasoning("EARLIER"), Message("assistant", "a"), ModelSampleBoundary(),
+            TurnSummary(sample_count=1))))
+        model = _Model(self.path, ModelSample(items=(Reasoning("NOW"),
+                                                     Message("assistant", "done"))))
+        terminal = _Terminal(_quit_when_idle)
+        self.assertEqual(await self._run(model, terminal, [
+            "--resume", "--prompt", "more", "--endpoint-api", "claude-relay",
+            "--save-log-reasoning", "assistant"]), 0)
+        public = self.path.read_bytes()
+        self.assertIn(_said("NOW"), public)
+        # The migrated history may be another model's: it shows only summaries.
+        self.assertNotIn(b"EARLIER", public)
+        self.assertEqual(len(public.splitlines()), len(load_interaction_save(self.full)))
+        self.assertIn(f"[cli] Private: {self.private}/, with the full log, which resuming reads, "
+                      "and debug files. The save log shows reasoning summaries, and this "
+                      "session's Claude Relay thinking, as assistant messages "
+                      "(save_log_reasoning).", self.notices(terminal))
+
+    async def test_config_changes_the_mode_for_new_lines_only(self):
+        first = Reasoning("", ("First summary.",), encrypted_content="C1")
+        second = Reasoning("", ("Second summary.",), encrypted_content="C2")
+        model = _Model(self.path, ModelSample(items=(first, Message("assistant", "one"))),
+                       ModelSample(items=(second, Message("assistant", "two"))))
+        terminal = _Terminal(_steps(
+            ("/config save_log_reasoning assistant", "save_log_reasoning = 'assistant'"),
+            ("again", "[assistant] two"), until="[assistant] two"))
+        self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
+        items = load_interaction_save(self.full).items
+        lines = self.path.read_bytes().splitlines(keepends=True)
+        self.assertEqual(len(lines), len(items))
+        self.assertEqual(lines[items.index(first)], _NIL)
+        self.assertEqual(lines[items.index(second)], _said("Second summary."))
+        # A plain restart takes the launch value again; the lines keep their form.
+        terminal = _Terminal(_quit_when_idle)
+        self.assertEqual(await self._run(_Model(self.path), terminal, ["--resume"]), 0)
+        self.assertFalse(any("differs from the full log" in text
+                             for text in self.notices(terminal)))
+        self.assertEqual(self.path.read_bytes().splitlines(keepends=True)[:len(lines)], lines)
+
+    async def test_a_reboot_carries_a_config_change_of_the_mode_over(self):
+        seed_cli_save(self.path, InteractionContext(_HISTORY))
+        model = _Model(self.path, ModelSample(items=(Reasoning("", ("Later summary.",)),
+                                                     Message("assistant", "done"))))
+        terminal = _Terminal(_quit_when_idle)
+        args = cli._build_parser().parse_args(["--resume", "--prompt", "more"])
+        rebooted = cli._Rebooted(cause="/reboot", config={"save_log_reasoning": "assistant"})
+        self.assertEqual(await asyncio.wait_for(cli._run(
+            model, Environment(), terminal, args, self.path, rebooted=rebooted), timeout=4), 0)
+        public = self.path.read_bytes()
+        self.assertIn(_said("Later summary."), public)
+        # Migrated with the launch value: the history's lines stay nil.
+        self.assertNotIn(_said(f"{_SECRET} summary"), public)
+
+    async def test_a_legacy_save_notes_that_save_log_reasoning_has_no_effect(self):
+        seed_cli_save(self.path, InteractionContext(_HISTORY))
+        terminal = _Terminal(_quit_when_idle)
+        self.assertEqual(await self._run(_Model(self.path), terminal, [
+            "--resume", "--auto-migrate-save=False", "--save-log-reasoning", "assistant"]), 0)
+        self.assertIn("[cli] Note: save_log_reasoning = 'assistant' has no effect: a save in "
+                      "its original format has no save log.", self.notices(terminal))
+        self.assertFalse(self.private.exists())
 
 
 if __name__ == "__main__":

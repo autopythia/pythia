@@ -14,6 +14,7 @@ from pythia.interaction import MAX_TIMEOUT_SECONDS
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import SampleParams
 from pythia.interaction import cli
+from pythia.interaction import demo
 from pythia.interaction.runtime_config import parse_config_literal
 from pythia.interaction.runtime_config import resolve_compaction_mode
 
@@ -50,6 +51,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "compaction_pi_keep_recent_tokens = 20000",
                 "compaction_pi_max_output_tokens = None",
                 "compaction_coldstart_reboot = False",
+                "save_log_reasoning = 'nil'",
                 "extra_sample_params = {}",
             )),
         )
@@ -66,6 +68,7 @@ class InteractionConfigTests(unittest.TestCase):
             "compaction_pi_keep_recent_tokens": 20000,
             "compaction_pi_max_output_tokens": None,
             "compaction_coldstart_reboot": False,
+            "save_log_reasoning": "nil",
             "extra_sample_params": {},
         }
         self.assertEqual(json.loads(rendered_json), {**defaults, "__init__": defaults})
@@ -102,6 +105,7 @@ class InteractionConfigTests(unittest.TestCase):
                 "compaction_pi_keep_recent_tokens = 20000",
                 "compaction_pi_max_output_tokens = None",
                 "compaction_coldstart_reboot = False",
+                "save_log_reasoning = 'nil'",
                 "extra_sample_params = {}",
             )),
         )
@@ -123,6 +127,7 @@ class InteractionConfigTests(unittest.TestCase):
             "--compaction-pi-keep-recent-tokens", "0",
             "--compaction-pi-max-output-tokens", "4096",
             "--compaction-coldstart-reboot",
+            "--save-log-reasoning", "assistant",
         ])
 
         config = InteractionConfig.from_namespace(args)
@@ -139,6 +144,7 @@ class InteractionConfigTests(unittest.TestCase):
             "compaction_pi_keep_recent_tokens": 0,
             "compaction_pi_max_output_tokens": 4096,
             "compaction_coldstart_reboot": True,
+            "save_log_reasoning": "assistant",
             "extra_sample_params": {},
         })
         self.assertEqual(
@@ -270,6 +276,31 @@ class InteractionConfigTests(unittest.TestCase):
                 parse_config_literal("compaction_mode", bad)
         with self.assertRaisesRegex(ConfigError, "unknown method 'remote'"):
             InteractionConfigSnapshot(compaction_mode="remote")
+
+    def test_save_log_reasoning_takes_one_of_its_two_words(self):
+        for text in ("nil", "assistant", " assistant "):
+            with self.subTest(text=text):
+                self.assertEqual(parse_config_literal("save_log_reasoning", text), text.strip())
+        # Not null, which other keys take: nil is a value of its own.
+        for text in ("null", "None", "Assistant", '"assistant"', "true", "1", "summary", ""):
+            with self.subTest(text=text), self.assertRaisesRegex(
+                    ConfigError, "^save_log_reasoning requires nil or assistant[.]$"):
+                parse_config_literal("save_log_reasoning", text)
+        config = InteractionConfig()
+        self.assertEqual(config.get("save_log_reasoning"), "nil")
+        self.assertEqual(config.set("save_log_reasoning", "assistant"), "assistant")
+        for value in (None, True, "Nil"):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                config.set("save_log_reasoning", value)
+        self.assertEqual(config.render("save_log_reasoning", json_output=False),
+                         "# init: save_log_reasoning = 'nil'\nsave_log_reasoning = 'assistant'")
+        self.assertEqual(config.reset("save_log_reasoning").save_log_reasoning, "nil")
+        with self.assertRaises(ConfigError):
+            InteractionConfigSnapshot(save_log_reasoning="summary")
+        # Only the CLI has the option, and a save log; other namespaces get nil.
+        self.assertEqual(InteractionConfig.from_namespace(
+            demo._build_parser().parse_args([])).get("save_log_reasoning"), "nil")
+        self.assertFalse(hasattr(demo._build_parser().parse_args([]), "save_log_reasoning"))
 
     def test_compaction_mode_resolves_per_route(self):
         catalog = BUILTIN_MODEL_CATALOG

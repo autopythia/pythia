@@ -28,6 +28,7 @@ from .model import SampleParams
 from .model_catalog import ModelBinding
 from .model_catalog import CompactionDefaults
 from .model_catalog import binding_from_namespace, freeze_extra_sample_params, thaw_json
+from .save import PUBLIC_LOG_REASONING
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .timeouts import validate_timeout_seconds
 
@@ -45,6 +46,7 @@ CONFIG_KEYS = (
     "compaction_pi_keep_recent_tokens",
     "compaction_pi_max_output_tokens",
     "compaction_coldstart_reboot",
+    "save_log_reasoning",
     "extra_sample_params",
 )
 # Keys renamed in October 2026, from their old names. The old names keep
@@ -80,6 +82,7 @@ _NO_REQUEST_TIMEOUT = (
     "request_timeout_seconds does not apply to Claude Relay; use the model "
     "catalog's timeouts.generation_seconds or --claude-relay-generation-timeout."
 )
+_SAVE_LOG_REASONING_VALUES = " or ".join(PUBLIC_LOG_REASONING)
 
 
 class ConfigError(ValueError):
@@ -105,6 +108,10 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
             return freeze_extra_sample_params(value)
         except ValueError as exc:
             raise ConfigError(str(exc)) from None
+    if key == "save_log_reasoning":
+        if not isinstance(value, str) or value not in PUBLIC_LOG_REASONING:
+            raise ConfigError(f"save_log_reasoning requires {_SAVE_LOG_REASONING_VALUES}.")
+        return value
     if key == "compaction_mode":
         # A compaction sequence, kept in its normal form. None is the route's
         # default, resolved when a config is bound.
@@ -149,7 +156,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
 
     Integers, booleans, and null for every key; seconds keys also take plain
     decimals such as ``90.5``. ``compaction_mode`` takes a compaction
-    sequence, such as ``coldstart,pi:2``, or null.
+    sequence, such as ``coldstart,pi:2``, or null; ``save_log_reasoning``
+    takes ``nil`` or ``assistant``, as they are.
     """
     key = _require_key(key)
     if key in _LAUNCH_ONLY_KEYS:
@@ -159,6 +167,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     literal = text.strip()
     if key == "compaction_mode":
         return validate_config_value(key, None if literal in ("null", "None") else literal)
+    if key == "save_log_reasoning":
+        return validate_config_value(key, literal)
     aliases = {
         "null": None,
         "None": None,
@@ -371,6 +381,12 @@ class InteractionConfigSnapshot:
     ``compaction_coldstart_reboot`` has the CLI restart itself on the current
     code after each coldstart compaction, as ``/reboot`` does. Only the CLI
     reboots; other hosts leave it False.
+
+    ``save_log_reasoning`` says how the CLI's save log shows reasoning, in
+    the lines written while it is in effect: ``nil``, as a ``{"type":
+    "nil"}`` line; ``assistant``, as an assistant message with the item's
+    summary, when it has one (``save.public_log_line``). Only the CLI has a
+    save log; other hosts ignore it.
     """
 
     enable_workspace: bool = True
@@ -384,6 +400,7 @@ class InteractionConfigSnapshot:
     compaction_pi_keep_recent_tokens: Optional[int] = DEFAULT_KEEP_RECENT_TOKENS
     compaction_pi_max_output_tokens: Optional[int] = None
     compaction_coldstart_reboot: bool = False
+    save_log_reasoning: str = "nil"
     extra_sample_params: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -658,6 +675,7 @@ class InteractionConfig:
                 ),
                 # A CLI option: other frontends' namespaces have none.
                 compaction_coldstart_reboot=getattr(args, "compaction_coldstart_reboot", False),
+                save_log_reasoning=getattr(args, "save_log_reasoning", "nil"),
                 extra_sample_params=binding.extra_sample_params,
             ),
             on_enable_workspace=on_enable_workspace,

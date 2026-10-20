@@ -673,8 +673,9 @@ def build_parser(description: str, *, allow_prompt_file: bool = False,
             help=(
                 "save prefix (default: %(default)s); relative to the launch directory, "
                 "not --cwd; its directory must exist; a trailing .jsonl is ignored. "
-                "PREFIX.jsonl is the save log, without reasoning, and PREFIX._private/ "
-                "holds the full log, context.jsonl, which resuming reads, and debug files. "
+                "PREFIX.jsonl is the save log, which leaves reasoning out or shows its "
+                "summaries (--save-log-reasoning), and PREFIX._private/ holds the full "
+                "log, context.jsonl, which resuming reads, and debug files. "
                 "--resume=False replaces the save"
             ),
         )

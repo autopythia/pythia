@@ -3,27 +3,33 @@
 A trailing ``.jsonl`` is ignored, so ``--save review.jsonl`` names the same
 save as ``--save review``, which has these files:
 
-- ``PREFIX.jsonl``, the public log: the full log line for line, with a
-  ``{"type": "nil"}`` line for each reasoning item, and without the
-  reasoning in compaction checkpoints (``save.PublicLogWriter``). It is
-  informational: editing it out-of-band at most causes a warning. Resuming
-  and compaction never read it; coldstart's pointer names it.
+- ``PREFIX.jsonl``, the public log (the save log): the full log line for
+  line, with each reasoning item shown as ``save_log_reasoning`` says while
+  its line is written: a ``{"type": "nil"}`` line, or an assistant message
+  with its summary (``save.PublicLogWriter``). It is informational: editing
+  it out-of-band at most causes a warning. Resuming and compaction never
+  read it; coldstart's pointer names it.
 - ``PREFIX.summary.md``, coldstart compaction's summary, as before.
 - ``PREFIX._private/``, the private directory (mode 0700): ``context.jsonl``,
   the full log, which is all that resuming reads; ``--debug-trace``'s
   ``trace.req.jsonl``, ``trace.res.jsonl`` and ``trace.events.jsonl``;
-  ``--debug-save-model-binding``'s ``context.jsonl.model-binding.json``; and
-  ``migration.json``, a migration's journal, while one runs.
+  and ``--debug-save-model-binding``'s ``context.jsonl.model-binding.json``.
 
 A save in the original format is one file, its full log, at the ``--save``
 path or at ``PREFIX.jsonl``, with its traces and snapshot next to it. When
 the CLI resumes one, it migrates it, unless ``--auto-migrate-save=False``:
 the file moves to ``PREFIX._private/context.jsonl`` with its traces and
-snapshot, and its public log is written. The migration first writes a
-journal of what it will do. One that fails is undone before the CLI exits
-with an error that names ``--auto-migrate-save=False``, and one that was
-interrupted is undone at the next launch. With ``--auto-migrate-save=False``
-the CLI keeps using such a save as it is, as a legacy save.
+snapshot, and its public log is written. Before it changes anything, the
+migration writes a journal of what it will do, ``PREFIX._migration.json``,
+which it removes last. One that fails is undone before the CLI exits with an
+error that names ``--auto-migrate-save=False``, and one that was interrupted
+is undone at the next launch. With ``--auto-migrate-save=False`` the CLI
+keeps using such a save as it is, as a legacy save.
+
+A save whose private directory exists is in the current format, so the CLI
+never resumes a file at ``PREFIX.jsonl`` as a full log while the private
+directory lacks ``context.jsonl``: that file is the save log, which may load
+as a save once reasoning shows as assistant messages.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
+from typing import Union
 
 from ._debug_trace import TRACE_EVENT_SUFFIX
 from ._debug_trace import TRACE_REQUEST_SUFFIX
@@ -64,12 +71,12 @@ from .save import resume_interaction_save_lines
 PUBLIC_SUFFIX = ".jsonl"
 PRIVATE_SUFFIX = "._private"
 CONTEXT_NAME = "context.jsonl"
-JOURNAL_NAME = "migration.json"
+# A migration's journal is PREFIX._migration.json, next to the save, while
+# the migration runs. It is written before the private directory is made.
+JOURNAL_SUFFIX = "._migration.json"
 # The option that keeps a save in the original format, as messages name it.
 NO_MIGRATION_OPTION = "--auto-migrate-save=False"
 _JOURNAL_VERSION = 1
-# A journal is written here, then renamed into place whole.
-_JOURNAL_TEMPORARY = "migration.json.tmp"
 # A migration writes the public log here, then moves it into place.
 _PUBLIC_TEMPORARY = "public.jsonl.tmp"
 _TRACE_SUFFIXES = (TRACE_REQUEST_SUFFIX, TRACE_RESPONSE_SUFFIX, TRACE_EVENT_SUFFIX)
@@ -112,6 +119,12 @@ def private_dir(prefix) -> Path:
 def full_log_path(path) -> Path:
     """The full log of the save that a ``--save`` path names, in the current format."""
     return private_dir(save_prefix(path)) / CONTEXT_NAME
+
+
+def migration_journal_path(prefix) -> Path:
+    """``PREFIX._migration.json``, the journal of a migration of the save at ``prefix``."""
+    prefix = Path(prefix)
+    return prefix.with_name(prefix.name + JOURNAL_SUFFIX)
 
 
 @dataclass(frozen=True)
@@ -187,6 +200,7 @@ class _Found:
     journal: bool  # a migration's journal: one was interrupted
     current: bool  # a full log in the current format
     original: Optional[Path]  # otherwise, a save in the original format, or None
+    private: bool  # the private directory exists
 
 
 def _require_private_dir(private: Path) -> None:
@@ -207,10 +221,11 @@ def _inspect(argument: Path) -> _Found:
         raise CliSaveError(f"the save's public log {public} is not a regular file")
     if os.path.lexists(log) and not log.is_file():
         raise CliSaveError(f"the save's full log {log} is not a regular file")
-    journal = os.path.lexists(private / JOURNAL_NAME)
+    journal = os.path.lexists(migration_journal_path(prefix))
     current = os.path.lexists(log)
+    made = os.path.isdir(private)
     if journal or current:
-        return _Found(prefix, journal, current, None)
+        return _Found(prefix, journal, current, None, made)
     # In the original format, the save was the file at the --save path, which
     # is the public log's path unless the path lacks .jsonl.
     candidates = [path for path in dict.fromkeys((argument, public)) if path.is_file()]
@@ -220,18 +235,35 @@ def _inspect(argument: Path) -> _Found:
             f"whose log is {public}, but {argument} would be its save in the original "
             "format: rename one of them, or choose another --save prefix"
         )
-    return _Found(prefix, False, False, candidates[0] if candidates else None)
+    return _Found(prefix, False, False, candidates[0] if candidates else None, made)
 
 
-def prepare_cli_save(argument, *, resume: bool = True, auto_migrate: bool = True) -> CliSave:
+def _missing_full_log(found: _Found) -> CliSaveError:
+    """Why a resumed save whose private directory lacks its full log can't be used."""
+    private = private_dir(found.prefix)
+    log = private / CONTEXT_NAME
+    return CliSaveError(
+        f"the save's full log {log} is missing, but its private directory is there, so "
+        f"{found.original} is taken for its save log, not a full log: restore the full log, "
+        f"or copy the save log to {log} to resume from it as it is, or start a new save with "
+        f"--resume=False. If {found.original} is a save in the original format, as when a "
+        f"--resume=False launch stopped before its first save, remove {private} and rerun"
+    )
+
+
+def prepare_cli_save(argument, *, resume: bool = True, auto_migrate: bool = True,
+                     reasoning: str = "nil") -> CliSave:
     """Make the save that a resolved ``--save`` path names ready to use.
 
     An interrupted migration is undone first. A save in the original format
     is then migrated when it is resumed (``resume``) and ``auto_migrate`` is
     true; kept as it is, as a legacy save, when ``auto_migrate`` is false;
     and otherwise replaced by a new save, as ``--resume=False`` replaces any
-    save. A save in the current format gets its private directory when it
-    lacks one. Raises ``CliSaveError``.
+    save. A migration writes the public log with ``reasoning``
+    (``save.PUBLIC_LOG_REASONING``). A resumed save whose private directory
+    lacks its full log is refused (``_missing_full_log``). A save in the
+    current format gets its private directory when it lacks one. Raises
+    ``CliSaveError``.
     """
     argument = Path(argument)
     found = _inspect(argument)
@@ -240,10 +272,12 @@ def prepare_cli_save(argument, *, resume: bool = True, auto_migrate: bool = True
         notices.append(_undo_interrupted(found.prefix))
         found = _inspect(argument)
     if found.original is not None:
+        if resume and found.private:
+            raise _missing_full_log(found)
         if not auto_migrate:
             return CliSave(found.original, notices=tuple(notices))
         if resume:
-            notices.append(_migrate(found.prefix, found.original))
+            notices.append(_migrate(found.prefix, found.original, reasoning))
     save = CliSave.at(found.prefix, notices)
     _make_private(save.private)
     return save
@@ -258,8 +292,11 @@ def check_cli_save(argument, *, resume: bool = True, auto_migrate: bool = True) 
     ``CliSaveError``.
     """
     found = _inspect(Path(argument))
-    if found.original is not None and auto_migrate and resume:
-        _checked_plan(found.prefix, found.original)
+    if found.original is not None and resume:
+        if found.private:
+            raise _missing_full_log(found)
+        if auto_migrate:
+            _checked_plan(found.prefix, found.original)
 
 
 def cli_save_exists(argument) -> bool:
@@ -267,7 +304,8 @@ def cli_save_exists(argument) -> bool:
     argument = Path(argument)
     prefix = save_prefix(argument)
     private = private_dir(prefix)
-    return (os.path.lexists(private / CONTEXT_NAME) or os.path.lexists(private / JOURNAL_NAME)
+    return (os.path.lexists(private / CONTEXT_NAME)
+            or os.path.lexists(migration_journal_path(prefix))
             or argument.is_file() or public_log_path(prefix).is_file())
 
 
@@ -313,6 +351,7 @@ class _Plan:
 class _Journal:
     """A migration's journal: what ``_undo`` needs to undo it."""
 
+    path: Path  # the journal's own
     source: Path
     log: Path
     public: Path
@@ -320,7 +359,6 @@ class _Journal:
     device: int  # the source's st_dev and st_ino: the file that moves to log
     inode: int
     public_sha256: str  # of the public log that the migration writes
-    created_private: bool
 
     @property
     def private(self) -> Path:
@@ -342,7 +380,7 @@ def _require_regular(path: Path, what: str) -> None:
         raise CliSaveError(f"{what} {path} is not a regular file")
 
 
-def _plan(prefix: Path, source: Path) -> _Plan:
+def _plan(prefix: Path, source: Path, reasoning: str = "nil") -> _Plan:
     """Check a migration of ``source`` without making it; raise ``CliSaveError`` with the reason."""
     public, private = public_log_path(prefix), private_dir(prefix)
     log = private / CONTEXT_NAME
@@ -361,20 +399,22 @@ def _plan(prefix: Path, source: Path) -> _Plan:
     except SaveError as exc:
         if isinstance(exc.__cause__, PublicLogError):
             raise _Unframed(
-                f"the save's full log {log} is missing, and {source} is a public log, "
-                "without reasoning, not a full log: restore the full log, or start a new "
-                "save with --resume=False") from None
+                f"the save's full log {log} is missing, and {source} is its save log, not "
+                "a full log: restore the full log, or start a new save with --resume=False"
+            ) from None
         raise CliSaveError(f"it doesn't load as a save ({exc})") from None
     except OSError as exc:
         raise CliSaveError(_reason(exc)) from None
     complete = read.data[:read.complete_size]
+    # The save's items are from earlier sessions: they show only summaries
+    # (see save.PublicLogWriter).
     return _Plan(source, log, public, tuple(moves), tuple(left),
-                 b"".join(public_log_lines(complete)), read.status, len(read.data))
+                 b"".join(public_log_lines(complete, reasoning)), read.status, len(read.data))
 
 
-def _checked_plan(prefix: Path, source: Path) -> _Plan:
+def _checked_plan(prefix: Path, source: Path, reasoning: str = "nil") -> _Plan:
     try:
-        return _plan(prefix, source)
+        return _plan(prefix, source, reasoning)
     except _Unframed:
         raise
     except CliSaveError as exc:
@@ -394,28 +434,21 @@ def _outcome(problems: List[str], journal: Path) -> str:
             "the journal first.")
 
 
-def _migrate(prefix: Path, source: Path) -> str:
+def _migrate(prefix: Path, source: Path, reasoning: str = "nil") -> str:
     """Migrate the save in the original format at ``source``; return a notice that says so.
 
-    Raises ``CliSaveError`` when it fails, once what it did is undone.
+    The journal comes first, so that a crash at any later point leaves it for
+    the next launch to undo the migration. Raises ``CliSaveError`` when it
+    fails, once what it did is undone.
     """
-    plan = _checked_plan(prefix, source)
-    private = plan.private
-    journal_path = private / JOURNAL_NAME
-    created = False
+    plan = _checked_plan(prefix, source, reasoning)
+    private, journal_path = plan.private, migration_journal_path(prefix)
     try:
-        try:
-            os.mkdir(private, 0o700)
-            created = True
-        except FileExistsError:
-            pass
-        _write_journal(journal_path, plan, created)
+        _write_journal(journal_path, plan)
     except OSError as exc:
-        if created:
-            with suppress(OSError):
-                os.rmdir(private)
         raise CliSaveError(_failure(source, _reason(exc), "Nothing was changed.")) from None
     try:
+        os.mkdir(private, 0o700)
         for old, new in plan.moves:
             _rename_new(old, new)
         _rename_new(plan.source, plan.log)
@@ -424,9 +457,9 @@ def _migrate(prefix: Path, source: Path) -> str:
         for directory in {private, plan.public.parent, plan.source.parent}:
             _fsync_directory(directory)
         os.unlink(journal_path)  # the migration is done
-        _fsync_directory(private)
+        _fsync_directory(journal_path.parent)
     except BaseException as exc:
-        problems = _undo(_journal_of(plan, created))
+        problems = _undo(_journal_of(plan, journal_path))
         if not isinstance(exc, Exception):
             raise
         reason = str(exc) if isinstance(exc, CliSaveError) else _reason(exc)
@@ -436,8 +469,7 @@ def _migrate(prefix: Path, source: Path) -> str:
 
 def _migrated_notice(plan: _Plan) -> str:
     text = (f"Migrated the save {plan.source} to the current format: its full log, with "
-            f"reasoning, is now {plan.log}, and {plan.public} is its public log, without "
-            "reasoning")
+            f"reasoning, is now {plan.log}, and {plan.public} is its save log")
     if plan.moves:
         text += f"; its debug files moved into {plan.private}"
     if plan.left:
@@ -446,12 +478,12 @@ def _migrated_notice(plan: _Plan) -> str:
     return text + "."
 
 
-def _journal_of(plan: _Plan, created: bool) -> _Journal:
-    return _Journal(plan.source, plan.log, plan.public, plan.moves, plan.status.st_dev,
-                    plan.status.st_ino, hashlib.sha256(plan.public_data).hexdigest(), created)
+def _journal_of(plan: _Plan, path: Path) -> _Journal:
+    return _Journal(path, plan.source, plan.log, plan.public, plan.moves, plan.status.st_dev,
+                    plan.status.st_ino, hashlib.sha256(plan.public_data).hexdigest())
 
 
-def _write_journal(path: Path, plan: _Plan, created: bool) -> None:
+def _write_journal(path: Path, plan: _Plan) -> None:
     """Write a migration's journal, whole and durably, before anything moves.
 
     It is written beside its path and then renamed into place, so a crash
@@ -459,7 +491,7 @@ def _write_journal(path: Path, plan: _Plan, created: bool) -> None:
     files without their directories (the save prefix's, and the private
     directory), so that ``_read_journal`` can check them.
     """
-    journal = _journal_of(plan, created)
+    journal = _journal_of(plan, path)
     record = {
         "version": _JOURNAL_VERSION,
         "source": journal.source.name,
@@ -467,10 +499,9 @@ def _write_journal(path: Path, plan: _Plan, created: bool) -> None:
         "device": journal.device,
         "inode": journal.inode,
         "public_sha256": journal.public_sha256,
-        "created_private": journal.created_private,
     }
     data = (json.dumps(record, indent=2) + "\n").encode("utf-8")
-    temporary = path.with_name(_JOURNAL_TEMPORARY)
+    temporary = path.with_name(path.name + ".tmp")
     with suppress(FileNotFoundError):
         os.unlink(temporary)  # left by a crash while a journal was written
     descriptor = os.open(temporary, _NEW_FILE_FLAGS, 0o600)
@@ -498,7 +529,8 @@ def _read_journal(prefix: Path) -> _Journal:
     """
     public, private = public_log_path(prefix), private_dir(prefix)
     log = private / CONTEXT_NAME
-    with open(private / JOURNAL_NAME, "rb") as file:
+    path = migration_journal_path(prefix)
+    with open(path, "rb") as file:
         record = json.loads(file.read().decode("utf-8"))
     if not isinstance(record, dict) or record.get("version") != _JOURNAL_VERSION:
         raise ValueError("it is not a migration journal of a known version")
@@ -515,11 +547,10 @@ def _read_journal(prefix: Path) -> _Journal:
             raise ValueError("it names a file that a migration doesn't move")
         moves.append(allowed[key])
     device, inode = record.get("device"), record.get("inode")
-    digest, created = record.get("public_sha256"), record.get("created_private")
-    if not (isinstance(device, int) and isinstance(inode, int) and isinstance(digest, str)
-            and isinstance(created, bool)):
+    digest = record.get("public_sha256")
+    if not (isinstance(device, int) and isinstance(inode, int) and isinstance(digest, str)):
         raise ValueError("it is incomplete")
-    return _Journal(source, log, public, tuple(moves), device, inode, digest, created)
+    return _Journal(path, source, log, public, tuple(moves), device, inode, digest)
 
 
 def _rename_new(source: Path, destination: Path) -> None:
@@ -577,9 +608,11 @@ def _undo(journal: _Journal) -> List[str]:
     Nothing that the migration didn't write is replaced or removed: the full
     log moves back only while it is the file that moved there (its device
     and inode), and a public log goes only when it is the one the migration
-    wrote. Steps that were never taken are skipped. The journal goes last,
-    and only when everything was undone, so an undo that fails or is
-    interrupted is tried again at the next launch.
+    wrote. Steps that were never taken are skipped. The private directory,
+    which the migration made, goes once it is empty, and the journal goes
+    last, only when everything was undone, so that an undo that fails or is
+    interrupted is tried again at the next launch, and none leaves a private
+    directory without a journal.
     """
     problems: List[str] = []
 
@@ -624,19 +657,16 @@ def _undo(journal: _Journal) -> List[str]:
         _fsync_directory(directory)
     if problems:
         return problems
-    journal_path = private / JOURNAL_NAME
-    attempt(lambda: os.unlink(journal_path), f"could not remove the journal {journal_path}")
-    if not problems:
-        _fsync_directory(private)
-        if journal.created_private:
-            with suppress(OSError):
-                os.rmdir(private)  # only when nothing else is in it
+    with suppress(OSError):
+        os.rmdir(private)  # the migration makes it; it goes once nothing else is in it
+    attempt(lambda: os.unlink(journal.path), f"could not remove the journal {journal.path}")
+    _fsync_directory(journal.path.parent)
     return problems
 
 
 def _undo_interrupted(prefix: Path) -> str:
     """Undo a migration that was interrupted; return a notice that says so."""
-    path = private_dir(prefix) / JOURNAL_NAME
+    path = migration_journal_path(prefix)
     try:
         journal = _read_journal(prefix)
     except (OSError, ValueError) as exc:
@@ -667,13 +697,16 @@ class CliSaveWriter:
     ``PublicLogWriter``, which never raises. Its problems become warnings,
     which go to ``on_warning`` once it is set, and wait for
     ``take_warnings`` until then. A legacy save has only its full log.
+    ``reasoning`` and ``thinking`` are the public log's (``PublicLogWriter``).
     """
 
-    def __init__(self, save: CliSave, full: Optional[InteractionSaveWriter] = None) -> None:
+    def __init__(self, save: CliSave, full: Optional[InteractionSaveWriter] = None, *,
+                 reasoning: Union[str, Callable[[], str]] = "nil",
+                 thinking: bool = False) -> None:
         self.cli_save = save
         self.full = InteractionSaveWriter(save.log) if full is None else full
-        self.public = (None if save.public is None
-                       else PublicLogWriter(save.public, name=save.public.name))
+        self.public = (None if save.public is None else PublicLogWriter(
+            save.public, name=save.public.name, reasoning=reasoning, thinking=thinking))
         self.on_warning: Optional[Callable[[str], None]] = None
 
     @property
@@ -713,15 +746,16 @@ class CliSaveWriter:
 
 
 def resume_cli_save(
-    save: CliSave,
+    save: CliSave, *, reasoning: Union[str, Callable[[], str]] = "nil", thinking: bool = False,
 ) -> Tuple[InteractionContext, CliSaveWriter, Optional[IncompleteSaveLine]]:
     """Load a save from its full log alone, with a writer that continues it.
 
     The public log is brought up to date at once; its warnings wait in the
-    writer. Raises ``SaveError`` as ``resume_interaction_save`` does.
+    writer. ``reasoning`` and ``thinking`` are as for ``CliSaveWriter``.
+    Raises ``SaveError`` as ``resume_interaction_save`` does.
     """
     resumed = resume_interaction_save_lines(save.log)
-    writer = CliSaveWriter(save, resumed.writer)
+    writer = CliSaveWriter(save, resumed.writer, reasoning=reasoning, thinking=thinking)
     writer.sync_public(resumed.lines, len(resumed.context))
     return resumed.context, writer, resumed.incomplete_line
 
@@ -731,11 +765,12 @@ __all__ = [
     "CliSave",
     "CliSaveError",
     "CliSaveWriter",
-    "JOURNAL_NAME",
+    "JOURNAL_SUFFIX",
     "NO_MIGRATION_OPTION",
     "check_cli_save",
     "cli_save_exists",
     "full_log_path",
+    "migration_journal_path",
     "prepare_cli_save",
     "private_dir",
     "public_log_path",
