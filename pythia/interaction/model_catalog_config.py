@@ -16,6 +16,7 @@ from .model_catalog import SECTION_PROVIDER_ERROR, compaction_route_error
 from .model_catalog import ModelCatalog, ModelLimits, ModelSpec, ModelTimeouts
 from .model_catalog import EndpointSpec
 from .model_catalog import MODEL_TIMEOUT_FIELDS
+from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import ResponsesDefaults
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS, SampleParamDefaults
 from .model_catalog import sample_params_route_error
@@ -173,6 +174,12 @@ def _entry(section, values, base):
             endpoint[key[9:]] = _text(value)
             if key == "endpoint.auth":
                 endpoint["auth_file"] = None
+        elif key == "endpoint.prompt_caching":
+            # null restores the default, 5m; none sends no cache_control.
+            caching = _text(value)
+            if caching is not None and caching not in PROMPT_CACHING_VALUES:
+                raise _FieldError(f"{key} must be 5m, 1h, none, or null")
+            endpoint["prompt_caching"] = caching
         elif key == "aliases":
             fields[key] = parse_json_value(value)
             if not isinstance(fields[key], list):
@@ -232,6 +239,8 @@ def _entry(section, values, base):
             and endpoint["url"] != original.endpoint.url and original.endpoint.auth != "none"
             and "endpoint.auth" not in values):
         raise ValueError("Changing a credentialed endpoint URL requires endpoint.auth.")
+    if endpoint.get("prompt_caching") is not None and endpoint.get("api") != "messages":
+        raise _FieldError("endpoint.prompt_caching requires endpoint.api messages")
     endpoint = EndpointSpec(**endpoint)
     if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
         raise ValueError("Catalog Codex login requires the official Codex endpoint.")

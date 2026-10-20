@@ -107,6 +107,11 @@ class MessagesPromptCaching:
 
     Each request carries the top-level (automatic) ``cache_control`` and the
     same control on the rightmost ``messages`` block that accepts one.
+
+    A one-hour write can't build on five-minute entries: a ``"1h"`` request
+    that writes rewrites a prefix that only five-minute entries hold, so a
+    conversation switched from ``"5m"`` to ``"1h"`` writes its whole prefix
+    again once. One switched the other way reads its one-hour entries.
     """
 
     ttl: Literal["5m", "1h"] = "5m"

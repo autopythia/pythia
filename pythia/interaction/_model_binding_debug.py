@@ -32,6 +32,9 @@ def _debug_entry(binding):
             "url": binding.endpoint.url,
             "model": binding.endpoint.model,
             "auth": binding.endpoint.auth,
+            # None means the built-in default (5m on Messages). Added without
+            # a version change.
+            "prompt_caching": binding.endpoint.prompt_caching,
         },
         "limits": {
             name: getattr(binding.limits, name)

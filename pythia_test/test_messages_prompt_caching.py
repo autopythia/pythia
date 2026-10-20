@@ -4,11 +4,18 @@ from pythia_test.interaction_helpers import messages_endpoint
 
 import copy
 import io
+import re
+import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
+from pathlib import Path
+from unittest import mock
 
+from pythia.interaction import ChatCompletionsModel
 from pythia.interaction import ContextPrefix
+from pythia.interaction import Environment
 from pythia.interaction import Instructions
 from pythia.interaction import MESSAGES_COMPACTION_BETA
 from pythia.interaction import Message
@@ -26,15 +33,29 @@ from pythia.interaction import TokenUsage
 from pythia.interaction import ToolCall
 from pythia.interaction import ToolResult
 from pythia.interaction import ToolSpec
+from pythia.interaction import auto
 from pythia.interaction import cli
 from pythia.interaction import demo
 from pythia.interaction import interaction_item_to_dict
 from pythia.interaction import summarize_turn_usage
+from pythia.interaction._auto_config import resolve_config
+from pythia.interaction._model_binding_debug import _debug_entry
+from pythia.interaction.model_catalog import EndpointSpec
+from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.model_config import build_model
+from pythia.interaction.model_config import render_model_catalog
 from pythia_test.test_messages import _FakeResponse
 from pythia_test.test_messages import _ScriptedOpener
 from pythia_test.test_messages import _payload
 
+
+# A Messages entry with 1-hour prompt caching, on an anonymous local endpoint.
+_CACHED_CATALOG = (
+    "[catalog]\nversion = 4\n"
+    "[model.cached]\nendpoint.api = messages\n"
+    "endpoint.url = http://127.0.0.1:9/v1/messages\nendpoint.model = fixture\n"
+    "endpoint.auth = none\nendpoint.prompt_caching = 1h\nlimits.max_output_tokens = 100\n"
+)
 
 def _response(*, content=None, usage=None, stop_reason="end_turn"):
     return _FakeResponse({
@@ -391,19 +412,174 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
                         "cache_control": {"type": "ephemeral", "ttl": "5m"},
                     }]}])
 
-    def test_frontends_do_not_expose_cache_options(self):
+    def test_the_endpoint_option_sets_both_controls_or_none(self):
+        for frontend in (cli, demo):
+            for value in ("5m", "1h", "none"):
+                with self.subTest(frontend=frontend.__name__, value=value):
+                    args = frontend._build_parser().parse_args([
+                        "--endpoint-api", "messages", "--model", "model",
+                        "--max-output-tokens", "100", "--endpoint-auth", "none",
+                        "--endpoint-prompt-caching", value,
+                    ])
+                    model = build_model(args)
+                    self.assertEqual(model.binding.endpoint.prompt_caching, value)
+                    payload = model._build_request_payload(
+                        InteractionContext((Message("user", "Hello."),)), (), None,
+                    )
+                    block = {"type": "text", "text": "Hello."}
+                    if value == "none":
+                        self.assertIsNone(model.endpoint.prompt_caching)
+                        self.assertNotIn("cache_control", payload)
+                    else:
+                        control = {"type": "ephemeral", "ttl": value}
+                        self.assertEqual(model.endpoint.prompt_caching,
+                                         MessagesPromptCaching(ttl=value))
+                        self.assertEqual(payload["cache_control"], control)
+                        block["cache_control"] = control
+                    self.assertEqual(payload["messages"], [{"role": "user", "content": [block]}])
+
+    def test_the_endpoint_option_requires_a_messages_endpoint(self):
+        routes = (
+            ["--endpoint-api", "chat-completions", "--endpoint-url",
+             "http://localhost/v1/chat/completions", "--endpoint-model", "model",
+             "--endpoint-auth", "none"],
+            # Claude Code chooses the relay's cache lifetime.
+            ["--endpoint-api", "claude-relay", "--endpoint-model", "claude-opus-5-5"],
+        )
+        for frontend in (cli, demo):
+            for route in routes:
+                with self.subTest(frontend=frontend.__name__, route=route[1]):
+                    args = frontend._build_parser().parse_args(
+                        [*route, "--endpoint-prompt-caching", "5m"])
+                    with self.assertRaisesRegex(
+                            ValueError,
+                            "^--endpoint-prompt-caching requires --endpoint-api messages$"):
+                        build_model(args)
+
+    def test_the_catalog_sets_prompt_caching_and_the_option_wins(self):
+        catalog = parse_model_catalog(_CACHED_CATALOG + (
+            "[model.claude-opus-5.5]\noverride = true\nendpoint.api = messages\n"
+            "endpoint.prompt_caching = none\n"))
+        for flags, expected in (
+            ([], MessagesPromptCaching(ttl="1h")),
+            (["--endpoint-prompt-caching", "5m"], MessagesPromptCaching()),
+            (["--endpoint-prompt-caching", "none"], None),
+        ):
+            with self.subTest(flags=flags):
+                args = cli._build_parser().parse_args(["--model", "cached", *flags])
+                self.assertEqual(build_model(args, catalog=catalog).endpoint.prompt_caching,
+                                 expected)
+        self.assertEqual(catalog.bind("messages", "claude-opus-5.5").endpoint.prompt_caching,
+                         "none")
+        # An override patches one entry, not its effort variants.
+        self.assertIsNone(
+            catalog.bind("messages", "claude-opus-5.5-max").endpoint.prompt_caching)
+        # null removes an entry's value, so the default applies.
+        cleared = parse_model_catalog(
+            "[catalog]\nversion = 4\n[model.cached]\noverride = true\n"
+            "endpoint.api = messages\nendpoint.prompt_caching = null\n", base=catalog)
+        self.assertIsNone(cleared.get_model_spec("messages", "cached").endpoint.prompt_caching)
+        self.assertIn("auth=none, prompt_caching=1h, source=user", render_model_catalog(catalog))
+        self.assertNotIn("prompt_caching", render_model_catalog(cleared).splitlines()[-1])
+        self.assertEqual(_debug_entry(catalog.bind("messages", "cached"))["endpoint"], {
+            "api": "messages", "url": "http://127.0.0.1:9/v1/messages", "model": "fixture",
+            "auth": "none", "prompt_caching": "1h",
+        })
+
+    def test_catalog_prompt_caching_is_checked(self):
+        entry = ("[catalog]\nversion = 4\n[model.x]\nendpoint.api = {api}\n{route}"
+                 "endpoint.prompt_caching = {value}\n")
+        http = ("endpoint.url = http://127.0.0.1:9/v1/{path}\nendpoint.model = fixture\n"
+                "endpoint.auth = none\n")
+        wrong_value = "endpoint.prompt_caching must be 5m, 1h, none, or null"
+        wrong_api = "endpoint.prompt_caching requires endpoint.api messages"
+        for api, route, value, message in (
+            ("messages", http.format(path="messages"), "2h", wrong_value),
+            ("messages", http.format(path="messages"), "None", wrong_value),
+            ("chat-completions", http.format(path="chat/completions"), "1h", wrong_api),
+            ("claude-relay", "endpoint.model = claude-opus-5-5\n", "none", wrong_api),
+        ):
+            with self.subTest(api=api, value=value):
+                with self.assertRaisesRegex(ValueError, "^" + re.escape(
+                        f"Invalid model catalog entry 'model.x' in user: {message}") + "$"):
+                    parse_model_catalog(entry.format(api=api, route=route, value=value))
+        # Python callers get the same checks from EndpointSpec.
+        with self.assertRaisesRegex(ValueError, "^endpoint.prompt_caching requires the Messages API$"):
+            EndpointSpec("chat-completions", "http://127.0.0.1:9/v1/chat/completions",
+                         prompt_caching="1h")
+        with self.assertRaisesRegex(ValueError, "^endpoint.prompt_caching must be 5m, 1h, or none$"):
+            EndpointSpec("messages", "http://127.0.0.1:9/v1/messages", prompt_caching="2h")
+
+    def test_auto_gives_the_option_to_its_messages_roles_only(self):
+        # The catalog turns main's caching off; the launch option wins.
+        catalog = parse_model_catalog(_CACHED_CATALOG.replace(
+            "endpoint.prompt_caching = 1h", "endpoint.prompt_caching = none") + (
+            "[model.plain]\nendpoint.api = chat-completions\n"
+            "endpoint.url = http://127.0.0.1:9/v1/chat/completions\nendpoint.model = plain\n"
+            "endpoint.auth = none\n"))
+        for options, expected in (({}, None),
+                                  ({"endpoint_prompt_caching": "1h"},
+                                   MessagesPromptCaching(ttl="1h"))):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
+                settings = resolve_config(overrides={"cwd": tmp}, catalog=catalog,
+                                          role_models={1: "cached", -1: "plain"})
+                settings.messages_options = dict(options)
+                built = {}
+
+                def model_factory(index, args):
+                    built[index] = build_model(args)  # built only: no request is made
+                    return built[index]
+
+                session = auto._Session(
+                    Path(tmp) / "session", settings, model_factory=model_factory,
+                    environment_factory=lambda index, args, tools: Environment(tools)).start()
+                try:
+                    deadline = time.monotonic() + 5
+                    while len(built) < 2 and time.monotonic() < deadline:
+                        time.sleep(0.005)
+                finally:
+                    session.close()
+                self.assertEqual(built[1].endpoint.prompt_caching, expected)
+                self.assertIsInstance(built[-1], ChatCompletionsModel)
+                # The bindings, which --debug-save-model-binding records, say so too.
+                self.assertEqual(session.bindings[1].endpoint.prompt_caching,
+                                 options.get("endpoint_prompt_caching", "none"))
+                self.assertIsNone(session.bindings[-1].endpoint.prompt_caching)
+
+    def test_auto_takes_the_option_at_launch(self):
+        for flags, expected in (([], {}), (["--endpoint-prompt-caching", "1h"],
+                                           {"endpoint_prompt_caching": "1h"})):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp:
+                seen = []
+
+                def stop(settings, *_args):
+                    seen.append(settings.messages_options)
+                    raise ValueError("stopped before the session")
+
+                with mock.patch.object(auto, "_check_credentials", stop), \
+                        redirect_stderr(io.StringIO()) as stderr:
+                    code = auto.main(["--no-user-model-catalog", "--model", "claude-sonnet-5.5",
+                                      "--prompt", "Hello.", "--save", str(Path(tmp) / "save"),
+                                      *flags])
+                self.assertEqual(code, 1)
+                self.assertIn("auto failed: stopped before the session", stderr.getvalue())
+                self.assertEqual(seen, [expected])
+                self.assertFalse((Path(tmp) / "save").exists())
+
+    def test_frontends_reject_other_cache_options(self):
         for frontend in (cli, demo):
             for flags in (
                 ["--messages-prompt-caching"],
-                ["--messages-cache-ttl", "5m"],
                 ["--messages-cache-ttl", "1h"],
+                ["--endpoint-prompt-caching", "2h"],
+                ["--endpoint-prompt-caching", "off"],
+                ["--endpoint-prompt-caching"],
             ):
                 with self.subTest(frontend=frontend.__name__, flags=flags):
                     with redirect_stderr(io.StringIO()):
                         with self.assertRaises(SystemExit) as raised:
                             frontend._build_parser().parse_args(flags)
                     self.assertEqual(raised.exception.code, 2)
-
 
 if __name__ == "__main__":
     unittest.main()

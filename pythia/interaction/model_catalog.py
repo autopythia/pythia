@@ -81,6 +81,10 @@ MAX_TIMEOUT_SECONDS = 86_400.0
 _RELAY_TIMEOUT_FIELDS = ("generation_seconds", "parked_seconds", "startup_seconds", "stop_seconds",
                          "idle_seconds")
 MODEL_TIMEOUT_FIELDS = ("request_seconds", *_RELAY_TIMEOUT_FIELDS)
+# endpoint.prompt_caching, Messages only: the lifetime of the prompt-cache
+# entries that each request writes, or none, which sends no cache_control (for
+# servers that reject it). Unset, it is 5m.
+PROMPT_CACHING_VALUES = ("5m", "1h", "none")
 
 
 def parse_json_value(text: str):
@@ -258,6 +262,8 @@ class EndpointSpec:
     auth: str = "none"
     # Resolved login reference, not file contents. Filled at the launch boundary.
     auth_file: Optional[str] = None
+    # PROMPT_CACHING_VALUES; None is 5m. Not part of the connection identity.
+    prompt_caching: Optional[str] = None
 
     def __post_init__(self):
         object.__setattr__(self, "api", _normalize_profile(self.api))
@@ -280,6 +286,11 @@ class EndpointSpec:
         if self.auth_file is not None:
             if self.auth != "codex-login" or not isinstance(self.auth_file, str) or not self.auth_file.strip() or "\x00" in self.auth_file:
                 raise ValueError("auth_file requires a nonempty Codex login reference")
+        if self.prompt_caching is not None:
+            if not isinstance(self.prompt_caching, str) or self.prompt_caching not in PROMPT_CACHING_VALUES:
+                raise ValueError("endpoint.prompt_caching must be 5m, 1h, or none")
+            if self.api != "messages":
+                raise ValueError("endpoint.prompt_caching requires the Messages API")
 
     @property
     def environment_variable(self):
@@ -882,7 +893,8 @@ class ModelCatalog:
         ))
 
     def bind(self, api=None, name=None, *, extra_sample_params=None,
-             endpoint_url=None, endpoint_model=None, endpoint_auth=None):
+             endpoint_url=None, endpoint_model=None, endpoint_auth=None,
+             endpoint_prompt_caching=None):
         if name is not None:
             if not isinstance(name, str):
                 raise TypeError("model name must be a string or None")
@@ -908,6 +920,10 @@ class ModelCatalog:
             changes["model"] = endpoint_model
         if endpoint_auth is not None:
             changes.update(auth=endpoint_auth, auth_file=None)
+        if endpoint_prompt_caching is not None:
+            if endpoint.api != "messages":
+                raise ValueError("--endpoint-prompt-caching requires --endpoint-api messages")
+            changes["prompt_caching"] = endpoint_prompt_caching
         endpoint = replace(endpoint, **changes)
         binding = ModelBinding(
             name, endpoint, spec,
@@ -947,6 +963,7 @@ def binding_from_namespace(args, catalog=None):
         endpoint_url=getattr(args, "endpoint_url", None),
         endpoint_model=getattr(args, "endpoint_model", None),
         endpoint_auth=auth,
+        endpoint_prompt_caching=getattr(args, "endpoint_prompt_caching", None),
         extra_sample_params=getattr(args, "extra_sample_params", None),
     )
     if inferred_supplied and binding.api == "codex" and (

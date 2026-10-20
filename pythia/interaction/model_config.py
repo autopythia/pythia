@@ -26,6 +26,7 @@ from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
 from .model_catalog import COMPACTION_DEFAULT_FIELDS
 from .model_catalog import MODEL_TIMEOUT_FIELDS
+from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
@@ -61,6 +62,8 @@ CLAUDE_RELAY_FIELDS = (
     "claude_relay_startup_timeout", "claude_relay_stop_timeout",
     "claude_relay_idle_timeout",
 )
+# Likewise; auto gives them to its Messages roles only.
+MESSAGES_FIELDS = ("endpoint_prompt_caching",)
 
 
 def relay_endpoint(args, binding):
@@ -245,8 +248,11 @@ def render_model_catalog(catalog):
         settings = "".join(f", {setting}" for setting in (
             *_request_settings(spec), *_sample_param_settings(spec), *_timeout_settings(spec),
             *(f"compaction.{name}={value}" for name, value in _compaction_settings(spec.compaction))))
+        caching = ("" if spec.endpoint.prompt_caching is None
+                   else f", prompt_caching={spec.endpoint.prompt_caching}")
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
-                     f"url={spec.endpoint.url}, auth={spec.endpoint.auth}, source={origin}{settings}")
+                     f"url={spec.endpoint.url}, auth={spec.endpoint.auth}{caching}, "
+                     f"source={origin}{settings}")
     if catalog.auto_models:
         lines.append("[auto] " + ", ".join(
             f"{role}.model = {name}" for role, name in catalog.auto_models.items()))
@@ -311,6 +317,13 @@ def add_endpoint_arguments(parser, *, auto=False):
         parser.add_argument(f"--claude-relay-{name}-timeout", type=float, default=argparse.SUPPRESS,
                             help=(f"{what} (default: the model catalog's timeouts.{name}_seconds, "
                                   f"else {fallback:g}); launch-only"))
+    parser.add_argument(
+        "--endpoint-prompt-caching", choices=PROMPT_CACHING_VALUES, default=argparse.SUPPRESS,
+        help=("Messages prompt caching: 5m or 1h, the lifetime of the cache entries that each "
+              "request writes (1h writes cost 2x base input, against 1.25x; a conversation "
+              "resumed with 1h after 5m writes its whole prefix again once), or none, which "
+              "sends no cache_control, for servers that reject it; launch-only (default: the "
+              "model catalog's endpoint.prompt_caching, else 5m)"))
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")
@@ -436,13 +449,17 @@ def build_model(
         )
         # Validate required budgets before touching credential sources.
         output_budget = InteractionConfig.from_namespace(args).get("max_output_tokens")
+        # The bound endpoint's prompt caching (--endpoint-prompt-caching, else
+        # the catalog's): unset is 5m, and none sends no cache_control.
+        caching = binding.endpoint.prompt_caching
         endpoint = MessagesEndpoint(
             binding=binding,
             max_output_tokens=output_budget,
             request_timeout_seconds=request_timeout_seconds,
             api_key=_endpoint_api_key(args, binding),
             server_compaction=compaction_options,
-            prompt_caching=MessagesPromptCaching(),
+            prompt_caching=(None if caching == "none" else MessagesPromptCaching()
+                            if caching is None else MessagesPromptCaching(ttl=caching)),
         )
         return MessagesModel(endpoint, opener=opener)
 

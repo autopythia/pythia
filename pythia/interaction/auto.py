@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -53,7 +54,7 @@ from .items import Init, Instructions, Message, ToolResult, Tools, UserInteracti
 from .items import UserToolResult
 from .media import AttachmentError, join_user_messages, parse_user_prompt, require_media_api
 from .model_config import build_model
-from .model_config import CLAUDE_RELAY_FIELDS, relay_endpoint
+from .model_config import CLAUDE_RELAY_FIELDS, MESSAGES_FIELDS, relay_endpoint
 from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
@@ -501,6 +502,7 @@ class _Session:
         self.catalog = getattr(settings, "catalog", BUILTIN_MODEL_CATALOG)
         self.settings = {i: deepcopy(s) for i, s in settings.items()}
         self._relay_options = dict(getattr(settings, "relay_options", {}))
+        self._messages_options = dict(getattr(settings, "messages_options", {}))
         self._models = {}
         self._model_lock = threading.Lock()
         self.sources = dict(getattr(settings, "sources", {}))
@@ -508,6 +510,12 @@ class _Session:
         # Role index -> (compaction_mode it runs, why coldstart was dropped).
         self._coldstart_dropped = {}
         self.bindings = {i: namespace(self.settings[i], self.catalog).model_binding for i in self.roles}
+        caching = self._messages_options.get("endpoint_prompt_caching")
+        if caching is not None:
+            # Launch-only: every Messages role's endpoint takes it, and the
+            # other roles ignore it.
+            self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, prompt_caching=caching))
+                                 if b.api == "messages" else b) for i, b in self.bindings.items()}
         self.names = {i: self.settings[i]["name"] for i in self.roles}
         self._model_factory, self._environment_factory = model_factory, environment_factory
         self._port = board_port
@@ -1977,6 +1985,8 @@ def main(argv=None):
                                   roles=roles)
         settings.relay_options = {name: getattr(args, name) for name in CLAUDE_RELAY_FIELDS
                                   if getattr(args, name, None) is not None}
+        settings.messages_options = {name: getattr(args, name) for name in MESSAGES_FIELDS
+                                     if getattr(args, name, None) is not None}
         if args.print_config:
             for index in roles:
                 binding = namespace(settings[index], catalog).model_binding
