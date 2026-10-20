@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from pythia.interaction import CommandRuntime
@@ -33,6 +34,7 @@ from pythia.interaction.demo import run_repository_summary
 from pythia.interaction._debug_trace import capture_trace_scope, trace_operation
 from pythia.interaction.environment import CancelToken, cancel_scope, current_cancel
 from pythia.interaction.environment import results_due_scope
+from pythia.interaction.local_tools import command
 
 
 def _execute(environment, name, call_id, arguments):
@@ -277,6 +279,35 @@ class CommandToolTests(unittest.TestCase):
                             {"cmd": "true", "yield_time_ms": 59_001})
             self.assertFalse(over.success)
             self.assertIn("yield_time_ms must not exceed 59000", over.output)
+
+    def test_a_wait_ends_by_its_deadline_though_linux_fires_select_late(self):
+        # Linux may fire a select() timeout as late as min(0.1%, 100 ms) of it
+        # (0.5% when niced), and up to the thread's 50 us timer slack: a 59 s
+        # wait returned after 59.059 s. This select returns as late as that.
+        for share in (0.001, 0.005):
+            with self.subTest(share=share), tempfile.TemporaryDirectory() as tmpdir, \
+                    CommandRuntime(tmpdir) as runtime:
+                now, timeouts = [1000.0], []
+
+                def late_select(read, write, error, timeout):
+                    timeouts.append(timeout)
+                    if timeout > 0:
+                        now[0] += timeout + max(min(timeout * share, 0.1), 50e-6)
+                    return [], [], []
+
+                reader, writer = os.pipe()
+                self.addCleanup(os.close, reader)
+                self.addCleanup(os.close, writer)
+                process = SimpleNamespace(stdout=SimpleNamespace(fileno=lambda: reader))
+                with mock.patch.object(command, "select", SimpleNamespace(select=late_select)), \
+                        mock.patch.object(command, "time", SimpleNamespace(monotonic=lambda: now[0])):
+                    self.assertEqual(runtime._read_process_output(process, 59.0), ("", False))
+                late = now[0] - 1059.0
+                self.assertGreaterEqual(late, 0)  # it waited the whole time
+                self.assertLess(late, 0.0001)  # within 0.1 ms, not 59 ms
+                waits = [timeout for timeout in timeouts if timeout > 0]
+                self.assertGreaterEqual(waits[0], 58.9)  # one long wait, then the rest
+                self.assertLessEqual(len(waits), 4)
 
     def test_a_wait_ends_when_the_calls_result_is_due(self):
         with tempfile.TemporaryDirectory() as tmpdir, CommandRuntime(tmpdir) as runtime:

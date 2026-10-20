@@ -28,6 +28,27 @@ from ._workspace import WorkspacePolicy
 # After stdout reaches EOF, the shell may still be exiting. Wait at least this
 # long for it, even on a zero-length poll, before reporting a live session.
 _EOF_EXIT_GRACE_SECONDS = 0.05
+# Linux may end a select() (poll, epoll) wait up to 0.1% of its timeout late,
+# 0.5% for a niced process, and at most 100 ms (fs/select.c,
+# select_estimate_accuracy); on an idle CPU it usually does: a 59 s wait
+# returned after 59.059 s. So a wait asks for that much less
+# (_select_timeout), then waits out what is left the same way, and ends within
+# about 0.1 ms of its deadline, as time.sleep() does.
+#
+# This runs on every platform: it is harmless elsewhere. macOS delays every
+# timeout alike to coalesce timers (select, kevent, nanosleep): by at most 1/8
+# of the time left and 1 ms for a foreground process, more in the background
+# or under App Nap (XNU, osfmk/kern/timer_call.c; not measured here). There a
+# wait still ends within that millisecond of its deadline, at the cost of a
+# couple more select() calls, since the loop ends a wait early only at EOF or
+# a cancel.
+_SELECT_LATE_SHARE = 0.005
+_SELECT_LATE_MAX_SECONDS = 0.1
+
+
+def _select_timeout(remaining: float) -> float:
+    """A select() timeout that ends by ``remaining``, however late Linux fires it."""
+    return remaining - min(remaining * _SELECT_LATE_SHARE, _SELECT_LATE_MAX_SECONDS)
 
 
 @dataclass
@@ -446,7 +467,8 @@ class CommandRuntime:
 
         The running tool call's cancel token (``current_cancel``), if any,
         ends the wait early, as if the yield time had run out: the process
-        keeps running and its output so far is returned.
+        keeps running and its output so far is returned. A wait that runs to
+        its deadline ends within about 0.1 ms of it (``_select_timeout``).
         """
         if process.stdout is None:
             return "", False
@@ -465,9 +487,9 @@ class CommandRuntime:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            ready, _, _ = select.select(watched, [], [], remaining)
+            ready, _, _ = select.select(watched, [], [], _select_timeout(remaining))
             if not ready:
-                break
+                continue  # it ended a little early, on purpose: the deadline is checked above
             if fd not in ready:
                 continue  # the cancel: checked above
             try:
