@@ -64,6 +64,7 @@ from ..model import ModelContextWindowError
 from ..model import ModelContinuationExpired
 from ..model import ModelError
 from ..model import ModelSample
+from ..model import park_model
 from ..model import retire_model
 from .preemption import NOT_PREEMPTIBLE
 
@@ -258,9 +259,12 @@ def run_turn(context, model, environment, config, host: TurnHost, *,
 
     ``config`` is an ``InteractionConfig`` snapshot. Returns ``ended`` with
     the final text, ``yielded`` with a handoff note, or ``stopped``; raises on
-    failure. The model is retired when the turn ends, unless it ended with a
-    final answer: then a model may keep its work for the next turn, as the
-    Claude relay keeps its native process (doc/claude-relay-warm-delivery-plan.md).
+    failure. The model is retired when the turn stops or fails. After a final
+    answer it may keep its work for the next turn, as the Claude relay keeps
+    its native process (doc/claude-relay-warm-delivery-plan.md); after a yield
+    it is parked (``park_model``): the relay's process waits for the batch's
+    results, which the turn that resumes delivers
+    (doc/claude-relay-warm-yield-plan.md).
     ``sample_params`` overrides ``config.sample_params()``.
 
     ``control`` (only supervised main passes one) lets a tool end the turn:
@@ -272,7 +276,9 @@ def run_turn(context, model, environment, config, host: TurnHost, *,
     except BaseException:
         retire_model(model)
         raise
-    if result.kind != "ended":
+    if result.kind == "yielded":
+        park_model(model)
+    elif result.kind != "ended":
         retire_model(model)
     return result
 

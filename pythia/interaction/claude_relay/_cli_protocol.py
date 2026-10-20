@@ -35,12 +35,17 @@ PROFILE = 'claude-stream-json-v9'
 # sending it, and answers the call itself (_recovery.native_timeout_texts).
 # Unset, it aborts the call's HTTP request after 60 s instead. The relay sets it
 # with --settings env, from ClaudeRelayEndpoint.native_tool_timeout_seconds,
-# this by default: near the CLI's own 60 s, with room for a full 59 s command
-# wait. The CLI sends one call at a time and gets no answer before the host has
-# run the whole batch, so the first call's clock covers the batch. Measured
-# through the relay from 20 to 240 s; re-measure after changing the pinned
-# version (doc/claude-relay-tool-deadline-plan.md).
-DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS = 75
+# this by default. The CLI sends one call at a time and gets no answer before
+# the host has run the whole batch, so the first call's clock covers the batch
+# (doc/claude-relay-tool-deadline-plan.md). It was 75 s, near the CLI's own
+# 60 s. An hour lets a process wait parked after a yield as long as its prompt
+# cache lives, and still come after the relay's own deadline for that wait,
+# 3,595 s from the start of the request that made the call, which the CLI
+# sends later (doc/claude-relay-warm-yield-plan.md, 4.2). Measured through the
+# relay from 20 to 240 s, and held for 91 s and 6 minutes at this value, with
+# the CLI's 300 s idle abort off (probe P5, October 20); re-measure after
+# changing the pinned version.
+DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS = 3600
 MAX_RECORD = 8 * 1024 * 1024
 # A message the CLI closes without its final message_delta (no stop reason, no
 # final usage) is interrupted: seen on 2.1.289, untraced, after a long thinking

@@ -8,11 +8,13 @@ from ..model import ModelTransportError
 NATIVE_MCP_TIMEOUT = 'native_mcp_timeout'
 # Why a kept native process went unused (continuation_abandoned): a delivery it
 # didn't take up, which is also the sample's recovery label; it ended while
-# idle, by exiting or with a record no idle CLI writes; its idle deadline.
+# idle, by exiting or with a record no idle CLI writes; its idle deadline; or,
+# parked after a yield, the deadline of its wait for the batch's results.
 DELIVERY_UNACKNOWLEDGED = 'delivery_unacknowledged'
 IDLE_EXIT = 'idle_exit'
 IDLE_RECORD = 'idle_record'
 IDLE_DEADLINE = 'idle_deadline'
+PARKED_DEADLINE = 'parked_deadline'
 # What the CLI reports as a call's result when it gives up on the call: its
 # 60 s HTTP abort while MCP_TOOL_TIMEOUT is unset, else its tool timeout,
 # which names the relay's MCP server (the --mcp-config key) and the tool.

@@ -179,7 +179,7 @@ class RelayTraceTests(unittest.TestCase):
         trace.close()
         ends = [r for r in rows(trace.event_path) if r['type'] == 'sample_end']
         self.assertEqual(len(ends), 2)
-        self.assertTrue(65 < ends[0]['results_due_in_seconds'] <= 70, ends[0])
+        self.assertTrue(3590 < ends[0]['results_due_in_seconds'] <= 3595, ends[0])  # an hour, less 5 s
         self.assertIsNone(ends[1]['results_due_in_seconds'])
 
     def test_a_cut_native_message_is_traced(self):

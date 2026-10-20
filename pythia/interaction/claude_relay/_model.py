@@ -23,7 +23,7 @@ from ._cli_protocol import DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS, NATIVE_INPUT_REW
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
 from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
-from ._recovery import DeliveryUnacknowledged, DELIVERY_UNACKNOWLEDGED, IDLE_DEADLINE
+from ._recovery import DeliveryUnacknowledged, DELIVERY_UNACKNOWLEDGED, IDLE_DEADLINE, PARKED_DEADLINE
 from .._debug_trace import DebugTrace, capture_trace_scope
 from ..timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
 from ..timeouts import DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS
@@ -51,13 +51,16 @@ class ClaudeRelayEndpoint:
     results; ``startup``/``stop`` bound the native process lifecycle.
     ``native_tool_timeout_seconds`` is the native client's own deadline for each
     MCP call (its MCP_TOOL_TIMEOUT), a whole number of seconds; the client times
-    each call from sending it. It is not a launch or catalog option yet.
+    each call from sending it. Its default outlasts the longest wait of a
+    process parked after a yield (``ClaudeRelayModel.park``). It is not a
+    launch or catalog option yet.
     ``idle_timeout_seconds`` bounds how long a native process is kept after a
     final answer for the next turn, counted from the start of that answer's
     request, where its prompt cache lifetime starts; 0 keeps none. After an
     answer whose request wrote 5-minute cache entries,
     ``short_cache_idle_timeout_seconds`` applies when shorter; it is not a
     launch or catalog option (doc/claude-relay-warm-delivery-plan.md, 3.3).
+    The same deadlines bound a process parked after a yield.
     """
 
     model: str
@@ -123,11 +126,15 @@ class ClaudeRelayEndpoint:
 
 
 @dataclass
-class _Idle:
-    """A native process kept after a final answer, until ``deadline``."""
+class _Kept:
+    """A native process kept for the next turn, until ``deadline``: idle after a
+    final answer, or parked after a yield, waiting for its batch's results.
+    ``reason`` is what the trace says if the deadline passes: IDLE_DEADLINE or
+    PARKED_DEADLINE."""
 
     runtime: Runtime
     deadline: float  # time.monotonic()
+    reason: str = IDLE_DEADLINE
     timer: threading.Timer | None = None
 
 
@@ -149,7 +156,10 @@ class ClaudeRelayModel:
         self._pending = {}
         self._stderr = b''
         self._epoch = 0
-        self._idle = None  # _Idle, while a kept process waits for the next turn
+        self._kept = None  # _Kept, while a kept process waits for the next turn
+        # The last sample's tool batch, for park(): when its results are due,
+        # and the origin (request start, cache lifetime) of the reply that made it.
+        self._parkable = None
 
     @property
     def stderr_tail(self):
@@ -168,20 +178,22 @@ class ClaudeRelayModel:
         process doesn't take up a delivery (``DeliveryUnacknowledged``; then
         the sample says ``recovery=delivery_unacknowledged``), a new process
         cold-imports the history. After a final answer the process is kept
-        until the idle deadline (``_keep``).
+        until the idle deadline (``_keep``). After a yield, ``park`` keeps it
+        waiting for the batch's results, as long.
         """
         started = time.monotonic()
         with self._sample_lock:
             with self._state_lock:
                 if self._closed:
                     raise ModelConfigurationError('ClaudeRelayModel is closed')
-                expired = self._take_idle()
+                expired = self._take_kept()
                 runtime = self._runtime
                 epoch = self._epoch
                 previous_signature, acknowledged, pending = self._signature, self._acknowledged, self._pending
             if expired is not None:
-                expired.trace.emit('continuation_abandoned', reason=IDLE_DEADLINE)
-                self._close_runtime(expired)
+                expired_runtime, reason = expired
+                expired_runtime.trace.emit('continuation_abandoned', reason=reason)
+                self._close_runtime(expired_runtime)
             scope = {**capture_trace_scope(), 'sample_id': secrets.token_hex(16)}
             executing = None
             results = snapshot = None
@@ -278,6 +290,10 @@ class ClaudeRelayModel:
                     if started_at is not None:
                         budget = min(self.endpoint.native_tool_timeout_seconds, self.endpoint.parked_timeout_seconds)
                         results_due = started_at + budget - RESULTS_MARGIN_SECONDS
+                with self._state_lock:
+                    if self._runtime is runtime and self._epoch == epoch:
+                        # What park() keeps, should the turn yield after this batch.
+                        self._parkable = None if results_due is None else (results_due, runtime.batch_origin)
                 sample = ModelSample(items, stop_reason=message.stop_reason, usage=message.usage,
                                      provider_turn_id=message.id, results_due=results_due, recovery=recovery)
                 if not calls:
@@ -350,63 +366,110 @@ class ClaudeRelayModel:
         deadline, or retire it now (doc/claude-relay-warm-delivery-plan.md, 3.3).
 
         The deadline counts from the start of the answer's request, where its
-        prompt cache lifetime starts: ``idle_timeout_seconds``, or after 5-minute
-        cache writes ``short_cache_idle_timeout_seconds`` when shorter. 0 keeps
+        prompt cache lifetime starts, for ``_limit``. An idle timeout of 0 keeps
         nothing, nor does an answer cut short (a stop reason other than
         end_turn or stop_sequence).
         """
         started, lifetime = runtime.kept if runtime.kept is not None else (time.monotonic(), None)
+        if self.endpoint.idle_timeout_seconds <= 0 or stop_reason not in ('end_turn', 'stop_sequence'):
+            self.retire()
+            return
+        remaining = self._hold(runtime, epoch, started + self._limit(lifetime), IDLE_DEADLINE)
+        if remaining is not None:
+            runtime.trace.emit('continuation_kept', idle_deadline_seconds=round(remaining, 3),
+                               cache_lifetime=lifetime)
+
+    def park(self):
+        """The turn yielded after the last sample (``park_model``): keep the process
+        waiting for that sample's tool batch, for the turn that resumes, as long
+        as an idle process waits after a final answer
+        (doc/claude-relay-warm-yield-plan.md, 4.2).
+
+        The deadline counts from the start of the batch reply's request, where
+        its prompt cache lifetime starts, for ``_limit``, and never passes the
+        batch's ``results_due``, so the native client never gives up on its call
+        first. A sample before the deadline delivers the results with the
+        turn's messages (``handoff``); at the deadline the process is retired
+        quietly (``continuation_abandoned``, ``parked_deadline``). A process
+        kept idle keeps its own deadline. Anything else is retired now: no
+        batch to wait for (a rewritten call retired its process already), a
+        process that failed while parked, or an idle timeout of 0.
+        """
+        with self._state_lock:
+            runtime, epoch, parkable, kept = self._runtime, self._epoch, self._parkable, self._kept
+        if runtime is None or kept is not None:
+            return
+        if parkable is None or runtime.error is not None or self.endpoint.idle_timeout_seconds <= 0:
+            self.retire()
+            return
+        due, origin = parkable
+        started, lifetime = origin if origin is not None else (time.monotonic(), None)
+        remaining = self._hold(runtime, epoch, min(started + self._limit(lifetime), due), PARKED_DEADLINE)
+        if remaining is not None:
+            runtime.trace.emit('continuation_parked', parked_deadline_seconds=round(remaining, 3),
+                               cache_lifetime=lifetime)
+
+    def _limit(self, lifetime):
+        """How long a kept process may wait from the start of the request that
+        last used its cache: ``idle_timeout_seconds``, or after 5-minute cache
+        writes (``lifetime`` '5m') ``short_cache_idle_timeout_seconds`` when
+        shorter (doc/claude-relay-warm-delivery-plan.md, 3.3)."""
         limit = self.endpoint.idle_timeout_seconds
         if lifetime == '5m':
             limit = min(limit, self.endpoint.short_cache_idle_timeout_seconds)
-        remaining = started + limit - time.monotonic()
-        if limit <= 0 or stop_reason not in ('end_turn', 'stop_sequence'):
-            self.retire()
-            return
+        return limit
+
+    def _hold(self, runtime, epoch, deadline, reason):
+        """Keep ``runtime`` for the next turn until ``deadline`` (monotonic), when a
+        timer retires it, unless a sample takes it first. Returns the seconds
+        left, or None when it was retired instead: at once, if the deadline has
+        passed (traced with ``reason``), or meanwhile."""
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
-            runtime.trace.emit('continuation_abandoned', reason=IDLE_DEADLINE)
+            runtime.trace.emit('continuation_abandoned', reason=reason)
             self.retire()
-            return
-        idle = _Idle(runtime, started + limit)
-        idle.timer = threading.Timer(remaining, self._idle_deadline, args=(idle,))
-        idle.timer.daemon = True
+            return None
+        kept = _Kept(runtime, deadline, reason)
+        kept.timer = threading.Timer(remaining, self._kept_deadline, args=(kept,))
+        kept.timer.daemon = True
         with self._state_lock:
             if self._runtime is not runtime or self._epoch != epoch or self._closed:
-                return  # retired meanwhile
-            self._idle = idle
-        idle.timer.start()  # a retire before this cancelled it: it then never fires
-        runtime.trace.emit('continuation_kept', idle_deadline_seconds=round(remaining, 3), cache_lifetime=lifetime)
+                return None  # retired meanwhile
+            self._kept = kept
+        kept.timer.start()  # a retire before this cancelled it: it then never fires
+        return remaining
 
-    def _idle_deadline(self, idle):
-        """The idle timer: retire the kept process, unless a sample took it."""
+    def _kept_deadline(self, kept):
+        """The kept process's timer: retire it, unless a sample took it."""
         with self._state_lock:
-            if self._idle is not idle:
+            if self._kept is not kept:
                 return
             runtime = self._detach_locked()
-        if runtime.idle_end is None:  # otherwise its end was traced already
-            runtime.trace.emit('continuation_abandoned', reason=IDLE_DEADLINE)
+        if runtime.idle_end is None and runtime.error is None:  # otherwise its end was traced already
+            runtime.trace.emit('continuation_abandoned', reason=kept.reason)
         self._close_runtime(runtime)
 
-    def _take_idle(self):
-        """Under ``_state_lock``, as a sample starts: stop the idle timer, since this
-        sample takes the kept process. One past its deadline is detached instead,
-        and returned for closing."""
-        idle, self._idle = self._idle, None
-        if idle is None:
+    def _take_kept(self):
+        """Under ``_state_lock``, as a sample starts: stop the kept process's timer,
+        since this sample takes the process. One past its deadline is detached
+        instead, and returned for closing, with the reason to trace."""
+        kept, self._kept = self._kept, None
+        if kept is None:
             return None
-        idle.timer.cancel()
-        if time.monotonic() < idle.deadline:
+        kept.timer.cancel()
+        if time.monotonic() < kept.deadline:
             return None
-        return self._detach_locked()
+        return self._detach_locked(), kept.reason
 
     def _detach_locked(self):
         """Under ``_state_lock``: forget the live process, which the caller closes."""
         self._epoch += 1
         runtime, self._runtime = self._runtime, None
         self._pending, self._acknowledged, self._signature = {}, (), None
-        idle, self._idle = self._idle, None
-        if idle is not None:
-            idle.timer.cancel()
+        self._parkable = None
+        kept, self._kept = self._kept, None
+        if kept is not None:
+            kept.timer.cancel()
         return runtime
 
     def _close_runtime(self, runtime):
@@ -431,8 +494,8 @@ class ClaudeRelayModel:
         """Cancel a live continuation without waiting for the sampling lock.
 
         That includes a process kept for the next turn. The turn loop retires
-        the model unless a turn ended with a final answer, and run_compaction
-        retires it when each compaction ends.
+        the model when a turn stops or fails (after a yield it parks it), and
+        run_compaction retires it when each compaction ends.
         """
         self._retire()
 

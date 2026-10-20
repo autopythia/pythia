@@ -32,7 +32,12 @@ from .model_catalog import validate_timeout_seconds
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 1200.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 120.0
 DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS = 1200.0
-DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS = 1800.0
+# How long the relay's MCP server holds a native tool call for its result: just
+# past the CLI's own deadline for the call (DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS,
+# an hour), so that a process parked after a yield waits as long as its prompt
+# cache lives, and the CLI's timeout, which the relay recognizes, comes first if
+# both are ever reached. doc/claude-relay-warm-yield-plan.md, section 4.2.
+DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS = 3605.0
 DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS = 30.0
 DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS = 5.0
 # How long the relay keeps a native process after a final answer, for the

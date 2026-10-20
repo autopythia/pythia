@@ -282,7 +282,7 @@ or prove auto-compaction suppression near them; see [SAMPLING.md](SAMPLING.md).
 | `--claude-relay-cli-version` | `CLAUDE_RELAY_CLI_VERSION`; explicit native version pin required |
 | `--claude-relay-tool-id-pointer` | `/params/_meta/claudecode~1toolUseId` |
 | `--claude-relay-generation-timeout` | 1200 seconds per generation wait for new endpoints |
-| `--claude-relay-parked-timeout` | 1800 seconds waiting for a host tool result |
+| `--claude-relay-parked-timeout` | 3605 seconds waiting for a host tool result |
 | `--claude-relay-startup-timeout` | 30 seconds for startup/version/input work |
 | `--claude-relay-stop-timeout` | 5 seconds per process-stop wait |
 
@@ -447,12 +447,17 @@ failure, cancellation and repeated expiry are not given automatic retry permissi
 This native MCP/tool deadline is separate from generation/parked deadlines;
 raising the generation timeout does not address it. It is the CLI's
 `MCP_TOOL_TIMEOUT`, timed from sending each call (unset, 60 s on 2.1.289), and a
-batch's first call waits for the whole batch. The adapter sets it to 75 s with
-`--settings` (no broker or wrapper change), recognizes the CLI's own timeout
-result for recovery, and makes a relay tool batch's results due 70 s after its
-first call arrived, so command waits end by then; `DefaultEnvironment` caps any
-wait at 59 s. After changing `CLAUDE_RELAY_CLI_VERSION`, run the live
-native-tool-timeout check above. See the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md)
+batch's first call waits for the whole batch. The adapter sets it to an hour
+(3600 s) with `--settings` (no broker or wrapper change), and turns off the
+CLI's abort of a call silent for 300 s (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 0),
+so that a process can wait after a yield as long as its prompt cache lives
+([warm yield plan](../doc/claude-relay-warm-yield-plan.md)). It recognizes the
+CLI's own timeout result for recovery, and makes a relay tool batch's results
+due 3,595 s after its first call arrived, so command waits end by then;
+`DefaultEnvironment` caps any wait at 59 s. After changing
+`CLAUDE_RELAY_CLI_VERSION`, run the live native-tool-timeout check above, and
+the warm yield plan's probe P5 (`doc/claude-relay-warm-yield-probes.py`), which
+holds a call for up to 58 minutes. See the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md)
 and the [continuation recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
 Direct library callers not using `run_turn` receive `ModelContinuationExpired`
 (a `ModelTransportError` subclass) and decide whether to call `sample()` again

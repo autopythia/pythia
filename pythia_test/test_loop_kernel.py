@@ -58,6 +58,18 @@ class _Model:
         self.retired += 1
 
 
+class _ParkingModel(_Model):
+    """A model that can keep its work after a yield, as the Claude relay keeps its
+    process waiting for the batch's results (doc/claude-relay-warm-yield-plan.md)."""
+
+    def __init__(self, host, *script):
+        super().__init__(host, *script)
+        self.parked = 0
+
+    def park(self):
+        self.parked += 1
+
+
 class _Host(TurnHost):
     def __init__(self, stop_after_calls=None):
         self.events, self.stop, self.retryable, self.notices = [], False, 0, []
@@ -237,8 +249,8 @@ class RunTurnTests(unittest.TestCase):
 
     def test_the_model_is_retired_when_a_turn_ends_other_than_with_a_final_answer(self):
         # After a final answer a model may keep its work for the next turn, as
-        # the Claude relay keeps its native process; a stop, a yield or a
-        # failure leaves nothing to keep.
+        # the Claude relay keeps its native process; a stop or a failure leaves
+        # nothing to keep. After a yield, a model that can't park is retired too.
         outcomes = {}
         host = _Host()
         model = _Model(host, _answer("done"))
@@ -259,6 +271,24 @@ class RunTurnTests(unittest.TestCase):
         outcomes["failed"] = ("failed", model.retired)
         self.assertEqual(outcomes, {"ended": ("ended", 0), "stopped": ("stopped", 1),
                                     "yielded": ("yielded", 1), "failed": ("failed", 1)})
+
+    def test_after_a_yield_a_model_that_can_park_is_parked(self):
+        host = _Host()
+        model = _ParkingModel(host, _calls(_call("a")))
+        result = run_turn(_context(), model, _environment(host), _config(), host,
+                          control=_Control(host, after_calls=1))
+        self.assertEqual((result.kind, model.parked, model.retired), ("yielded", 1, 0))
+        # Only after a yield: a stop retires it, and a final answer leaves it be.
+        host = _Host(stop_after_calls=1)
+        model = _ParkingModel(host, _calls(_call("a"), _call("b")))
+        self.assertEqual(run_turn(_context(), model, _environment(host), _config(), host).kind,
+                         "stopped")
+        self.assertEqual((model.parked, model.retired), (0, 1))
+        host = _Host()
+        model = _ParkingModel(host, _answer("done"))
+        self.assertEqual(run_turn(_context(), model, _environment(host), _config(), host).kind,
+                         "ended")
+        self.assertEqual((model.parked, model.retired), (0, 0))
 
     def test_each_call_runs_with_its_samples_results_due_and_is_traced(self):
         host, context = _TracingHost(), _context()

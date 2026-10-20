@@ -105,13 +105,18 @@ by these short tests.
   [recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
 - That native timeout is the CLI's `MCP_TOOL_TIMEOUT`, timed from sending each
   MCP call; unset, a 60 s HTTP abort applies (measured on 2.1.289). The adapter
-  sets 75 s with `--settings` in argv, so no START env or allowlist change, and
-  also recognizes the CLI's `MCP server "pythia" tool "<name>" timed out after
-  75s` result. The `notifications/cancelled` the CLI sends with it is
+  sets an hour (3600 s) with `--settings` in argv, so no START env or allowlist
+  change, and also recognizes the CLI's `MCP server "pythia" tool "<name>" timed
+  out after 3600s` result. The same `--settings` turn off the CLI's abort of a
+  call whose server sends nothing for 300 s
+  (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 0), whose result the adapter doesn't
+  recognize. The hour lets a process wait after a yield as long as its prompt
+  cache lives; see the [warm yield plan](../doc/claude-relay-warm-yield-plan.md).
+  The `notifications/cancelled` the CLI sends with its timeout result is
   acknowledged, not a failure; the result record decides. The CLI sends a
   batch's calls one at a time and none is answered before the whole batch has
   run, so the first call's clock covers the batch: each relay tool batch carries
-  `ModelSample.results_due`, 70 s after its first call arrived, and command
+  `ModelSample.results_due`, 3,595 s after its first call arrived, and command
   waits end by then. `DefaultEnvironment` also caps any wait at 59 s. A-side
   only; see the [tool deadline plan](../doc/claude-relay-tool-deadline-plan.md).
 - The MCP endpoint implements stateless JSON-response Streamable HTTP with

@@ -197,6 +197,8 @@ tool_timeout_ms = settings.get('env', {}).get('MCP_TOOL_TIMEOUT')
 print('fixture-state:' + json.dumps({'pid': os.getpid(), 'effort': effort, 'summary': summary,
                                    'tool_server_count': len(config),
                                    'mcp_tool_timeout': tool_timeout_ms,
+                                   'mcp_tool_idle_timeout': settings.get('env', {}).get(
+                                       'CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT'),
                                    'history_result_ids': [row['id'] for row in history if row['kind'] == 'result'],
                                    'history_call_names': [row['name'] for row in history if row['kind'] == 'call'],
                                    'history_call_arguments': [row['arguments'] for row in history if row['kind'] == 'call'],
@@ -290,6 +292,16 @@ def final_usage(words):
         return {'input_tokens': 5, 'output_tokens': 4}
     return {'input_tokens': 5, 'cache_creation_input_tokens': 7, 'output_tokens': 4,
             'cache_creation': {'ephemeral_5m_input_tokens': 7, 'ephemeral_1h_input_tokens': 0}}
+
+
+def batch_usage(words):
+    """A tool batch's usage. With 'cache-5m' its request wrote 5-minute cache
+    entries, as final_usage says; otherwise it reports no cache writes."""
+    usage = {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}
+    if 'cache-5m' in words:
+        usage.update(cache_creation_input_tokens=7,
+                     cache_creation={'ephemeral_5m_input_tokens': 7, 'ephemeral_1h_input_tokens': 0})
+    return usage
 
 
 def after_result(words):
@@ -539,12 +551,25 @@ elif text in ('rewritten-tool-input', 'rewritten-tool-input-beyond') and not any
     except (KeyError, OSError):
         pass  # the relay retires this process rather than answer it
     wait_for_end()
+elif text == 'icron-yield' and not any(row['kind'] == 'result' for row in history):
+    # The CLI's scheduler, icron, through the relay: the model schedules a
+    # message a second away and yields in one batch. The process waits for the
+    # batch's results, which the turn that the message starts brings, with the
+    # message (doc/claude-relay-warm-yield-plan.md).
+    assert 'mcp__pythia__icron' in names
+    blocks = [{'type': 'tool_use', 'id': 'toolu_schedule', 'name': 'mcp__pythia__icron',
+               'input': {'action': 'schedule', 'message': 'fixture wake-up', 'after': 1}},
+              {'type': 'tool_use', 'id': 'toolu_yield', 'name': 'mcp__pythia__icron',
+               'input': {'action': 'yield', 'note': 'waiting for the fixture wake-up'}}]
+    stream_message('m-icron', blocks, {'input_tokens': 10, 'output_tokens': 2}, 'tool_use')
+    outputs = [json.loads(tool_result(block)) for block in blocks]
+    answer = pick_up(f"pid={os.getpid()} yielded={outputs[1].get('yielded')}")
 elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row in history):
     arguments = {} if text == 'empty-arguments' else {'value': 1}
     blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': arguments} for ident in ('toolu_a', 'toolu_b')]
     batch_reason = 'max_tokens' if text == 'limited-tools' else 'tool_use'
-    stream_message('m1', blocks, {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}, batch_reason)
-    emit({'type': 'assistant', 'message': {'id': 'm1', 'content': blocks, 'usage': {'input_tokens': 10, 'cache_read_input_tokens': 3, 'output_tokens': 2}, 'stop_reason': batch_reason}})
+    stream_message('m1', blocks, batch_usage(text), batch_reason)
+    emit({'type': 'assistant', 'message': {'id': 'm1', 'content': blocks, 'usage': batch_usage(text), 'stop_reason': batch_reason}})
     if text in ('native-timeout', 'native-tool-timeout'):
         # Synthetic-only gate: the test waits for callback claim / actual host
         # effects, then requests the native error. No wall-clock timeout sleeps.

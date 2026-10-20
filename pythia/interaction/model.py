@@ -473,14 +473,31 @@ def retire_model(model) -> None:
     Any thread may call it, also while a sample runs; that sample then fails
     soon. The model stays usable: its next sample starts a new continuation or
     request. The turn loop retires at each turn's end except after a final
-    answer, when the Claude relay keeps its process for the next turn; at the
-    end of each compaction; and to cancel the sample in flight for a
-    preempting steer or stop. A preempting stop also closes the model (see
-    ``close_model``).
+    answer, when the Claude relay keeps its process for the next turn, and
+    after a yield (``park_model``); at the end of each compaction; and to
+    cancel the sample in flight for a preempting steer or stop. A preempting
+    stop also closes the model (see ``close_model``).
     """
     retire = getattr(model, "retire", None)
     if callable(retire):
         retire()
+
+
+def park_model(model) -> None:
+    """After a turn yielded: let the model keep what can serve the next turn.
+
+    A yielded turn ends right after its tool batch, before the batch's results
+    go back to the model. The Claude relay keeps its native process waiting for
+    them, as long as its prompt cache lives, so that the turn that resumes
+    delivers them with its message, warm (doc/claude-relay-warm-yield-plan.md).
+    A model without ``park`` is retired (``retire_model``), as after a stop;
+    for an HTTP model, that cancels nothing at a turn's end.
+    """
+    park = getattr(model, "park", None)
+    if callable(park):
+        park()
+    else:
+        retire_model(model)
 
 
 def close_model(model) -> None:
@@ -497,7 +514,7 @@ def close_model(model) -> None:
 
 
 __all__ = [
-    "retire_model", "close_model",
+    "retire_model", "park_model", "close_model",
     "Model",
     "ModelAuthenticationError",
     "ModelCancelled",

@@ -251,7 +251,8 @@ probes saw them:
   failure: the relay adopts nothing, retires the process and answers the same
   sample from a cold import, with `recovery=delivery_unacknowledged`.
 - **`--settings`** always carries `crossSessionInbound` `refuse`, and
-  `MCP_TOOL_TIMEOUT` with MCP tools.
+  `MCP_TOOL_TIMEOUT` (an hour) and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 0 (no
+  abort of a call silent for 300 s) with MCP tools.
 
 A kept process waits at most `timeouts.idle_seconds` or
 `--claude-relay-idle-timeout` (3595 s, 59 minutes, by default), counted from
@@ -260,8 +261,11 @@ where its prompt-cache lifetime starts. After a reply that wrote 5-minute
 cache entries (`cache_creation.ephemeral_5m_input_tokens` in its
 `message_start`) the limit is 305 s, or the configured one if shorter. 0 keeps
 no process: the old behavior. The turn loop retires the process at a turn's
-end unless the turn ended with a final answer, and every compaction retires
-it when it ends.
+end unless the turn ended with a final answer or yielded, and every compaction
+retires it when it ends. After a yield the process waits for the yield's tool
+batch, its call held, until the same deadline, counted from the start of the
+request that made the batch; the turn that resumes delivers the results with
+its message ([warm yield plan](../doc/claude-relay-warm-yield-plan.md)).
 
 ## 3. Catalog and request semantics
 

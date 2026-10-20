@@ -1,4 +1,5 @@
-"""Warm delivery on the Claude relay (doc/claude-relay-warm-delivery-plan.md).
+"""Warm delivery on the Claude relay (doc/claude-relay-warm-delivery-plan.md),
+and warm resumes after a yield (doc/claude-relay-warm-yield-plan.md).
 
 A real Python relay with the synthetic native CLI, never Claude. The fixture
 serves turn after turn while its stdin stays open, as CLI 2.1.289 does: a
@@ -21,12 +22,14 @@ from pythia.interaction.claude_relay._context import Delivery, Snapshot, handoff
 from pythia.interaction.compaction import CompactionSettings, run_compaction
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.default_environment import DefaultEnvironment
-from pythia.interaction.items import ContextPrefix, Instructions, Message, ToolCall, ToolResult
+from pythia.interaction.items import ContextPrefix, Instructions, Message, ModelFailure, ToolCall
+from pythia.interaction.items import ToolResult, TurnSummary, UserInteractionBoundary
 from pythia.interaction.loop import TurnHost, run_turn
 from pythia.interaction.model import ModelConfigurationError, ModelResponseError
 from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.model_config import relay_endpoint
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
+from pythia.interaction.save import load_interaction_save
 from pythia.interaction.timeouts import DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS
 from pythia.interaction.timeouts import DEFAULT_CLAUDE_RELAY_SHORT_CACHE_IDLE_TIMEOUT_SECONDS
 from pythia.interaction.timeouts import MAX_TIMEOUT_SECONDS
@@ -446,6 +449,128 @@ class WarmPiTests(WarmTests):
         # The next sample starts from the checkpoint, in a new process.
         context.extend(result.context_items())
         self.assertEqual(self.ask(context, 'text-only', tools=TOOLS).last_assistant_text, 'cold:text-only')
+
+
+class ParkedYieldTests(WarmTests):
+    """After a yield, the process waits for its batch's results, as long as an idle
+    one waits after a final answer; the turn that resumes delivers them, with its
+    message (doc/claude-relay-warm-yield-plan.md)."""
+
+    def batch(self, text='two'):
+        """A context whose turn yielded with a tool batch, which the model parked."""
+        context = InteractionContext((Instructions(''), Message('user', text)))
+        sample = self.model.sample(context, tools=TOOLS)
+        context.extend(sample.context_items())
+        self.model.park()
+        return context, sample
+
+    def resume(self, context, sample, text):
+        """The batch's results and the turn's end, then the resuming turn's message."""
+        context.extend(ToolResult(call.call_id, f'r{i}') for i, call in enumerate(sample.tool_calls))
+        context.append(TurnSummary(sample_count=1))
+        final = self.ask(context, text, tools=TOOLS)
+        context.append(UserInteractionBoundary())
+        return final
+
+    def test_the_turn_that_resumes_gets_the_results_with_its_message_warm(self):
+        self.relaunch()
+        context, sample = self.batch()
+        runtime = self.model._runtime
+        [parked] = self.trace.of('continuation_parked')
+        # An hour, less the time since the batch's request started.
+        self.assertTrue(3590 < parked['parked_deadline_seconds'] <= 3595, parked)
+        self.assertIsNone(parked['cache_lifetime'])  # the fixture's batch wrote no cache entries
+        final = self.resume(context, sample, 'Wake-up from icron')
+        self.assertEqual(final.last_assistant_text, 'r0|r1 +Wake-up from icron')
+        self.assertEqual(final.recovery, ())
+        self.assertIs(self.model._runtime, runtime)
+        delivery = self.trace.of('continuation_delivery')[-1]
+        self.assertEqual((delivery['message_count'], delivery['mid_turn']), (1, True))
+        self.assertEqual(self.abandoned(), [])
+        self.assertEqual(len(self.trace.of('claude_invocation')), 2)  # the version query, then the CLI
+
+    def test_at_the_deadline_the_process_is_retired_quietly(self):
+        self.relaunch(idle_timeout_seconds=1)
+        context, sample = self.batch()
+        runtime = self.model._runtime
+        self.assertLessEqual(self.trace.of('continuation_parked')[-1]['parked_deadline_seconds'], 1)
+        self.assertTrue(self.until(lambda: self.model._runtime is None, 4))
+        self.assertTrue(runtime.closed.is_set())
+        self.assertEqual(self.abandoned(), ['parked_deadline'])
+        final = self.resume(context, sample, 'later')
+        self.assertEqual(final.last_assistant_text, 'cold:later')
+        self.assertEqual(final.recovery, ())  # no failure, nothing to report
+        self.assertNotEqual(self.fixture_state()['pid'], self.fixture_state(runtime)['pid'])
+
+    def test_five_minute_cache_writes_shorten_the_deadline(self):
+        self.relaunch(idle_timeout_seconds=30, short_cache_idle_timeout_seconds=1)
+        self.batch('cache-5m')
+        parked = self.trace.of('continuation_parked')[-1]
+        self.assertEqual(parked['cache_lifetime'], '5m')
+        self.assertLessEqual(parked['parked_deadline_seconds'], 1)
+        self.assertTrue(self.until(lambda: self.model._runtime is None, 4))
+        self.assertEqual(self.abandoned(), ['parked_deadline'])
+
+    def test_the_deadline_never_passes_the_results_due_time(self):
+        # The native client gives up 6 s after the call: results due 1 s after it.
+        self.relaunch(native_tool_timeout_seconds=6)
+        context, sample = self.batch()
+        parked = self.trace.of('continuation_parked')[-1]
+        self.assertLessEqual(parked['parked_deadline_seconds'], 1)
+        self.assertLessEqual(time.monotonic() + parked['parked_deadline_seconds'], sample.results_due + .1)
+        self.assertTrue(self.until(lambda: self.model._runtime is None, 4))
+        self.assertEqual(self.abandoned(), ['parked_deadline'])
+
+    def test_otherwise_park_keeps_nothing(self):
+        # No kept processes at all.
+        self.relaunch(idle_timeout_seconds=0)
+        context = InteractionContext((Instructions(''), Message('user', 'two')))
+        self.model.sample(context, tools=TOOLS)
+        runtime = self.model._runtime
+        self.model.park()
+        self.assertIsNone(self.model._runtime)
+        self.assertTrue(runtime.closed.is_set())
+        # A batch whose call the CLI rewrote: its process is retired already.
+        self.relaunch()
+        sample = self.model.sample(InteractionContext((Message('user', 'rewritten-tool-input'),)), tools=TOOLS)
+        self.assertEqual(len(sample.tool_calls), 1)
+        self.assertIsNone(self.model._runtime)
+        self.model.park()
+        self.assertIsNone(self.model._runtime)
+        # After a final answer, the idle process keeps its own deadline.
+        self.relaunch()
+        self.answered()
+        runtime = self.model._runtime
+        self.model.park()
+        self.assertIs(self.model._runtime, runtime)
+        self.assertEqual(self.trace.of('continuation_parked'), [])
+        self.assertEqual(len(self.trace.of('continuation_kept')), 1)
+
+    def test_the_cli_resumes_an_icron_yield_in_the_same_process(self):
+        # The fixture's model schedules a message a second away and yields; the
+        # headless CLI waits for icron, and the wake-up's turn goes to the
+        # process that made the call.
+        path = self.root / 'conversation.jsonl'
+        result = subprocess.run(['/usr/bin/python3', '-m', 'pythia.interaction.cli',
+                                 *fixtures.ModelTests.launch_options(self), '--headless',
+                                 '--enable-experimental-icron', '--prompt', 'icron-yield',
+                                 '--enable-default-tools', 'False', '--debug-trace',
+                                 '--save', str(path), '--resume', 'False', '--cwd', str(self.root)],
+                                cwd=fixtures.ROOT, env={**os.environ, 'HOME': str(self.root)},
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = load_interaction_save(path)
+        [*_, answer] = [item for item in saved if isinstance(item, Message) and item.role == 'assistant']
+        self.assertRegex(answer.content_text, r'^pid=\d+ yielded=True \+Wake-up from icron at ')
+        self.assertFalse(any(isinstance(item, ModelFailure) for item in saved))
+        events = [json.loads(line) for line in path.with_suffix('.trace.events.jsonl').read_text().splitlines()]
+        kinds = [event['type'] for event in events]
+        self.assertEqual(kinds.count('claude_invocation'), 2)  # one process: the version query, then the CLI
+        self.assertEqual(kinds.count('continuation_parked'), 1)
+        [delivery] = [event for event in events if event['type'] == 'continuation_delivery']
+        self.assertTrue(delivery['mid_turn'])
+        self.assertNotIn('continuation_abandoned', kinds)
+        self.assertTrue(self.until(lambda: not native_processes(self.broker.pid), 5))
 
 
 if __name__ == '__main__':

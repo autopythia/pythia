@@ -36,9 +36,9 @@ from pythia.interaction.model_config import build_parser, build_model, prepare_n
 from pythia.interaction.save import interaction_item_to_dict, load_interaction_save
 from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.timeouts import (
-    DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
-    DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS,
-    MAX_TIMEOUT_SECONDS,
+    DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS, DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS,
+    DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -286,11 +286,18 @@ class RelayTimeoutConfigTests(unittest.TestCase):
                                  '--claude-relay-parked-timeout', value)
                 relay_endpoint(args, args.model_binding)
 
-    def test_native_tool_timeout_is_whole_seconds_with_a_default_near_the_clis_own(self):
+    def test_native_tool_timeout_is_whole_seconds_with_a_default_of_an_hour(self):
         endpoint = ClaudeRelayEndpoint('fixture-model', '/a', '/b', 1000, '2.1.0')
-        self.assertEqual(endpoint.native_tool_timeout_seconds, 75)  # the CLI's own is 60
+        # An hour, so that a process parked after a yield waits as long as its
+        # cache lives (doc/claude-relay-warm-yield-plan.md): its results are due
+        # no sooner than the idle deadline, and pythia's own wait outlasts it.
+        self.assertEqual(endpoint.native_tool_timeout_seconds, 3600)
+        self.assertGreaterEqual(endpoint.native_tool_timeout_seconds - relay_model.RESULTS_MARGIN_SECONDS,
+                                DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS)
+        self.assertEqual(DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS, 3605)
+        self.assertGreater(endpoint.parked_timeout_seconds, endpoint.native_tool_timeout_seconds)
         args = self.args('relay-test', catalog=parse_model_catalog(self.CATALOG))
-        self.assertEqual(relay_endpoint(args, args.model_binding).native_tool_timeout_seconds, 75)
+        self.assertEqual(relay_endpoint(args, args.model_binding).native_tool_timeout_seconds, 3600)
         self.assertEqual(replace(endpoint, native_tool_timeout_seconds=20).native_tool_timeout_seconds, 20)
         for value in (0, -1, 1.5, 75.0, True, '75', int(MAX_TIMEOUT_SECONDS) + 1):
             with self.subTest(value=value), self.assertRaises(ModelConfigurationError):
@@ -428,10 +435,13 @@ class ModelTests(unittest.TestCase):
         before = time.monotonic()
         sample = self.model.sample(context, tools=TOOLS)
         after = time.monotonic()
-        # The relay gave the native client its tool timeout, 75 s by default.
-        self.assertEqual(self.fixture_state(self.model._runtime)['mcp_tool_timeout'], '75000')
+        # The relay gave the native client its tool timeout, an hour by default.
+        self.assertEqual(self.fixture_state(self.model._runtime)['mcp_tool_timeout'], '3600000')
+        # And turned off the client's abort of a call silent for 300 s, so the
+        # timeout alone applies (doc/claude-relay-warm-yield-plan.md, probe P5).
+        self.assertEqual(self.fixture_state(self.model._runtime)['mcp_tool_idle_timeout'], '0')
         budget = self.endpoint.native_tool_timeout_seconds - relay_model.RESULTS_MARGIN_SECONDS
-        self.assertEqual(budget, 70)
+        self.assertEqual(budget, 3595)
         # The fixture calls back after its message: the clock started in between.
         self.assertGreaterEqual(sample.results_due, before + budget)
         self.assertLessEqual(sample.results_due, after + budget)

@@ -168,6 +168,27 @@ class LiveRelayTests(unittest.TestCase):
             starts.assert_not_called()
         self.assertTrue(old.mailbox.all_returned())
 
+    def test_a_resume_after_a_yield_reaches_the_parked_process(self):
+        # doc/claude-relay-warm-yield-plan.md: the turn yielded after its batch,
+        # and the turn loop parked the model. 90 s later, past the native
+        # deadline of before (75 s), the turn that resumes brings the result and
+        # its message to the same process, which reads the history from cache.
+        context, old = self.parked()
+        self.model.park()
+        time.sleep(90)
+        self.assertIsNone(old.error)
+        self.assertIs(self.model._runtime, old)
+        context.append(Message('user', 'Wake-up: after the receipt, add one more line with only the word RESUMED.'))
+        with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=Runtime) as starts:
+            resumed = self.model.sample(context, tools=self.environment.tool_specs)
+            starts.assert_not_called()
+        self.assertEqual(resumed.recovery, ())
+        self.assertIn(self.receipt, resumed.last_assistant_text)
+        self.assertIn('RESUMED', resumed.last_assistant_text)
+        self.assertGreater(resumed.usage.cached_input_tokens, resumed.usage.input_tokens // 2)
+        self.assertIs(self.model._runtime, old)
+        self.assertEqual(self.executions, 1)
+
     def test_effort_change_retires_before_release_without_effect_replay(self):
         context, old = self.parked()
         with mock.patch('pythia.interaction.claude_relay._model.Runtime', side_effect=Runtime) as starts:

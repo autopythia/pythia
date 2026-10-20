@@ -145,11 +145,12 @@ class Runtime:
         self.idle_end = None  # IDLE_EXIT or IDLE_RECORD: it ended while idle
         # For the idle deadline: when the latest request started (its
         # system/status requesting), the lifetime of the latest cache writes,
-        # and both for the reply streaming, the final message, and the turn
-        # last answered (kept).
+        # and both for the reply streaming, the final message, the turn last
+        # answered (kept), and the latest tool batch, whose process a yield
+        # parks (batch_origin; doc/claude-relay-warm-yield-plan.md).
         self.request_started = None
         self.cache_lifetime = None
-        self.reply_origin = self.final_origin = self.kept = None
+        self.reply_origin = self.final_origin = self.kept = self.batch_origin = None
 
     @property
     def event_types(self):
@@ -355,11 +356,17 @@ class Runtime:
             # Flag settings, which --setting-sources leaves on. A process kept
             # between turns refuses turns from B's other Claude sessions (its
             # cross-session inbox, bound in -p mode). With MCP tools, the CLI's
-            # deadline for each call; unset, it is 60 s. That one goes through
-            # argv because the relay forwards no environment for it.
+            # deadline for each call (MCP_TOOL_TIMEOUT; unset, 60 s). The CLI
+            # also aborts a call whose server sends nothing for 300 s
+            # (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT), with a result the relay
+            # doesn't recognize; 0 turns that off, so the deadline alone applies,
+            # as an hour-long wait after a yield needs (probe P5,
+            # doc/claude-relay-warm-yield-plan.md). These go through argv
+            # because the relay forwards no environment for them.
             settings = {'crossSessionInbound': 'refuse'}
             if self.mcp:
-                settings['env'] = {'MCP_TOOL_TIMEOUT': str(self.endpoint.native_tool_timeout_seconds * 1000)}
+                settings['env'] = {'MCP_TOOL_TIMEOUT': str(self.endpoint.native_tool_timeout_seconds * 1000),
+                                   'CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT': '0'}
             argv += ['--settings', json.dumps(settings, separators=(',', ':'))]
             argv += self.sampling.cli_args()
             if self.names:
@@ -694,6 +701,7 @@ class Runtime:
                         if calls:
                             self.mailbox.register(calls)
                             self.diagnostics.set_phase('awaiting_host_results')
+                            self.batch_origin = self.reply_origin
                             self._put((message, items, calls))
                         else:
                             self.diagnostics.set_phase('awaiting_run_result')
