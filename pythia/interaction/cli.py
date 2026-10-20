@@ -45,6 +45,13 @@ from typing import Union
 from ._account_http import default_account_opener
 from ._cli_editor import Editor
 from ._cli_editor import safe_text
+from ._cli_save import CliSave
+from ._cli_save import CliSaveWriter
+from ._cli_save import NO_MIGRATION_OPTION
+from ._cli_save import check_cli_save
+from ._cli_save import cli_save_exists
+from ._cli_save import prepare_cli_save
+from ._cli_save import resume_cli_save
 from ._cli_terminal import PosixTerminal
 from ._debug_trace import DebugTrace
 from ._prompt import load_prompt
@@ -104,7 +111,7 @@ from .model import ModelError
 from .model import ModelTimeoutError
 from .model import SampleParams
 from .model import close_model
-from .model_config import DEFAULT_SAVE_PATH
+from .model_config import DEFAULT_SAVE_PREFIX
 from .model_config import _boolean_argument
 from .model_config import build_model
 from .model_config import build_parser
@@ -112,14 +119,12 @@ from .model_config import initial_model_name
 from .model_config import resolve_save_path
 from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
-from ._model_binding_debug import debug_model_binding_path
 from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import ConfigError
 from .runtime_config import InteractionConfig
 from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
 from .save import InteractionSaveWriter
-from .save import resume_interaction_save
 from .user import UserInteraction
 from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
@@ -744,6 +749,18 @@ async def _append(
     await _checkpoint(context, state, writer)
 
 
+def _compaction_log(writer, environment):
+    """The log that coldstart points to: a CLI save's, or else the file that ``writer`` saves."""
+    own = getattr(writer, "compaction_log", None)
+    return own(environment) if callable(own) else compaction_log(writer.path, environment)
+
+
+def _drift_note(writer) -> Optional[str]:
+    """A note when a coldstart pointer names a public log known to differ from the full log."""
+    note = getattr(writer, "drift_note", None)
+    return note() if callable(note) else None
+
+
 async def _fail_pending_tools(
     context: InteractionContext, state: _UIState, writer: InteractionSaveWriter,
     *, reason: str,
@@ -948,6 +965,7 @@ async def _compact_user_tool(
 
     state.set_phase("compacting")
     rebooting = False  # a coldstart compaction with compaction_coldstart_reboot
+    coldstart = False  # a coldstart compaction that succeeded
     try:
         if model is None:
             result_item = UserToolResult(
@@ -970,7 +988,7 @@ async def _compact_user_tool(
                         sample_params=snapshot.sample_params(),
                         instructions=_compact_focus(intent),
                         reason="manual",
-                        log=compaction_log(writer.path, model_environment),
+                        log=_compaction_log(writer, model_environment),
                         stop_requested=lambda: (state.closing
                                                 or state.stop_level is not None),
                         on_failure=failures.append,
@@ -1023,6 +1041,7 @@ async def _compact_user_tool(
                     result_item,
                     *compaction.context_items(),
                 )
+                coldstart = compaction.protocol == "coldstart"
                 rebooting = (compaction.protocol == "coldstart"
                              and snapshot.compaction_coldstart_reboot)
 
@@ -1033,6 +1052,9 @@ async def _compact_user_tool(
                 source_user_calls=(call,),
             )
         )
+        note = _drift_note(writer) if coldstart else None
+        if note is not None:
+            state.notice(note)
         if rebooting:
             _coldstart_reboot(state, pointer=True)
     finally:
@@ -1789,6 +1811,9 @@ class _CliHost(TurnHost):
         return self._state.reboot is not None
 
     def compacted(self, result) -> None:
+        note = _drift_note(self._writer) if result.protocol == "coldstart" else None
+        if note is not None:
+            self.notice(note)
         if (result.protocol == "coldstart" and self._config is not None
                 and self._config.compaction_coldstart_reboot):
             # Synchronously: the interrupt point that follows must see it.
@@ -1798,7 +1823,11 @@ class _CliHost(TurnHost):
         return self._state.preemption.operation(cancel)
 
     def log_path(self):
-        return self._writer.path
+        save = getattr(self._writer, "cli_save", None)
+        return self._writer.path if save is None else save.shown
+
+    def compaction_log(self, environment):
+        return _compaction_log(self._writer, environment)
 
     @contextmanager
     def trace(self, op: str, **tags):
@@ -1969,7 +1998,7 @@ def _resume_notice(context: InteractionContext) -> Optional[str]:
     return None
 
 
-async def _drive_interaction(model, environment, state, args, path, config):
+async def _drive_interaction(model, environment, state, args, save, config):
     state.active_model = model
     icron = state.icron
     if icron is not None:
@@ -1978,7 +2007,7 @@ async def _drive_interaction(model, environment, state, args, path, config):
         icron.start(functools.partial(_post, loop, _queue_wake, state),
                     functools.partial(_post, loop, _safe_notice, state))
     try:
-        return await _drive_interaction_body(model, environment, state, args, path, config)
+        return await _drive_interaction_body(model, environment, state, args, save, config)
     finally:
         if icron is not None:
             # Before the model and the environment: no code runs after this.
@@ -1996,7 +2025,7 @@ async def _drive_interaction_body(
     environment: Environment,
     state: _UIState,
     args: argparse.Namespace,
-    path: Path,
+    save: CliSave,
     config: InteractionConfig,
 ) -> None:
     attachment_cwd = Path(args.cwd).expanduser().resolve()
@@ -2005,17 +2034,18 @@ async def _drive_interaction_body(
                                          config=config)
     state.reads_files = functools.partial(_reads_files, args=args)
     tools_snapshot = Tools(environment.tool_specs)
-    existing = args.resume and await _on_context_thread(state, path.exists)
+    # Resuming reads the full log alone; the public log is brought up to date.
+    existing = args.resume and await _on_context_thread(state, save.log.exists)
     incomplete_line = None
     if existing:
         context, writer, incomplete_line = await _on_context_thread(
-            state, resume_interaction_save, path)
+            state, resume_cli_save, save)
         if state.rebooted is None:
             # A restarted CLI's terminal shows them already, from the process
             # it replaced.
             state.displays.extend(render_interaction_items(context.items))
         if incomplete_line is not None:
-            state.notice(incomplete_line.warning(path.name))
+            state.notice(incomplete_line.warning(save.log_name))
         state.notice(
             "Note: command sessions and plan state were not restored. "
             "Old command session IDs are not resumable; use only IDs from this run."
@@ -2033,14 +2063,18 @@ async def _drive_interaction_body(
     else:
         if args.resume:
             state.notice(
-                f"Warning: no existing {path.name} was found; a fresh one was created."
+                f"Warning: no existing {save.shown.name} was found; a fresh one was created."
             )
-        writer = InteractionSaveWriter(path)
+        writer = CliSaveWriter(save)
         initial = [Init(model=args.model or initial_model_name(model))]
         if args.instructions is not None:
             initial.append(Instructions(args.instructions))
         initial.append(tools_snapshot)
         context = InteractionContext(initial)
+    # The public log's warnings, such as a drift that resuming found, become
+    # notices; the log never fails a save.
+    writer.on_warning = functools.partial(_post, asyncio.get_running_loop(), _safe_notice, state)
+    writer.report_warnings()
     if state.closing:
         return
     initial_query = args.prompt
@@ -2079,7 +2113,7 @@ async def _drive_interaction_body(
                         and getattr(args, "model_binding", None) is not None):
                     warning = await _on_context_thread(state, 
                         save_debug_model_bindings,
-                        debug_model_binding_path(path),
+                        save.binding_path,
                         {"main": args.model_binding},
                     )
                     if warning is not None:
@@ -2345,8 +2379,24 @@ def _runtime_config(environment, args, path=None):
     return config
 
 
-def _startup_notices(state, args, path, config=None):
-    state.notice(f"Save log: {path}")
+def _prepared_save(path, args) -> CliSave:
+    """The save to run on: main prepares it, and a --save path is prepared here."""
+    if isinstance(path, CliSave):
+        return path
+    return prepare_cli_save(resolve_save_path(Path(path)), resume=args.resume,
+                            auto_migrate=getattr(args, "auto_migrate_save", True))
+
+
+def _startup_notices(state, args, save, config=None):
+    for notice in save.notices:  # what preparing the save did, such as a migration
+        state.notice(notice)
+    state.notice(f"Save log: {save.shown}")
+    if save.private is not None:
+        state.notice(f"Private: {save.private}/, with the full log, which has the reasoning "
+                     "that the save log leaves out, and debug files.")
+    else:
+        state.notice(f"Note: this save keeps its original format ({NO_MIGRATION_OPTION}): "
+                     "it has the reasoning, and debug files go next to it.")
     if state.trace is not None:
         state.notice(
             f"Debug trace: {state.trace.request_path} and "
@@ -2404,8 +2454,8 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
     """One explicit task, quiet context display, and orderly effect draining."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
-    path = Path(path).absolute()
-    config = _runtime_config(environment, args, path)
+    save = _prepared_save(path, args)
+    config = _runtime_config(environment, args, save.shown)
     state = _UIState(
         headless=True,
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
@@ -2413,7 +2463,7 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         icron=icron,
         rebooted=rebooted,
     )
-    _startup_notices(state, args, path, config)
+    _startup_notices(state, args, save, config)
     if rebooted is not None:
         _carry_over(state, config, rebooted)
     loop = asyncio.get_running_loop()
@@ -2430,7 +2480,7 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         # asyncio.run on older Python versions cancels *all* tasks on SIGINT.
         # Request a cooperative stop instead, so the effect owner can save.
         previous_sigint = signal.signal(signal.SIGINT, interrupt)
-    worker = asyncio.create_task(_drive_interaction(model, environment, state, args, path, config))
+    worker = asyncio.create_task(_drive_interaction(model, environment, state, args, save, config))
     try:
         while not worker.done():
             # The controller's display queue is transient, not a second log.
@@ -2460,14 +2510,14 @@ async def _run(
     environment: Environment,
     terminal: PosixTerminal,
     args: argparse.Namespace,
-    path: Path = DEFAULT_SAVE_PATH,
+    path: Union[Path, CliSave] = DEFAULT_SAVE_PREFIX,
     *,
     trace: Optional[DebugTrace] = None,
     icron: Optional[Icron] = None,
     rebooted: Optional[_Rebooted] = None,
 ) -> int:
-    path = Path(path).absolute()
-    config = _runtime_config(environment, args, path)
+    save = _prepared_save(path, args)
+    config = _runtime_config(environment, args, save.shown)
     prompt = args.prompt or ""
     state = _UIState(
         editor=Editor(prompt, len(prompt)) if rebooted is None else rebooted.draft,
@@ -2484,7 +2534,7 @@ async def _run(
         "!! they also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press "
         "/exit!!."
     )
-    _startup_notices(state, args, path, config)
+    _startup_notices(state, args, save, config)
     if rebooted is not None:
         _carry_over(state, config, rebooted)
     worker = None
@@ -2495,7 +2545,7 @@ async def _run(
             terminal.render(state.editor, "starting", tuple(state.displays))
             state.displays.clear()
             worker = asyncio.create_task(
-                _drive_interaction(model, environment, state, args, path, config)
+                _drive_interaction(model, environment, state, args, save, config)
             )
             while True:
                 for key in terminal.read_keys():
@@ -2558,10 +2608,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = build_parser(
         "Interactive POSIX shell or headless task using Pythia's caller-owned interaction API.",
         allow_prompt_file=True,
+        save_prefix=True,
     )
     # Unlike the one-shot demo, the CLI continues its save by default;
     # --resume=False starts a new save, replacing the file.
     parser.set_defaults(resume=True)
+    parser.add_argument(
+        "--auto-migrate-save",
+        nargs="?",
+        const=True,
+        default=True,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "when resuming a save in the original format, one file with reasoning at the "
+            "--save path, migrate it: the file becomes PREFIX._private/context.jsonl, its "
+            "debug files move along, and PREFIX.jsonl becomes its public log. A migration "
+            "that fails is undone, and the CLI exits. False keeps using such a save as it "
+            "is. Launch-only. A bare flag means True (default: %(default)s)"
+        ),
+    )
     parser.add_argument(
         "--headless", nargs="?", const=True, default=False,
         type=_boolean_argument, metavar="{False,True}",
@@ -2589,9 +2655,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "append HTTP requests/responses and native/MCP events, including "
-            "sensitive payloads and credentials, to the --save path with its extension replaced by "
-            ".trace.req.jsonl, .trace.res.jsonl and .trace.events.jsonl; "
-            "never truncated, even when --resume=False replaces the save; launch-only"
+            "sensitive payloads and credentials, to PREFIX._private/trace.req.jsonl, "
+            "trace.res.jsonl and trace.events.jsonl (for a save kept in its original format, "
+            "next to it, its extension replaced by .trace.req.jsonl and so on); never "
+            "truncated, even when --resume=False replaces the save; launch-only"
         ),
     )
     parser.add_argument(
@@ -2652,6 +2719,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.rebooted == "check":
             if not args.headless:
                 importlib.import_module("pythia.term_input")  # the terminal imports it late
+            # A save that the restarted CLI couldn't migrate fails the check,
+            # which keeps the running session.
+            check_cli_save(resolve_save_path(args.save_path),
+                           auto_migrate=args.auto_migrate_save)
             return 0  # the start check (_check_reboot): the code loads, and the options parse
         if args.rebooted is not None:
             rebooted = _take_reboot_state()
@@ -2669,12 +2740,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             SampleParams(max_output_tokens=args.max_output_tokens)
         save_path = resolve_save_path(args.save_path)
         if (args.headless and args.prompt is None and rebooted is None
-                and not (args.resume and args.instructions is not None and save_path.is_file())):
+                and not (args.resume and args.instructions is not None
+                         and cli_save_exists(save_path))):
             raise ValueError(
                 "--headless requires --prompt or --prompt-file, or "
                 "--resume with --instructions and an existing save."
             )
-        trace = DebugTrace.open(save_path, events=True, context_id=1, role="main") if args.debug_trace else None
+        # Before the trace and the model: a migration that fails ends the CLI here.
+        save = prepare_cli_save(save_path, resume=args.resume,
+                                auto_migrate=args.auto_migrate_save)
+        trace = (DebugTrace.open_paths(*save.trace_paths, context_id=1, role="main")
+                 if args.debug_trace else None)
         try:
             model = _build_model(args, trace)
         except CodexAuthUnavailable:
@@ -2693,12 +2769,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with environment_manager as environment:
             if args.headless:
                 return asyncio.run(_run_headless(
-                    model, environment, args, path=save_path, trace=trace, icron=icron,
+                    model, environment, args, path=save, trace=trace, icron=icron,
                     rebooted=rebooted,
                 ))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(
-                model, environment, terminal, args, path=save_path, trace=trace, icron=icron,
+                model, environment, terminal, args, path=save, trace=trace, icron=icron,
                 rebooted=rebooted,
             ))
     except _Rebooting as rebooting:

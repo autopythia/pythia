@@ -1429,6 +1429,14 @@ _COLDSTART_LOG_FORMAT = (
     '"content"), "tool_call" ("name", "arguments_json"), "tool_result" '
     '("output") or "context_prefix" (an earlier compaction).'
 )
+# The same for a public log (save.PublicLogWriter), which has a "nil" line for
+# each item it leaves out.
+_PUBLIC_LOG_FORMAT = (
+    'Each line is a JSON item with a "type", such as "message" ("role", '
+    '"content"), "tool_call" ("name", "arguments_json"), "tool_result" '
+    '("output"), "context_prefix" (an earlier compaction) or "nil" (an item '
+    'left out of this log).'
+)
 # The summary file: the save's path with this suffix in place of ``.jsonl``,
 # as for the debug trace files. Its first line says what it covers, such as
 # "Covers lines 1–3756 of session_4a8f….", and the rest is pi's format.
@@ -1450,30 +1458,48 @@ _SUMMARY_MOVED_ASIDE = "summary_moved_aside"
 class CompactionLog:
     """The save that a coldstart pointer names.
 
-    ``path`` is the save file. ``cwd`` is the tools' working directory: the
-    pointer gives the path relative to it when the save is inside it.
+    ``path`` is the log that the pointer names. ``cwd`` is the tools' working
+    directory: the pointer gives paths relative to it when they are inside
+    it. ``source`` is the full log, which holds the context and which
+    ``check`` reads; None when it is ``path``. Otherwise ``path`` is its
+    public log (``save.PublicLogWriter``), which a compaction never reads, so
+    it may drift from the full log without failing one. ``private`` is a
+    directory that the pointer tells the model to ignore, or None.
     """
 
     path: Path
     cwd: Optional[Path] = None
+    source: Optional[Path] = None
+    private: Optional[Path] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", Path(self.path))
-        if self.cwd is not None:
-            object.__setattr__(self, "cwd", Path(self.cwd))
+        for name in ("cwd", "source", "private"):
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, Path(getattr(self, name)))
 
-    def reference(self) -> Tuple[str, bool]:
-        """The path to show, and whether it is relative to ``cwd``."""
+    def _reference(self, path: Path) -> Tuple[str, bool]:
+        """A path to show, and whether it is relative to ``cwd``."""
         if self.cwd is not None:
-            for path, base in (
-                (self.path.absolute(), self.cwd.absolute()),
-                (self.path.resolve(), self.cwd.resolve()),
+            for candidate, base in (
+                (path.absolute(), self.cwd.absolute()),
+                (path.resolve(), self.cwd.resolve()),
             ):
                 try:
-                    return path.relative_to(base).as_posix(), True
+                    return candidate.relative_to(base).as_posix(), True
                 except ValueError:
                     continue
-        return str(self.path.absolute()), False
+        return str(path.absolute()), False
+
+    def reference(self) -> Tuple[str, bool]:
+        """The log's path to show, and whether it is relative to ``cwd``."""
+        return self._reference(self.path)
+
+    def private_reference(self) -> Optional[str]:
+        """The private directory's path to show, ending with a slash, or None."""
+        if self.private is None:
+            return None
+        return self._reference(self.private)[0].rstrip("/") + "/"
 
     @property
     def summary_path(self) -> Path:
@@ -1515,20 +1541,22 @@ class CompactionLog:
         return _SummaryFile(name, state, last, moved_aside=moved)
 
     def check(self, context: InteractionContext) -> None:
-        """Check that the save holds ``context``, or raise ``CompactionLogError``.
+        """Check that the full log holds ``context``, or raise ``CompactionLogError``.
 
-        The save's first N lines must be the context's N items, in order.
-        Later lines may follow: ``/compact`` saves its own call before it
-        compacts. An incomplete last line, which an interrupted append leaves,
-        is ignored, as on resume. Items are compared as objects, then by their
-        save encoding when the objects differ.
+        The full log (``source``, else ``path``) must have the context's N
+        items as its first N lines, in order. Later lines may follow:
+        ``/compact`` saves its own call before it compacts. An incomplete last
+        line, which an interrupted append leaves, is ignored, as on resume.
+        Items are compared as objects, then by their save encoding when the
+        objects differ. A public log is never read.
         """
         from .save import SaveError
         from .save import load_interaction_save
 
-        name = self.reference()[0]
+        source = self.path if self.source is None else self.source
+        name = self._reference(source)[0]
         try:
-            saved = load_interaction_save(self.path)
+            saved = load_interaction_save(source)
         except SaveError as exc:
             if isinstance(exc.__cause__, FileNotFoundError):
                 raise CompactionLogError(f"the save {name} was not found") from None
@@ -1692,16 +1720,20 @@ def _session_id(context: InteractionContext) -> Optional[str]:
     return first.prefix_id if isinstance(first, Init) else None
 
 
-def compaction_log(path, environment=None) -> Optional[CompactionLog]:
+def compaction_log(path, environment=None, *, source=None,
+                   private=None) -> Optional[CompactionLog]:
     """The log of the save at ``path``, with ``environment``'s working directory.
 
     ``None`` without a save. An environment without a ``cwd`` (one without
-    the default tools) gives the pointer an absolute path.
+    the default tools) gives the pointer an absolute path. ``source`` and
+    ``private`` are as in ``CompactionLog``: the full log, when ``path`` is
+    its public log, and a directory that the pointer tells the model to ignore.
     """
     if path is None:
         return None
     cwd = getattr(environment, "cwd", None)
-    return CompactionLog(path, cwd if isinstance(cwd, (str, os.PathLike)) else None)
+    return CompactionLog(path, cwd if isinstance(cwd, (str, os.PathLike)) else None,
+                         source=source, private=private)
 
 
 def coldstart_unavailable(tool_specs: Iterable[object], log_path) -> Optional[str]:
@@ -1860,10 +1892,13 @@ class ColdstartCompactor:
             if relative else f"`{reference}`"
         )
         length = len(context)
+        log_format = _COLDSTART_LOG_FORMAT if self.log.source is None else _PUBLIC_LOG_FORMAT
+        private = self.log.private_reference()
+        ignore = "" if private is None else f" Ignore the contents of `{private}`; they are private."
         paragraphs = [
             f"{COLDSTART_POINTER_PREFIX} {where}, lines 1\u2013{length}; later "
-            f"lines continue from here. {_COLDSTART_LOG_FORMAT} "
-            f"{_summary_sentence(summary)}"
+            f"lines continue from here. {log_format} "
+            f"{_summary_sentence(summary)}{ignore}"
         ]
         for label, line, text in _quoted_user_messages(context.items):
             paragraphs.append(

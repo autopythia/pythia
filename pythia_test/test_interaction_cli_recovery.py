@@ -36,7 +36,7 @@ from pythia.interaction import cli
 from pythia.interaction import load_interaction_save
 from pythia.interaction import render_interaction_items
 from pythia.interaction import save_interaction_save
-from pythia_test.interaction_helpers import patch_saves, real_save
+from pythia_test.interaction_helpers import full_log, patch_saves, real_save, seed_cli_save
 from pythia_test.test_interaction_cli import _ControllerTestCase
 from pythia_test.test_interaction_cli import _Model
 from pythia_test.test_interaction_cli import _Terminal
@@ -85,14 +85,15 @@ class CLIRecoveryTests(_ControllerTestCase):
         for tail, notice, continuable in tails:
             with self.subTest(tail=tail):
                 context = InteractionContext((*old, *tail))
-                save_interaction_save(self.path, context)
+                seed_cli_save(self.path, context)
                 original_bytes = self.path.read_bytes()
                 model = _Model(self.path)
                 terminal = _Terminal(_quit_when_idle)
                 with patch_saves() as save:
                     self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
                 save.assert_not_called()
-                self.assertEqual(self.path.read_bytes(), original_bytes)
+                # Migrated, byte for byte, without a save.
+                self.assertEqual(full_log(self.path).read_bytes(), original_bytes)
                 self.assertEqual(model.calls, [])
                 self.assertEqual(
                     tuple(i for i in terminal.items if not i.text.startswith("[cli]")),
@@ -236,7 +237,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         calls = tuple(ToolCall("record", name, "{}") for name in ("one", "two", "three"))
         original = (Init("old"), Tools(), *calls, ModelSampleBoundary(),
                     ToolResult("one", "already saved"))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         environment = mock.Mock(spec=Environment, tool_specs=())
         writes = []
 
@@ -267,7 +268,7 @@ class CLIRecoveryTests(_ControllerTestCase):
     async def test_pending_recovery_with_instructions_only_is_explicit_continuation(self):
         original = (Init("old"), Tools(), Message("user", "old query"),
                     ToolCall("record", "one", "{}"))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         environment = Environment()
         model = _Model(self.path, _answer())
         with mock.patch.object(environment, "execute_tool_calls") as execute:
@@ -290,7 +291,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         original = (Init("old"), Tools(), Message("user", "old query"), reasoning,
                     OpaqueCompaction.from_responses("opaque-checkpoint"), call, metadata,
                     ModelSampleBoundary())
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer())
         terminal = _Terminal(_quit_when_idle)
         await self._run(model, terminal, ["--resume", "--prompt", "follow-up\nunchanged"])
@@ -317,7 +318,7 @@ class CLIRecoveryTests(_ControllerTestCase):
             self.assertIsNotNone(previous.latest_plan)
         original = (Init("old"), *calls, *results.items,
                     Message("assistant", "previous"), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         with DefaultEnvironment(cwd=self.path.parent) as environment:
             model = _Model(self.path, ModelSample(items=(ToolCall(
                 "write_stdin", "lost", '{"session_id":1,"chars":"must not write"}'
@@ -341,7 +342,7 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
                 with self.subTest(resume=resume, fail_at=fail_at):
                     calls = (ToolCall("record", "one", "{}"), ToolCall("record", "two", "{}"))
                     original = (Init("old"), *calls) if resume else (Init("old"),)
-                    save_interaction_save(self.path, InteractionContext(original))
+                    seed_cli_save(self.path, InteractionContext(original))
                     executions, attempts, references = [], [], []
                     durable = self.path.read_bytes()
                     real_checkpoint = cli._checkpoint
@@ -389,7 +390,7 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
                         with patch_saves(save):
                             self.assertEqual(await self._run(model, terminal, argv, environment), 1)
                     self.assertEqual(len(attempts), fail_at)
-                    self.assertEqual(self.path.read_bytes(), durable)
+                    self.assertEqual(full_log(self.path).read_bytes(), durable)
                     self.assertNotIn("must not run", repr(attempts))
                     self.assertTrue(any("unsaved state remains in memory" in i.text for i in terminal.items))
                     if resume:

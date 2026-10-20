@@ -35,6 +35,7 @@ import json
 import os
 from pathlib import Path
 from pythia.interaction import cli, Message, ModelSample, ModelTimeoutError, ToolCall, ToolResult, load_interaction_save
+from pythia.interaction._cli_save import full_log_path
 
 failure = os.environ.get("PYTHIA_TEST_FAILURE")
 
@@ -83,7 +84,8 @@ class Model:
         self.enable_default_tools = enable_default_tools
 
     def sample(self, context, *, tools=(), sample_params=None):
-        assert load_interaction_save(self.save_path).items == context.items
+        # --save names a prefix: the full log is in its private directory.
+        assert load_interaction_save(full_log_path(self.save_path)).items == context.items
         assert {tool.name for tool in tools} == (
             {"exec_command", "write_stdin", "apply_patch", "update_plan"}
             if self.enable_default_tools else set()
@@ -419,9 +421,27 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_error_restores_terminal_and_preserves_bad_session(self):
         path = self.root / "interaction.jsonl"
         path.write_text("invalid JSON\n")
-        self.start("--resume")
+        # Kept in its original format, the save fails to load in the session,
+        # which restores the terminal.
+        self.start("--resume", "--auto-migrate-save=False")
         await self.wait_exit(expected=1)
         self.assertEqual(path.read_text(), "invalid JSON\n")
+
+    async def test_a_save_that_cant_be_migrated_fails_before_the_terminal(self):
+        path = self.root / "interaction.jsonl"
+        path.write_text("invalid JSON\n")
+        self.start("--resume")
+        status = await asyncio.to_thread(self.process.wait, timeout=4)
+        stderr = self.process.stderr.read().decode()
+        self.assertEqual(status, 1, stderr)
+        self.assertIn(f"could not migrate the save {path}", stderr)
+        self.assertIn("Nothing was changed. To use the save in its original format, rerun "
+                      "with --auto-migrate-save=False.", stderr)
+        self.assertEqual(termios.tcgetattr(self.slave), self.attributes)
+        self._read()
+        self.assertNotIn(b"\x1b[?2004h", self.output)
+        self.assertEqual(path.read_text(), "invalid JSON\n")
+        self.assertFalse((self.root / "interaction._private").exists())
 
     async def test_resume_never_executes_unresolved_command_and_waits_for_input(self):
         path = self.root / "interaction.jsonl"

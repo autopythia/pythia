@@ -21,6 +21,7 @@ from pythia.interaction import (
     save_interaction_save,
 )
 from pythia.interaction import cli
+from pythia.interaction._cli_save import CliSaveError, full_log_path
 from pythia_test.interaction_helpers import patch_saves, real_save
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
 
@@ -237,21 +238,28 @@ class CLIAppendTests(_ControllerTestCase):
         handler = mock.Mock(return_value=ToolOutcome("looked"))
         environment = Environment((Tool(ToolSpec("lookup", "Look up.", {}), handler),))
         model = _Model(self.path, ModelSample((ToolCall("lookup", "one", "{}"),)), _answer())
-        states = []
+        states, public = [], []
 
         def save(writer, context):
+            # The public log, as the previous save left it: it follows the full log.
+            if self.path.exists():
+                public.append((self.path.stat().st_ino, self.path.read_bytes()))
             real_save(writer, context)
-            states.append((self.path.stat().st_ino, self.path.read_bytes()))
+            states.append((writer.path.stat().st_ino, writer.path.read_bytes()))
 
         with patch_saves(save):
             self.assertEqual(await self._run(model, _Terminal(_quit_when_idle),
                                              ["--prompt", "hello"], environment), 0)
         handler.assert_called_once()
         self.assertGreaterEqual(len(states), 5)
-        self.assertEqual(len({inode for inode, _ in states}), 1)  # created once
-        for (_, before), (_, after) in zip(states, states[1:]):
-            self.assertTrue(after.startswith(before))
+        self.assertEqual(states[0][0], full_log_path(self.path).stat().st_ino)
+        self.assertEqual(len(public), len(states) - 1)
+        for log in (states, public):
+            self.assertEqual(len({inode for inode, _ in log}), 1)  # created once
+            for (_, before), (_, after) in zip(log, log[1:]):
+                self.assertTrue(after.startswith(before))
         self.assertIsInstance(load_interaction_save(self.path)[-1], TurnSummary)
+        self.assertEqual(self.path.read_bytes(), full_log_path(self.path).read_bytes())
 
     async def test_resume_warns_and_truncates_a_cut_off_line_before_other_work(self):
         save_interaction_save(self.path, InteractionContext(_COMPLETE))
@@ -260,12 +268,15 @@ class CLIAppendTests(_ControllerTestCase):
         model, terminal = _Model(self.path), _Terminal(_quit_when_idle)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
         self.assertEqual(model.calls, [])
+        # Migrated with the cut-off line, which the full log then loses, and
+        # which its public log never has.
+        self.assertEqual(full_log_path(self.path).read_bytes(), durable)
         self.assertEqual(self.path.read_bytes(), durable)
         notices = [item.text for item in terminal.items if item.text.startswith("[cli]")]
         self.assertIn(
-            "[cli] Warning: interaction.jsonl ends with a line that fails to parse (line 5, "
-            "20 bytes), probably cut off by an interrupted save. It was not loaded and is "
-            "truncated from the file.", notices)
+            "[cli] Warning: interaction._private/context.jsonl ends with a line that fails to "
+            "parse (line 5, 20 bytes), probably cut off by an interrupted save. It was not "
+            "loaded and is truncated from the file.", notices)
         self.assertEqual(tuple(item for item in terminal.items if not item.text.startswith("[cli]")),
                          render_interaction_items(_COMPLETE))
         # Shown once: the next resume finds a complete save.
@@ -293,10 +304,22 @@ class CLIAppendTests(_ControllerTestCase):
         data = _line(_COMPLETE[0]) + b"{broken\n" + _line(_COMPLETE[1])
         self.path.write_bytes(data)
         model = _Model(self.path)
-        with self.assertRaisesRegex(SaveError, "invalid JSON in save .* at line 2"):
+        # In the original format, it isn't migrated.
+        with self.assertRaisesRegex(CliSaveError, "could not migrate the save .*: it doesn't "
+                                    r"load as a save \(invalid JSON in save .* at line 2"):
             await self._run(model, _Terminal(_quit_when_idle), ["--resume"])
         self.assertEqual(model.calls, [])
         self.assertEqual(self.path.read_bytes(), data)
+        self.assertFalse(full_log_path(self.path).parent.exists())
+        # As a full log, it fails to resume.
+        self.path.unlink()
+        full_log_path(self.path).parent.mkdir()
+        full_log_path(self.path).write_bytes(data)
+        with self.assertRaisesRegex(SaveError, "invalid JSON in save .* at line 2"):
+            await self._run(model, _Terminal(_quit_when_idle), ["--resume"])
+        self.assertEqual(model.calls, [])
+        self.assertEqual(full_log_path(self.path).read_bytes(), data)
+        self.assertFalse(self.path.exists())
 
 
 class DemoAppendTests(_SaveTestCase):

@@ -260,14 +260,21 @@ class DebugTrace:
     @classmethod
     def open(cls, save_path, *, events=False, run_id=None, context_id=None, role=None) -> "DebugTrace":
         """Prepare private logs before model construction; optionally start an event writer."""
-        trace = cls(*debug_trace_paths(save_path),
-                    event_path=Path(save_path).with_suffix(TRACE_EVENT_SUFFIX) if events else None,
+        event_path = Path(save_path).with_suffix(TRACE_EVENT_SUFFIX) if events else None
+        return cls.open_paths(*debug_trace_paths(save_path), event_path,
+                              run_id=run_id, context_id=context_id, role=role)
+
+    @classmethod
+    def open_paths(cls, request_path, response_path, event_path=None, *, run_id=None,
+                   context_id=None, role=None) -> "DebugTrace":
+        """``open`` with the logs' paths given; an event writer starts with ``event_path``."""
+        trace = cls(request_path, response_path, event_path=event_path,
                     run_id=run_id, context_id=context_id, role=role)
         for path in (trace.request_path, trace.response_path, trace.event_path):
             if path is None:
                 continue
             _prepare_log(path)
-        if events:
+        if trace.event_path is not None:
             trace._writer = threading.Thread(target=trace._write_events, name='debug-trace-writer', daemon=True)
             trace._writer.start()
         return trace

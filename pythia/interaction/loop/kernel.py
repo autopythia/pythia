@@ -243,6 +243,15 @@ class TurnHost:
         """
         return None
 
+    def compaction_log(self, environment):
+        """The log that coldstart compaction points to (``compaction.CompactionLog``), or None.
+
+        The default is ``log_path``'s, with ``environment``'s working
+        directory. A host whose save keeps its full log apart from the log
+        that the pointer names (the CLI's public log) returns its own.
+        """
+        return compaction_log(self.log_path(), environment)
+
     def notice(self, text: str) -> None:
         """Show a one-line host notice."""
 
@@ -440,7 +449,7 @@ def compact(context, model, environment, config, host, sample_params, *,
 
     settings = config.compaction_settings()
     # Only coldstart points to the save.
-    log = (compaction_log(host.log_path(), environment)
+    log = (host.compaction_log(environment)
            if any(method == "coldstart" for method, _ in settings.methods) else None)
     try:
         with host.trace("compact", context_revision=len(context)):

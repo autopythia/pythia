@@ -12,6 +12,7 @@ from pythia.interaction import ToolCall, ToolResult, Tools, TurnSummary, UserInt
 from pythia.interaction import cli, load_interaction_save, save_interaction_save, user_tools
 from pythia.interaction._cli_editor import Editor
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
+from pythia_test.interaction_helpers import seed_cli_save
 
 
 def _submit(state, text):
@@ -83,7 +84,7 @@ class ContinueControllerTests(_ControllerTestCase):
     async def test_continue_after_a_restart_samples_the_saved_turn_once(self):
         original = (Init("old"), Tools(), Message("user", "old query"), UserInteractionBoundary(),
                     ToolCall("record", "one", "{}"), ModelSampleBoundary())
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("finished"))
         terminal = _Terminal(_steps(("/continue", None), until="[assistant] finished"))
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
@@ -112,7 +113,7 @@ class ContinueControllerTests(_ControllerTestCase):
                 (answered, "the log ends with assistant text, which may be a final answer"),
                 ((Init("old"), Tools()), "the last turn ended")):
             with self.subTest(reason=reason):
-                save_interaction_save(self.path, InteractionContext(saved))
+                seed_cli_save(self.path, InteractionContext(saved))
                 expected = f"[cli] Nothing to continue: {reason}. Enter a query instead."
                 model = _Model(self.path)
                 terminal = _Terminal(_steps(("/continue", None), until=expected))

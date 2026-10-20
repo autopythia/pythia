@@ -23,7 +23,7 @@ from pythia.interaction import (
 from pythia.interaction.codex_auth import CodexAuthUnavailable
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_pty import _SCRIPT
-from pythia_test.interaction_helpers import patch_saves
+from pythia_test.interaction_helpers import patch_saves, remove_cli_save, seed_cli_save
 
 
 class NoInput:
@@ -167,7 +167,7 @@ class HeadlessCLITests(unittest.TestCase):
     def test_resume_closes_pending_calls_then_runs_one_new_prompt(self):
         old = (Init("old"), ToolCall("exec_command", "pending", '{"cmd":"touch must-not-run"}'),
                ModelSampleBoundary())
-        save_interaction_save(self.path, InteractionContext(old))
+        seed_cli_save(self.path, InteractionContext(old))
         code, model, _, stderr = self.run_main(["--resume", "--prompt", "continue"], _answer())
         self.assertEqual(code, 0, stderr)
         self.assertEqual(len(model.calls), 1)
@@ -181,7 +181,7 @@ class HeadlessCLITests(unittest.TestCase):
         old = (Init("old"), Message("user", "old task"), Message("assistant", "old answer"), TurnSummary())
         for resume in (["--resume"], []):  # resume is the default
             with self.subTest(resume=resume):
-                save_interaction_save(self.path, InteractionContext(old))
+                seed_cli_save(self.path, InteractionContext(old))
                 code, model, _, stderr = self.run_main([*resume, "--instructions", ""], _answer())
                 self.assertEqual(code, 0, stderr)
                 self.assertEqual(len(model.calls), 1)

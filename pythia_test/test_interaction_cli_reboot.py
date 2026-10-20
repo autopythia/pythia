@@ -27,7 +27,7 @@ from pythia.interaction.loop import kernel
 from pythia.interaction.loop.tail import turn_tail
 from pythia.interaction.runtime_config import ConfigError, parse_config_literal
 from pythia.interaction.user_tools import UserToolIntent
-from pythia_test.interaction_helpers import patch_compaction
+from pythia_test.interaction_helpers import patch_compaction, seed_cli_save
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 
 
@@ -403,7 +403,7 @@ class _RebootCase(unittest.IsolatedAsyncioTestCase):
 
     def _resumable(self):
         """A finished turn whose usage is over a threshold of 100 tokens."""
-        save_interaction_save(self.path, InteractionContext((
+        seed_cli_save(self.path, InteractionContext((
             Init("saved"), Tools(), Message("user", "old request"), UserInteractionBoundary(),
             Message("assistant", "old answer"), SampleMetadata(TokenUsage(90, 10, 100, 20)),
             ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100))))
@@ -417,7 +417,7 @@ class _RebootCase(unittest.IsolatedAsyncioTestCase):
                     UserToolResult(ToolResult("user_1", "compacted")),
                     ContextPrefix((Message("user", "a pointer to the log"),)),
                     CompactionMetadata(TokenUsage(), protocol))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         return original
 
 
@@ -647,7 +647,7 @@ class RestartedCLITests(_RebootCase):
         original = (Init("saved"), Tools(), Message("user", "old query"),
                     UserInteractionBoundary(), ToolCall("probe", "p1", "{}"),
                     ModelSampleBoundary(), ToolResult("p1", "probed"))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         return original
 
     async def test_it_continues_the_turn_with_what_it_carried_over(self):

@@ -12,7 +12,8 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save
+from pythia_test.interaction_helpers import full_log, patch_compaction, patch_saves, real_save
+from pythia_test.interaction_helpers import remove_cli_save, seed_cli_save
 from unittest import mock
 
 from pythia.interaction import DefaultEnvironment
@@ -110,7 +111,7 @@ class _Model:
 
     def sample(self, context, *, tools=(), sample_params=None):
         self.calls.append((context.copy(), tuple(tools), sample_params))
-        self.checkpoints.append(load_interaction_save(self.path).items)
+        self.checkpoints.append(load_interaction_save(full_log(self.path)).items)
         self.threads.append(threading.get_ident())
         if not self.outcomes:
             raise AssertionError("unexpected sample")
@@ -215,9 +216,15 @@ for module in (cli, demo):
             self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
             self.assertIsNone(cli_args.pop("rebooted"))
             self.assertIsNone(cli_args.pop("prompt_file"))
+            self.assertTrue(cli_args.pop("auto_migrate_save"))
             # Same option, different defaults: only the CLI resumes unless told otherwise.
             self.assertTrue(cli_args.pop("resume"))
             self.assertEqual(demo_args.pop("resume"), "--resume" in argv)
+            # The CLI's --save names a prefix, whose default has no .jsonl.
+            self.assertEqual(cli_args.pop("save_path"),
+                             Path("chosen.jsonl") if argv else Path("interaction"))
+            self.assertEqual(demo_args.pop("save_path"),
+                             Path("chosen.jsonl") if argv else Path("interaction.jsonl"))
             self.assertEqual(cli_args, demo_args)
 
     def test_resume_is_an_optional_boolean_defaulting_to_true_only_in_the_cli(self):
@@ -233,8 +240,9 @@ for module in (cli, demo):
                         parser.parse_args(["--resume=" + value])
                     self.assertEqual(error.exception.code, 2)
             help_text = " ".join(parser.format_help().split())
+            missing = "a missing save starts" if frontend is cli else "a missing file starts"
             self.assertIn(
-                f"a missing file starts a new one. A bare flag means True (default: {default})",
+                f"{missing} a new one. A bare flag means True (default: {default})",
                 help_text,
             )
 
@@ -414,7 +422,8 @@ for module in (cli, demo):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--resume", result.stdout)
         self.assertIn("--prompt", result.stdout)
-        self.assertIn("--save PATH", result.stdout)
+        self.assertIn("--save PREFIX", result.stdout)
+        self.assertIn("--auto-migrate-save", result.stdout)
         self.assertIn("--enable-default-tools", result.stdout)
         self.assertIn("--headless", result.stdout)
         self.assertIn("--prompt-file PATH", result.stdout)
@@ -527,7 +536,7 @@ class CLIToolsSnapshotTests(_ControllerTestCase):
             with self.subTest(previous=previous):
                 original = (Init("saved"), *((previous,) if previous is not None else ()),
                             ContextPrefix((Message("assistant", "previous"),)), TurnSummary())
-                save_interaction_save(self.path, InteractionContext(original))
+                seed_cli_save(self.path, InteractionContext(original))
                 expected = original if previous == current else (*original, current)
                 for _ in range(2):
                     model = _Model(self.path)
@@ -543,7 +552,7 @@ class CLIToolsSnapshotTests(_ControllerTestCase):
 
     async def test_snapshot_checkpoint_failure_blocks_sampling(self):
         original = (Init("saved"), Message("assistant", "previous"), TurnSummary())
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer())
         terminal = _Terminal(lambda t, e, s: t.submit("/quit") if s == "failed" else None)
         with patch_saves(OSError("no space")):
@@ -587,7 +596,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
             TurnSummary(sample_count=1),
             ToolCall("exec_command", "pending", '{"cmd":"touch must-not-run"}'),
         )
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("continued"))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         environment = Environment()
@@ -610,7 +619,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
                       [item.text for item in terminal.items])
 
     async def test_config_and_both_compaction_paths_keep_empty_model_tools(self):
-        save_interaction_save(self.path, InteractionContext((
+        seed_cli_save(self.path, InteractionContext((
             Init("old"), Message("assistant", "old answer"),
             SampleMetadata(TokenUsage(total_tokens=100)),
             ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100),
@@ -644,7 +653,7 @@ class CLIDisabledToolsTests(_ControllerTestCase):
 
 class CLIControllerTests(_ControllerTestCase):
     async def test_auto_compaction_context_tokens_config_drives_compaction(self):
-        save_interaction_save(self.path, InteractionContext((
+        seed_cli_save(self.path, InteractionContext((
             Init("old"), Message("assistant", "old answer"),
             SampleMetadata(TokenUsage(total_tokens=100)),
             ModelSampleBoundary(), TurnSummary(sample_count=1, context_tokens=100),
@@ -850,7 +859,7 @@ class CLIControllerTests(_ControllerTestCase):
         call = ToolCall("missing", "pending", "{}")
         original = (Init("resumed"), Instructions("old"), Message("user", "old"),
                     UserInteractionBoundary(), call, ModelSampleBoundary())
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/quit") if s == "idle" else None)
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(
@@ -872,7 +881,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_resume_without_query_marks_pending_calls_unrecoverable_and_waits(self):
         original = (Init("saved"), Message("user", "original"),
                     UserInteractionBoundary(), ToolCall("missing", "pending", "{}"))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
@@ -888,7 +897,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_instructions_only_resume_samples_without_a_new_user_message(self):
         original = (Init("saved"), Instructions("old"),
                     Message("assistant", "previous"), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(
@@ -900,9 +909,9 @@ class CLIControllerTests(_ControllerTestCase):
         for resume in (False, True):
             with self.subTest(resume=resume):
                 if resume:
-                    self.path.unlink()
+                    remove_cli_save(self.path)
                 else:
-                    save_interaction_save(self.path, InteractionContext((Init("old"),)))
+                    seed_cli_save(self.path, InteractionContext((Init("old"),)))
                 terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
                 model = _Model(self.path, _answer())
                 argv = ["--prompt", "fresh"] + (["--resume"] if resume else ["--resume=False"])
@@ -940,7 +949,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_completed_resume_does_not_repeat_answer_or_summary(self):
         original = (Init("saved"), Tools(), Message("assistant", "previous"),
                     ModelSampleBoundary(), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/exit") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
@@ -951,7 +960,7 @@ class CLIControllerTests(_ControllerTestCase):
     async def test_resume_is_the_default(self):
         original = (Init("saved"), Tools(), Message("assistant", "previous"),
                     ModelSampleBoundary(), TurnSummary(sample_count=1))
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         terminal = _Terminal(lambda t, e, s: t.submit("/exit") if s == "idle" else None)
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, []), 0)
@@ -1004,7 +1013,7 @@ class CLIControllerTests(_ControllerTestCase):
                 sample_count=1,
             ),
         )
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("after auto compact"))
         compacted = []
 
@@ -1081,7 +1090,7 @@ class CLIControllerTests(_ControllerTestCase):
             ModelSampleBoundary(),
             TurnSummary(sample_count=1, context_tokens=100),
         )
-        save_interaction_save(self.path, InteractionContext(original))
+        seed_cli_save(self.path, InteractionContext(original))
         model = _Model(self.path, _answer("done"))
         terminal = _Terminal(
             lambda t, e, s: t.key("c-d") if s == "idle" else None

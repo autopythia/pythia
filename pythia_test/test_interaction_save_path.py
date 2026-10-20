@@ -6,6 +6,7 @@ from contextlib import ExitStack
 import io
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -17,7 +18,8 @@ from pythia.interaction import (
     ToolCall, ToolResult, Tools, TurnSummary, UserInteractionBoundary,
     UserToolCall, UserToolResult, load_interaction_save, save_interaction_save,
 )
-from pythia.interaction.model_config import DEFAULT_SAVE_PATH, resolve_save_path
+from pythia.interaction._cli_save import full_log_path, private_dir, public_log_path, save_prefix
+from pythia.interaction.model_config import DEFAULT_SAVE_PATH, DEFAULT_SAVE_PREFIX, resolve_save_path
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.interaction_helpers import patch_saves
 
@@ -42,19 +44,36 @@ class _SavePathTestCase(unittest.TestCase):
         self.default.write_bytes(self.default_bytes)
         (self.launch / "logs").mkdir()
         self.selected = self.launch / "logs" / "chosen log.data"
+        # The CLI's --save names a prefix: "chosen log.data" has its log at
+        # "chosen log.data.jsonl" and its full log in "chosen log.data._private".
+        self.public = public_log_path(save_prefix(self.selected))
+        self.private = private_dir(save_prefix(self.selected))
+        self.full = full_log_path(self.selected)
+
+    def reset(self):
+        """Remove the selected save, in either format, between subtests."""
+        for path in (self.selected, self.public):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(self.private, ignore_errors=True)
+
+    def log(self, frontend):
+        """Where a frontend keeps its full log: the CLI's private directory, or the --save file."""
+        return self.full if frontend is cli else self.selected
 
     def assert_default_untouched(self):
         self.assertEqual(self.default.read_bytes(), self.default_bytes)
         self.assertFalse((self.workspace / "interaction.jsonl").exists())
+        self.assertFalse((self.launch / "interaction._private").exists())
         self.assertEqual(Path.cwd(), self.launch)
 
 
 class SaveArgumentTests(_SavePathTestCase):
     def test_shared_default_and_explicit_save_paths_do_not_change_resume(self):
-        for frontend, resume_default in ((cli, True), (demo, False)):
+        for frontend, resume_default, default in ((cli, True, DEFAULT_SAVE_PREFIX),
+                                                  (demo, False, DEFAULT_SAVE_PATH)):
             with self.subTest(frontend=frontend.__name__):
                 parser = frontend._build_parser()
-                self.assertEqual(parser.parse_args([]).save_path, DEFAULT_SAVE_PATH)
+                self.assertEqual(parser.parse_args([]).save_path, default)
                 self.assertIs(parser.parse_args([]).resume, resume_default)
                 for raw in ("review.jsonl", "~/review.jsonl", str(self.selected), " spaced name "):
                     args = parser.parse_args(["--save", raw])
@@ -62,14 +81,23 @@ class SaveArgumentTests(_SavePathTestCase):
                     self.assertEqual(args.save_path, Path(raw))
                     self.assertIs(args.resume, resume_default)
                 help_text = " ".join(parser.format_help().split())
-                self.assertIn("--save PATH", help_text)
-                self.assertIn("default: interaction.jsonl", help_text)
-                self.assertIn("selected --save file", help_text)
+                if frontend is cli:
+                    self.assertIn("--save PREFIX", help_text)
+                    self.assertIn("save prefix (default: interaction)", help_text)
+                    self.assertIn("a trailing .jsonl is ignored", help_text)
+                    self.assertIn("the save that --save names", help_text)
+                    self.assertIn("--auto-migrate-save [{False,True}]", help_text)
+                else:
+                    self.assertIn("--save PATH", help_text)
+                    self.assertIn("default: interaction.jsonl", help_text)
+                    self.assertIn("selected --save file", help_text)
+                    self.assertNotIn("--auto-migrate-save", help_text)
         argv = ["--save", "review", "--resume"]
         demo_args = vars(demo._build_parser().parse_args(argv))
         self.assertFalse(demo_args.pop("experimental_user_message_injection"))
         cli_args = vars(cli._build_parser().parse_args(argv))
         self.assertTrue(cli_args.pop("enable_default_tools"))
+        self.assertTrue(cli_args.pop("auto_migrate_save"))
         self.assertFalse(cli_args.pop("headless"))
         self.assertFalse(cli_args.pop("debug_trace"))
         self.assertFalse(cli_args.pop("enable_experimental_icron"))
@@ -115,8 +143,9 @@ class SaveArgumentTests(_SavePathTestCase):
 
 @unittest.skipUnless(os.name == "posix", "interactive main requires POSIX")
 class SaveEntrypointTests(_SavePathTestCase):
-    def _main(self, frontend, argv=(), *, samples=(_answer(),), save_argument=None):
-        model = _Model(self.selected, *samples)
+    def _main(self, frontend, argv=(), *, samples=(_answer(),), save_argument=None, starts=True):
+        """Run a frontend's main; ``starts`` is false when the CLI must fail before its terminal."""
+        model = _Model(self.log(frontend), *samples)
         model.endpoint = SimpleNamespace(model="initial-model")
         terminal = _Terminal(
             lambda t, e, s: t.key("c-d") if s in {"idle", "failed", "auth needed"} else None
@@ -135,9 +164,11 @@ class SaveEntrypointTests(_SavePathTestCase):
             code = frontend.main(["--cwd", str(self.workspace), "--save", argument, *argv])
         self.assertEqual([context.items for context, _tools, _options in model.calls], model.checkpoints)
         self.assert_default_untouched()
-        if frontend is cli:
+        if frontend is cli and starts:
             self.assertTrue(terminal.exited)
-            self.assertEqual(sum(i.text == f"[cli] Save log: {self.selected}" for i in terminal.items), 1)
+            self.assertEqual(sum(i.text == f"[cli] Save log: {self.public}" for i in terminal.items), 1)
+        elif frontend is cli:
+            self.assertFalse(terminal.exited)
         return code, model, terminal, tuple(call.args[0] for call in printed.call_args_list)
 
     def test_missing_experimental_demo_resume_seeds_only_selected_log(self):
@@ -159,36 +190,45 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_fresh_custom_file_replaces_only_selected_log_and_checkpoints_all_batches(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
-                self.selected.write_text("old selected file\n")
+                self.reset()
+                # The CLI's save is its public log and private directory.
+                replaced = self.public if frontend is cli else self.selected
+                replaced.write_text("old selected file\n")
                 code, model, _terminal, _printed = self._main(
                     frontend, ["--resume=False", "--prompt", "fresh query"],
                     samples=(ModelSample(items=(_PLAN_CALL,)), _answer()),
                 )
                 self.assertEqual(code, 0)
                 self.assertEqual(len(model.calls), 2)
-                saved = load_interaction_save(self.selected)
+                saved = load_interaction_save(self.log(frontend))
                 self.assertEqual(saved.items[0].model, "initial-model")
                 self.assertEqual(saved.items[2:4], (Message("user", "fresh query"), UserInteractionBoundary()))
                 self.assertIn(ToolResult("plan-one", "Plan updated"), saved.items)
                 self.assertEqual(saved.items[-1].sample_count, 2)
                 self.assertNotIn("Save log:", repr(saved.items))
                 self.assertNotIn(str(self.selected), repr(saved.items))
+                if frontend is cli:
+                    # No reasoning here, so the public log is the full log.
+                    self.assertEqual(self.public.read_bytes(), self.full.read_bytes())
+                    self.assertFalse(self.selected.exists())
 
     def test_absolute_and_home_paths_reach_both_entrypoints(self):
         for frontend in (cli, demo):
             for argument in (str(self.selected), "~/logs/chosen log.data"):
                 with self.subTest(frontend=frontend.__name__, argument=argument):
+                    self.reset()
                     with mock.patch.dict(os.environ, {"HOME": str(self.launch)}):
                         code, model, _terminal, _printed = self._main(
                             frontend, ["--prompt", "hello"], save_argument=argument,
                         )
                     self.assertEqual(code, 0)
                     self.assertEqual(len(model.calls), 1)
-                    self.assertIn(Message("user", "hello"), load_interaction_save(self.selected).items)
+                    self.assertIn(Message("user", "hello"), load_interaction_save(self.log(frontend)).items)
 
     def test_completed_resume_replays_only_chosen_file_without_sampling(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
+                self.reset()
                 with demo.DefaultEnvironment(cwd=self.workspace) as environment:
                     snapshot = Tools(environment.tool_specs)
                 save_interaction_save(self.selected, InteractionContext((*_COMPLETED, snapshot)))
@@ -196,23 +236,33 @@ class SaveEntrypointTests(_SavePathTestCase):
                 code, model, terminal, printed = self._main(frontend, ["--resume"], samples=())
                 self.assertEqual(code, 0)
                 self.assertEqual(model.calls, [])
-                self.assertEqual(self.selected.read_bytes(), before)
                 texts = [str(i) for i in terminal.items] if frontend is cli else [str(i) for i in printed]
                 self.assertEqual(sum("[assistant] previous answer" in text for text in texts), 1)
+                if frontend is demo:
+                    self.assertEqual(self.selected.read_bytes(), before)
+                    continue
+                # The CLI migrated the save in the original format at the
+                # --save path: it moved, byte for byte, and has its public log.
+                self.assertFalse(self.selected.exists())
+                self.assertEqual(self.full.read_bytes(), before)
+                self.assertEqual(self.public.read_bytes(), before)
+                self.assertEqual(sum(f"[cli] Migrated the save {self.selected} " in text
+                                     for text in texts), 1)
 
     def test_missing_chosen_resume_never_falls_back_to_existing_default(self):
         for frontend in (cli, demo):
             for prompt in (None, "explicit"):
                 with self.subTest(frontend=frontend.__name__, prompt=prompt):
-                    self.selected.unlink(missing_ok=True)
+                    self.reset()
                     argv = ["--resume"] + (["--prompt", prompt] if prompt is not None else [])
                     samples = () if frontend is cli and prompt is None else (_answer(),)
                     code, model, terminal, printed = self._main(frontend, argv, samples=samples)
                     self.assertEqual(code, 0)
                     self.assertEqual(len(model.calls), len(samples))
                     notices = "\n".join(str(i) for i in (*terminal.items, *printed))
-                    self.assertIn("no existing chosen log.data was found", notices)
-                    saved = load_interaction_save(self.selected)
+                    name = self.public.name if frontend is cli else self.selected.name
+                    self.assertIn(f"no existing {name} was found", notices)
+                    saved = load_interaction_save(self.log(frontend))
                     users = [i.content for i in saved if isinstance(i, Message) and i.role == "user"]
                     expected = [] if not samples else [prompt if prompt is not None else demo.DEFAULT_PROMPT]
                     self.assertEqual(users, expected)
@@ -220,15 +270,26 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_malformed_chosen_resume_preserves_both_files(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
+                self.reset()
                 self.selected.write_bytes(b"invalid JSON\n")
-                code, model, _terminal, _printed = self._main(frontend, ["--resume"], samples=())
+                # The CLI refuses to migrate it, before its terminal starts.
+                code, model, _terminal, printed = self._main(
+                    frontend, ["--resume"], samples=(), starts=frontend is not cli)
                 self.assertEqual(code, 1)
                 self.assertEqual(model.calls, [])
                 self.assertEqual(self.selected.read_bytes(), b"invalid JSON\n")
+                if frontend is cli:
+                    self.assertFalse(self.private.exists())
+                    self.assertFalse(self.public.exists())
+                    message = "\n".join(map(str, printed))
+                    self.assertIn(f"could not migrate the save {self.selected}", message)
+                    self.assertIn("Nothing was changed.", message)
+                    self.assertIn("rerun with --auto-migrate-save=False", message)
 
     def test_pending_call_override_and_follow_up_keep_frontend_recovery_policies(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
+                self.reset()
                 original = (Init("old"), Message("user", "old query"), _PLAN_CALL)
                 save_interaction_save(self.selected, InteractionContext(original))
                 code, model, _terminal, _printed = self._main(
@@ -252,6 +313,7 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_instructions_only_resume_on_selected_file_adds_no_user_turn(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
+                self.reset()
                 save_interaction_save(self.selected, InteractionContext(_COMPLETED))
                 code, model, _terminal, _printed = self._main(
                     frontend, ["--resume", "--instructions", "override"],
@@ -268,7 +330,7 @@ class SaveEntrypointTests(_SavePathTestCase):
         self.assertEqual(code, 0)
         create.assert_not_called()
         self.assertEqual(model.calls, [])
-        saved = load_interaction_save(self.selected)
+        saved = load_interaction_save(self.full)
         self.assertEqual(saved.items[:-2], original)
         self.assertIsInstance(saved.items[-1], Tools)
         self.assertIsInstance(saved.items[-2], UserToolResult)
@@ -277,6 +339,7 @@ class SaveEntrypointTests(_SavePathTestCase):
     def test_checkpoint_failure_keeps_chosen_file_and_does_not_redirect_to_default(self):
         for frontend in (cli, demo):
             with self.subTest(frontend=frontend.__name__):
+                self.reset()
                 self.selected.write_bytes(b"previous selected contents\n")
                 with patch_saves(OSError("disk failure")) as save:
                     code, model, terminal, printed = self._main(
@@ -285,10 +348,12 @@ class SaveEntrypointTests(_SavePathTestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(model.calls, [])
                 save.assert_called_once()
-                self.assertEqual(save.call_args.args[0].path, self.selected)
+                self.assertEqual(save.call_args.args[0].path, self.log(frontend))
                 self.assertEqual(self.selected.read_bytes(), b"previous selected contents\n")
                 if frontend is cli:
                     self.assertTrue(any("unsaved state remains in memory" in i.text for i in terminal.items))
+                    # The public log follows the full log: never ahead of it.
+                    self.assertFalse(self.public.exists())
 
     def test_path_errors_fail_before_model_environment_or_terminal_creation(self):
         not_directory = self.launch / "not-directory"

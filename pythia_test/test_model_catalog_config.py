@@ -27,6 +27,7 @@ from pythia.interaction._auto_config import (
 from pythia.interaction._model_binding_debug import (
     debug_model_binding_path, save_debug_model_bindings,
 )
+from pythia.interaction._cli_save import full_log_path
 from pythia.interaction.chat_completions import ChatCompletionsEndpoint, ChatCompletionsModel
 from pythia.interaction.messages import (
     MessagesEndpoint, MessagesModel, MessagesPromptCaching, MessagesServerCompaction,
@@ -1169,6 +1170,8 @@ class CatalogEntrypointTests(unittest.TestCase):
                                    "--prompt", "hello", "--save", str(log)])
             self.assertEqual(result, 0)
             self.assertTrue(log.is_file())
+            # The CLI keeps its snapshot in its save's private directory.
+            self.assertFalse(debug_model_binding_path(full_log_path(log)).exists())
             self.assertFalse(debug_model_binding_path(log).exists())
             self.assertEqual(stale_sidecar.read_text(), "not valid catalog provenance")
             self.assertEqual(requests[0]["model"], "served-local")
@@ -1183,8 +1186,9 @@ class CatalogEntrypointTests(unittest.TestCase):
                     "--debug-save-model-binding",
                 ])
             self.assertEqual(result, 0)
-            snapshot_path = debug_model_binding_path(debug_log)
+            snapshot_path = debug_model_binding_path(full_log_path(debug_log))
             self.assertTrue(snapshot_path.is_file())
+            self.assertFalse(debug_model_binding_path(debug_log).exists())
             snapshot = json.loads(snapshot_path.read_text())
             self.assertEqual(snapshot["bindings"]["main"]["selector"], "local-max")
             self.assertEqual(

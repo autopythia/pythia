@@ -363,7 +363,10 @@ class UserToolValueTests(unittest.TestCase):
 class AuthConfigurationTests(unittest.TestCase):
     def test_main_opens_only_missing_auth_case_and_rejects_other_config_errors(self):
         with tempfile.TemporaryDirectory() as directory:
-            base = ["--endpoint-api", "codex", "--model", "test", "--endpoint-auth-home", directory]
+            # A save of its own: main prepares (and would migrate) the default
+            # save in the working directory before it runs the session.
+            base = ["--endpoint-api", "codex", "--model", "test", "--endpoint-auth-home", directory,
+                    "--save", str(Path(directory) / "session.jsonl")]
             for extra, code, opens in (([], 0, True), (["--endpoint-url", "bad-url"], 1, False),
                                        (["--request-timeout-seconds", "0"], 1, False)):
                 with self.subTest(extra=extra):

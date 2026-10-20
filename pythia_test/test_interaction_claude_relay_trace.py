@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from pythia.interaction._debug_trace import DebugTrace
+from pythia.interaction._cli_save import full_log_path
 from pythia.interaction.claude_relay import ClaudeRelayModel
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.items import Message, ToolResult
@@ -227,12 +228,15 @@ class RelayTraceTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=15)
             with self.subTest(frontend=frontend):
                 self.assertEqual(run.returncode, 1)
-                context_path = save if frontend == 'cli' else save / 'contexts/1.jsonl'
+                # The CLI's full log and traces are in its save's private directory.
+                context_path = full_log_path(save) if frontend == 'cli' else save / 'contexts/1.jsonl'
                 context = load_interaction_save(context_path)
                 failure = next(i for i in context if isinstance(i, ModelFailure))
                 self.assertEqual(failure.last_event_type, 'stream_event/error')
-                self.assertNotIn('PRIVATE_UPSTREAM_BODY', context_path.read_text() + run.stdout + run.stderr)
-                events = rows(context_path.with_suffix('.trace.events.jsonl'))
+                logs = context_path.read_text() + (save.read_text() if frontend == 'cli' else '')
+                self.assertNotIn('PRIVATE_UPSTREAM_BODY', logs + run.stdout + run.stderr)
+                events = rows(context_path.with_name('trace.events.jsonl') if frontend == 'cli'
+                              else context_path.with_suffix('.trace.events.jsonl'))
                 self.assertTrue(any(r['type'] == 'sample_begin' and r['op'] == 'sample' for r in events))
                 self.assertIn(b'PRIVATE_UPSTREAM_BODY', b''.join(payload(r) for r in events if r['type'] == 'claude_stdout'))
 

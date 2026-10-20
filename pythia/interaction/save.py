@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import io
 import json
 import os
 import tempfile
@@ -17,6 +18,7 @@ from typing import List
 from typing import Mapping
 from typing import NamedTuple
 from typing import Optional
+from typing import Sequence
 from typing import Tuple
 from typing import Union
 
@@ -53,6 +55,10 @@ SavePath = Union[str, os.PathLike]
 
 class SaveError(ValueError):
     pass
+
+
+class PublicLogError(SaveError):
+    """A ``{"type": "nil"}`` line: the file is a public log, not a full log."""
 
 
 _ITEM_TYPES = {
@@ -356,6 +362,11 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     """Decode a dictionary produced by ``interaction_item_to_dict``."""
     mapping = _require_mapping(value)
     item_type = mapping.get("type")
+    if item_type == "nil":
+        raise PublicLogError(
+            '"nil" stands for an item that a public log leaves out, so this is not '
+            "a full log (a CLI save keeps its full log in PREFIX._private/context.jsonl)"
+        )
     if not isinstance(item_type, str) or item_type not in _ITEM_TYPE_NAMES:
         raise SaveError(f"unknown interaction item type: {item_type!r}")
 
@@ -888,6 +899,7 @@ class _ReadSave(NamedTuple):
     complete_size: int  # bytes before an incomplete final line
     terminated: bool  # the complete part is empty or ends with a newline
     incomplete: Optional[IncompleteSaveLine]
+    data: Optional[bytes] = None  # the bytes read, when kept (keep_data)
 
 
 def _parse_lines(
@@ -932,11 +944,13 @@ def _parse_lines(
     return items, offset, terminated, unparsed
 
 
-def _read_save(source: Path) -> _ReadSave:
+def _read_save(source: Path, *, keep_data: bool = False) -> _ReadSave:
     try:
         with source.open("rb") as file:
             status = os.fstat(file.fileno())
-            items, size, terminated, unparsed = _parse_lines(file, source)
+            data = file.read() if keep_data else None
+            items, size, terminated, unparsed = _parse_lines(
+                file if data is None else io.BytesIO(data), source)
     except OSError as exc:
         raise SaveError(f"could not load save {source}: {exc}") from exc
 
@@ -945,9 +959,9 @@ def _read_save(source: Path) -> _ReadSave:
     except (TypeError, ValueError) as exc:
         raise SaveError(f"invalid save {source}: {exc}") from exc
     if unparsed is None:
-        return _ReadSave(context, status, size, size, terminated, None)
+        return _ReadSave(context, status, size, size, terminated, None, data)
     # The incomplete line starts right after a newline.
-    return _ReadSave(context, status, size, unparsed.line.offset, True, unparsed.line)
+    return _ReadSave(context, status, size, unparsed.line.offset, True, unparsed.line, data)
 
 
 def load_interaction_save(path: SavePath) -> InteractionContext:
@@ -958,6 +972,23 @@ def load_interaction_save(path: SavePath) -> InteractionContext:
     :func:`resume_interaction_save`. Any other invalid line is an error.
     """
     return _read_save(Path(path)).context
+
+
+class SaveData(NamedTuple):
+    """A loaded save with the bytes it was loaded from (``read_interaction_save``)."""
+
+    context: InteractionContext
+    data: bytes  # the file as read
+    complete_size: int  # the bytes before an incomplete final line
+    incomplete_line: Optional[IncompleteSaveLine]
+    status: os.stat_result  # the file's, when it was opened
+
+
+def read_interaction_save(path: SavePath) -> SaveData:
+    """Load a save as :func:`load_interaction_save` does, with the bytes it was loaded from."""
+    read = _read_save(Path(path), keep_data=True)
+    assert read.data is not None
+    return SaveData(read.context, read.data, read.complete_size, read.incomplete, read.status)
 
 
 class InteractionSaveWriter:
@@ -1099,15 +1130,332 @@ def resume_interaction_save(path: SavePath) -> ResumedInteractionSave:
     return ResumedInteractionSave(read.context, writer, read.incomplete)
 
 
+class ResumedSaveLines(NamedTuple):
+    """A resumed save (see :func:`resume_interaction_save`) with its complete lines."""
+
+    context: InteractionContext
+    writer: InteractionSaveWriter
+    incomplete_line: Optional[IncompleteSaveLine]
+    lines: bytes  # the save as read, without an incomplete final line
+
+
+def resume_interaction_save_lines(path: SavePath) -> ResumedSaveLines:
+    """Load a save to continue it, as :func:`resume_interaction_save` does.
+
+    It also returns the bytes of the save's complete lines, read with them,
+    from which :func:`public_log_lines` makes its public log.
+    """
+    source = Path(path)
+    read = _read_save(source, keep_data=True)
+    writer = InteractionSaveWriter(source)
+    writer._continue(read)
+    assert read.data is not None
+    return ResumedSaveLines(read.context, writer, read.incomplete, read.data[:read.complete_size])
+
+
+# Public logs: a full log line for line, with reasoning left out.
+
+# A public log has this line in place of each reasoning item of its full log,
+# so that line N of the public log stands for line N of the full log.
+NIL_LINE = b'{"type": "nil"}\n'
+
+
+def _public_line(line: bytes) -> bytes:
+    """A full log's line, without its newline, as its public log has it."""
+    # Only a line that names one of the two types can change: skip parsing
+    # the others.
+    if b'"reasoning"' in line or b'"context_prefix"' in line:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            if value.get("type") == "reasoning":
+                return NIL_LINE
+            items = value.get("prefix_items")
+            if value.get("type") == "context_prefix" and isinstance(items, list):
+                kept = [item for item in items
+                        if not (isinstance(item, dict) and item.get("type") == "reasoning")]
+                if len(kept) != len(items):
+                    value["prefix_items"] = kept
+                    return (json.dumps(value, ensure_ascii=False) + "\n").encode("utf-8")
+    return line + b"\n"
+
+
+def public_log_lines(data: bytes) -> List[bytes]:
+    """The public log of a full log's complete lines, ``data``: a line for each.
+
+    A reasoning item's line becomes ``{"type": "nil"}``, and a
+    ``context_prefix`` leaves out the reasoning among its items. Every other
+    line is kept byte for byte, blank or not, and each ends with a newline.
+    """
+    if not data:
+        return []
+    pieces = data.split(b"\n")
+    if not pieces[-1]:
+        pieces.pop()
+    return [_public_line(piece) for piece in pieces]
+
+
+def public_log_line(item: InteractionItem) -> bytes:
+    """An item's line in a public log, as :func:`public_log_lines` makes it."""
+    if isinstance(item, Reasoning):
+        return NIL_LINE
+    line = _encode_items((item,))
+    if isinstance(item, ContextPrefix) and any(
+            isinstance(nested, Reasoning) for nested in item.prefix_items):
+        return _public_line(line[:-1])
+    return line
+
+
+def _same_line(line: bytes, expected: bytes) -> bool:
+    """Whether a public log's line is the expected one, byte for byte or as JSON.
+
+    Comparing JSON values too keeps a line that an older version encoded
+    otherwise from counting as a difference.
+    """
+    if line == expected:
+        return True
+    try:
+        return json.loads(line) == json.loads(expected)
+    except ValueError:
+        return False
+
+
+def _public_log_state(current: bytes, expected: Sequence[bytes]) -> Tuple[Optional[int], bytes]:
+    """Where a public log first differs from ``expected``, and what it lacks.
+
+    Returns the first differing line's number, or None, and the bytes that
+    complete it: the rest of ``expected`` after the lines it has, and of a
+    line it has only the start of, as an interrupted append leaves it.
+    """
+    pieces = current.split(b"\n")
+    partial = pieces.pop()  # b"" when the log is empty or ends with a newline
+    for index, line in enumerate(pieces):
+        if index >= len(expected) or not _same_line(line + b"\n", expected[index]):
+            return index + 1, b""
+    rest = list(expected[len(pieces):])
+    if partial:
+        if not rest or not rest[0].startswith(partial):
+            return len(pieces) + 1, b""
+        rest[0] = rest[0][len(partial):]
+    return None, b"".join(rest)
+
+
+def _failure_reason(error: BaseException) -> str:
+    """Why a write failed, without the path it names."""
+    cause = error.__cause__ if isinstance(error, SaveError) else error
+    if isinstance(cause, OSError):
+        return cause.strerror or str(cause) or type(cause).__name__
+    return str(error) or type(error).__name__
+
+
+def _read_from_start(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    while True:
+        chunk = os.read(descriptor, 1 << 20)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _ends_with_newline(descriptor: int, size: int) -> bool:
+    if not size:
+        return True
+    os.lseek(descriptor, size - 1, os.SEEK_SET)
+    return os.read(descriptor, 1) == b"\n"
+
+
+class PublicLogWriter:
+    """Best-effort writer of a save's public log: its full log without reasoning.
+
+    Line N of the public log stands for item N of the full log
+    (:func:`public_log_line`): each reasoning item is ``{"type": "nil"}``, and
+    a ``context_prefix`` leaves out the reasoning among its items. The full
+    log is the save, which is all that resuming needs; the public log is
+    informational, and may be edited out-of-band. So this writer never
+    raises. It keeps the file as it finds it, appends after its end, and
+    reports a change it finds, or a write that failed, as a warning
+    (:meth:`take_warnings`); a failed write is tried again at the next save.
+
+    A new writer's first :meth:`save` writes the whole public log, replacing
+    any file at ``path``, as a new save does; :meth:`sync` continues one
+    instead. A missing public log is written anew from the full log. Each
+    write ends with ``fsync``. ``drifted`` is true once the public log is
+    known to differ from the full log, so that its line numbers may not
+    match the full log's.
+    """
+
+    def __init__(self, path: SavePath, *, name: Optional[str] = None) -> None:
+        self.path = Path(path)
+        self._name = self.path.name if name is None else name  # in warnings
+        self._lock = threading.Lock()
+        self._warnings_lock = threading.Lock()
+        self._warnings: List[str] = []
+        self._count = 0  # items of the full log that the public log has
+        self._fresh = True  # the next save writes the whole public log anew
+        # (st_dev, st_ino, st_size) as the last write left the file, or None
+        # when that isn't known (then the next append reports no change).
+        self._state: Optional[Tuple[int, int, int]] = None
+        self._failed = False  # the last write failed, which was reported
+        self.drifted = False
+
+    def take_warnings(self) -> Tuple[str, ...]:
+        """The warnings since the last call, for the frontend to show."""
+        with self._warnings_lock:
+            warnings, self._warnings = tuple(self._warnings), []
+        return warnings
+
+    def _warn(self, text: str) -> None:
+        with self._warnings_lock:
+            self._warnings.append(text)
+
+    def _write_failed(self, error: BaseException) -> None:
+        if not self._failed:
+            self._warn(
+                f"Warning: could not write {self._name} ({_failure_reason(error)}). It is "
+                "informational: the save is unaffected, and the next save tries again."
+            )
+        self._failed = True
+
+    def _missing_note(self) -> str:
+        return f"Note: {self._name} was missing; it was written anew from the full log."
+
+    def sync(self, lines: bytes, count: int) -> None:
+        """Continue the public log of a full log of ``count`` items, whose complete lines are ``lines``.
+
+        A public log that has the first of its lines, as a crash between the
+        two saves or an interrupted append leaves it, gets the rest. One that
+        differs is kept as it is, with a warning: later saves append after
+        its end. A missing one is written anew.
+        """
+        with self._lock:
+            self._fresh, self._count = False, count
+            try:
+                expected = public_log_lines(lines)
+                try:
+                    descriptor = os.open(self.path, os.O_RDWR | os.O_APPEND | _OPEN_FLAGS)
+                except FileNotFoundError:
+                    self._replace(b"".join(expected), note=self._missing_note())
+                    return
+                try:
+                    status = os.fstat(descriptor)
+                    differs, rest = _public_log_state(_read_from_start(descriptor), expected)
+                    if differs is not None:
+                        self._state = None  # appends start on a line of their own
+                        self.drifted = True
+                        self._warn(
+                            f"Note: {self._name} differs from the full log from line {differs} "
+                            "on, as when it is edited. It is informational, so it was kept as "
+                            "it is: new lines are appended after its end, and its line numbers "
+                            "may not match the full log's."
+                        )
+                        return
+                    if rest:
+                        try:
+                            _write_all(descriptor, rest)
+                            os.fsync(descriptor)
+                        except OSError:
+                            # It had the full log's first lines: writing it
+                            # anew at the next save loses nothing.
+                            self._fresh = True
+                            raise
+                    self._state = (status.st_dev, status.st_ino, status.st_size + len(rest))
+                    self._failed = False
+                finally:
+                    os.close(descriptor)
+            except Exception as exc:
+                self._write_failed(exc)
+
+    def save(self, context: InteractionContext) -> None:
+        """Add the items of ``context`` that the public log lacks. Never raises."""
+        with self._lock:
+            try:
+                if self._fresh:
+                    if self._replace(b"".join(public_log_line(item) for item in context)):
+                        self._count = len(context)
+                    return
+                new = context[self._count:]
+                if new and self._append(context, b"".join(public_log_line(item) for item in new)):
+                    self._count = len(context)
+            except Exception as exc:
+                self._write_failed(exc)
+
+    def _replace(self, data: bytes, *, note: Optional[str] = None) -> bool:
+        try:
+            status = _replace_atomically(self.path, data)
+        except SaveError as exc:
+            self._fresh = True
+            self._write_failed(exc)
+            return False
+        self._state = (status.st_dev, status.st_ino, len(data))
+        self._fresh = self._failed = self.drifted = False
+        if note is not None:
+            self._warn(note)
+        return True
+
+    def _append(self, context: InteractionContext, data: bytes) -> bool:
+        try:
+            descriptor = os.open(self.path, os.O_RDWR | os.O_APPEND | _OPEN_FLAGS)
+        except FileNotFoundError:
+            return self._replace(
+                b"".join(public_log_line(item) for item in context), note=self._missing_note())
+        except OSError as exc:
+            self._write_failed(exc)
+            return False
+        try:
+            status = os.fstat(descriptor)
+            if (status.st_dev, status.st_ino, status.st_size) != self._state:
+                if self._state is not None:
+                    self.drifted = True
+                    self._warn(
+                        f"Note: {self._name} was changed outside this session. It is "
+                        "informational, so it was kept as it is: new lines are appended "
+                        "after its end, and its line numbers may not match the full log's."
+                    )
+                if not _ends_with_newline(descriptor, status.st_size):
+                    data = b"\n" + data
+            try:
+                _write_all(descriptor, data)
+                os.fsync(descriptor)
+            except OSError:
+                # Drop this write's part, so the next save can write it again
+                # (on a line of its own: the state is no longer known).
+                self._state = None
+                try:
+                    os.ftruncate(descriptor, status.st_size)
+                except OSError:
+                    self.drifted = True  # part of this write may remain
+                raise
+            self._state = (status.st_dev, status.st_ino, status.st_size + len(data))
+            self._failed = False
+            return True
+        except OSError as exc:
+            self._write_failed(exc)
+            return False
+        finally:
+            os.close(descriptor)
+
+
 __all__ = [
     "IncompleteSaveLine",
     "InteractionSaveWriter",
+    "NIL_LINE",
+    "PublicLogError",
+    "PublicLogWriter",
     "ResumedInteractionSave",
+    "ResumedSaveLines",
+    "SaveData",
     "SaveError",
     "interaction_item_from_dict",
     "interaction_item_to_dict",
     "iter_interaction_items",
     "load_interaction_save",
+    "public_log_line",
+    "public_log_lines",
+    "read_interaction_save",
     "resume_interaction_save",
+    "resume_interaction_save_lines",
     "save_interaction_save",
 ]

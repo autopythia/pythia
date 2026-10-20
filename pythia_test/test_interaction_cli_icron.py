@@ -22,6 +22,7 @@ from pythia.interaction._cli_editor import Editor
 from pythia.interaction.loop.icron import WAKE_HEADER
 from pythia.interaction.loop.supervision import Yield
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
+from pythia_test.interaction_helpers import seed_cli_save
 
 
 NOW = datetime(2027, 1, 15, 12, 0).timestamp()  # noon, local time
@@ -145,7 +146,9 @@ class DisplayContractTests(_IcronControllerCase):
             return terminal
 
         def normal(text, path):
-            text = text.replace(str(path), "<save>").replace(path.name, "<name>")
+            # The save's private directory is named after its prefix.
+            text = text.replace(str(path), "<save>").replace(str(path.with_suffix("")), "<prefix>")
+            text = text.replace(path.name, "<name>")
             return re.sub(r"\d+(\.\d+)?", "N", text)
 
         plain_path, icron_path = self.directory / "plain.jsonl", self.directory / "icron.jsonl"
@@ -373,7 +376,7 @@ class ResumeTests(_IcronControllerCase):
                  ToolResult("y", json.dumps({"yielded": True})))
         for icron in (True, False):
             with self.subTest(icron=icron):
-                save_interaction_save(self.path, InteractionContext(items))
+                seed_cli_save(self.path, InteractionContext(items))
                 model = _Model(self.path)
                 terminal = _Terminal(_once([
                     (lambda t, s: _phase(s) == "idle", lambda t: t.submit("/continue")),
@@ -388,7 +391,7 @@ class ResumeTests(_IcronControllerCase):
                  _icron("s", action="schedule", message="x", after=3600), ModelSampleBoundary(),
                  ToolResult("s", json.dumps({"job_id": "k-1", "due": due, "every": None})),
                  Message("assistant", "Scheduled."))
-        save_interaction_save(self.path, InteractionContext(items))
+        seed_cli_save(self.path, InteractionContext(items))
         terminal = _Terminal(_once([(lambda t, s: _phase(s) == "idle", _exit)]))
         self.assertEqual(await self._run(_Model(self.path), terminal, ["--resume"]), 0)
         self.assertIn(f"[cli] {cli._ICRON_RESTART_NOTICE}", _texts(terminal))

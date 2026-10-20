@@ -42,6 +42,9 @@ from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 DEFAULT_SAVE_PATH = Path("interaction.jsonl")
+# The CLI's --save names a save prefix (see _cli_save): interaction.jsonl and
+# interaction._private/.
+DEFAULT_SAVE_PREFIX = Path("interaction")
 _CLAUDE_RELAY_TIMEOUT_DEFAULTS = {
     "generation": DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS,
     "parked": DEFAULT_CLAUDE_RELAY_PARKED_TIMEOUT_SECONDS,
@@ -521,7 +524,13 @@ def _model_argument_help() -> str:
     return text.replace("%", "%%")  # argparse %-formats help strings
 
 
-def build_parser(description: str, *, allow_prompt_file: bool = False) -> argparse.ArgumentParser:
+def build_parser(description: str, *, allow_prompt_file: bool = False,
+                 save_prefix: bool = False) -> argparse.ArgumentParser:
+    """The options that the CLI and the demo share.
+
+    With ``save_prefix`` (the CLI), ``--save`` names a save prefix rather
+    than a file.
+    """
     parser = argparse.ArgumentParser(description=description)
     add_endpoint_arguments(parser)
     add_catalog_arguments(parser)
@@ -654,18 +663,34 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
             "On --resume, appends an override."
         ),
     )
-    parser.add_argument(
-        "--save",
-        dest="save_path",
-        metavar="PATH",
-        type=_save_path_argument,
-        default=DEFAULT_SAVE_PATH,
-        help=(
-            "interaction JSONL file to read/write (default: %(default)s); "
-            "relative to the launch directory, not --cwd; parent must exist; "
-            "replaces the file when --resume is False"
-        ),
-    )
+    if save_prefix:
+        parser.add_argument(
+            "--save",
+            dest="save_path",
+            metavar="PREFIX",
+            type=_save_path_argument,
+            default=DEFAULT_SAVE_PREFIX,
+            help=(
+                "save prefix (default: %(default)s); relative to the launch directory, "
+                "not --cwd; its directory must exist; a trailing .jsonl is ignored. "
+                "PREFIX.jsonl is the save log, without reasoning, and PREFIX._private/ "
+                "holds the full log, context.jsonl, which resuming reads, and debug files. "
+                "--resume=False replaces the save"
+            ),
+        )
+    else:
+        parser.add_argument(
+            "--save",
+            dest="save_path",
+            metavar="PATH",
+            type=_save_path_argument,
+            default=DEFAULT_SAVE_PATH,
+            help=(
+                "interaction JSONL file to read/write (default: %(default)s); "
+                "relative to the launch directory, not --cwd; parent must exist; "
+                "replaces the file when --resume is False"
+            ),
+        )
     parser.add_argument(
         "--resume",
         nargs="?",
@@ -674,10 +699,12 @@ def build_parser(description: str, *, allow_prompt_file: bool = False) -> argpar
         type=_boolean_argument,
         metavar="{False,True}",
         help=(
-            "resume the selected --save file instead of starting a new save; "
-            "a missing file starts a new one. A bare flag means True "
-            "(default: %(default)s)"
-        ),
+            ("resume the save that --save names instead of starting a new one; "
+             "a missing save starts a new one. ")
+            if save_prefix else
+            ("resume the selected --save file instead of starting a new save; "
+             "a missing file starts a new one. ")
+        ) + "A bare flag means True (default: %(default)s)",
     )
     add_renamed_options(parser)
     return parser

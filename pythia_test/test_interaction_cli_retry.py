@@ -5,7 +5,7 @@ import json
 import threading
 from types import SimpleNamespace
 import unittest
-from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save
+from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save, seed_cli_save
 from unittest import mock
 
 from pythia.interaction import (
@@ -246,7 +246,7 @@ class RetryControllerTests(_ControllerTestCase):
     async def test_resumed_failure_is_not_retryable_and_prompt_retry_is_literal(self):
         original = InteractionContext((Init("old"), Tools(), Message("user", "hello"),
             ModelFailure(category="timeout", message="old failure"), ModelSampleBoundary()))
-        save_interaction_save(self.path, original)
+        seed_cli_save(self.path, original)
         before = self.path.read_bytes()
         commands = deque(("/retry", "/quit"))
         terminal = _Terminal(lambda t, e, s: t.submit(commands.popleft()) if s == "idle" and commands else None)

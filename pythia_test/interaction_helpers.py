@@ -4,7 +4,9 @@ import contextlib
 from dataclasses import replace
 import http.server
 import json
+from pathlib import Path
 import queue
+import shutil
 import threading
 from types import SimpleNamespace
 from unittest import mock
@@ -19,6 +21,10 @@ from pythia.interaction import Message
 from pythia.interaction import MessagesEndpoint
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
+from pythia.interaction import save_interaction_save
+from pythia.interaction._cli_save import full_log_path
+from pythia.interaction._cli_save import private_dir
+from pythia.interaction._cli_save import save_prefix
 from pythia.interaction.codex_auth import _resolve_auth_file
 from pythia.interaction.compaction import SUMMARIZATION_SYSTEM_PROMPT
 from pythia.interaction.compaction import WARMPI_INSTRUCTION
@@ -27,6 +33,32 @@ from pythia.interaction.model import ModelTransportError
 
 # The first line of warmpi's instruction, as it appears in a relay record.
 _WARMPI_MARK = WARMPI_INSTRUCTION.split("\n", 1)[0]
+
+
+def full_log(path):
+    """The full log of a save: a CLI save's PREFIX._private/context.jsonl once it exists, else ``path``.
+
+    The CLI's --save names a prefix (pythia.interaction._cli_save), whose
+    PREFIX.jsonl leaves reasoning out; the demo's --save is the full log.
+    """
+    candidate = full_log_path(path)
+    return candidate if candidate.exists() else Path(path)
+
+
+def seed_cli_save(path, context):
+    """Write ``context`` as a CLI save in the original format at ``path``, to be migrated.
+
+    A save in the current format at the same prefix goes first, so the CLI
+    resumes this one.
+    """
+    remove_cli_save(path)
+    save_interaction_save(path, context)
+
+
+def remove_cli_save(path):
+    """Remove the CLI save that a --save path names: its log and its private directory."""
+    Path(path).unlink(missing_ok=True)
+    shutil.rmtree(private_dir(save_prefix(path)), ignore_errors=True)
 
 
 def _full_url(prefix, suffix):

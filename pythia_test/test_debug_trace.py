@@ -29,6 +29,7 @@ from pythia.interaction import InteractionSaveWriter
 from pythia.interaction import CommandRuntime, create_exec_command_tool
 from pythia.interaction import _debug_trace
 from pythia.interaction._account_http import AccountServiceError
+from pythia.interaction._cli_save import full_log_path
 from pythia.interaction._request_gate import cancellable_urlopen
 from pythia.interaction._debug_trace import (
     DebugTrace, TracingOpener, debug_trace_paths, trace_operation,
@@ -749,7 +750,10 @@ class CLITraceTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.save = self.root / "session.jsonl"
-        self.request_log, self.response_log = debug_trace_paths(self.save)
+        # The CLI's traces are in its save's private directory.
+        private = self.root / "session._private"
+        self.request_log, self.response_log = private / "trace.req.jsonl", private / "trace.res.jsonl"
+        self.event_log = private / "trace.events.jsonl"
 
     def main(self, *argv):
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -772,6 +776,7 @@ class CLITraceTests(unittest.TestCase):
             code, stderr = self.main("--debug-trace", *endpoint, "--resume=False", "--prompt", prompt)
             self.assertEqual(code, 0, stderr)
             self.assertIn(f"Debug trace: {self.request_log} and {self.response_log}", stderr)
+            self.assertIn(f"events: {self.event_log} ", stderr)
         requests, responses = _rows(self.request_log), _rows(self.response_log)
         self.assertEqual([json.loads(row["payload"])["messages"][-1]["content"]
                           for row in requests], ["first", "second"])
@@ -786,6 +791,7 @@ class CLITraceTests(unittest.TestCase):
         self.assertIn(Message("assistant", "Hello."), saved)
 
     def test_unusable_trace_destination_fails_before_the_model_is_built(self):
+        self.request_log.parent.mkdir()
         self.request_log.mkdir()
         with mock.patch.object(cli, "build_model") as build:
             code, stderr = self.main("--debug-trace", "--prompt", "hello")
@@ -793,6 +799,7 @@ class CLITraceTests(unittest.TestCase):
         build.assert_not_called()
         self.assertIn("debug trace destination must be a regular file", stderr)
         self.assertFalse(self.save.exists())
+        self.assertFalse(full_log_path(self.save).exists())
 
     def test_without_the_flag_no_logs_are_created(self):
         model = _Model(self.save, _answer())

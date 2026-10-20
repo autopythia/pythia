@@ -16,6 +16,7 @@ import time
 import unittest
 
 from pythia.interaction._debug_trace import DebugTrace
+from pythia.interaction._cli_save import full_log_path
 from pythia.interaction.claude_relay import ClaudeRelayEndpoint, ClaudeRelayModel
 from pythia.interaction.claude_relay._cli_protocol import PROFILE
 from pythia.interaction.claude_relay._context import Delivery, Snapshot, handoff
@@ -559,11 +560,13 @@ class ParkedYieldTests(WarmTests):
                                 cwd=fixtures.ROOT, env={**os.environ, 'HOME': str(self.root)},
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
-        saved = load_interaction_save(path)
+        # The CLI's full log and traces are in its save's private directory.
+        full = full_log_path(path)
+        saved = load_interaction_save(full)
         [*_, answer] = [item for item in saved if isinstance(item, Message) and item.role == 'assistant']
         self.assertRegex(answer.content_text, r'^pid=\d+ yielded=True \+Wake-up from icron at ')
         self.assertFalse(any(isinstance(item, ModelFailure) for item in saved))
-        events = [json.loads(line) for line in path.with_suffix('.trace.events.jsonl').read_text().splitlines()]
+        events = [json.loads(line) for line in full.with_name('trace.events.jsonl').read_text().splitlines()]
         kinds = [event['type'] for event in events]
         self.assertEqual(kinds.count('claude_invocation'), 2)  # one process: the version query, then the CLI
         self.assertEqual(kinds.count('continuation_parked'), 1)
