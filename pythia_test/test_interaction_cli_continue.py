@@ -92,9 +92,13 @@ class ContinueControllerTests(_ControllerTestCase):
         items = model.calls[0][0].items
         self.assertEqual(items, model.checkpoints[0])  # exactly the saved context
         self.assertEqual(items[:len(original)], original)
-        (closing,) = items[len(original):]  # startup closed the call; nothing else
+        # Startup closed the call; then /continue's record, and no user message.
+        closing, call, result = items[len(original):]
         self.assertIsInstance(closing, ToolResult)
         self.assertFalse(closing.success)
+        self.assertEqual((call.call.name, call.call.arguments_json), ("continue", "{}"))
+        self.assertEqual(result.result.output, "Continuing the turn without a new message.")
+        self.assertTrue(any(i.text.startswith("[user-tool-ret]  continue (") for i in terminal.items))
         saved = load_interaction_save(self.path)
         self.assertEqual(_users(saved), ["old query"])
         self.assertEqual(sum(isinstance(item, UserInteractionBoundary) for item in saved), 1)
@@ -130,7 +134,8 @@ class ContinueControllerTests(_ControllerTestCase):
             "--prompt", "hello", "--max-samples", "1"]), 1)  # the earlier failure stays
         self.assertEqual(len(model.calls), 2)
         self.assertEqual(model.calls[1][0].items, model.checkpoints[1])
-        self.assertIsInstance(model.calls[1][0].items[-1], ToolResult)
+        self.assertIsInstance(model.calls[1][0].items[-3], ToolResult)
+        self.assertEqual(model.calls[1][0].items[-2].call.name, "continue")  # its record
         saved = load_interaction_save(self.path)
         self.assertEqual(_users(saved), ["hello"])
         self.assertEqual(sum(isinstance(item, UserInteractionBoundary) for item in saved), 1)

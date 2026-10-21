@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -645,9 +646,11 @@ class CLIDisabledToolsTests(_ControllerTestCase):
         self.assertEqual(model.calls[0][1], ())
         saved = load_interaction_save(self.path)
         results = [item.result for item in saved if isinstance(item, UserToolResult)]
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(results), 2)  # the /config change and /compact; a read isn't recorded
         self.assertTrue(all(result.success for result in results))
-        config = json.loads(results[1].output)
+        shown = [item.text for item in terminal.items if item.text.startswith("[cli] config:\n")]
+        self.assertEqual(len(shown), 1)  # /config.json's answer, as a notice
+        config = json.loads(shown[0].removeprefix("[cli] config:\n"))
         self.assertEqual(config["max_output_tokens"], 17)
         self.assertNotIn("enable_default_tools", config)
 
@@ -1236,7 +1239,7 @@ class CLIControllerTests(_ControllerTestCase):
             elif step == 1 and "steers=1" in status:
                 t.submit("/steer!")  # flush the steer typed above
                 step = 2
-            elif step == 2 and "steers=1 (immediate)" in status:
+            elif step == 2 and "steers=1 (!)" in status:
                 release.set()
                 step = 3
             elif step == 3 and status == "idle" and any(
@@ -1258,11 +1261,21 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(step, 4)
         later.assert_not_called()
         steer = Message("user", "Also check the tests.")
-        self.assertEqual(model.calls[1][0].items[-3:], (
+        # The /steer! record goes right before the steer it flushed.
+        call, result = model.calls[1][0].items[-3:-1]
+        self.assertEqual(model.calls[1][0].items[-5:-3], (
             ToolResult("p1", "probed"),
-            ToolResult("p2", kernel.SKIPPED_OUTPUT, success=False), steer))
+            ToolResult("p2", kernel.SKIPPED_OUTPUT, success=False)))
+        self.assertEqual((call.call.name, call.call.arguments_json), ("steer", '{"urgency":1}'))
+        self.assertEqual(result, UserToolResult(ToolResult(
+            call.call.call_id, "Delivered 1 steer before the next sample.")))
+        self.assertEqual(model.calls[1][0].items[-1], steer)
+        self.assertNotIn(call, model.calls[1][0].model_items())  # never model input
         self.assertIn("[cli] Flushing 1 steer: delivered once the current sample or tool "
                       "call finishes.", [item.text for item in terminal.items])
+        # The steer showed when it was typed, and not again when the turn took it.
+        self.assertEqual([item.text for item in terminal.items].count(
+            "[user] Also check the tests."), 1)
 
     async def test_quit_drains_sample_without_executing_returned_tools(self):
         entered, release = threading.Event(), threading.Event()
@@ -1288,10 +1301,90 @@ class CLIControllerTests(_ControllerTestCase):
             release.set()
         self.assertEqual(load_interaction_save(self.path).pending_tool_calls(), (call,))
 
+    async def test_a_steer_that_the_turn_ends_before_starts_the_next_query(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def first(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release model")
+            return _answer("first done")
+        step = 0
+
+        def frame(t, editor, status):
+            nonlocal step
+            if step == 0 and entered.is_set():
+                t.submit("/steer more context")  # no bangs: the final answer comes first
+                step = 1
+            elif step == 1 and "steers=1" in status:
+                release.set()
+                step = 2
+            elif step == 2 and status == "idle" and any(
+                    i.text == "[assistant] second done" for i in t.items):
+                t.key("c-d")
+
+        model = _Model(self.path, first, _answer("second done"))
+        terminal = _Terminal(frame)
+        try:
+            self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 0)
+        finally:
+            release.set()
+        saved = load_interaction_save(self.path).items
+        index = next(i for i, item in enumerate(saved) if isinstance(item, UserToolCall))
+        call, result = saved[index:index + 2]
+        # Its record goes where the first turn ended; the steer starts the next query.
+        self.assertIsInstance(saved[index - 1], TurnSummary)
+        self.assertEqual((call.call.name, call.call.arguments_json), ("steer", '{"urgency":0}'))
+        self.assertEqual(result.result.output, "Not delivered as steers: the turn ended first, "
+                                               "so they wait as queued queries.")
+        self.assertEqual(saved[index + 2:index + 4],
+                         (Message("user", "more context"), UserInteractionBoundary()))
+        texts = [item.text for item in terminal.items]
+        # Shown when typed, and not again when its turn began.
+        self.assertEqual(texts.count("[user] more context"), 1)
+        self.assertEqual(texts.count(f"[user-tool-call] steer ({call.call.call_id})"), 1)
+        self.assertEqual(sum(t.startswith("[user-tool-ret]  steer") for t in texts), 1)
+
+    async def test_an_exit_drops_queued_input_and_says_so(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def sample(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release model")
+            return _answer("finished anyway")
+        step = 0
+
+        def frame(t, editor, status):
+            nonlocal step
+            if step == 0 and entered.is_set():
+                t.submit("/task one")
+                t.submit("/task two")
+                step = 1
+            elif step == 1 and "queued=2" in status:
+                t.submit("/exit")
+                step = 2
+            elif step == 2 and status.startswith("closing"):
+                release.set()
+
+        terminal = _Terminal(frame)
+        try:
+            self.assertEqual(await self._run(_Model(self.path, sample), terminal,
+                                             ["--prompt", "hello"]), 0)
+        finally:
+            release.set()
+        texts = [item.text for item in terminal.items]
+        # They showed when typed, so the exit says it dropped them.
+        self.assertLess(texts.index("[user] two"), texts.index(
+            "[cli] Dropped 2 queued inputs; they were not sent."))
+        self.assertIn("[cli] Closing: stopping before the next sample. Ctrl-C or /exit! stops "
+                      "sooner; /exit!! also cancels the current operation where possible.", texts)
+        self.assertEqual([item.content_text for item in load_interaction_save(self.path)
+                          if isinstance(item, Message) and item.role == "user"], ["hello"])
+
     async def test_one_ctrl_c_lets_the_sample_finish_and_saves_it(self):
         entered, release, retires = threading.Event(), threading.Event(), []
-        waiting = ("closing — waiting for current operation; Ctrl-C or /exit!! cancels it where "
-                   "possible")
+        waiting = "closing (!) "  # then the elapsed time
 
         def sample(context):
             entered.set()
@@ -1346,7 +1439,7 @@ class CLIControllerTests(_ControllerTestCase):
                 self.assertEqual(await self._run(
                     model, terminal, ["--prompt", "hello", "--resume=False"]), 0)
                 self.assertTrue(retired.is_set())
-                self.assertTrue(any(status.startswith("closing — cancelling current operation where possible")
+                self.assertTrue(any(status.startswith("closing (!!)")
                                     for _editor, status, _prompt in terminal.frames))
 
     def test_exit_commands_and_the_editor_while_stopping(self):
@@ -1378,12 +1471,17 @@ class CLIControllerTests(_ControllerTestCase):
         state.editor = Editor("more", 4)
         state.handle_key("c-m", "\r")
         self.assertEqual([item.text for item in state.displays], [
+            "[cli] Closing: stopping before the next sample. Ctrl-C or /exit! stops sooner; "
+            "/exit!! also cancels the current operation where possible.",
             "[cli] Already stopping. Ctrl-C or /exit! stops sooner; /exit!! also cancels "
             "the current operation where possible.",
             "[cli] Stopping; input is not accepted. Ctrl-C or /exit! stops sooner; /exit!! "
             "also cancels the current operation where possible.",
+            "[cli] Closing (!): waiting for the current operation. Ctrl-C or /exit!! cancels "
+            "the current operation where possible.",
             "[cli] Already stopping. Ctrl-C or /exit!! cancels the current operation where "
             "possible.",
+            "[cli] Closing (!!): cancelling the current operation where possible.",
             "[cli] Stopping; input is not accepted."])
         fresh = cli._UIState(ready=True)
         fresh.editor = Editor("/quit!!!", 8)  # more than two ! read as two
@@ -1417,7 +1515,6 @@ class CLIControllerTests(_ControllerTestCase):
 
     async def test_exit_during_a_tool_lets_the_batch_finish_and_leaves_nothing_unanswered(self):
         entered, release, executions = threading.Event(), threading.Event(), []
-        gentle = "closing — stopping before the next sample; Ctrl-C or /exit! stops sooner"
 
         def record(arguments, *, timeout_seconds=None):
             executions.append(True)
@@ -1432,7 +1529,7 @@ class CLIControllerTests(_ControllerTestCase):
             if entered.is_set() and not typed:
                 t.submit("/exit")
                 typed.append(True)
-            if status.startswith(gentle):  # then the elapsed time
+            if re.fullmatch(r"closing \d+s", status):  # /exit: no bangs, then the elapsed time
                 release.set()
 
         calls = (ToolCall("record", "one", "{}"), ToolCall("record", "two", "{}"))

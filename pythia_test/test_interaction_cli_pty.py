@@ -384,7 +384,8 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         os.write(self.master, b"/quit\r")
         await self.wait_exit()
         saved = load_interaction_save(selected)
-        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["login", "quota"])
+        # /login and /quota answer with notices; they leave no records.
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], [])
         self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
                          [Message("user", "explicit query")])
         self.assertEqual(default.read_bytes(), b"default sentinel\n")
@@ -506,8 +507,9 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         os.write(self.master, b"\x15\x0b/login\r")
         await self.wait_output(b"Model ready")
         saved = load_interaction_save(self.root / "interaction.jsonl")
-        self.assertTrue(saved.items[-1].result.success)
-        self.assertIsInstance(saved.items[-1], UserToolResult)
+        # /login answers with a notice: it leaves no record.
+        self.assertIn(b"[cli] login: Codex credentials saved", self.output)
+        self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in saved))
         self.assertFalse(any(isinstance(i, Message) and i.role == "user" for i in saved))
         self.assertNotIn(b"[assistant] answer", self.output)
         os.write(self.master, b"explicit query\r")
@@ -537,9 +539,8 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         os.write(self.master, b"/quit\r")
         await self.wait_exit(default_tools=False)
         saved = load_interaction_save(self.root / "interaction.jsonl")
-        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)],
-                         ["config", "login", "quota"])
-        self.assertTrue(all(i.result.success for i in saved if isinstance(i, UserToolResult)))
+        # /config.json is a read, and /login and /quota answer with notices too.
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], [])
         self.assertFalse(next(i for i in saved if isinstance(i, ToolResult)).success)
         self.assertNotIn(b"FAKE_PTY_SECRET", self.output)
         self.assertNotIn("FAKE_PTY_SECRET", (self.root / "interaction.jsonl").read_text())
@@ -559,7 +560,9 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         saved = load_interaction_save(self.root / "interaction.jsonl")
         self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
                          [Message("user", "original")])
-        self.assertFalse(any(isinstance(i, (UserToolCall, ToolCall)) for i in saved))
+        self.assertFalse(any(isinstance(i, ToolCall) for i in saved))
+        # The /retry that ran is recorded; the refused one isn't.
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["retry"])
         self.assertIsInstance(saved[-1], TurnSummary)
 
     async def test_exit_during_real_login_callback_wait_restores_terminal(self):
@@ -571,7 +574,7 @@ class PosixCLITests(unittest.IsolatedAsyncioTestCase):
         os.write(self.master, b"\x03")
         await self.wait_exit()
         saved = load_interaction_save(self.root / "interaction.jsonl")
-        self.assertFalse(saved.items[-1].result.success)
+        self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in saved))
         self.assertFalse(saved.pending_user_tool_calls())
         self.assertFalse((self.root / "auth.json").exists())
         self.assertNotIn("code_challenge", (self.root / "interaction.jsonl").read_text())

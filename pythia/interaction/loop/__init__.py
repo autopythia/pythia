@@ -29,6 +29,7 @@ from .preemption import Preemption
 from .preemption import Urgency
 from .preemption import command_urgency
 from .preemption import escalated_stop
+from .preemption import urgency_marker
 from .tail import TurnTail
 from .tail import turn_tail
 from .tail import unfinished_turn
@@ -62,4 +63,5 @@ __all__ = [
     "turn_tail",
     "turn_yield",
     "unfinished_turn",
+    "urgency_marker",
 ]

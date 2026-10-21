@@ -1005,13 +1005,15 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
             "[cli] Note: this session compacts with pi:2, not compaction_mode "
             "legacydefault:2,coldstart (--compaction-mode): coldstart compaction needs exec_command "
             "to read the saved log, and default model tools are disabled.", texts)
-        refused, shown = self.user_results(saved)
+        # The change is recorded, as refused; the read answers with a notice.
+        [refused] = self.user_results(saved)
         self.assertFalse(refused.success)
         self.assertEqual(refused.output, (
             "compaction_mode can't include coldstart in this session: coldstart compaction "
             "needs exec_command to read the saved log, and default model tools are disabled. "
             "It stays pi:2."))
-        self.assertEqual(json.loads(shown.output),
+        [shown] = [text for text in texts if text.startswith("[cli] config:\n")]
+        self.assertEqual(json.loads(shown.removeprefix("[cli] config:\n")),
                          {"__init__": {"compaction_mode": "pi:2"}, "compaction_mode": "pi:2"})
 
     async def test_a_config_change_applies_to_the_next_turn(self):

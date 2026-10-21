@@ -258,7 +258,7 @@ class CompactCommandTests(unittest.IsolatedAsyncioTestCase):
                 steps.append("exit")
                 t.submit("/exit!")
             elif steps == ["compact", "exit"] and status.startswith(
-                    "closing — waiting for current operation"):
+                    "closing (!)"):
                 steps.append("answer")
                 launches.all[0].answer("## Goal\nShip it.")
         with fake_relay_runtime() as launches:

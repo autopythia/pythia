@@ -421,8 +421,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(cli._run(_Model(), Environment(), terminal, args, path), 4)
         texts = [item.text for item in terminal.items]
         self.assertFalse([text for text in texts if "this session compacts with" in text], texts)
-        [shown] = [text for text in texts if text.startswith("[user-tool-ret]")]
-        self.assertEqual(json.loads(shown.split("\n", 1)[1]),
+        [shown] = [text for text in texts if text.startswith("[cli] config:\n")]  # a read: a notice
+        self.assertEqual(json.loads(shown.removeprefix("[cli] config:\n")),
                          {"compaction_mode": "pi:3", "__init__": {"compaction_mode": "pi:3"}})
 
 

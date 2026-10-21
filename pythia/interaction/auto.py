@@ -43,7 +43,7 @@ from .loop.supervision import Fault, SupervisedHandle, Yield, YieldChannel, supe
 from .loop.supervision import SupervisorTools, YieldTool, decide, run_supervised_task
 from .loop import MissingFinalText, SampleLimitExceeded  # noqa: F401 (re-exported)
 from .loop import Interrupt, Preemption, Steer, TurnHost, Urgency, run_turn
-from .loop import command_urgency, escalated_stop
+from .loop import command_urgency, escalated_stop, urgency_marker
 from .loop import turn_tail
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
@@ -860,8 +860,7 @@ class _Session:
         if phase in _TIMED_PHASES:
             text += f"... {int(time.monotonic() - started)}s"
         if urgency >= Urgency.IMMEDIATE:
-            text += (" | steer pending (preempting)" if urgency >= Urgency.PREEMPT
-                     else " | steer pending (immediate)")
+            text += " | steer pending" + urgency_marker(urgency)
         if continuable:
             text += " | /continue resumes its turn"
         return text
@@ -1656,12 +1655,14 @@ def _exit_level(words):
     return command_urgency(words[0], "/exit", "/quit") if len(words) == 1 else None
 
 
-# The status line while closing, by the stop's level.
-_CLOSING_STATUS = {
-    Urgency.QUEUED: "closing - stopping before the next sample... (Ctrl-C or /exit! stops sooner)",
-    Urgency.IMMEDIATE: ("closing - waiting for current work... (Ctrl-C or /exit!! cancels it "
-                        "where possible)"),
-    Urgency.PREEMPT: "closing - cancelling current work where possible...",
+# The status line while closing, by the stop's level: just its bangs.
+_CLOSING_STATUS = {level: "closing" + urgency_marker(level) for level in Urgency}
+# What the stop does, shown once when it's requested or raised, with how to
+# stop sooner (_stop_hint).
+_CLOSING_NOTICE = {
+    Urgency.QUEUED: "Closing: stopping before the next sample.",
+    Urgency.IMMEDIATE: "Closing (!): waiting for the current work.",
+    Urgency.PREEMPT: "Closing (!!): cancelling the current work where possible.",
 }
 
 
@@ -1673,6 +1674,15 @@ def _stop_hint(level):
     if level < Urgency.PREEMPT:
         return " Ctrl-C or /exit!! cancels the current work where possible."
     return ""
+
+
+def _stop(session, level, notices):
+    """Request a stop at ``level``, and say what it does if that raised it."""
+    before = session.stop_level
+    session.request_stop(level)
+    after = session.stop_level
+    if after is not None and (before is None or after > before):
+        notices.append(DisplayItem(_CLOSING_NOTICE[after] + _stop_hint(after)))
 
 
 class _InterruptStages:
@@ -1776,7 +1786,7 @@ async def _interactive(session, terminal):
                     if key.key in {"c-c", "c-d"}:
                         # The first press is /exit!; a later one also cancels
                         # what is in flight (/exit!!).
-                        session.request_stop(escalated_stop(session.stop_level))
+                        _stop(session, escalated_stop(session.stop_level), notices)
                         if closing is None:
                             closing = asyncio.create_task(asyncio.to_thread(session.close))
                     elif closing is not None:
@@ -1787,7 +1797,7 @@ async def _interactive(session, terminal):
                             words = editor.text.split()
                             level, current = _exit_level(words), session.stop_level
                             if level is not None and (current is None or level > current):
-                                session.request_stop(level)
+                                _stop(session, level, notices)
                                 editor = Editor()
                             elif level is not None:
                                 notices.append(DisplayItem(
@@ -1850,7 +1860,7 @@ async def _interactive(session, terminal):
                                     notices.extend(result)
                                     editor = Editor()
                                     if quit_ is not None:  # QUEUED (/exit) is falsy
-                                        session.request_stop(quit_)
+                                        _stop(session, quit_, notices)
                                         closing = asyncio.create_task(asyncio.to_thread(session.close))
                                 except ValueError as exc:
                                     notices.append(DisplayItem(str(exc)))

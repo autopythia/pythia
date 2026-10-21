@@ -1220,9 +1220,8 @@ class RuntimeTests(unittest.TestCase):
             return answer("done")
         session = self.session({1: [first_sample], -1: [answer("Complete.")]},
                                worker_board=False)
-        gentle = "closing - stopping before the next sample... (Ctrl-C or /exit! stops sooner)"
-        waiting = ("closing - waiting for current work... (Ctrl-C or /exit!! cancels it where "
-                   "possible)")
+        # The status line shows only the stop's bangs; notices say what each does.
+        gentle, waiting, cancelling = "closing", "closing (!)", "closing (!!)"
         hint = (" Ctrl-C or /exit! stops sooner; /exit!! also cancels the current work where "
                 "possible.")
         stopping = "Stopping; input is not accepted." + hint
@@ -1273,7 +1272,7 @@ class RuntimeTests(unittest.TestCase):
                 elif self.stage == 5 and already_waiting in self.seen:
                     self.keys.append(SimpleNamespace(key="c-c", data=""))  # level 3
                     self.stage = 6
-                elif self.stage == 6 and status == "closing - cancelling current work where possible...":
+                elif self.stage == 6 and status == cancelling:
                     release.set()  # this test's model can't be cancelled
                     self.stage = 7
         terminal = Terminal()
@@ -1284,6 +1283,12 @@ class RuntimeTests(unittest.TestCase):
             session.close()
         self.assertEqual(terminal.stage, 7)
         self.assertTrue(session.preempting)
+        closing = [text for text in terminal.seen if text.startswith("Closing")]
+        self.assertEqual(closing, [
+            "Closing: stopping before the next sample." + hint,
+            "Closing (!): waiting for the current work. Ctrl-C or /exit!! cancels the current "
+            "work where possible.",
+            "Closing (!!): cancelling the current work where possible."])
 
     def test_slash_exit_bang_stops_and_preempts_at_once(self):
         session = self.session({}, worker_board=False)
@@ -1643,7 +1648,7 @@ class RuntimeTests(unittest.TestCase):
                          "Flushing 1 steer for task 1 of #1 (main): delivered once the current "
                          "sample or tool call finishes.")
         self.assertRegex(holder["status"],
-                         r"^#1 \(main\) - executing tools\.\.\. \d+s \| steer pending \(immediate\)$")
+                         r"^#1 \(main\) - executing tools\.\.\. \d+s \| steer pending \(!\)$")
         sampled = self.calls[1][1]
         results = [(i.call_id, i.output) for i in sampled if isinstance(i, ToolResult)]
         self.assertEqual(results, [("p1", "probed"), ("p2", kernel.SKIPPED_OUTPUT)])
@@ -2047,7 +2052,7 @@ class RuntimeTests(unittest.TestCase):
             release.set()
             session.close()
         self.assertEqual(terminal.stage, 5)
-        self.assertTrue(any("steer pending (immediate)" in status for status in terminal.statuses))
+        self.assertTrue(any("steer pending (!)" in status for status in terminal.statuses))
         probe.assert_not_called()  # the sample's call was skipped
         self.assertEqual(self.last_user(self.calls[1][1]).content, "Also cover the CLI.")
 

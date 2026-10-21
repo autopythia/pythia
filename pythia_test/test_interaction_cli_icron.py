@@ -474,13 +474,17 @@ class QueueTests(unittest.TestCase):
         state = cli._UIState(ready=True, turn_active=True, icron=icron)
         state.pending.extend((cli._WakeIntent(), cli._Submission("after", Message("user",
                                                                                   "after"))))
-        self.assertEqual(cli._take_interrupt(state), (Message("user", "after"),))  # withdrawn
+        self.assertEqual(cli._take_interrupt(state).messages,
+                         (Message("user", "after"),))  # withdrawn
         icron.main.resume("From the host.")
         state.pending.extend((cli._Submission("before", Message("user", "before")),
                               cli._WakeIntent()))
-        before, wake = cli._take_interrupt(state)
+        taken = cli._take_interrupt(state)
+        before, wake = taken.messages
         self.assertEqual(before, Message("user", "before"))
         self.assertTrue(wake.content_text.endswith("From the host:\nFrom the host."), wake)
+        # The turn shows the wake-up; typed text, it shows only if not yet shown.
+        self.assertEqual(taken.shown, (False, False))
         self.assertEqual((list(state.pending), icron.undelivered()), ([], 0))
 
     def test_due_wake_ups_wait_for_a_model_with_one_notice(self):

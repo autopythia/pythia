@@ -20,6 +20,7 @@ from contextlib import nullcontext
 from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import datetime
 from datetime import time as day_time
 from datetime import timedelta
@@ -100,6 +101,7 @@ from .loop import Urgency
 from .loop import command_urgency
 from .loop import escalated_stop
 from .loop import run_turn
+from .loop import urgency_marker
 from .loop import turn_yield
 from .loop.icron import Job as IcronJob
 from .loop.icron import log_state as icron_log_state
@@ -135,13 +137,17 @@ from .user_tools import parse_user_tool
 FRAME_INTERVAL = 1 / 128
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _MAX_PENDING_QUERIES = 8
-# The status line while closing, by the stop's level.
-_CLOSING_STATUS = {
-    Urgency.QUEUED: "closing — stopping before the next sample; Ctrl-C or /exit! stops sooner",
-    Urgency.IMMEDIATE: ("closing — waiting for current operation; Ctrl-C or /exit!! cancels it "
-                        "where possible"),
-    Urgency.PREEMPT: "closing — cancelling current operation where possible",
+# The status line while closing, by the stop's level: just its bangs.
+_CLOSING_STATUS = {level: "closing" + urgency_marker(level) for level in Urgency}
+# What the stop does, shown once when the user asks for it or raises it while
+# work runs, with how to stop sooner (_UIState._stop_hint).
+_CLOSING_NOTICE = {
+    Urgency.QUEUED: "Closing: stopping before the next sample.",
+    Urgency.IMMEDIATE: "Closing (!): waiting for the current operation.",
+    Urgency.PREEMPT: "Closing (!!): cancelling the current operation where possible.",
 }
+# The result of a tool call that /reboot! or /reboot!! kept from starting.
+REBOOT_SKIPPED_OUTPUT = "Not executed: the user rebooted the CLI before this call started."
 
 
 @dataclass(frozen=True, eq=False)
@@ -157,7 +163,12 @@ class _ContinueIntent:
     after a finished turn (_ends_with_coldstart_compact): the model then
     follows the pointer. /compact queues one for that itself (_follow_pointer),
     as does a cancelled reboot that was to follow it (_reboot_ready).
+
+    ``by_user`` is true for the user's /continue, which is recorded when it
+    starts its turn; the CLI's own continuations are not.
     """
+
+    by_user: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -178,11 +189,30 @@ class _Submission:
     ``steers`` is false for ``/task <text>``: a running turn never takes it as
     a steer, so it becomes the next query, and text typed after it queues
     behind it (a steer never overtakes input queued before it).
+
+    ``shown`` is true once the transcript shows the message: the CLI shows
+    typed text when it's queued, so the turn that takes it doesn't show it
+    again. A restarted CLI's queue says so too (_reboot_state).
     """
 
     text: str
     message: Message
     steers: bool = True
+    shown: bool = False
+
+
+@dataclass(frozen=True, eq=False)
+class _RecordEntry:
+    """The record of a /steer, /steer! or /steer!!, queued in front of the
+    steers it flushed, and written right before them: where the running turn
+    takes them (_take_interrupt), or, if the turn ends first, where it ends
+    (_write_leading_records). Its call was shown when the command was
+    accepted. An exit drops it with them. It isn't the user's input: it never
+    counts toward the queue's limit or its counts (_queued_input).
+    """
+
+    call: UserToolCall
+    flushed: int  # the steers queued when the command was accepted
 
 
 @dataclass
@@ -201,6 +231,13 @@ class _Reboot:
     continues: bool = False
     pointer: bool = False
     ready: bool = False
+    # /reboot! and /reboot!! (Urgency.IMMEDIATE, PREEMPT) end a running turn
+    # sooner, as /exit! and /exit!! would; a coldstart reboot is QUEUED.
+    urgency: Urgency = Urgency.QUEUED
+    # The calls of the /reboot commands that requested it or raised its
+    # level, shown when accepted, and logged with its outcome (_reboot_ready).
+    # An exit drops them. A coldstart reboot that no command asked for has none.
+    calls: list = field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True)
@@ -233,7 +270,7 @@ def _reads_no_files(text: str) -> bool:
 class _UIState:
     editor: Editor = field(default_factory=Editor)
     pending: deque[Union[_Submission, UserToolIntent, _RetryIntent, _ContinueIntent,
-                         _WakeIntent]] = field(default_factory=deque)
+                         _WakeIntent, _RecordEntry]] = field(default_factory=deque)
     retry: Optional[_RetryIntent] = None
     headless: bool = False
     displays: deque[DisplayItem] = field(default_factory=deque)
@@ -346,7 +383,22 @@ class _UIState:
 
     def escalate_stop(self) -> None:
         """Ctrl-C, Ctrl-D, or SIGINT: /exit! the first time, then /exit!!."""
-        self.request_stop(escalated_stop(self.stop_level))
+        self._user_stop(escalated_stop(self.stop_level))
+
+    def _user_stop(self, level: Urgency) -> None:
+        """A stop the user asked for (/exit, /quit, Ctrl-C). Interactively, a
+        notice says what it dropped, and while work runs, what it does and how
+        to stop sooner; the status line shows only its bangs."""
+        before, dropped = self.stop_level, _queued_input(self)
+        self.request_stop(level)
+        if self.headless or self.stop_level is None or (
+                before is not None and self.stop_level <= before):
+            return
+        if dropped:
+            self.notice(f"Dropped {dropped} queued input{'s' if dropped != 1 else ''}; "
+                        f"{'they were' if dropped != 1 else 'it was'} not sent.")
+        if self.phase not in {"idle", "failed", "auth needed"}:
+            self.notice(_CLOSING_NOTICE[self.stop_level] + self._stop_hint())
 
     def _stop_hint(self) -> str:
         """What a stronger exit would do now, as a sentence (or nothing)."""
@@ -374,7 +426,7 @@ class _UIState:
                     self.notice(f"Already stopping.{self._stop_hint()}")
                 else:
                     self.editor = Editor()
-                    self.request_stop(level)
+                    self._user_stop(level)
                 return
             if self.closing:
                 if text.strip():
@@ -424,7 +476,7 @@ class _UIState:
                     self.notice(error)
                     self.editor = Editor()
                     return
-                intent = _ContinueIntent()
+                intent = _ContinueIntent(by_user=True)
             elif head == "/task":
                 # The next query, never a steer: it waits for the running turn
                 # to end, as plain text does when no turn can take a steer.
@@ -453,7 +505,7 @@ class _UIState:
                 else:
                     self._submit_text(parts[1], draft=text, flush=steer)
                 return
-            elif head == "/reboot":
+            elif command_urgency(head, "/reboot") is not None:
                 self._request_reboot(text)
                 return
             elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
@@ -476,9 +528,14 @@ class _UIState:
             if _queued_input(self) >= _MAX_PENDING_QUERIES:
                 self.notice("Query queue is full; the draft has not been submitted.")
             else:
+                if isinstance(intent, UserToolIntent) and _recorded(intent):
+                    # Shown at once, as the log will record it (under this ID).
+                    intent = replace(intent, call_id=_user_call_id())
                 self.pending.append(intent)
                 self.editor = Editor()
                 self.changed.set()
+                if isinstance(intent, UserToolIntent) and intent.call_id is not None:
+                    self.displays.extend(render_interaction_items((_intent_call(intent),)))
                 if isinstance(intent, UserToolIntent) and intent.notice is not None:
                     self.notice(intent.notice)
 
@@ -531,7 +588,11 @@ class _UIState:
         if _queued_input(self) >= _MAX_PENDING_QUERIES:
             self.notice("Query queue is full; the draft has not been submitted.")
             return
+        # The transcript shows queued text at once, as the log will record it;
+        # the turn that takes it doesn't show it again.
+        submission = replace(submission, shown=True)
         self.pending.append(submission)
+        self.displays.extend(render_interaction_items((submission.message,)))
         if self.editor.text == draft:
             self.editor = Editor()
         self.changed.set()
@@ -560,6 +621,14 @@ class _UIState:
         if not count:
             self.notice("No queued steers to flush.")
             return
+        # Its record goes in front of the steers it flushes, after the records
+        # already there, and is written right before them (_RecordEntry).
+        call = _user_call("steer", {"urgency": int(Urgency(level))})
+        index = 0
+        while index < len(self.pending) and isinstance(self.pending[index], _RecordEntry):
+            index += 1
+        self.pending.insert(index, _RecordEntry(call, count))
+        self.displays.extend(render_interaction_items((call,)))
         self.preemption.flush(level)
         level = max(Urgency(level), self.preemption.level)
         steers, them = (f"{count} steers", "them") if count > 1 else ("1 steer", "it")
@@ -577,28 +646,46 @@ class _UIState:
                         "call ends; a sample or command wait is cancelled where possible.")
 
     def _request_reboot(self, text: str) -> None:
-        """/reboot: restart the CLI on the current code, at once while idle.
+        """/reboot, /reboot!, /reboot!!: restart the CLI on the current code,
+        at once while idle.
 
-        Like /exit, it waits for a running turn's tool batch: the turn ends
-        before its next sample, once it takes the steers queued so far, and
-        the restarted CLI continues it. It waits for a running command too.
+        A running turn ends before its next sample, once it takes the steers
+        queued so far, and the restarted CLI continues it. As with /exit at the
+        same level, /reboot lets its tool batch finish; /reboot! only the
+        sample or tool call in flight, and the calls that haven't started are
+        closed as not executed (REBOOT_SKIPPED_OUTPUT); /reboot!! also cancels
+        that operation where possible. A compaction, or a command such as
+        /compact, finishes first. A stronger /reboot raises a pending one.
         Handled at once, like /exit: it is never queued.
         """
         self.editor = Editor()
-        if text.strip() != "/reboot" or "\n" in text or "\r" in text:
-            self.notice("Usage: /reboot (no arguments; single line).")
+        level = command_urgency(text.split(maxsplit=1)[0], "/reboot")
+        if len(text.split()) != 1 or "\n" in text or "\r" in text:
+            self.notice(f"Usage: /reboot{'!' * level} (no arguments; single line).")
             return
-        if self.reboot is not None:
+        reboot = self.reboot
+        if reboot is not None and level <= reboot.urgency:
             self.notice("A reboot is already pending.")
             return
-        refusal = _reboot_refusal(self)
-        if refusal is not None:
-            self.notice(f"Cannot reboot: {refusal}.")
-            return
-        self.reboot = _Reboot("/reboot")
+        if reboot is None:
+            refusal = _reboot_refusal(self)
+            if refusal is not None:
+                self.notice(f"Cannot reboot: {refusal}.")
+                return
+            self.reboot = reboot = _Reboot("/reboot")
+        reboot.urgency = level
+        # Logged with the reboot's outcome (_reboot_ready); shown at once.
+        call = _user_call("reboot", {"urgency": int(level)})
+        reboot.calls.append(call)
+        self.displays.extend(render_interaction_items((call,)))
         if self.phase not in {"idle", "failed", "auth needed"}:
-            self.notice("Rebooting once the current operation allows: a running turn finishes "
-                        "its tool batch and continues after the restart. /exit exits instead.")
+            if level > Urgency.QUEUED:
+                # As a flush of steers does: the turn starts nothing new before
+                # its interrupt point, and at PREEMPT it also cancels the
+                # operation in flight. _reboot_ready resets it if the reboot
+                # is cancelled.
+                self.preemption.flush(level)
+            self.notice(_reboot_notice(level, self.phase))
         self.changed.set()
 
     def _icron_command(self, head: str, text: str) -> None:
@@ -934,15 +1021,10 @@ async def _compact_user_tool(
     # for the effect before starting it.
     source_context = context.copy()
     snapshot = config.snapshot()
-    call = UserToolCall(
-        ToolCall(
-            intent.name,
-            "user_" + uuid.uuid4().hex,
-            intent.arguments_json,
-        )
-    )
+    call = _intent_call(intent)
     await _append(context, (call,), state, writer)
-    state.displays.extend(render_interaction_items((call,)))
+    if intent.call_id is None:  # else the transcript showed it when it was queued
+        state.displays.extend(render_interaction_items((call,)))
     state.active_user_call = call.call.call_id
 
     if state.closing:
@@ -1080,9 +1162,14 @@ async def _user_tool(
             config,
         )
     expected_account = state.bound_account_id
-    call = UserToolCall(ToolCall(intent.name, "user_" + uuid.uuid4().hex, intent.arguments_json))
-    await _append(context, (call,), state, writer)
-    state.displays.extend(render_interaction_items((call,)))
+    # A /config change is recorded, with its call before the change, as for
+    # every effect; a /config read, /login and /quota answer with a notice.
+    recorded = _recorded(intent)
+    call = _intent_call(intent)
+    if recorded:
+        await _append(context, (call,), state, writer)
+        if intent.call_id is None:  # else the transcript showed it when it was queued
+            state.displays.extend(render_interaction_items((call,)))
     if state.closing:
         return model
     state.login_cancel.clear()
@@ -1109,12 +1196,16 @@ async def _user_tool(
             outcome = await _on_context_thread(state, 
                 environment.execute_tool_calls, (call.call,),
             )
-        result = UserToolResult(outcome.items[0])
-        await _append(context, (result,), state, writer)
-        state.displays.extend(render_interaction_items((result,), source_user_calls=(call,)))
+        result = outcome.items[0]
+        if recorded:
+            await _append(context, (UserToolResult(result),), state, writer)
+            state.displays.extend(render_interaction_items((UserToolResult(result),),
+                                                           source_user_calls=(call,)))
+        else:
+            state.notice(_command_notice(intent.name, result))
     finally:
         state.active_user_call = None
-    if intent.name == "login" and result.result.success and not state.closing:
+    if intent.name == "login" and result.success and not state.closing:
         state.set_phase("loading model")
         candidate = None
         try:
@@ -1184,6 +1275,29 @@ def _reads_files(text: str, args) -> bool:
     return bool(args.enable_experimental_media and split_leading_references(text)[0])
 
 
+def _reboot_notice(level: Urgency, phase: str) -> str:
+    """What a /reboot at ``level`` does to the work in progress; while idle, it
+    reboots at once."""
+    if phase == "compacting":
+        return ("Rebooting right after the compaction in progress, which a reboot never "
+                "cancels. /exit exits instead.")
+    if level >= Urgency.PREEMPT:
+        return ("Rebooting once the current sample or tool call is cancelled, where possible: "
+                "a running turn skips the tool calls it hasn't started and continues after "
+                "the restart. /exit exits instead.")
+    if level >= Urgency.IMMEDIATE:
+        return ("Rebooting once the current sample or tool call finishes: a running turn "
+                "skips the tool calls it hasn't started and continues after the restart. "
+                "/exit exits instead.")
+    return ("Rebooting once the current operation allows: a running turn finishes its tool "
+            "batch and continues after the restart. /exit exits instead.")
+
+
+def _has_steers(state: _UIState) -> bool:
+    """Whether a running turn has steers to take at its interrupt point."""
+    return bool(state.turn_active and state.pending and _steers(state.pending[0]))
+
+
 def _steer_count(state: _UIState) -> int:
     """Leading steering submissions in the queue: a running turn takes them as
     steers. A command, or a /task submission, ends the run (see _Submission).
@@ -1199,12 +1313,15 @@ def _steer_count(state: _UIState) -> int:
 
 
 def _steers(entry) -> bool:
-    return isinstance(entry, _WakeIntent) or (isinstance(entry, _Submission) and entry.steers)
+    # A record entry stands in front of the steers it flushed, so a turn takes
+    # it with them.
+    return (isinstance(entry, (_WakeIntent, _RecordEntry))
+            or (isinstance(entry, _Submission) and entry.steers))
 
 
 def _queued_input(state: _UIState) -> int:
-    """The user's queued entries: a wake-up marker isn't one."""
-    return sum(not isinstance(entry, _WakeIntent) for entry in state.pending)
+    """The user's queued entries: a wake-up marker or a record entry isn't one."""
+    return sum(not isinstance(entry, (_WakeIntent, _RecordEntry)) for entry in state.pending)
 
 
 def _take_steers(state: _UIState) -> tuple:
@@ -1217,18 +1334,126 @@ def _take_steers(state: _UIState) -> tuple:
     return tuple(submissions)
 
 
-def _take_interrupt(state: _UIState) -> tuple:
-    """The user messages a running turn takes at its interrupt point: its
-    steers, with icron's message in a wake-up marker's place among them."""
-    messages = []
+@dataclass(frozen=True)
+class _Interrupt:
+    """What a running turn takes at its interrupt point (_take_interrupt)."""
+
+    records: tuple = ()  # _RecordEntry: written right before the messages
+    messages: tuple = ()  # user messages: the steers, and icron's wake-ups
+    shown: tuple = ()  # per message: whether the transcript already shows it
+
+
+def _take_interrupt(state: _UIState) -> _Interrupt:
+    """What a running turn takes at its interrupt point: its steers, with
+    icron's message in a wake-up marker's place among them, and the records
+    of the /steer commands that flushed them."""
+    records, messages, shown = [], [], []
     for entry in _take_steers(state):
-        if not isinstance(entry, _WakeIntent):
+        if isinstance(entry, _RecordEntry):
+            records.append(entry)
+        elif not isinstance(entry, _WakeIntent):
             messages.append(entry.message)
-            continue
-        wakeup = None if state.icron is None else state.icron.take_wakes()
-        if wakeup is not None:  # None: withdrawn since it was queued
-            messages.append(Message("user", wakeup.text()))
-    return tuple(messages)
+            shown.append(entry.shown)
+        else:
+            wakeup = None if state.icron is None else state.icron.take_wakes()
+            if wakeup is not None:  # None: withdrawn since it was queued
+                messages.append(Message("user", wakeup.text()))
+                shown.append(False)
+    return _Interrupt(tuple(records), tuple(messages), tuple(shown))
+
+
+# Records of the user's commands (doc/cli-slash-commands-plan.md): a
+# UserToolCall and its UserToolResult, never model input. Their calls name a
+# command without its bangs, and a command that takes bangs records their
+# number as its ``urgency``.
+
+def _user_call(name: str, arguments: dict) -> UserToolCall:
+    return UserToolCall(ToolCall(name, _user_call_id(),
+                                 json.dumps(arguments, separators=(",", ":"))))
+
+
+def _user_call_id() -> str:
+    return "user_" + uuid.uuid4().hex
+
+
+def _record(call: UserToolCall, output: str, *, success: bool = True) -> tuple:
+    """A command's record: its call, and its result."""
+    return (call, UserToolResult(ToolResult(call.call.call_id, output, success=success)))
+
+
+def _record_results(records) -> tuple:
+    """The display of records whose calls the transcript already shows: their
+    calls were shown when their commands were accepted."""
+    return render_interaction_items(tuple(result for _, result in records),
+                                    source_user_calls=tuple(call for call, _ in records))
+
+
+def _steer_record(entry: _RecordEntry, *, delivered: bool) -> tuple:
+    """A /steer's record: delivered with the steers that follow it, or not,
+    when the turn ended before it took them."""
+    steers = f"{entry.flushed} steer{'s' if entry.flushed != 1 else ''}"
+    return _record(entry.call, f"Delivered {steers} before the next sample." if delivered
+                   else ("Not delivered as steers: the turn ended first, so they wait as "
+                         "queued queries."))
+
+
+def _recorded(intent: UserToolIntent) -> bool:
+    """Whether a queued command is recorded: /compact, and a /config change
+    (a /config read, /login and /quota answer with notices)."""
+    if intent.name == "compact":
+        return True
+    if intent.name != "config":
+        return False
+    try:
+        return "value" in json.loads(intent.arguments_json)
+    except ValueError:
+        return False
+
+
+def _command_notice(name: str, result: ToolResult) -> str:
+    """The notice of a command that isn't recorded (/login, /quota, a /config
+    read): its result, after its name."""
+    output = result.output.rstrip()
+    head = name if result.success else f"{name} failed"
+    return f"{head}:{chr(10) if chr(10) in output else ' '}{output}"
+
+
+def _intent_call(intent: UserToolIntent) -> UserToolCall:
+    """A queued command's call, as the transcript shows it and the log records it."""
+    return UserToolCall(ToolCall(intent.name, intent.call_id or _user_call_id(),
+                                 intent.arguments_json))
+
+
+async def _log_records(context, state, writer, records, *, show_calls=False) -> None:
+    """Log commands' records (``(call, result)`` pairs) and show them: their
+    results, and also their calls with ``show_calls``. Records are
+    audit-only: none is written after a failed checkpoint, or where it would
+    come between tool calls and their results."""
+    if not records or state.persistence_failed:
+        return
+    if context.pending_tool_calls() or context.pending_user_tool_calls():
+        return
+    items = tuple(item for record in records for item in record)
+    # A side write: the status line keeps the phase it had (_checkpoint sets
+    # "saving"), with its timer.
+    phase, started = state.phase, state.phase_started
+    try:
+        await _append(context, items, state, writer)
+    finally:
+        state.phase, state.phase_started = phase, started
+    state.displays.extend(render_interaction_items(items) if show_calls
+                          else _record_results(records))
+
+
+async def _write_leading_records(context, state, writer) -> None:
+    """Log the record entries at the front of the queue: a turn ended before
+    it took their steers, which now wait as queued queries (_RecordEntry)."""
+    entries = []
+    while state.pending and isinstance(state.pending[0], _RecordEntry):
+        entries.append(state.pending.popleft())
+    if entries and not state.closing:
+        await _log_records(context, state, writer,
+                           [_steer_record(entry, delivered=False) for entry in entries])
 
 
 # icron (--enable-experimental-icron): its wake-ups, its commands, and its notices.
@@ -1580,13 +1805,15 @@ def _check_reboot() -> Optional[str]:
             f"{check.returncode}{detail})")
 
 
-async def _reboot_ready(state: _UIState) -> bool:
+async def _reboot_ready(state: _UIState, context: InteractionContext,
+                        writer: InteractionSaveWriter) -> bool:
     """Whether the session shuts down now for its requested reboot.
 
     The reboot is dropped, with a notice, if _reboot_refusal now objects (as
     when main scheduled an icron job meanwhile), or if the start check fails.
     A turn that it ended then continues here, and a pointer it was to follow
-    is followed here.
+    is followed here. Either way, the records of the /reboot commands that
+    asked for it are logged with its outcome, where it ended the turn.
     """
     reboot, phase = state.reboot, state.phase
     refusal = _reboot_refusal(state)
@@ -1597,15 +1824,25 @@ async def _reboot_ready(state: _UIState) -> bool:
         except Exception as exc:  # dropped below, so that the loop never retries it
             refusal = f"the restarted CLI's start check failed ({type(exc).__name__})"
     if state.closing:
-        return False  # an exit came meanwhile: it wins
+        return False  # an exit came meanwhile: it wins, and drops the records
     if refusal is None:
+        # Before ``ready``: a reboot whose records can't be saved doesn't happen.
+        await _log_records(context, state, writer, [
+            _record(call, "The CLI restarts on the current code"
+                    + (", and the model follows the coldstart pointer." if reboot.pointer
+                       else "; the turn continues after the restart." if reboot.continues
+                       else "."))
+            for call in reboot.calls])
         reboot.ready = True
         state.notice("Rebooting: the CLI restarts on the current code"
                      + (", and the model follows the coldstart pointer." if reboot.pointer
                         else " and continues the turn." if reboot.continues else "."))
         return True
     state.reboot = None
+    await _log_records(context, state, writer, [
+        _record(call, f"Reboot cancelled: {refusal}.", success=False) for call in reboot.calls])
     state.set_phase(phase)
+    state.preemption.take()  # a /reboot! or /reboot!! flush: nothing waits for it now
     state.notice(f"Reboot cancelled: {refusal}."
                  + (" The model follows the coldstart pointer here." if reboot.pointer
                     else " The turn continues here." if reboot.continues else ""))
@@ -1625,15 +1862,21 @@ def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> di
     for entry in (state.pending if queued is None else queued):
         if isinstance(entry, _Submission):
             queue.append({"kind": "text", "text": entry.text, "steers": entry.steers,
-                          "message": interaction_item_to_dict(entry.message)})
+                          "message": interaction_item_to_dict(entry.message),
+                          # The terminal keeps the transcript: shown text isn't shown again.
+                          "shown": entry.shown})
         elif isinstance(entry, UserToolIntent):
-            queue.append({"kind": "command", "name": entry.name,
-                          "arguments_json": entry.arguments_json})
+            command = {"kind": "command", "name": entry.name,
+                       "arguments_json": entry.arguments_json}
+            if entry.call_id is not None:  # its call is shown, and logged under this ID
+                command["call_id"] = entry.call_id
+            queue.append(command)
         elif isinstance(entry, (_ContinueIntent, _RetryIntent)):
             # A retry's ticket belongs to this process; /continue reads the
             # log, which has the failure too.
             queue.append({"kind": "continue"})
-        # icron has no wake-ups to carry (_reboot_refusal).
+        # icron has no wake-ups to carry (_reboot_refusal), and a record entry
+        # was logged when its turn ended (_write_leading_records).
     return {
         "version": _REBOOT_STATE_VERSION, "cause": state.reboot.cause,
         "continues": state.reboot.continues, "config": changes,
@@ -1659,11 +1902,15 @@ def _parse_reboot_state(data) -> _Rebooted:
             if not (isinstance(entry["text"], str) and isinstance(message, Message)
                     and message.role == "user"):
                 raise ValueError("invalid queued text")
-            queued.append(_Submission(entry["text"], message, entry["steers"] is True))
+            queued.append(_Submission(entry["text"], message, entry["steers"] is True,
+                                      shown=entry.get("shown") is True))
         elif kind == "command":
-            if not (isinstance(entry["name"], str) and isinstance(entry["arguments_json"], str)):
+            call_id = entry.get("call_id")
+            if not (isinstance(entry["name"], str) and isinstance(entry["arguments_json"], str)
+                    and (call_id is None or isinstance(call_id, str) and call_id)):
                 raise ValueError("invalid queued command")
-            queued.append(UserToolIntent(entry["name"], entry["arguments_json"]))
+            queued.append(UserToolIntent(entry["name"], entry["arguments_json"],
+                                         call_id=call_id))
         elif kind == "continue":
             queued.append(_ContinueIntent())
         else:
@@ -1771,10 +2018,11 @@ class _CliHost(TurnHost):
     """
 
     def __init__(self, state: _UIState, writer: InteractionSaveWriter, loop,
-                 steering=False, config=None) -> None:
+                 steering=False, config=None, context=None) -> None:
         self._state, self._writer, self._loop = state, writer, loop
         self._steering = steering
         self._config = config  # the turn's InteractionConfigSnapshot
+        self._context = context  # the turn's context, for records at its interrupt points
 
     def _post(self, function, *args) -> None:
         self._loop.call_soon_threadsafe(function, *args)
@@ -1798,16 +2046,22 @@ class _CliHost(TurnHost):
         Slash commands and /retry wait for the turn to end, and a steer never
         overtakes one queued before it. Each steer's attachments were read
         when Enter accepted it. icron's due wake-ups among the steers come as
-        its message (_take_interrupt).
+        its message (_take_interrupt). The records of the /steer commands that
+        flushed them are logged right before them; the transcript already
+        shows typed text (_Submission.shown), so the turn shows only the rest.
         """
         if not self._steering or self._state.closing:
             return super().interrupt()
-        messages = self._on_loop(_take_interrupt, self._state)
+        taken = self._on_loop(_take_interrupt, self._state)
         if self._state.closing:
             return Interrupt.STOP
-        if not messages:
+        if taken.records and self._context is not None:
+            records = [_steer_record(entry, delivered=True) for entry in taken.records]
+            self.append(self._context, tuple(item for record in records for item in record))
+            self.show(_record_results(records))
+        if not taken.messages:
             return Interrupt.CONTINUE
-        return Steer(messages)
+        return Steer(taken.messages, shown=taken.shown)
 
     def append(self, context, items) -> None:
         context.extend(items)
@@ -1837,7 +2091,17 @@ class _CliHost(TurnHost):
         return self._state.closing or self._state.preemption.stop_level is not None
 
     def should_steer(self) -> bool:
-        return self._steering and self._state.preemption.due()
+        # Flushed steers wait for the interrupt point. A flush for /reboot! or
+        # /reboot!! alone skips operations but has no steers to deliver, so a
+        # final answer still ends the turn.
+        return (self._steering and self._state.preemption.due()
+                and self._on_loop(_has_steers, self._state))
+
+    def skipped_output(self) -> str:
+        reboot = self._state.reboot
+        if reboot is not None and reboot.urgency >= Urgency.IMMEDIATE:
+            return REBOOT_SKIPPED_OUTPUT
+        return super().skipped_output()
 
     def reboot_requested(self) -> bool:
         return self._state.reboot is not None
@@ -1901,7 +2165,8 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     # failure the loop reports as retryable arms a new one.
     state.retry = None
     snapshot = config.snapshot()
-    host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot)
+    host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot,
+                    context=context)
     state.turn_active = not state.pending  # a steer never overtakes older input
     icron = state.icron
     if icron is not None:
@@ -1965,8 +2230,23 @@ async def _reload_retry_model(
     return model
 
 
-def _ends_with_completed_manual_compaction(context: InteractionContext) -> bool:
+def _log_tail(context: InteractionContext) -> tuple:
+    """The raw log, without tool snapshots, and without the records of other
+    commands after its last step (a /continue, /retry, /reboot, or /config
+    change after /compact's checkpoint, say): they change nothing there.
+    /compact's own records stay."""
     items = tuple(item for item in context.items if not isinstance(item, Tools))
+    end = len(items)
+    while (end >= 2 and isinstance(items[end - 1], UserToolResult)
+           and isinstance(items[end - 2], UserToolCall)
+           and items[end - 2].call.name != "compact"
+           and items[end - 1].result.call_id == items[end - 2].call.call_id):
+        end -= 2
+    return items[:end]
+
+
+def _ends_with_completed_manual_compaction(context: InteractionContext) -> bool:
+    items = _log_tail(context)
     end = len(items)
     if end and isinstance(items[end - 1], CompactionMetadata):
         end -= 1
@@ -1996,7 +2276,7 @@ def _ends_with_coldstart_compact(context: InteractionContext) -> bool:
     """
     if not _ends_with_completed_manual_compaction(context):
         return False
-    last = next(item for item in reversed(context.items) if not isinstance(item, Tools))
+    last = _log_tail(context)[-1]
     return isinstance(last, CompactionMetadata) and last.protocol == "coldstart"
 
 
@@ -2191,7 +2471,7 @@ async def _drive_interaction_body(
                 state.ready = True
                 startup = False
             else:
-                if state.reboot is not None and await _reboot_ready(state):
+                if state.reboot is not None and await _reboot_ready(state, context, writer):
                     return
                 _queue_wake(state)  # due wake-ups that a failure or a missing model held
                 if state.headless:
@@ -2213,6 +2493,11 @@ async def _drive_interaction_body(
                 query = state.pending.popleft()
                 if state.pending:
                     state.changed.set()
+                if isinstance(query, _RecordEntry):
+                    # Normally logged when its turn ended (_write_leading_records).
+                    await _log_records(context, state, writer,
+                                       [_steer_record(query, delivered=False)])
+                    continue
                 if isinstance(query, _WakeIntent):
                     # Between turns, icron's due wake-ups start one, as text
                     # the user typed would.
@@ -2238,6 +2523,9 @@ async def _drive_interaction_body(
                         if model is None:
                             state.set_phase("auth needed")
                             continue
+                    await _log_records(context, state, writer, [_record(
+                        _user_call("retry", {}), "Sampling again after the failure.")],
+                        show_calls=True)
                     query = None  # Continue context; do not append a user turn.
                 elif isinstance(query, _ContinueIntent):
                     # Continue the saved turn where it stopped, without a user
@@ -2260,6 +2548,13 @@ async def _drive_interaction_body(
                         if model is None:
                             state.set_phase("auth needed")
                             continue
+                    if query.by_user:
+                        await _log_records(context, state, writer, [_record(
+                            _user_call("continue", {}),
+                            "The model follows the coldstart pointer."
+                            if _ends_with_coldstart_compact(context)
+                            else "Continuing the turn without a new message.")],
+                            show_calls=True)
                     query = None
                 else:
                     await _fail_pending_user_tools(context, state, writer)
@@ -2315,7 +2610,8 @@ async def _drive_interaction_body(
                     turn_text = query
                 user = UserInteraction((message,))
                 await _append(context, user.context_items(), state, writer)
-                state.displays.extend(user.display_items())
+                if not (isinstance(query, _Submission) and query.shown):
+                    state.displays.extend(user.display_items())
             else:  # /retry, /continue, or a resumed save's new instructions
                 turn_text = _last_user_text(context)
             if should_sample:
@@ -2335,6 +2631,9 @@ async def _drive_interaction_body(
             else:
                 result = None
             state.set_phase("auth needed" if state.auth_required else "idle")
+            # Steers that the turn didn't take wait as queued queries now; their
+            # /steer records go where it ended.
+            await _write_leading_records(context, state, writer)
             if state.reboot is not None:
                 # Only a reboot ends a turn as stopped without an exit; the
                 # restarted CLI continues it. The next iteration reboots.
@@ -2627,13 +2926,12 @@ async def _run(
                           else _CLOSING_STATUS[state.stop_level])
                 if busy:
                     status += f" {int(time.monotonic() - state.phase_started)}s"
+                reboot = state.reboot
+                if reboot is not None and state.stop_level is None and state.phase != "rebooting":
+                    status += " | rebooting" + urgency_marker(reboot.urgency)
                 steers = _steer_count(state)
                 if steers:
-                    status += f" | steers={steers}"
-                    level = state.preemption.level
-                    if level >= Urgency.IMMEDIATE:
-                        status += (" (preempting)" if level >= Urgency.PREEMPT
-                                   else " (immediate)")
+                    status += f" | steers={steers}" + urgency_marker(state.preemption.level)
                 queued = _queued_input(state) - steers
                 if queued > 0:
                     status += f" | queued={queued}"

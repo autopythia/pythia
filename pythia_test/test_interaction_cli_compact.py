@@ -87,10 +87,23 @@ class _Case(unittest.IsolatedAsyncioTestCase):
                 cli._run(model, Environment(), terminal, args, self.path, **options), timeout=6)
         return code, seeded
 
-    def assertFollowedThePointer(self, model, seeded):
-        """One request, the checkpoint with its pointer last: no new message."""
+    def assertFollowedThePointer(self, model, seeded, *, typed=False, after=()):
+        """One request, the checkpoint with its pointer last: no new message.
+        With ``typed``, the user's /continue started it: its record follows.
+        ``after`` names the records of other commands between the checkpoint
+        and that, as a /reboot typed during /compact."""
         [(context, _, _)] = model.calls
-        self.assertIsInstance(context.items[-1], CompactionMetadata)
+        items = context.items
+        if typed:
+            call, result = items[-2:]
+            self.assertEqual((call.call.name, result.result.output),
+                             ("continue", "The model follows the coldstart pointer."))
+            items = items[:-2]
+        if after:
+            calls = items[-2 * len(after)::2]
+            self.assertEqual([call.call.name for call in calls], list(after))
+            items = items[:-2 * len(after)]
+        self.assertIsInstance(items[-1], CompactionMetadata)
         self.assertEqual(context.items[:len(seeded)], seeded)
         self.assertEqual(context.model_items()[-1], Message("user", _POINTER))
         saved = load_interaction_save(self.path)
@@ -197,7 +210,7 @@ class AfterCompactTests(_Case):
         compactor = _Compactor(gate)
         terminal = _compact_then(
             (lambda t, s: compactor.entered.is_set(), lambda t: t.submit("/reboot")),
-            (lambda t, s: _has(t, "Rebooting once"), lambda t: gate.set()))
+            (lambda t, s: _has(t, "Rebooting right after the compaction"), lambda t: gate.set()))
         try:
             with _rebootable(), self.assertRaises(cli._Rebooting) as caught:
                 await self._session(_Model(self.path), terminal, compactor=compactor)
@@ -210,7 +223,8 @@ class AfterCompactTests(_Case):
         terminal = _Terminal(_steps((_idle_with(_ANSWERED), _exit)))
         code, seeded = await self._session(model, terminal, rebooted=rebooted)
         self.assertEqual(code, 0)
-        self.assertFollowedThePointer(model, seeded)
+        # The /reboot's record follows the checkpoint, and the pointer is still followed.
+        self.assertFollowedThePointer(model, seeded, after=("reboot",))
         self.assertNotIn(_RESUMED, _notices(terminal.items))  # the continuation was queued
 
 
@@ -227,7 +241,26 @@ class TypedContinueTests(_Case):
         self.assertEqual(code, 0)
         self.assertIn(_RESUMED, _notices(terminal.items))
         # The pointer, once; then the turn it started has ended.
-        self.assertFollowedThePointer(model, seeded)
+        self.assertFollowedThePointer(model, seeded, typed=True)
+
+
+class LogTailTests(unittest.TestCase):
+    def test_records_after_the_checkpoint_leave_its_pointer_unanswered(self):
+        # A /config change, the user's /continue, or a /reboot is recorded where
+        # it took effect: after the checkpoint, which they don't answer.
+        records = []
+        for name in ("config", "continue", "reboot"):
+            records.extend(cli._record(cli._user_call(name, {}), "done"))
+        context = InteractionContext((*_compacted(), *records, Tools()))
+        self.assertTrue(cli._ends_with_coldstart_compact(context))
+        self.assertEqual(cli._resume_notice(context), _RESUMED)
+        # Another /compact's records are the log's last step, as before.
+        again = cli._record(cli._user_call("compact", {}), "failed", success=False)
+        self.assertFalse(cli._ends_with_coldstart_compact(
+            InteractionContext((*_compacted(), *again))))
+        # An answer after the records answers the pointer.
+        self.assertFalse(cli._ends_with_coldstart_compact(InteractionContext((
+            *_compacted(), *records, Message("assistant", "updated")))))
 
 
 if __name__ == "__main__":

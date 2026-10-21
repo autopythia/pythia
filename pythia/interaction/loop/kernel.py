@@ -103,9 +103,14 @@ class Steer:
     sample. Like messages that tools inject, a steer continues the current
     turn: no ``UserInteractionBoundary`` follows it, so provider turn
     continuity (such as the Responses turn ID and Codex turn state) is kept.
+
+    ``shown`` has a flag per message, true where the host already shows it
+    (the CLI shows typed text when it's queued); the turn loop shows the
+    others. By default it shows them all.
     """
 
     messages: Tuple[Message, ...]
+    shown: Tuple[bool, ...] = ()
 
     def __post_init__(self) -> None:
         messages = tuple(self.messages)
@@ -113,6 +118,10 @@ class Steer:
                                    for m in messages):
             raise ValueError("A steer requires one or more user messages.")
         object.__setattr__(self, "messages", messages)
+        shown = tuple(self.shown) or (False,) * len(messages)
+        if len(shown) != len(messages) or not all(isinstance(flag, bool) for flag in shown):
+            raise ValueError("A steer's shown flags must match its messages.")
+        object.__setattr__(self, "shown", shown)
 
 
 TURN_KINDS = ("ended", "yielded", "stopped")
@@ -209,11 +218,17 @@ class TurnHost:
 
         The turn then ends at its next interrupt point, as ``stopped``, right
         after it saves the steers taken there: the restarted program continues
-        the turn from the save. Unlike a stop, a reboot neither drops the
-        steers nor stops the tool batch in flight. The default host never
-        reboots.
+        the turn from the save. Unlike a stop, a reboot doesn't drop the
+        steers. It lets the tool batch in flight finish, unless the host also
+        flushed the turn's operations (``preemptible``) to end it sooner, as
+        the CLI's /reboot! and /reboot!! do. The default host never reboots.
         """
         return False
+
+    def skipped_output(self) -> str:
+        """The result of a tool call that a flush kept from starting
+        (``skip_calls``): by default, that the user sent a message."""
+        return SKIPPED_OUTPUT
 
     def compacted(self, result: CompactionResult) -> None:
         """Called after an automatic compaction is saved and shown.
@@ -314,7 +329,10 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             return STOPPED
         if isinstance(answer, Steer):
             host.append(context, answer.messages)
-            host.show(render_interaction_items(answer.messages))
+            unshown = tuple(message for message, shown in zip(answer.messages, answer.shown)
+                            if not shown)
+            if unshown:
+                host.show(render_interaction_items(unshown))
         if host.reboot_requested():
             return STOPPED  # the restarted program continues the turn
         operation = host.preemptible(_retirer(model))
@@ -537,11 +555,13 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
 
 
 def skip_calls(context, calls: Iterable[ToolCall], host: TurnHost) -> None:
-    """Close tool calls that a steer kept from starting; they never ran."""
+    """Close tool calls that a flush (a steer, or the CLI's /reboot!) kept from
+    starting; they never ran. Their result is ``host.skipped_output()``."""
     calls = tuple(calls)
     if not calls:
         return
-    results = tuple(ToolResult(call.call_id, SKIPPED_OUTPUT, success=False) for call in calls)
+    output = host.skipped_output()
+    results = tuple(ToolResult(call.call_id, output, success=False) for call in calls)
     host.append(context, results)
     host.show(render_interaction_items(results, source_calls=calls))
 

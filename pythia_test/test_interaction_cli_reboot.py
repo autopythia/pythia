@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -23,7 +24,9 @@ from pythia.interaction import ToolSpec, Tools, TurnSummary, UserInteractionBoun
 from pythia.interaction import UserToolResult, cli, demo, load_interaction_save
 from pythia.interaction import save_interaction_save
 from pythia.interaction._cli_editor import Editor
+from pythia.interaction.environment import current_cancel
 from pythia.interaction.loop import kernel
+from pythia.interaction.loop import Urgency
 from pythia.interaction.loop.tail import turn_tail
 from pythia.interaction.runtime_config import ConfigError, parse_config_literal
 from pythia.interaction.user_tools import UserToolIntent
@@ -228,8 +231,8 @@ class RebootCommandTests(unittest.TestCase):
             self.assertTrue(state.changed.is_set())
             _submit(state, "/reboot")
             busy = cli._UIState(ready=True, phase="sampling")
-            _submit(busy, "/reboot")
-            _submit(busy, "/reboot!")
+            for text in ("/reboot", "/reboot!", "/reboot!", "/reboot!!", "/reboot! now"):
+                _submit(busy, text)
         self.assertEqual(_notices(state.displays), [
             "Cannot reboot: this process's command line isn't known, so it can't be run again.",
             "Usage: /reboot (no arguments; single line).",
@@ -237,13 +240,22 @@ class RebootCommandTests(unittest.TestCase):
             "A reboot is already pending.",
         ])
         self.assertEqual((state.editor, list(state.pending)), (Editor(), []))
-        self.assertEqual(busy.reboot, cli._Reboot("/reboot"))
-        notices = _notices(busy.displays)
-        self.assertEqual(notices[0], "Rebooting once the current operation allows: a running "
-                                     "turn finishes its tool batch and continues after the "
-                                     "restart. /exit exits instead.")
-        self.assertTrue(notices[1].startswith("Unsupported command. Use /retry"))
-        self.assertIn("/reboot", notices[1])
+        # A stronger /reboot raises the pending one, and flushes the turn's
+        # operations at its level, as /steer! and /steer!! do.
+        self.assertEqual(busy.reboot, cli._Reboot("/reboot", urgency=Urgency.PREEMPT))
+        self.assertEqual(busy.preemption.level, Urgency.PREEMPT)
+        self.assertEqual(_notices(busy.displays), [
+            "Rebooting once the current operation allows: a running turn finishes its tool "
+            "batch and continues after the restart. /exit exits instead.",
+            "Rebooting once the current sample or tool call finishes: a running turn skips "
+            "the tool calls it hasn't started and continues after the restart. /exit exits "
+            "instead.",
+            "A reboot is already pending.",
+            "Rebooting once the current sample or tool call is cancelled, where possible: a "
+            "running turn skips the tool calls it hasn't started and continues after the "
+            "restart. /exit exits instead.",
+            "Usage: /reboot! (no arguments; single line).",
+        ])
 
     def test_icron_jobs_live_only_in_this_process(self):
         icron = Icron()
@@ -292,6 +304,33 @@ class RebootStateTests(unittest.TestCase):
         self.assertEqual(command, UserToolIntent("config", '{"key":"max_samples","value":7}'))
         self.assertIsInstance(continuation, cli._ContinueIntent)
         self.assertIsNone(rebooted.warning)
+
+    def test_shown_input_stays_shown_and_queued_calls_keep_their_ids(self):
+        state = cli._UIState(reboot=cli._Reboot("/reboot"))
+        steer = cli._user_call("steer", {"urgency": 1})
+        state.pending.extend((
+            cli._RecordEntry(steer, 1),  # logged when its turn ended: not carried
+            cli._Submission("typed", Message("user", "typed"), shown=True),
+            cli._Submission("wake", Message("user", "wake")),
+            UserToolIntent("config", '{"key":"max_samples","value":7}', call_id="user_abc"),
+            UserToolIntent("quota", "{}"),  # not recorded: no call shown
+        ))
+        carried = cli._reboot_state(state, InteractionConfig())
+        self.assertEqual([entry.get("shown", entry.get("call_id")) for entry in carried["queue"]],
+                         [True, False, "user_abc", None])
+        typed, wake, config, quota = cli._parse_reboot_state(json.loads(json.dumps(carried))).queue
+        self.assertEqual((typed.shown, wake.shown), (True, False))
+        self.assertEqual((config.call_id, quota.call_id), ("user_abc", None))
+        # A state from older code has neither field: its text is shown when taken.
+        for entry in carried["queue"]:
+            entry.pop("shown", None)
+            entry.pop("call_id", None)
+        typed, _, config, _ = cli._parse_reboot_state(carried).queue
+        self.assertEqual((typed.shown, config.call_id), (False, None))
+        for call_id in (7, ""):
+            carried["queue"][2]["call_id"] = call_id
+            with self.subTest(call_id=call_id), self.assertRaises(ValueError):
+                cli._parse_reboot_state(carried)
 
     def test_it_reaches_the_restarted_cli_through_an_inherited_descriptor(self):
         carried = cli._reboot_state(self._state(), InteractionConfig())
@@ -433,6 +472,12 @@ class RebootFlowTests(_RebootCase):
             "draft": {"text": "", "cursor": 0}, "queue": [], "exit_code": 0})
         self.assertIn("Rebooting: the CLI restarts on the current code.", _notices(terminal.items))
         self.assertEqual(_users(load_interaction_save(self.path)), ["hello"])
+        # Recorded with its outcome; its call showed when it was typed, once.
+        call, result = load_interaction_save(self.path).items[-2:]
+        self.assertEqual((call.call.name, call.call.arguments_json), ("reboot", '{"urgency":0}'))
+        self.assertEqual(result, UserToolResult(ToolResult(
+            call.call.call_id, "The CLI restarts on the current code.")))
+        self.assertEqual(_texts(terminal).count(f"[user-tool-call] reboot ({call.call.call_id})"), 1)
 
     async def test_reboot_during_a_turn_takes_its_steers_and_carries_the_rest(self):
         probe, entered, release = _blocking_probe()
@@ -460,20 +505,135 @@ class RebootFlowTests(_RebootCase):
             release.set()
         self.assertEqual(len(model.calls), 1)
         saved = load_interaction_save(self.path)
-        # The batch finished, and the steer reached the turn before it ended.
-        self.assertEqual(saved.items[-2:], (ToolResult("p1", "probed"),
-                                            Message("user", "Also check the docs.")))
+        # The batch finished, and the steer reached the turn before it ended;
+        # the /reboot's record follows, with its outcome.
+        self.assertEqual(saved.items[-4:-2], (ToolResult("p1", "probed"),
+                                              Message("user", "Also check the docs.")))
+        call, result = saved.items[-2:]
+        self.assertEqual((call.call.name, call.call.arguments_json), ("reboot", '{"urgency":0}'))
+        self.assertEqual(result, UserToolResult(ToolResult(
+            call.call.call_id,
+            "The CLI restarts on the current code; the turn continues after the restart.")))
         self.assertTrue(turn_tail(saved.items).unfinished)
         self.assertTrue(carried["continues"])
         self.assertEqual(carried["config"], {"auto_compaction_context_tokens": 5000})
         self.assertEqual(carried["draft"], {"text": "half typed", "cursor": 10})
+        # The queued /config change was shown under its ID, which the restarted
+        # CLI logs it under; the queued text was shown too, and isn't again.
+        command_id = carried["queue"][1].pop("call_id")
+        self.assertTrue(command_id.startswith("user_"), command_id)
+        self.assertTrue(any(item.text == f"[user-tool-call] config ({command_id})"
+                            for item in terminal.items))
         self.assertEqual(carried["queue"], [
             {"kind": "text", "text": "Then this.", "steers": False,
-             "message": {"type": "message", "role": "user", "content": "Then this."}},
+             "message": {"type": "message", "role": "user", "content": "Then this."},
+             "shown": True},
             {"kind": "command", "name": "config",
              "arguments_json": '{"key":"max_samples","value":7}'}])
         self.assertIn("Rebooting: the CLI restarts on the current code and continues the turn.",
                       _notices(terminal.items))
+
+    async def test_reboot_bang_skips_the_calls_not_started_and_the_turn_continues(self):
+        probe, entered, release = _blocking_probe()
+        later = mock.Mock(return_value=ToolOutcome("never"))
+        environment = Environment((probe, Tool(ToolSpec("later", "Later.", {"type": "object"}),
+                                               later)))
+        terminal = _Terminal(_steps(
+            (lambda t, s: entered.is_set(), lambda t: t.submit("/reboot!")),
+            (lambda t, s: "| rebooting (!)" in s, lambda t: release.set())))
+        model = _Model(self.path, ModelSample((ToolCall("probe", "p1", "{}"),
+                                               ToolCall("later", "l1", "{}"))))
+        try:
+            with _rebootable():
+                carried = await self._rebooted(model, terminal, ["--prompt", "go"], environment)
+        finally:
+            release.set()
+        # The call in flight finished; the one not started was closed, not run.
+        later.assert_not_called()
+        self.assertEqual((carried["cause"], carried["continues"]), ("/reboot", True))
+        saved = load_interaction_save(self.path).items
+        self.assertEqual([item for item in saved if isinstance(item, ToolResult)], [
+            ToolResult("p1", "probed"),
+            ToolResult("l1", cli.REBOOT_SKIPPED_OUTPUT, success=False)])
+        self.assertEqual(len(model.calls), 1)  # no sample after the batch
+        self.assertTrue(turn_tail(saved).unfinished)  # the restarted CLI continues it
+
+    async def test_reboot_bang_bang_cancels_the_command_wait_in_flight(self):
+        entered = threading.Event()
+
+        def wait(arguments, *, timeout_seconds=None):
+            entered.set()
+            token, deadline = current_cancel(), time.monotonic() + 4
+            while not token.cancelled and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return ToolOutcome("cancelled" if token.cancelled else "not cancelled")
+        environment = Environment((Tool(ToolSpec("wait", "Wait.", {"type": "object"}), wait),))
+        terminal = _Terminal(_steps((lambda t, s: entered.is_set(),
+                                     lambda t: t.submit("/reboot!!"))))
+        model = _Model(self.path, ModelSample((ToolCall("wait", "w1", "{}"),)))
+        with _rebootable():
+            carried = await self._rebooted(model, terminal, ["--prompt", "go"], environment)
+        self.assertEqual((carried["cause"], carried["continues"]), ("/reboot", True))
+        saved = load_interaction_save(self.path).items
+        self.assertEqual([item for item in saved if isinstance(item, ToolResult)],
+                         [ToolResult("w1", "cancelled")])
+
+    async def test_reboot_bang_during_the_final_sample_lets_the_turn_end(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def answer(context):
+            entered.set()
+            if not release.wait(4):
+                raise AssertionError("the test did not release the model")
+            return _answer("done")
+        terminal = _Terminal(_steps(
+            (lambda t, s: entered.is_set(), lambda t: t.submit("/reboot!")),
+            (lambda t, s: "| rebooting (!)" in s, lambda t: release.set())))
+        model = _Model(self.path, answer)
+        try:
+            with _rebootable():
+                carried = await self._rebooted(model, terminal, ["--prompt", "go"])
+        finally:
+            release.set()
+        # A final answer still ends the turn, so there's nothing to continue.
+        self.assertEqual((carried["cause"], carried["continues"]), ("/reboot", False))
+        saved = load_interaction_save(self.path).items
+        self.assertIsInstance(saved[-3], TurnSummary)
+        self.assertEqual(json.loads(saved[-2].call.arguments_json), {"urgency": 1})
+        self.assertEqual(saved[-1].result.output, "The CLI restarts on the current code.")
+
+    async def test_a_cancelled_reboot_bang_lets_the_turn_continue_here(self):
+        probe, entered, release = _blocking_probe()
+        later = mock.Mock(return_value=ToolOutcome("never"))
+        environment = Environment((probe, Tool(ToolSpec("later", "Later.", {"type": "object"}),
+                                               later)))
+        terminal = _Terminal(_steps(
+            (lambda t, s: entered.is_set(), lambda t: t.submit("/reboot!")),
+            (lambda t, s: "| rebooting (!)" in s, lambda t: release.set()),
+            (_idle_with("[assistant] done here"), _exit)))
+        model = _Model(self.path, ModelSample((ToolCall("probe", "p1", "{}"),
+                                               ToolCall("later", "l1", "{}"))),
+                       _answer("done here"))
+        try:
+            with _rebootable(check="the restarted CLI would fail to start"):
+                self.assertEqual(await self._session(model, terminal, ["--prompt", "go"],
+                                                     environment), 0)
+        finally:
+            release.set()
+        later.assert_not_called()
+        self.assertIn("Reboot cancelled: the restarted CLI would fail to start. The turn "
+                      "continues here.", _notices(terminal.items))
+        # The flush was reset: the continuation sampled, and nothing more was skipped.
+        self.assertEqual(len(model.calls), 2)
+        saved = load_interaction_save(self.path).items
+        self.assertIsInstance(saved[-1], TurnSummary)
+        # Where the reboot ended the turn: its record, with the cancellation.
+        index = next(i for i, item in enumerate(saved) if isinstance(item, UserToolCall))
+        self.assertEqual(saved[index - 1], ToolResult("l1", cli.REBOOT_SKIPPED_OUTPUT,
+                                                      success=False))
+        self.assertEqual(saved[index + 1].result, ToolResult(
+            saved[index].call.call_id, "Reboot cancelled: the restarted CLI would fail to start.",
+            success=False))
 
     async def test_an_exit_after_a_reboot_request_wins(self):
         probe, entered, release = _blocking_probe()
@@ -598,7 +758,7 @@ class RebootFlowTests(_RebootCase):
         terminal = _Terminal(_steps(
             (lambda t, s: s == "idle", lambda t: t.submit("/compact")),
             (lambda t, s: compactor.entered.is_set(), lambda t: t.submit("/reboot")),
-            (lambda t, s: _has(t, "Rebooting once"), lambda t: gate.set())))
+            (lambda t, s: _has(t, "Rebooting right after the compaction"), lambda t: gate.set())))
         model = _Model(self.path)
         try:
             with _rebootable(), patch_compaction(cli, "create_default_compactor",

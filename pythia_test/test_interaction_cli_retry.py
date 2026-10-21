@@ -107,7 +107,9 @@ class RetryControllerTests(_ControllerTestCase):
                 self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
                                  [Message("user", "original")])
                 self.assertEqual(sum(isinstance(i, UserInteractionBoundary) for i in saved), 1)
-                self.assertFalse(any(isinstance(i, UserToolCall) for i in saved))
+                # /retry's record, but no user input.
+                self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)],
+                                 ["retry"])
                 shown = [item.text for item in terminal.items]
                 self.assertEqual(shown.count(HINT), 1)
                 self.assertLess(shown.index("[cli] " + diagnostic), shown.index(HINT))
@@ -219,8 +221,9 @@ class RetryControllerTests(_ControllerTestCase):
         ))
         self.assertEqual(model.calls[1][1], ())
         self.assertIn(Message("user", "summary"), model.calls[1][0].model_items())
+        # /quota and /login answer with notices; /retry is recorded before its sample.
         self.assertEqual([i.call.name for i in load_interaction_save(self.path) if isinstance(i, UserToolCall)],
-                         ["config", "quota", "login", "compact"])
+                         ["config", "compact", "retry"])
 
     async def test_new_query_invalidates_queued_retry_and_success_disables_retry(self):
         step = 0

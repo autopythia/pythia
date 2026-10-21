@@ -441,16 +441,16 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             if step == 0:
                 terminal.submit("/config.json")
                 step = 1
-            elif step == 1 and sum(
-                item.text.startswith("[user-tool-ret]  config")
+            elif step == 1 and any(
+                item.text.startswith("[cli] config:\n")  # a read answers with a notice
                 for item in terminal.items
-            ) >= 1:
+            ):
                 terminal.submit("/config max_output_tokens 17")
                 step = 2
-            elif step == 2 and sum(
+            elif step == 2 and any(
                 item.text.startswith("[user-tool-ret]  config")
                 for item in terminal.items
-            ) >= 2:
+            ):
                 terminal.submit("next query")
                 step = 3
             elif step == 3 and any(
@@ -482,8 +482,16 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             item for item in saved if isinstance(item, UserToolResult)
             and item.result.call_id in {call.call.call_id for call in config_calls}
         ]
-        self.assertEqual(len(config_calls), 2)
-        self.assertEqual(len(config_results), 2)
+        # Only the change is recorded; the read was a notice.
+        self.assertEqual(len(config_calls), 1)
+        self.assertEqual(len(config_results), 1)
+        # Its call showed when it was queued, under the ID it's logged with, once.
+        shown_calls = [item.text for item in terminal.items
+                       if item.text.startswith("[user-tool-call] config")]
+        self.assertEqual(shown_calls,
+                         [f"[user-tool-call] config ({config_calls[0].call.call_id})"])
+        [read] = [item.text.removeprefix("[cli] config:\n") for item in terminal.items
+                  if item.text.startswith("[cli] config:\n")]
         # The official Codex route defaults to coldstart, then warmpi twice;
         # without exec_command, coldstart is dropped silently.
         defaults = {
@@ -502,10 +510,10 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "extra_sample_params": {},
         }
         self.assertEqual(
-            json.loads(config_results[0].result.output),
+            json.loads(read),
             {**defaults, "__init__": defaults},
         )
-        self.assertEqual(config_results[1].result.output,
+        self.assertEqual(config_results[0].result.output,
                          "# init: max_output_tokens = None\nmax_output_tokens = 17")
 
     async def test_config_is_available_without_an_authenticated_model(self):
@@ -516,18 +524,18 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             if status == "auth needed" and not submitted:
                 submitted = True
                 terminal.submit("/config enable_workspace")
-            elif status == "auth needed" and submitted and self.path.exists():
-                saved = load_interaction_save(self.path)
-                if isinstance(saved.items[-1], UserToolResult):
-                    terminal.key("c-d")
+            elif status == "auth needed" and submitted and any(
+                    item.text == "[cli] config: enable_workspace = True"
+                    for item in terminal.items):
+                terminal.key("c-d")
 
         self.assertEqual(
             await self.run_cli(None, _Terminal(frame)),
             0,
         )
+        # A read answers with a notice, and isn't recorded.
         saved = load_interaction_save(self.path)
-        self.assertEqual(saved.items[-1].result.output, "enable_workspace = True")
-        self.assertTrue(saved.items[-1].result.success)
+        self.assertFalse(any(isinstance(item, (UserToolCall, UserToolResult)) for item in saved))
 
     async def test_unfinished_config_is_closed_without_replay(self):
         call = UserToolCall(ToolCall(
@@ -735,7 +743,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tool_result.success)
         self.assertIn(str(outside), tool_result.output)
 
-    async def test_quota_plan_propagates_http_to_log_and_replay_without_empty_argument_block(self):
+    async def test_quota_plan_propagates_http_to_its_notice_and_nothing_is_logged(self):
         token = "FAKE_BEARER"
         self.auth_path.write_text(json.dumps({
             "tokens": {"access_token": token, "account_id": "account"},
@@ -751,10 +759,9 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 }).encode())
 
                 def open_request(request, *, timeout):
-                    pending = load_interaction_save(self.path).pending_user_tool_calls()
-                    self.assertEqual(len(pending), 1)
-                    self.assertEqual(pending[0].call.name, "quota")
-                    self.assertEqual(pending[0].call.arguments_json, "{}")
+                    # /quota isn't recorded: nothing is logged before its request.
+                    self.assertFalse(any(isinstance(item, (UserToolCall, UserToolResult))
+                                         for item in load_interaction_save(self.path)))
                     self.assertEqual(request.get_method(), "GET")
                     self.assertEqual(request.full_url, "https://chatgpt.com/backend-api/wham/usage")
                     self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
@@ -768,7 +775,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                         if not submitted:
                             submitted = True
                             t.submit("/quota")
-                        elif any(i.text.startswith("[user-tool-ret]  quota") for i in t.items):
+                        elif any(i.text.startswith("[cli] quota:") for i in t.items):
                             t.key("c-d")
 
                 terminal = _Terminal(frame)
@@ -779,16 +786,14 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                     opener.assert_called_once()
                     self.assertTrue(response.closed)
                     saved = load_interaction_save(self.path)
-                    self.assertEqual(tuple(type(i) for i in saved), (
-                        Init, Tools, UserToolCall, UserToolResult,
-                    ))
-                    self.assertEqual(saved.items[2].call.arguments_json, "{}")
-                    self.assertTrue(saved.items[3].result.success)
-                    self.assertIn(f"\nplan: {expected_plan}\n", saved.items[3].result.output)
+                    self.assertEqual(tuple(type(i) for i in saved), (Init, Tools))
+                    [notice] = [i.text for i in terminal.items if i.text.startswith("[cli] quota:")]
+                    self.assertTrue(notice.startswith("[cli] quota:\n"), notice)
+                    self.assertIn(f"\nplan: {expected_plan}\n", notice)
+                    self.assertNotIn(token, notice)
                     self.assertNotIn(token, self.path.read_text())
-                    self.assertNotIn("{}", tuple(i.text for i in terminal.items))
                     transcript = tuple(i for i in terminal.items if not i.text.startswith("[cli]"))
-                    self.assertEqual(len(transcript), 3)
+                    self.assertEqual(len(transcript), 1)  # the tool snapshot only
                     self.assertEqual(transcript, render_interaction_items(saved.items))
 
                     before = self.path.read_bytes()
@@ -817,7 +822,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(editor.text, "initial draft")
                 t.submit("/quota")
                 step = 2
-            elif status == "auth needed" and step == 2 and any(isinstance(i, UserToolResult) for i in load_interaction_save(self.path)):
+            elif status == "auth needed" and step == 2 and any(
+                    i.text.startswith("[cli] quota failed:") for i in t.items):
                 t.submit("/login")
                 step = 3
             elif status == "idle" and step == 3:
@@ -828,15 +834,14 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 t.submit("/quit")
 
         def login(path, **kwargs):
-            pending = load_interaction_save(self.path).pending_user_tool_calls()
-            self.assertEqual(pending[0].call.name, "login")
-            self.assertFalse(any(isinstance(i, UserInteractionBoundary) for i in load_interaction_save(self.path)))
+            saved = load_interaction_save(self.path)
+            # Neither /quota nor /login is recorded, and the draft wasn't submitted.
+            self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in saved))
+            self.assertFalse(any(isinstance(i, UserInteractionBoundary) for i in saved))
             path.write_text('{"tokens":{"access_token":"FAKE_SECRET","account_id":"account"}}')
 
         def activate(args):
-            saved = load_interaction_save(self.path)
-            self.assertIsInstance(saved.items[-1], UserToolResult)
-            self.assertTrue(saved.items[-1].result.success)
+            self.assertFalse(any(isinstance(i, UserToolResult) for i in load_interaction_save(self.path)))
             return model
 
         terminal = _Terminal(frame)
@@ -845,7 +850,9 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.run_cli(None, terminal), 0)
         saved = load_interaction_save(self.path)
         self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"], [Message("user", "explicit query")])
-        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["quota", "login"])
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], [])
+        self.assertIn("[cli] login: Codex credentials saved. Model activation is handled "
+                      "separately.", [i.text for i in terminal.items])
         self.assertEqual(len(model.calls), 1)
         self.assertNotIn("FAKE_SECRET", self.path.read_text())
         self.assertNotIn("FAKE_SECRET", "\n".join(i.text for i in terminal.items))
@@ -869,36 +876,37 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         await self.run_cli(model, _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None))
         self.assertEqual(self.path.read_bytes(), before)
 
-    async def test_user_call_and_result_save_failures_block_login_or_activation(self):
-        for fail_result in (False, True):
-            with self.subTest(fail_result=fail_result):
-                attempted = []
+    async def test_login_and_activation_save_nothing(self):
+        # /login is a notice, not a record: a save failing now couldn't block
+        # it, since none happens between startup and the next query.
+        saves, logged_in = [], []
 
-                def save(writer, context):
-                    target = UserToolResult if fail_result else UserToolCall
-                    if any(isinstance(i, target) for i in context):
-                        raise OSError("disk failed")
-                    real_save(writer, context)
+        def save(writer, context):
+            saves.append(tuple(context.items))
+            real_save(writer, context)
 
-                def login(path, **kwargs):
-                    attempted.append(True)
+        def login(path, **kwargs):
+            logged_in.append(len(saves))
+            path.write_text('{"tokens":{"access_token":"FAKE_SECRET","account_id":"account"}}')
 
-                def frame(t, editor, status):
-                    if status == "auth needed":
-                        t.submit("/login")
-                    if status == "failed":
-                        t.key("c-d")
+        model = _Model(self.path)
 
-                with patch_saves(save):
-                    with mock.patch.object(user_tools, "login", side_effect=login):
-                        with mock.patch.object(cli, "build_model") as activate:
-                            self.assertEqual(await self.run_cli(None, _Terminal(frame)), 1)
-                activate.assert_not_called()
-                self.assertEqual(len(attempted), int(fail_result))
-                saved = load_interaction_save(self.path)
-                self.assertEqual(bool(saved.pending_user_tool_calls()), fail_result)
+        def frame(t, editor, status):
+            if status == "auth needed" and not logged_in:
+                t.submit("/login")
+            elif status == "idle":
+                t.key("c-d")
 
-    async def test_quit_during_login_cancels_wait_and_checkpoints_safe_result(self):
+        with patch_saves(save):
+            with mock.patch.object(user_tools, "login", side_effect=login):
+                with mock.patch.object(cli, "build_model", return_value=model) as activate:
+                    self.assertEqual(await self.run_cli(None, _Terminal(frame)), 0)
+        activate.assert_called_once()
+        self.assertEqual(logged_in, [len(saves)])  # no save before it, nor after
+        self.assertFalse(any(isinstance(item, (UserToolCall, UserToolResult))
+                             for context in saves for item in context))
+
+    async def test_quit_during_login_cancels_wait_and_logs_nothing(self):
         entered = threading.Event()
 
         def login(path, *, notify, cancel, **kwargs):
@@ -918,7 +926,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.run_cli(None, _Terminal(frame)), 0)
         saved = load_interaction_save(self.path)
         self.assertFalse(saved.pending_user_tool_calls())
-        self.assertFalse(saved.items[-1].result.success)
+        self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in saved))
         self.assertNotIn("fake transient challenge", self.path.read_text())
 
     async def test_login_failure_and_activation_failure_are_safe_and_do_not_sample(self):
@@ -1028,7 +1036,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         saved = load_interaction_save(self.path)
         self.assertEqual(saved.items[:len(original)], original)
         self.assertEqual(saved.model_items(), InteractionContext(original).model_items())
-        self.assertEqual(len(saved.items), len(original) + 2)
+        self.assertEqual(len(saved.items), len(original))  # /login logs nothing
         self.assertEqual(model.calls, [])
 
     async def test_compact_records_audit_pair_and_installs_checkpoint_atomically(self):

@@ -63,6 +63,13 @@ def escalated_stop(level: Optional[Urgency]) -> Urgency:
     return Urgency.IMMEDIATE
 
 
+def urgency_marker(level: Urgency) -> str:
+    """How a status line shows a command's level: nothing at ``QUEUED``,
+    otherwise its bangs in parentheses, after a space (``" (!!)"``)."""
+    level = Urgency(level)
+    return f" ({'!' * level})" if level > Urgency.QUEUED else ""
+
+
 class _NotPreemptible:
     """The default host's operation: never skipped, never cancelled."""
 
@@ -223,4 +230,5 @@ class _Operation:
             self._cancel_done.set()
 
 
-__all__ = ["NOT_PREEMPTIBLE", "Preemption", "Urgency", "command_urgency", "escalated_stop"]
+__all__ = ["NOT_PREEMPTIBLE", "Preemption", "Urgency", "command_urgency", "escalated_stop",
+           "urgency_marker"]

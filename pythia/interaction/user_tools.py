@@ -30,6 +30,11 @@ class UserToolIntent:
     # A note for the user, such as on a deprecated name; not part of the
     # command, so intents compare equal without it.
     notice: Optional[str] = field(default=None, compare=False)
+    # The call ID of the record that the transcript already shows, for a
+    # recorded command that waited behind a running turn (the CLI shows it
+    # when it's queued, and logs it under this ID when it runs); likewise
+    # not part of the command.
+    call_id: Optional[str] = field(default=None, compare=False)
 
 
 def parse_user_tool(text: str) -> UserToolIntent:
@@ -46,7 +51,7 @@ def parse_user_tool(text: str) -> UserToolIntent:
         raise ValueError(
             "Unsupported command. Use /retry, /continue, /steer, /task, "
             "/compact [focus], /config, /config.json, /login, /quota, /reboot, "
-            "/exit, or /quit (/steer, /exit, and /quit take ! or !! to act sooner)."
+            "/exit, or /quit (/steer, /reboot, /exit, and /quit take ! or !! to act sooner)."
         )
     command = words[0]
     if command in {"/config", "/config.json"}:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import json
 import tempfile
 import threading
 import unittest
@@ -277,7 +278,17 @@ class CliSteerInputTests(unittest.TestCase):
         state.handle_key("c-m", "\r")
 
     def _notices(self, state):
-        return [item.text.removeprefix("[cli] ") for item in state.displays]
+        return [item.text.removeprefix("[cli] ") for item in state.displays
+                if item.text.startswith("[cli] ")]
+
+    def _texts(self, state):
+        """The queued text, in order (record entries are left out)."""
+        return [entry.text for entry in state.pending if isinstance(entry, cli._Submission)]
+
+    def _records(self, state):
+        """The queued /steer records, as their urgencies, in order."""
+        return [json.loads(entry.call.call.arguments_json)["urgency"]
+                for entry in state.pending if isinstance(entry, cli._RecordEntry)]
 
     def test_task_queues_the_next_query_and_never_steers(self):
         state = cli._UIState(ready=True, turn_active=True)
@@ -296,6 +307,12 @@ class CliSteerInputTests(unittest.TestCase):
             "Usage: /task <text> queues the text as the next query instead of steering the "
             "running turn.",
             "Queued as the next query; it waits for the current turn to end."])
+        # Queued text shows at once, as the log will record it, and says so.
+        self.assertEqual([item.text for item in state.displays][1:], [
+            "[user] check the tests later",
+            "[cli] Queued as the next query; it waits for the current turn to end.",
+            "[user] and this"])
+        self.assertTrue(all(entry.shown for entry in state.pending))
         idle = cli._UIState(ready=True)  # no turn: plain text, and no notice
         idle.set_phase("idle")
         self._enter(idle, "/task now")
@@ -313,7 +330,16 @@ class CliSteerInputTests(unittest.TestCase):
         self.assertEqual(state.preemption.level, Urgency.IMMEDIATE)
         self._enter(state, "/steer!!!")  # more than two ! read as two
         self.assertEqual(state.preemption.level, Urgency.PREEMPT)
-        self.assertEqual([entry.text for entry in state.pending], ["first", "second"])
+        self.assertEqual(self._texts(state), ["first", "second"])
+        # Each flush queues its record in front of the steers, in order; its
+        # urgency is the command's bangs, at most two.
+        self.assertEqual(self._records(state), [1, 2])
+        self.assertIsInstance(state.pending[0], cli._RecordEntry)
+        self.assertEqual((state.pending[0].call.call.name, state.pending[0].flushed), ("steer", 2))
+        calls = [item.text for item in state.displays if item.text.startswith("[user-tool-call]")]
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].startswith(
+            f"[user-tool-call] steer ({state.pending[0].call.call.call_id})"))
         self.assertEqual(state.editor.text, "")
         self.assertEqual(cli._take_steers(state)[-1].text, "second")
         self.assertEqual(state.preemption.level, Urgency.QUEUED)  # delivered: reset
@@ -328,6 +354,7 @@ class CliSteerInputTests(unittest.TestCase):
         self._enter(state, "/steer!")
         self._enter(state, "/steer")  # the urgency only rises: it stays immediate
         self.assertEqual(state.preemption.level, Urgency.IMMEDIATE)
+        self.assertEqual(self._records(state), [0, 0, 1, 0])  # as typed, each in turn
         self.assertEqual(self._notices(state), [
             "1 steer queued for the next sample, after the current tool batch; "
             "/steer! or /steer!! delivers it sooner.",
@@ -340,16 +367,18 @@ class CliSteerInputTests(unittest.TestCase):
         state = cli._UIState(ready=True, turn_active=True)
         self._enter(state, "earlier")
         self._enter(state, "/steer!! and now")
-        self.assertEqual([entry.text for entry in state.pending], ["earlier", "and now"])
-        self.assertEqual(state.pending[1].message, Message("user", "and now"))
+        self.assertEqual(self._texts(state), ["earlier", "and now"])
+        self.assertEqual(state.pending[2].message, Message("user", "and now"))
+        self.assertEqual(self._records(state), [2])  # in front of both steers it flushed
+        self.assertEqual(state.pending[0].flushed, 2)
         self.assertEqual(state.preemption.level, Urgency.PREEMPT)
         self.assertEqual(state.editor.text, "")
 
     def test_steer_with_text_and_no_bang_is_plain_text(self):
         state = cli._UIState(ready=True, turn_active=True)
         self._enter(state, "/steer /tmp/notes.md has the details")  # text starting with /
-        self.assertEqual([entry.text for entry in state.pending],
-                         ["/tmp/notes.md has the details"])
+        self.assertEqual(self._texts(state), ["/tmp/notes.md has the details"])
+        self.assertEqual(self._records(state), [0])
         self.assertEqual(state.preemption.level, Urgency.QUEUED)
         self.assertEqual(self._notices(state), [
             "1 steer queued for the next sample, after the current tool batch; "
@@ -363,6 +392,7 @@ class CliSteerInputTests(unittest.TestCase):
                     state.pending.append(ahead)
                 self._enter(state, "/steer later")
                 self.assertEqual(state.pending[-1].text, "later")
+                self.assertEqual(self._records(state), [])  # nothing flushed: no record
                 self.assertEqual(state.preemption.level, Urgency.QUEUED)
                 self.assertIn("No running turn can take a steer now; queued as the next query.",
                               self._notices(state))
@@ -376,7 +406,8 @@ class CliSteerInputTests(unittest.TestCase):
         self._enter(state, "/steer")
         self._enter(state, "/steer!! second")
         self.assertEqual(state.preemption.level, Urgency.PREEMPT)
-        self.assertEqual([entry.text for entry in state.pending], ["first", "second"])
+        self.assertEqual(self._texts(state), ["first", "second"])
+        self.assertEqual(self._records(state), [0, 2])
         self.assertEqual(self._notices(state), [
             "1 steer queued for the next sample, right after the compaction in progress; "
             "steers never cancel compaction.",
@@ -392,7 +423,8 @@ class CliSteerInputTests(unittest.TestCase):
         state.read_query = read
         self._enter(state, "/steer!! @missing.png look")
         self.assertEqual(state.editor.text, "/steer!! @missing.png look")
-        self.assertEqual([entry.text for entry in state.pending], ["queued steer"])
+        self.assertEqual(self._texts(state), ["queued steer"])
+        self.assertEqual(self._records(state), [])
         self.assertEqual(state.preemption.level, Urgency.QUEUED)
         self.assertEqual(self._notices(state), ["cannot read attachment: missing.png"])
 
