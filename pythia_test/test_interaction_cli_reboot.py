@@ -479,6 +479,26 @@ class RebootFlowTests(_RebootCase):
             call.call.call_id, "The CLI restarts on the current code.")))
         self.assertEqual(_texts(terminal).count(f"[user-tool-call] reboot ({call.call.call_id})"), 1)
 
+    async def test_a_config_change_right_before_a_reboot_is_logged_before_it(self):
+        model = _Model(self.path, _answer("done"))
+
+        def change_then_reboot(terminal):
+            terminal.submit("/config max_samples 3")  # applies at once, logged at a safe point
+            terminal.submit("/reboot")
+
+        terminal = _Terminal(_steps((_idle_with("[assistant] done"), change_then_reboot)))
+        with _rebootable():
+            carried = await self._rebooted(model, terminal, ["--prompt", "hello"])
+        self.assertEqual(carried["config"], {"max_samples": 3})
+        self.assertEqual(carried["queue"], [])
+        change, changed, call, result = load_interaction_save(self.path).items[-4:]
+        self.assertEqual((change.call.name, change.call.arguments_json),
+                         ("config", '{"key":"max_samples","value":3}'))
+        self.assertEqual(changed, UserToolResult(ToolResult(
+            change.call.call_id, "# init: max_samples = None\nmax_samples = 3")))
+        self.assertEqual((call.call.name, result.result.output),
+                         ("reboot", "The CLI restarts on the current code."))
+
     async def test_reboot_during_a_turn_takes_its_steers_and_carries_the_rest(self):
         probe, entered, release = _blocking_probe()
         self._resumable()
@@ -486,7 +506,8 @@ class RebootFlowTests(_RebootCase):
         def type_during_the_tool(terminal):
             terminal.submit("Also check the docs.")  # a steer
             terminal.submit("/task Then this.")  # waits for the turn to end
-            terminal.submit("/config max_samples 7")  # so does a command
+            terminal.submit("/compact")  # so does a queued command
+            terminal.submit("/config max_samples 7")  # applies at once
             terminal.submit("/reboot")
             terminal.key("<bracketed-paste>", "half typed")  # a draft
 
@@ -505,10 +526,16 @@ class RebootFlowTests(_RebootCase):
             release.set()
         self.assertEqual(len(model.calls), 1)
         saved = load_interaction_save(self.path)
-        # The batch finished, and the steer reached the turn before it ended;
-        # the /reboot's record follows, with its outcome.
-        self.assertEqual(saved.items[-4:-2], (ToolResult("p1", "probed"),
-                                              Message("user", "Also check the docs.")))
+        # The batch finished, and the steer reached the turn before it ended,
+        # after the /config change's record (records go first); the /reboot's
+        # record follows, with its outcome.
+        self.assertEqual(saved.items[-6], ToolResult("p1", "probed"))
+        change, changed = saved.items[-5:-3]
+        self.assertEqual((change.call.name, change.call.arguments_json),
+                         ("config", '{"key":"max_samples","value":7}'))
+        self.assertEqual(changed, UserToolResult(ToolResult(
+            change.call.call_id, "# init: max_samples = None\nmax_samples = 7")))
+        self.assertEqual(saved.items[-3], Message("user", "Also check the docs."))
         call, result = saved.items[-2:]
         self.assertEqual((call.call.name, call.call.arguments_json), ("reboot", '{"urgency":0}'))
         self.assertEqual(result, UserToolResult(ToolResult(
@@ -516,20 +543,23 @@ class RebootFlowTests(_RebootCase):
             "The CLI restarts on the current code; the turn continues after the restart.")))
         self.assertTrue(turn_tail(saved.items).unfinished)
         self.assertTrue(carried["continues"])
-        self.assertEqual(carried["config"], {"auto_compaction_context_tokens": 5000})
+        self.assertEqual(carried["config"], {"auto_compaction_context_tokens": 5000,
+                                             "max_samples": 7})
         self.assertEqual(carried["draft"], {"text": "half typed", "cursor": 10})
-        # The queued /config change was shown under its ID, which the restarted
-        # CLI logs it under; the queued text was shown too, and isn't again.
+        # The queued /compact was shown under its ID, which the restarted CLI
+        # logs it under; the queued text was shown too, and isn't again.
         command_id = carried["queue"][1].pop("call_id")
         self.assertTrue(command_id.startswith("user_"), command_id)
-        self.assertTrue(any(item.text == f"[user-tool-call] config ({command_id})"
+        self.assertTrue(any(item.text == f"[user-tool-call] compact ({command_id})"
                             for item in terminal.items))
         self.assertEqual(carried["queue"], [
             {"kind": "text", "text": "Then this.", "steers": False,
              "message": {"type": "message", "role": "user", "content": "Then this."},
              "shown": True},
-            {"kind": "command", "name": "config",
-             "arguments_json": '{"key":"max_samples","value":7}'}])
+            {"kind": "command", "name": "compact", "arguments_json": "{}"}])
+        # The change showed with its result when typed, and only then.
+        self.assertEqual(_texts(terminal).count(
+            f"[user-tool-call] config ({change.call.call_id})"), 1)
         self.assertIn("Rebooting: the CLI restarts on the current code and continues the turn.",
                       _notices(terminal.items))
 

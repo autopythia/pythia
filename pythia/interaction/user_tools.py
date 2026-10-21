@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from dataclasses import field
 import json
 import re
-from typing import Optional
+from typing import Mapping, Optional
 
 from ._account_http import AccountServiceError
 from .codex_auth import CodexAuthError, _resolve_auth_file, load_codex_auth
@@ -99,6 +99,40 @@ def parse_user_tool(text: str) -> UserToolIntent:
     return UserToolIntent(name, json.dumps(arguments, sort_keys=True))
 
 
+def run_config(config: InteractionConfig, arguments: Mapping) -> ToolOutcome:
+    """/config and /config.json (``parse_user_tool``'s arguments): read or
+    change ``config``. Never raises: an error is a failed outcome, which never
+    quotes the value. The CLI runs this at once; ``create_user_environment``'s
+    ``config`` tool runs it too.
+    """
+    try:
+        if not isinstance(arguments, Mapping) or set(arguments) - {"key", "value", "format"}:
+            raise ConfigError("Unexpected config arguments.")
+        output_format = arguments.get("format", "python")
+        if output_format not in {"python", "json"}:
+            raise ConfigError("Config format must be python or json.")
+        if "key" not in arguments:
+            key = None
+            if "value" in arguments:
+                raise ConfigError("A config value requires a key.")
+        else:
+            key = arguments["key"]
+            if not isinstance(key, str) or key not in CONFIG_KEYS:
+                raise ConfigError(
+                    "Unknown config key; use /config to list supported keys."
+                )
+        if "value" in arguments:
+            assert key is not None
+            config.set(key, arguments["value"])
+        return ToolOutcome(
+            config.render(key, json_output=output_format == "json")
+        )
+    except ConfigError as exc:
+        return ToolOutcome(str(exc), False)
+    except Exception:
+        return ToolOutcome("Config operation failed; details were withheld.", False)
+
+
 def create_user_environment(
     args,
     *,
@@ -172,32 +206,7 @@ def create_user_environment(
 
     def configure(arguments, timeout_seconds):
         del timeout_seconds
-        try:
-            if set(arguments) - {"key", "value", "format"}:
-                raise ConfigError("Unexpected config arguments.")
-            output_format = arguments.get("format", "python")
-            if output_format not in {"python", "json"}:
-                raise ConfigError("Config format must be python or json.")
-            if "key" not in arguments:
-                key = None
-                if "value" in arguments:
-                    raise ConfigError("A config value requires a key.")
-            else:
-                key = arguments["key"]
-                if not isinstance(key, str) or key not in CONFIG_KEYS:
-                    raise ConfigError(
-                        "Unknown config key; use /config to list supported keys."
-                    )
-            if "value" in arguments:
-                assert key is not None
-                config.set(key, arguments["value"])
-            return ToolOutcome(
-                config.render(key, json_output=output_format == "json")
-            )
-        except ConfigError as exc:
-            return ToolOutcome(str(exc), False)
-        except Exception:
-            return ToolOutcome("Config operation failed; details were withheld.", False)
+        return run_config(config, arguments)
 
     return Environment((
         Tool(ToolSpec("config", "Read or update in-memory interaction configuration.", {

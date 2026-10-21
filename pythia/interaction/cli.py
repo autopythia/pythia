@@ -132,6 +132,7 @@ from .user import UserInteraction
 from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
 from .user_tools import parse_user_tool
+from .user_tools import run_config
 
 
 FRAME_INTERVAL = 1 / 128
@@ -203,16 +204,29 @@ class _Submission:
 
 @dataclass(frozen=True, eq=False)
 class _RecordEntry:
-    """The record of a /steer, /steer! or /steer!!, queued in front of the
-    steers it flushed, and written right before them: where the running turn
-    takes them (_take_interrupt), or, if the turn ends first, where it ends
-    (_write_leading_records). Its call was shown when the command was
-    accepted. An exit drops it with them. It isn't the user's input: it never
-    counts toward the queue's limit or its counts (_queued_input).
+    """A command's record, waiting for a safe point to log it: a running
+    turn's next interrupt point (_take_interrupt), the end of a turn
+    (_write_leading_records), or at once between turns. Records stay ahead of
+    the rest of the queue, in the order they came (_queue_front). Its call
+    was shown when the command was accepted. An exit drops it. It isn't the
+    user's input: it never counts toward the queue's limit or its counts
+    (_queued_input).
+
+    A /steer's record (``flushed``) stands in front of the steers it flushed,
+    and its result, shown when it's logged, says whether the turn took them.
+    A /config change's record has its ``result`` already, shown with its call:
+    the change applied when it was typed (_UIState._config_command).
     """
 
     call: UserToolCall
-    flushed: int  # the steers queued when the command was accepted
+    flushed: int = 0  # a /steer's: the steers queued when the command was accepted
+    result: Optional[UserToolResult] = None  # a /config change's
+
+    def record(self, *, delivered: bool) -> tuple:
+        """Its ``(call, result)``; a /steer's says whether its steers were delivered."""
+        if self.result is not None:
+            return (self.call, self.result)
+        return _steer_record(self, delivered=delivered)
 
 
 @dataclass
@@ -330,6 +344,18 @@ class _UIState:
     # one it replaced, when it is a restarted CLI.
     reboot: Optional[_Reboot] = None
     rebooted: Optional[_Rebooted] = field(default=None, repr=False)
+    # What /config, /config.json and /quota run with at once, even while a
+    # turn runs (_config_command, _quota_command): the live config, the
+    # launch options, and the context's length, for --debug-trace's tags.
+    # _drive_interaction_body sets them before the session is ready.
+    config: Optional[InteractionConfig] = field(default=None, repr=False)
+    args: Optional[argparse.Namespace] = field(default=None, repr=False)
+    context_revision: Callable[[], int] = field(default=lambda: 0, repr=False)
+    # The /quota query running on its own thread, or None: one runs at a
+    # time. A stop abandons it: quota_cancel keeps it from sending its
+    # request if it hasn't yet, and its answer is dropped.
+    quota: Optional[object] = None
+    quota_cancel: threading.Event = field(default_factory=threading.Event)
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -344,18 +370,19 @@ class _UIState:
     def request_stop(self, level: Urgency = Urgency.IMMEDIATE) -> None:
         """Exit at ``level``; a lower level than the current one does nothing.
 
-        Every level drops queued input, cancels a login wait, and starts no
-        new query. QUEUED (/exit): the turn finishes its tool batch and ends
-        before its next sample. IMMEDIATE (/exit!, the first Ctrl-C): the
-        sample or tool call in flight finishes and is saved, for every model,
-        and nothing new starts. PREEMPT (/exit!!, a later Ctrl-C): that
-        operation is also cancelled where possible (a Claude relay sample, a
-        command's wait), and the model is closed. Closing cancels the model's
-        work in flight, also outside the turn's operations, such as a
-        compaction (automatic or /compact), and the model then refuses every
-        request, so a compaction between its summary requests stops too.
-        Retiring would not do: it cancels only a request in flight. Nothing
-        uses the model after a stop. Outcomes are still saved.
+        Every level drops queued input, cancels a login wait, abandons a
+        /quota query, and starts no new query. QUEUED (/exit): the turn
+        finishes its tool batch and ends before its next sample. IMMEDIATE
+        (/exit!, the first Ctrl-C): the sample or tool call in flight finishes
+        and is saved, for every model, and nothing new starts. PREEMPT
+        (/exit!!, a later Ctrl-C): that operation is also cancelled where
+        possible (a Claude relay sample, a command's wait), and the model is
+        closed. Closing cancels the model's work in flight, also outside the
+        turn's operations, such as a compaction (automatic or /compact), and
+        the model then refuses every request, so a compaction between its
+        summary requests stops too. Retiring would not do: it cancels only a
+        request in flight. Nothing uses the model after a stop. Outcomes are
+        still saved.
         """
         level = Urgency(level)
         if self.stop_level is not None and level <= self.stop_level:
@@ -367,6 +394,8 @@ class _UIState:
         self.retry = None
         self.pending.clear()
         self.login_cancel.set()
+        self.quota = None  # its answer is dropped; nothing waits for its thread
+        self.quota_cancel.set()
         if self.icron is not None:
             self.icron.stop()  # every stop cancels running code
         self.changed.set()
@@ -508,6 +537,12 @@ class _UIState:
             elif command_urgency(head, "/reboot") is not None:
                 self._request_reboot(text)
                 return
+            elif head in ("/config", "/config.json"):
+                self._config_command(text)
+                return
+            elif head == "/quota":
+                self._quota_command(text)
+                return
             elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
                 self._icron_command(head, text)
                 return
@@ -624,10 +659,7 @@ class _UIState:
         # Its record goes in front of the steers it flushes, after the records
         # already there, and is written right before them (_RecordEntry).
         call = _user_call("steer", {"urgency": int(Urgency(level))})
-        index = 0
-        while index < len(self.pending) and isinstance(self.pending[index], _RecordEntry):
-            index += 1
-        self.pending.insert(index, _RecordEntry(call, count))
+        self._queue_record(_RecordEntry(call, count))
         self.displays.extend(render_interaction_items((call,)))
         self.preemption.flush(level)
         level = max(Urgency(level), self.preemption.level)
@@ -687,6 +719,80 @@ class _UIState:
                 self.preemption.flush(level)
             self.notice(_reboot_notice(level, self.phase))
         self.changed.set()
+
+    def _queue_record(self, entry: _RecordEntry) -> None:
+        """Queue a command's record behind the records already at the front of
+        the queue, and before everything else (_RecordEntry)."""
+        _queue_front(self, entry)
+        self.changed.set()
+
+    def _config_command(self, text: str) -> None:
+        """/config and /config.json, at once, even while a turn runs.
+
+        A read answers with a notice. A change applies at once, so a running
+        turn, which keeps the config it started with (_turn), sees it from
+        its next turn on. It shows with its result, and its record is logged
+        at the next safe point (_RecordEntry), before what's queued after it.
+        Usage errors are notices, which never quote the argument.
+        """
+        self.editor = Editor()
+        if self.config is None:
+            self.notice("Config isn't available yet.")
+            return
+        try:
+            intent = parse_user_tool(text)
+        except ValueError as exc:
+            self.notice(str(exc))
+            return
+        call = _intent_call(intent)
+        outcome = run_config(self.config, json.loads(intent.arguments_json))
+        result = ToolResult(call.call.call_id, outcome.output, success=outcome.success)
+        if not _recorded(intent):  # a read
+            if intent.notice is not None:
+                self.notice(intent.notice)
+            self.notice(_command_notice("config", result))
+            return
+        record = _RecordEntry(call, result=UserToolResult(result))
+        self.displays.extend(render_interaction_items((call,)))
+        if intent.notice is not None:
+            self.notice(intent.notice)
+        self.displays.extend(render_interaction_items((record.result,), source_user_calls=(call,)))
+        self._queue_record(record)
+
+    def _quota_command(self, text: str) -> None:
+        """/quota, at once, even while a turn runs: the account's usage, from a
+        request on its own thread (_quota_query), as a notice. One runs at a
+        time, and the status line shows it; a stop abandons it. It keeps the
+        user tool's safeguards (create_user_environment): errors withhold
+        credentials, the account must be the session's, and the request has
+        the fixed account timeout.
+        """
+        self.editor = Editor()
+        if self.config is None or self.args is None:
+            self.notice("Quota isn't available yet.")
+            return
+        try:
+            intent = parse_user_tool(text)
+        except ValueError as exc:
+            self.notice(str(exc))
+            return
+        if self.quota is not None:
+            self.notice("A quota query is already running.")
+            return
+        environment = create_user_environment(
+            self.args, notify=lambda text: None, cancel=self.quota_cancel, config=self.config,
+            expected_account=self.bound_account_id,
+            **({} if self.trace is None else {
+                "opener": self.trace.opener(default_account_opener()),
+            }),
+        )
+        token = self.quota = object()
+        worker = functools.partial(_quota_query, self, asyncio.get_running_loop(), token,
+                                   environment, _intent_call(intent).call,
+                                   self.context_revision())
+        # A daemon thread: an exit never waits for its request.
+        threading.Thread(target=contextvars.copy_context().run, args=(worker,),
+                         name="interaction-quota", daemon=True).start()
 
     def _icron_command(self, head: str, text: str) -> None:
         """/cron, /crontab, and /py (--enable-experimental-icron): handled at
@@ -1162,8 +1268,11 @@ async def _user_tool(
             config,
         )
     expected_account = state.bound_account_id
-    # A /config change is recorded, with its call before the change, as for
-    # every effect; a /config read, /login and /quota answer with a notice.
+    # The queued commands: /login, which answers with a notice. /config and
+    # /quota run at once (_UIState), but a restarted CLI may carry them over
+    # queued from older code: a /config change is then recorded, with its
+    # call before the change, as for every effect; a read and /quota answer
+    # with a notice.
     recorded = _recorded(intent)
     call = _intent_call(intent)
     if recorded:
@@ -1256,8 +1365,10 @@ def _query_message(query: str, args, cwd: Path,
                    config: Optional[InteractionConfig] = None) -> Message:
     """The user message for submitted text; raises AttachmentError.
 
-    Local paths follow ``config``'s current enable_workspace, which /config
-    changes, as the tools do; without ``config``, the launch option.
+    Local paths follow ``config``'s current enable_workspace, as /config
+    last set it, even while a turn runs whose tools keep the policy they
+    started with (_turn): these are the user's own files, read when Enter
+    accepts the text. Without ``config``, the launch option.
     """
     message = parse_user_prompt(
         query,
@@ -1294,8 +1405,14 @@ def _reboot_notice(level: Urgency, phase: str) -> str:
 
 
 def _has_steers(state: _UIState) -> bool:
-    """Whether a running turn has steers to take at its interrupt point."""
-    return bool(state.turn_active and state.pending and _steers(state.pending[0]))
+    """Whether a running turn has steers to take at its interrupt point. The
+    records in front of them aren't steers: a /config change's record alone
+    doesn't keep a turn going after its final answer."""
+    if not state.turn_active:
+        return False
+    entry = next((entry for entry in state.pending if not isinstance(entry, _RecordEntry)),
+                 None)
+    return entry is not None and _steers(entry)
 
 
 def _steer_count(state: _UIState) -> int:
@@ -1324,14 +1441,28 @@ def _queued_input(state: _UIState) -> int:
     return sum(not isinstance(entry, (_WakeIntent, _RecordEntry)) for entry in state.pending)
 
 
+def _queue_front(state: _UIState, entry) -> None:
+    """Put ``entry`` first in the queue, behind only the records there: they
+    go before everything else (_RecordEntry), and keep their order."""
+    index = 0
+    while index < len(state.pending) and isinstance(state.pending[index], _RecordEntry):
+        index += 1
+    state.pending.insert(index, entry)
+
+
 def _take_steers(state: _UIState) -> tuple:
-    """The steers a running turn takes at its interrupt point; this also resets
-    their urgency (flushed steers are delivered now)."""
-    submissions = []
+    """What a running turn takes at its interrupt point: the records at the
+    front of the queue, at every interrupt point (a record isn't input, so
+    input queued before the turn started doesn't hold it back), then the
+    steers, if the turn takes steers; this also resets their urgency
+    (flushed steers are delivered now)."""
+    taken = []
+    while state.pending and isinstance(state.pending[0], _RecordEntry):
+        taken.append(state.pending.popleft())
     while state.turn_active and state.pending and _steers(state.pending[0]):
-        submissions.append(state.pending.popleft())
+        taken.append(state.pending.popleft())
     state.preemption.take()
-    return tuple(submissions)
+    return tuple(taken)
 
 
 @dataclass(frozen=True)
@@ -1346,7 +1477,7 @@ class _Interrupt:
 def _take_interrupt(state: _UIState) -> _Interrupt:
     """What a running turn takes at its interrupt point: its steers, with
     icron's message in a wake-up marker's place among them, and the records
-    of the /steer commands that flushed them."""
+    in front of them (_RecordEntry)."""
     records, messages, shown = [], [], []
     for entry in _take_steers(state):
         if isinstance(entry, _RecordEntry):
@@ -1398,8 +1529,8 @@ def _steer_record(entry: _RecordEntry, *, delivered: bool) -> tuple:
 
 
 def _recorded(intent: UserToolIntent) -> bool:
-    """Whether a queued command is recorded: /compact, and a /config change
-    (a /config read, /login and /quota answer with notices)."""
+    """Whether a command is recorded: /compact, and a /config change (a
+    /config read, /login and /quota answer with notices)."""
     if intent.name == "compact":
         return True
     if intent.name != "config":
@@ -1418,17 +1549,55 @@ def _command_notice(name: str, result: ToolResult) -> str:
     return f"{head}:{chr(10) if chr(10) in output else ' '}{output}"
 
 
+def _quota_query(state: _UIState, loop, token, environment: Environment,
+                 call: ToolCall, revision: int) -> None:
+    """/quota's thread: run the user tool, tagged for --debug-trace, then post
+    its answer to the event loop (_quota_done)."""
+    trace = state.trace
+    try:
+        with (nullcontext() if trace is None
+              else trace.operation("quota", context_revision=revision)):
+            result = environment.execute_tool_calls((call,)).items[0]
+    except Exception:  # not expected: the user tool's guard catches its errors
+        result = ToolResult(call.call_id, "User tool failed; provider and credential "
+                            "details were withheld.", success=False)
+    warning = None if trace is None else trace.take_warning()
+    with suppress(RuntimeError):  # the event loop closed: nothing waits for it
+        loop.call_soon_threadsafe(_quota_done, state, token, result, warning)
+
+
+def _quota_done(state: _UIState, token, result: ToolResult, warning: Optional[str]) -> None:
+    """/quota's answer, on the event loop: dropped if a stop abandoned it."""
+    if warning is not None:
+        _safe_notice(state, warning)
+    if state.quota is not token:
+        return
+    state.quota = None
+    state.notice(_command_notice("quota", result))
+
+
 def _intent_call(intent: UserToolIntent) -> UserToolCall:
     """A queued command's call, as the transcript shows it and the log records it."""
     return UserToolCall(ToolCall(intent.name, intent.call_id or _user_call_id(),
                                  intent.arguments_json))
 
 
-async def _log_records(context, state, writer, records, *, show_calls=False) -> None:
+def _entry_records(entries, *, delivered: bool) -> tuple:
+    """The records of record entries (``(call, result)`` pairs), and what to
+    show when they're logged: the results of /steer records, whose calls
+    showed when accepted (a /config change showed its result too)."""
+    records = [entry.record(delivered=delivered) for entry in entries]
+    shown = _record_results([record for entry, record in zip(entries, records)
+                             if entry.result is None])
+    return records, shown
+
+
+async def _log_records(context, state, writer, records, *, show_calls=False,
+                       display=None) -> None:
     """Log commands' records (``(call, result)`` pairs) and show them: their
-    results, and also their calls with ``show_calls``. Records are
-    audit-only: none is written after a failed checkpoint, or where it would
-    come between tool calls and their results."""
+    results, and also their calls with ``show_calls``, or else ``display``.
+    Records are audit-only: none is written after a failed checkpoint, or
+    where it would come between tool calls and their results."""
     if not records or state.persistence_failed:
         return
     if context.pending_tool_calls() or context.pending_user_tool_calls():
@@ -1441,19 +1610,21 @@ async def _log_records(context, state, writer, records, *, show_calls=False) -> 
         await _append(context, items, state, writer)
     finally:
         state.phase, state.phase_started = phase, started
-    state.displays.extend(render_interaction_items(items) if show_calls
+    state.displays.extend(display if display is not None
+                          else render_interaction_items(items) if show_calls
                           else _record_results(records))
 
 
 async def _write_leading_records(context, state, writer) -> None:
-    """Log the record entries at the front of the queue: a turn ended before
-    it took their steers, which now wait as queued queries (_RecordEntry)."""
+    """Log the record entries at the front of the queue (_RecordEntry): a
+    turn ended before it took them (its steers wait as queued queries now),
+    or they came between turns."""
     entries = []
     while state.pending and isinstance(state.pending[0], _RecordEntry):
         entries.append(state.pending.popleft())
     if entries and not state.closing:
-        await _log_records(context, state, writer,
-                           [_steer_record(entry, delivered=False) for entry in entries])
+        records, shown = _entry_records(entries, delivered=False)
+        await _log_records(context, state, writer, records, display=shown)
 
 
 # icron (--enable-experimental-icron): its wake-ups, its commands, and its notices.
@@ -1763,9 +1934,11 @@ def _follow_pointer(state: _UIState, context: InteractionContext) -> None:
     """After /compact's coldstart compaction: the model follows the pointer at
     once, as within the turn of an automatic compaction. The pointer is a user
     message that asks the model to update the summary and pick up where the
-    log left off, so a continuation (/continue) goes first in the queue. Input
-    typed meanwhile waits for that turn to end, as input queued before any turn
-    does (a steer never overtakes older input).
+    log left off, so a continuation (/continue) goes first in the queue,
+    behind only the records of /config changes made meanwhile, which are
+    logged first (_queue_front). Input typed meanwhile waits for that turn to
+    end, as input queued before any turn does (a steer never overtakes older
+    input).
 
     An exit wins, and a reboot that is to follow the pointer does so itself
     (_coldstart_reboot). After an icron yield, a wake-up or the user's message
@@ -1777,7 +1950,7 @@ def _follow_pointer(state: _UIState, context: InteractionContext) -> None:
     if Icron.yield_recorded_in(context.items):
         state.notice(_ICRON_POINTER_NOTICE)
         return
-    state.pending.appendleft(_ContinueIntent())
+    _queue_front(state, _ContinueIntent())
     state.changed.set()
 
 
@@ -1813,7 +1986,8 @@ async def _reboot_ready(state: _UIState, context: InteractionContext,
     when main scheduled an icron job meanwhile), or if the start check fails.
     A turn that it ended then continues here, and a pointer it was to follow
     is followed here. Either way, the records of the /reboot commands that
-    asked for it are logged with its outcome, where it ended the turn.
+    asked for it are logged with its outcome, where it ended the turn, after
+    the records of commands since then, such as a /config change.
     """
     reboot, phase = state.reboot, state.phase
     refusal = _reboot_refusal(state)
@@ -1825,6 +1999,7 @@ async def _reboot_ready(state: _UIState, context: InteractionContext,
             refusal = f"the restarted CLI's start check failed ({type(exc).__name__})"
     if state.closing:
         return False  # an exit came meanwhile: it wins, and drops the records
+    await _write_leading_records(context, state, writer)
     if refusal is None:
         # Before ``ready``: a reboot whose records can't be saved doesn't happen.
         await _log_records(context, state, writer, [
@@ -1847,7 +2022,7 @@ async def _reboot_ready(state: _UIState, context: InteractionContext,
                  + (" The model follows the coldstart pointer here." if reboot.pointer
                     else " The turn continues here." if reboot.continues else ""))
     if reboot.continues or reboot.pointer:
-        state.pending.appendleft(_ContinueIntent())
+        _queue_front(state, _ContinueIntent())
     if state.pending:
         state.changed.set()  # run the queue: the continuation first, if any
     return False
@@ -1876,7 +2051,8 @@ def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> di
             # log, which has the failure too.
             queue.append({"kind": "continue"})
         # icron has no wake-ups to carry (_reboot_refusal), and a record entry
-        # was logged when its turn ended (_write_leading_records).
+        # was logged when its turn ended, or before the reboot's own records
+        # (_write_leading_records); a /config change carries over in "config".
     return {
         "version": _REBOOT_STATE_VERSION, "cause": state.reboot.cause,
         "continues": state.reboot.continues, "config": changes,
@@ -2043,12 +2219,14 @@ class _CliHost(TurnHost):
     def interrupt(self):
         """Right before a sample: text submitted since becomes steers.
 
-        Slash commands and /retry wait for the turn to end, and a steer never
-        overtakes one queued before it. Each steer's attachments were read
-        when Enter accepted it. icron's due wake-ups among the steers come as
-        its message (_take_interrupt). The records of the /steer commands that
-        flushed them are logged right before them; the transcript already
-        shows typed text (_Submission.shown), so the turn shows only the rest.
+        Queued commands (/compact, /login) wait for the turn to end, and a
+        steer never overtakes one queued before it. Each steer's attachments
+        were read when Enter accepted it. icron's due wake-ups among the
+        steers come as its message (_take_interrupt). The records waiting at
+        the front of the queue (of /config changes, and of the /steer
+        commands that flushed the steers) are logged first, steers or not;
+        the transcript already shows typed text (_Submission.shown), so the
+        turn shows only the rest.
         """
         if not self._steering or self._state.closing:
             return super().interrupt()
@@ -2056,9 +2234,10 @@ class _CliHost(TurnHost):
         if self._state.closing:
             return Interrupt.STOP
         if taken.records and self._context is not None:
-            records = [_steer_record(entry, delivered=True) for entry in taken.records]
+            records, shown = _entry_records(taken.records, delivered=True)
             self.append(self._context, tuple(item for record in records for item in record))
-            self.show(_record_results(records))
+            if shown:
+                self.show(shown)
         if not taken.messages:
             return Interrupt.CONTINUE
         return Steer(taken.messages, shown=taken.shown)
@@ -2160,14 +2339,20 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     and the turn's end is main's handoff to icron: a Yield of ``job_text``,
     the turn's input as typed, after ``resumes`` turns that icron started
     since the user's last input.
+
+    The turn runs on the config as it is when it starts: a /config change
+    during the turn applies from the next one. That includes the tools'
+    workspace policy (enable_workspace), set here.
     """
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.
     state.retry = None
     snapshot = config.snapshot()
+    _apply_workspace(environment, snapshot)
     host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot,
                     context=context)
-    state.turn_active = not state.pending  # a steer never overtakes older input
+    # A steer never overtakes older input; a record isn't input.
+    state.turn_active = all(isinstance(entry, _RecordEntry) for entry in state.pending)
     icron = state.icron
     if icron is not None:
         icron.begin_turn()
@@ -2349,6 +2534,8 @@ async def _drive_interaction_body(
     state.read_query = functools.partial(_query_message, args=args, cwd=attachment_cwd,
                                          config=config)
     state.reads_files = functools.partial(_reads_files, args=args)
+    # /config, /config.json and /quota run at once with these (_UIState).
+    state.config, state.args = config, args
     tools_snapshot = Tools(environment.tool_specs)
     # The save log shows reasoning as save_log_reasoning says while each line
     # is written, so a /config change applies from the next line on.
@@ -2391,6 +2578,7 @@ async def _drive_interaction_body(
             initial.append(Instructions(args.instructions))
         initial.append(tools_snapshot)
         context = InteractionContext(initial)
+    state.context_revision = functools.partial(len, context)
     # The public log's warnings, such as a drift that resuming found, become
     # notices; the log never fails a save.
     writer.on_warning = functools.partial(_post, asyncio.get_running_loop(), _safe_notice, state)
@@ -2494,9 +2682,11 @@ async def _drive_interaction_body(
                 if state.pending:
                     state.changed.set()
                 if isinstance(query, _RecordEntry):
-                    # Normally logged when its turn ended (_write_leading_records).
-                    await _log_records(context, state, writer,
-                                       [_steer_record(query, delivered=False)])
+                    # Between turns: a /config change's record, with any
+                    # behind it (a /steer's is normally logged where its turn
+                    # ended).
+                    state.pending.appendleft(query)
+                    await _write_leading_records(context, state, writer)
                     continue
                 if isinstance(query, _WakeIntent):
                     # Between turns, icron's due wake-ups start one, as text
@@ -2662,8 +2852,15 @@ async def _drive_interaction_body(
                 state.notice(
                     "Queued queries discarded after failure; submit again explicitly."
                 )
+            # A /config change's record stays: the change applied when it was
+            # typed. A /steer's goes with its steers.
+            kept = [entry for entry in state.pending
+                    if isinstance(entry, _RecordEntry) and entry.result is not None]
             state.pending.clear()
+            state.pending.extend(kept)
             state.changed.clear()
+            if kept:
+                state.changed.set()
             if state.persistence_failed:
                 state.retry = None
                 # Retain the unsaved context here until exit; never replay the effect.
@@ -2706,17 +2903,23 @@ def _coldstart_unavailable(environment, args, path) -> Optional[str]:
 
 
 def _runtime_config(environment, args, path=None):
-    workspace_update = getattr(environment, "set_enable_workspace", None)
+    """The session's live config. Its enable_workspace reaches the tools when
+    each turn starts (_turn), not when /config changes it: a running turn's
+    tools keep one policy."""
     config = InteractionConfig.from_namespace(
         args,
-        on_enable_workspace=(
-            workspace_update if callable(workspace_update) else None
-        ),
         coldstart_unavailable=_coldstart_unavailable(environment, args, path),
     )
-    if callable(workspace_update):
-        workspace_update(config.get("enable_workspace"))
+    _apply_workspace(environment, config.snapshot())
     return config
+
+
+def _apply_workspace(environment, snapshot) -> None:
+    """Give the tools ``snapshot``'s workspace policy, where the environment
+    has one to set (DefaultEnvironment.set_enable_workspace)."""
+    update = getattr(environment, "set_enable_workspace", None)
+    if callable(update):
+        update(snapshot.enable_workspace)
 
 
 def _prepared_save(path, args) -> CliSave:
@@ -2890,10 +3093,10 @@ async def _run(
     )
     state.notice(
         "pythia.interaction — /retry, /continue, /steer [text], /task <text>, /compact [focus], "
-        "/config, /config.json, /login, /quota, /reboot, /exit or /quit. /steer and /exit wait "
-        "for the current tool batch; with ! they wait only for the current operation, and with "
-        "!! they also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second press "
-        "/exit!!."
+        "/config, /config.json, /login, /quota, /reboot, /exit or /quit. /steer, /reboot and "
+        "/exit wait for the current tool batch; with ! they wait only for the current operation, "
+        "and with !! they also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second "
+        "press /exit!!."
     )
     _startup_notices(state, args, save, config)
     if rebooted is not None:
@@ -2935,6 +3138,8 @@ async def _run(
                 queued = _queued_input(state) - steers
                 if queued > 0:
                     status += f" | queued={queued}"
+                if state.quota is not None:
+                    status += " | quota"
                 if state.icron is not None and state.stop_level is None:
                     part = _icron_status(state.icron)
                     if part:

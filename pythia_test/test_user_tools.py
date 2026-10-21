@@ -348,17 +348,79 @@ class UserToolValueTests(unittest.TestCase):
         state.handle_key("c-m", "")
         self.assertEqual(state.editor.text, "hello")
         self.assertEqual(tuple(state.pending), ())
+        # /login waits in the queue (/config and /quota run at once).
         for _ in range(9):
-            state.editor = Editor("/quota", 6)
+            state.editor = Editor("/login", 6)
             state.handle_key("c-m", "")
         self.assertEqual(len(state.pending), 8)
-        self.assertEqual(state.editor.text, "/quota")
+        self.assertEqual(state.editor.text, "/login")
         self.assertTrue(all(isinstance(i, user_tools.UserToolIntent) for i in state.pending))
         state.editor = Editor("/quit", 5)
         state.handle_key("c-m", "")
         self.assertTrue(state.closing)
         self.assertTrue(state.login_cancel.is_set())
         self.assertFalse(state.pending)
+
+    def test_a_config_change_applies_at_once_and_its_record_waits_in_front(self):
+        state = cli._UIState(ready=True, phase="sampling", turn_active=True,
+                             config=InteractionConfig())
+
+        def enter(text):
+            state.editor = Editor(text, len(text))
+            state.handle_key("c-m", "")
+
+        enter("next step")  # a steer for the running turn
+        enter("/config max_samples 4")
+        enter("/config max_samples")
+        enter("/config max_samples x")
+        self.assertEqual(state.config.get("max_samples"), 4)  # at once, even mid-turn
+        record, steer = state.pending  # the read and the usage error queue nothing
+        self.assertIsInstance(record, cli._RecordEntry)
+        self.assertEqual(record.record(delivered=True), (record.call, record.result))
+        self.assertEqual(record.result.result.output, "# init: max_samples = None\nmax_samples = 4")
+        self.assertEqual(cli._queued_input(state), 1)  # a record isn't input
+        texts = [item.text for item in state.displays]
+        self.assertIn(f"[user-tool-call] config ({record.call.call.call_id})", texts)
+        self.assertEqual(len([text for text in texts if text.startswith("[user-tool-ret]")]), 1)
+        self.assertIn("[cli] config:\n# init: max_samples = None\nmax_samples = 4", texts)
+        self.assertEqual(texts[-1], "[cli] Invalid value for max_samples.")  # not quoted
+        # A record alone isn't a steer: it doesn't keep a turn going after
+        # its final answer. With a steer behind it, the turn takes both.
+        state.pending.remove(steer)
+        self.assertFalse(cli._has_steers(state))
+        state.pending.append(steer)
+        self.assertTrue(cli._has_steers(state))
+        taken = cli._take_interrupt(state)
+        self.assertEqual(taken.records, (record,))
+        self.assertEqual(taken.messages, (Message("user", "next step"),))
+        self.assertEqual(taken.shown, (True,))
+
+    def test_records_go_before_continuations_and_every_turn_takes_them(self):
+        # Between turns: /compact runs, and meanwhile a change and a query come in.
+        state = cli._UIState(ready=True, phase="compacting", config=InteractionConfig())
+        for text in ("/config max_samples 4", "hello"):
+            state.editor = Editor(text, len(text))
+            state.handle_key("c-m", "")
+        first, query = state.pending
+        self.assertIsInstance(first, cli._RecordEntry)
+        # A coldstart /compact's continuation goes first, behind the record;
+        # a later change's record goes behind that one, before the continuation.
+        cli._follow_pointer(state, InteractionContext((Init("saved"),)))
+        state.editor = Editor("/config max_samples 5", 21)
+        state.handle_key("c-m", "")
+        second = state.pending[1]
+        self.assertEqual([type(entry) for entry in state.pending],
+                         [cli._RecordEntry, cli._RecordEntry, cli._ContinueIntent,
+                          cli._Submission])
+        self.assertEqual(json.loads(second.call.call.arguments_json)["value"], 5)
+        # A turn that started with input queued takes no steers, but it still
+        # takes the records at its first interrupt point.
+        state.pending.remove(state.pending[2])
+        state.turn_active = False
+        taken = cli._take_interrupt(state)
+        self.assertEqual(taken.records, (first, second))
+        self.assertEqual(taken.messages, ())
+        self.assertEqual(tuple(state.pending), (query,))
 
 
 class AuthConfigurationTests(unittest.TestCase):
@@ -959,9 +1021,12 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         login.assert_not_called()
         self.assertIn(Message("user", "/login"), model.calls[0][0].items)
 
-    async def test_quota_queued_during_sample_runs_after_turn_and_before_follow_up(self):
+    async def test_quota_during_a_sample_answers_at_once_one_at_a_time(self):
         self.auth_path.write_text('{"tokens":{"access_token":"fake","account_id":"account"}}')
         entered, release = threading.Event(), threading.Event()
+        querying, answer = threading.Event(), threading.Event()
+        # Not assertions in the mocks: the user tool's guard would catch them.
+        seen = {}
         step = 0
 
         def first(context):
@@ -971,21 +1036,34 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             return _answer("first")
 
         def quota(auth, **kwargs):
-            items = load_interaction_save(self.path).items
-            self.assertIsInstance(items[-1], UserToolCall)
-            self.assertIsInstance(items[-2], TurnSummary)
-            self.assertNotIn(Message("user", "follow-up"), items)
+            seen["during the sample"] = entered.is_set() and not release.is_set()
+            seen["thread"] = threading.current_thread().name
+            seen["timeout"] = kwargs.get("timeout_seconds")
+            querying.set()
+            if not answer.wait(2):
+                raise AssertionError("quota not released")
             return "quota snapshot"
 
         def frame(t, editor, status):
             nonlocal step
+            texts = [i.text for i in t.items]
             if entered.is_set() and step == 0:
                 t.submit("/quota")
-                t.submit("follow-up")
                 step = 1
-            if "queued=2" in status:
+            elif step == 1 and querying.is_set() and status.endswith(" | quota"):
+                seen["status"] = status
+                t.submit("/quota")  # one at a time
+                step = 2
+            elif step == 2 and "[cli] A quota query is already running." in texts:
+                answer.set()
+                step = 3
+            elif step == 3 and "[cli] quota: quota snapshot" in texts:
+                seen["answered during the sample"] = not release.is_set()
+                seen["status after"] = status
+                t.submit("follow-up")  # a steer, which the turn ends before
                 release.set()
-            if status == "idle" and any(i.text == "[assistant] second" for i in t.items):
+                step = 4
+            elif step == 4 and status == "idle" and "[assistant] second" in texts:
                 t.key("c-d")
 
         self.args.prompt = "first"
@@ -995,10 +1073,209 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.run_cli(model, _Terminal(frame)), 0)
         finally:
             release.set()
-        query.assert_called_once()
+            answer.set()
+        query.assert_called_once()  # the second /quota started nothing
+        self.assertEqual(seen["thread"], "interaction-quota")
+        self.assertEqual(seen["timeout"], DEFAULT_LOGIN_TIMEOUT_SECONDS)
+        self.assertTrue(seen["during the sample"])
+        self.assertTrue(seen["answered during the sample"])
+        self.assertRegex(seen["status"], r"^sampling \d+s \| quota$")
+        self.assertNotIn("quota", seen["status after"])
         self.assertEqual(len(model.calls), 2)
         saved = load_interaction_save(self.path)
+        self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in saved))
         self.assertEqual(len([i for i in saved if isinstance(i, TurnSummary)]), 2)
+
+    async def test_an_exit_abandons_a_running_quota(self):
+        self.auth_path.write_text('{"tokens":{"access_token":"fake","account_id":"account"}}')
+        querying, answer = threading.Event(), threading.Event()
+        step = 0
+
+        def quota(auth, **kwargs):
+            querying.set()
+            answer.wait(5)
+            return "late snapshot"
+
+        def frame(t, editor, status):
+            nonlocal step
+            if status == "idle" and step == 0:
+                t.submit("/quota")
+                step = 1
+            elif step == 1 and querying.is_set() and status == "idle | quota":
+                t.submit("/quit")
+                step = 2
+
+        terminal = _Terminal(frame)
+        try:
+            with mock.patch.object(user_tools, "query_quota", side_effect=quota):
+                self.assertEqual(await self.run_cli(_Model(self.path), terminal), 0)
+                # It exited while the request still ran: nothing waited for it.
+                running = [t for t in threading.enumerate() if t.name == "interaction-quota"]
+                still_waiting = not answer.is_set()
+        finally:
+            answer.set()
+        self.assertTrue(still_waiting)
+        self.assertEqual([t.daemon for t in running], [True])
+        running[0].join(2)
+        self.assertFalse(running[0].is_alive())
+        self.assertFalse(any("snapshot" in item.text for item in terminal.items))
+        saved = load_interaction_save(self.path)
+        self.assertFalse(any(isinstance(i, (UserToolCall, UserToolResult)) for i in saved))
+
+    async def test_config_during_a_turn_answers_at_once_and_applies_from_the_next_turn(self):
+        entered, release = threading.Event(), threading.Event()
+        seen = {}
+        step = 0
+
+        def first(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("sample not released")
+            return ModelSample(items=(ToolCall("probe", "p1", "{}"),))
+
+        def frame(t, editor, status):
+            nonlocal step
+            texts = [i.text for i in t.items]
+            if entered.is_set() and step == 0:
+                t.submit("/config max_output_tokens 17")
+                t.submit("/config.json max_output_tokens")
+                step = 1
+            elif step == 1 and any(text.startswith("[cli] config:\n") for text in texts):
+                seen["answered during the sample"] = not release.is_set()
+                release.set()
+                step = 2
+            elif step == 2 and status == "idle" and "[assistant] first" in texts:
+                t.submit("next query")
+                step = 3
+            elif step == 3 and status == "idle" and "[assistant] second" in texts:
+                t.key("c-d")
+
+        self.args.prompt = "go"
+        model = _Model(self.path, first, _answer("first"), _answer("second"))
+        terminal = _Terminal(frame)
+        try:
+            self.assertEqual(await self.run_cli(model, terminal), 0)
+        finally:
+            release.set()
+        self.assertTrue(seen["answered during the sample"])
+        # The running turn kept the config it started with; the next one has the change.
+        params = SampleParams(enable_auto_compaction=True,
+                              request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual([call[2] for call in model.calls], [
+            params, params, SampleParams(max_output_tokens=17, enable_auto_compaction=True,
+                                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)])
+        # The change's record went in at the turn's next pause between steps,
+        # right after the tool's result.
+        self.assertFalse(any(isinstance(i, UserToolCall) for i in model.checkpoints[0]))
+        self.assertIsInstance(model.checkpoints[1][-3], ToolResult)
+        change, changed = model.checkpoints[1][-2:]
+        self.assertEqual((change.call.name, change.call.arguments_json),
+                         ("config", '{"key":"max_output_tokens","value":17}'))
+        self.assertEqual(changed, UserToolResult(ToolResult(
+            change.call.call_id, "# init: max_output_tokens = None\nmax_output_tokens = 17")))
+        saved = load_interaction_save(self.path)
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["config"])
+        # The change showed with its result when typed, and only then; the
+        # read, typed after it, answered with a notice.
+        texts = [i.text for i in terminal.items]
+        self.assertEqual(texts.count(f"[user-tool-call] config ({change.call.call_id})"), 1)
+        self.assertEqual(len([text for text in texts if text.startswith("[user-tool-ret]")]), 1)
+        [read] = [text.removeprefix("[cli] config:\n") for text in texts
+                  if text.startswith("[cli] config:\n")]
+        self.assertEqual(json.loads(read),
+                         {"max_output_tokens": 17, "__init__": {"max_output_tokens": None}})
+
+    async def test_a_workspace_change_during_a_turn_applies_from_the_next_turn(self):
+        workspace, outside = self.root / "workspace", self.root / "outside"
+        workspace.mkdir()
+        outside.mkdir()
+        entered, release = threading.Event(), threading.Event()
+        step = 0
+
+        def outside_command(call_id):
+            return ModelSample(items=(ToolCall("exec_command", call_id, json.dumps({
+                "cmd": "pwd", "workdir": str(outside), "yield_time_ms": 1_000})),))
+
+        def first(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("sample not released")
+            return outside_command("during")
+
+        def frame(t, editor, status):
+            nonlocal step
+            texts = [i.text for i in t.items]
+            if entered.is_set() and step == 0:
+                t.submit("/config enable_workspace False")
+                step = 1
+            elif step == 1 and any(text.startswith("[user-tool-ret]") for text in texts):
+                release.set()
+                step = 2
+            elif step == 2 and status == "idle" and "[assistant] first" in texts:
+                t.submit("again")
+                step = 3
+            elif step == 3 and status == "idle" and "[assistant] second" in texts:
+                t.key("c-d")
+
+        self.args.prompt = "go"
+        model = _Model(self.path, first, _answer("first"), outside_command("after"),
+                       _answer("second"))
+        try:
+            with DefaultEnvironment(cwd=workspace) as environment:
+                result = await asyncio.wait_for(
+                    cli._run(model, environment, _Terminal(frame), self.args, self.path), 6)
+        finally:
+            release.set()
+        self.assertEqual(result, 0)
+        results = {item.call_id: item for item in load_interaction_save(self.path)
+                   if isinstance(item, ToolResult)}
+        # The running turn's tools kept its policy; the next turn's have the change.
+        self.assertFalse(results["during"].success)
+        self.assertIn("workdir escapes configured cwd", results["during"].output)
+        self.assertTrue(results["after"].success)
+        self.assertIn(str(outside), results["after"].output)
+
+    async def test_a_config_change_during_a_failed_turn_keeps_its_record(self):
+        entered, release = threading.Event(), threading.Event()
+        step = 0
+
+        def first(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("sample not released")
+            raise RuntimeError("injected failure")
+
+        def logged(name):
+            return [i for i in load_interaction_save(self.path)
+                    if isinstance(i, UserToolResult) and name in i.result.output]
+
+        def frame(t, editor, status):
+            nonlocal step
+            if entered.is_set() and step == 0:
+                t.submit("/config max_samples 5")
+                t.submit("queued text")  # a steer, which the failure discards
+                step = 1
+            elif step == 1 and any(i.text.startswith("[user-tool-ret]") for i in t.items):
+                release.set()
+                step = 2
+            elif step == 2 and status == "failed" and logged("max_samples"):
+                t.key("c-d")
+
+        self.args.prompt = "go"
+        terminal = _Terminal(frame)
+        try:
+            self.assertEqual(await self.run_cli(_Model(self.path, first), terminal), 1)
+        finally:
+            release.set()
+        saved = load_interaction_save(self.path)
+        # The change applied when it was typed, so its record outlives the failure.
+        change, changed = saved.items[-2:]
+        self.assertEqual((change.call.name, change.call.arguments_json),
+                         ("config", '{"key":"max_samples","value":5}'))
+        self.assertEqual(changed.result.call_id, change.call.call_id)
+        self.assertNotIn(Message("user", "queued text"), saved.items)
+        self.assertIn("[cli] Queued queries discarded after failure; submit again explicitly.",
+                      [i.text for i in terminal.items])
 
     async def test_same_account_login_rebinds_without_sampling_or_changing_provider_state(self):
         metadata = SampleMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="state")
