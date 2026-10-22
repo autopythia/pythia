@@ -1014,11 +1014,13 @@ class RuntimeTests(unittest.TestCase):
 
     def test_busy_phase_classification(self):
         session = self.session({})
-        for phase in ("starting", "sampling", "compacting", "executing tools", "saving",
+        for phase in ("starting", "sampling", "retrying", "compacting", "executing tools", "saving",
                       "awaiting watcher"):
             with self.subTest(phase=phase):
                 session._phase(2, phase)
                 self.assertTrue(session._is_busy(2))
+                # Every busy phase but starting shows its timer.
+                self.assertEqual(session.status(2).endswith(f" - {phase}... 0s"), phase != "starting")
         for phase in ("quiescent", "closed"):
             with self.subTest(phase=phase):
                 session._phase(2, phase)

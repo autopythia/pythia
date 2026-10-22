@@ -23,10 +23,10 @@ from pythia.interaction.default_environment import DefaultEnvironment
 from pythia.interaction.environment import ToolSpec
 from pythia.interaction.items import Instructions, Message, ToolCall, ToolResult, Tools, SampleMetadata, ModelSampleBoundary, ContextPrefix
 from pythia.interaction.loop import TurnHost, run_turn
-from pythia.interaction.model import ModelError, ModelConfigurationError, SampleParams, TokenUsage
+from pythia.interaction.model import ModelError, ModelConfigurationError, RetryState, SampleParams, TokenUsage
 from pythia.interaction.claude_relay._cli_protocol import Assembler, decode
 from pythia.interaction.claude_relay._context import Snapshot
-from pythia.interaction.claude_relay._mcp import Mailbox, MCPServer
+from pythia.interaction.claude_relay._mcp import Mailbox, MCPServer, NativeToolRejected
 from pythia.interaction.claude_relay._runtime import PREAMBLE, Runtime, system_prompt
 from pythia.interaction.compaction import PiCompactor, CompactionError, CompactionSettings, auto_compaction_due
 from pythia.interaction.compaction import run_compaction
@@ -521,6 +521,30 @@ class ModelTests(unittest.TestCase):
                 self.assertTrue(failure.message.startswith(message + ' (phase='), failure.message)
                 self.assertEqual(caught.exception.completed_items, ())  # nothing published, nothing run
                 self.assertIsNone(self.model._runtime)
+                # A rejection vouches for sampling again, its process confirmed gone.
+                self.assertIs(caught.exception.retry_state,
+                              RetryState.ELIGIBLE if code else RetryState.NONE)
+
+    def test_a_rejection_is_blocked_unless_its_teardown_is_confirmed(self):
+        close = Runtime.close
+
+        def failing(runtime):
+            close(runtime)
+            raise RuntimeError('private cleanup details')
+
+        def unconfirmed(runtime):
+            close(runtime)
+            runtime.retirement_complete = False
+        for teardown, note in ((failing, '; cleanup failed (RuntimeError)'),
+                               (unconfirmed, '; cleanup unconfirmed')):
+            with self.subTest(note=note):
+                with mock.patch.object(Runtime, 'close', teardown), \
+                        self.assertRaises(NativeToolRejected) as caught:
+                    self.model.sample(InteractionContext((Message('user', 'bare-tool-name'),)), tools=TOOLS)
+                self.assertIs(caught.exception.retry_state, RetryState.BLOCKED)
+                message = caught.exception.failure.message
+                self.assertTrue(message.endswith(note), message)
+                self.assertNotIn('private cleanup details', message)
 
     def test_a_cut_native_message_is_discarded_and_the_clis_retry_adopted(self):
         # The fixture cuts a message the observed way (no message_delta), then

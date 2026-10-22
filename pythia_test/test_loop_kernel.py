@@ -12,13 +12,18 @@ from unittest import mock
 
 from pythia.interaction import Environment, Init, InteractionContext, Message
 from pythia.interaction import ModelSample, Tool, ToolCall, ToolOutcome, ToolResult, ToolSpec
+from pythia.interaction.claude_relay._cli_protocol import NativeStreamInterrupted, NativeToolInputRewritten
+from pythia.interaction.claude_relay._mcp import MCPError, NativeToolRejected
+from pythia.interaction.claude_relay._recovery import DeliveryUnacknowledged, ExpiredCall, NativeMCPTimeout
 from pythia.interaction.environment import current_cancel, current_results_due
 from pythia.interaction.items import ModelFailure, ModelSampleBoundary, SampleMetadata, TurnSummary
 from pythia.interaction.loop import Interrupt, MissingFinalText, Preemption, SampleLimitExceeded, Steer
 from pythia.interaction.loop import TurnHost, TurnResult, run_turn
 from pythia.interaction.loop import Urgency, command_urgency, escalated_stop
 from pythia.interaction.loop import kernel
-from pythia.interaction.model import ModelContinuationExpired, ModelContextWindowError, ModelTransportError
+from pythia.interaction.model import ModelCancelled, ModelContinuationExpired, ModelContextWindowError
+from pythia.interaction.model import ModelError, ModelRefusal, ModelResponseError, ModelTransportError
+from pythia.interaction.model import RetryState
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 
 
@@ -38,6 +43,28 @@ def _expired():
     return ModelContinuationExpired('expired', failure=ModelFailure(
         'ModelContinuationExpired', 'Native MCP operation expired', provider='claude-relay',
         error_code='native_mcp_timeout'))
+
+
+def _rejected():
+    """A rejected tool name, as the Claude relay raises it: eligible for a retry,
+    with its failure."""
+    error = NativeToolRejected('probe', 'mcp__pythia__probe')
+    error.failure = ModelFailure('NativeToolRejected', str(error), provider='claude-relay',
+                                 error_code='native_tool_name_rejected')
+    return error
+
+
+def _record_waits(test):
+    """Have run_turn record each wait before a retry instead of waiting; the
+    waits themselves are RetryWaitTests'."""
+    waits = []
+    patcher = mock.patch.object(kernel, '_wait_to_retry', lambda host, seconds: waits.append(seconds))
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return waits
+
+
+_EXPIRED_NOTICE = 'Model continuation expired; restarting from saved tool results in {} s ({}/3).'
 
 
 class _Model:
@@ -146,13 +173,17 @@ def _config(**values):
 
 
 class RunTurnTests(unittest.TestCase):
+    def setUp(self):
+        self.waits = _record_waits(self)
+
     def test_continuation_recovery_retries_sampling_not_tools(self):
         host, context = _Host(), _context()
         model = _Model(host, _calls(_call('a')), _expired(), _answer('recovered'))
         result = run_turn(context, model, _environment(host), _config(max_samples=2), host)
         self.assertEqual(result.final_text, 'recovered')
         self.assertEqual(host.calls_run, 1)
-        self.assertEqual(host.notices, [kernel.CONTINUATION_NOTICE])
+        self.assertEqual(host.notices, [_EXPIRED_NOTICE.format(1, 2)])
+        self.assertEqual(self.waits, [1])
         self.assertEqual(host.retryable, 0)
         metadata = [i for i in context if isinstance(i, SampleMetadata)]
         self.assertEqual(metadata[-1].recovery, (kernel.CONTINUATION_RECOVERY,))
@@ -161,18 +192,21 @@ class RunTurnTests(unittest.TestCase):
         failure = next(n for n,e in enumerate(order) if e[0] == 'append' and 'ModelFailure' in e[1])
         self.assertEqual(order[failure + 1][0], 'sample')
 
-    def test_recovery_budget_spans_later_tool_batches_and_compaction(self):
+    def test_each_sample_gets_its_own_attempts_across_tool_batches_and_compaction(self):
         host, context = _Host(), _context()
-        model = _Model(host, _expired(), _calls(_call('a')), _expired(), _answer('never'))
+        model = _Model(host, _expired(), _calls(_call('a')), _expired(), _answer('done'))
         with _fake_compaction(host, due=False), mock.patch.object(
-                kernel, 'auto_compaction_due', side_effect=[False, True, False]):
-            with self.assertRaises(ModelContinuationExpired):
-                run_turn(context, model, _environment(host), _config(), host)
+                kernel, 'auto_compaction_due', side_effect=[False, True, False, False]):
+            result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, 'done')
         self.assertEqual(host.calls_run, 1)
-        self.assertEqual(host.notices, [kernel.CONTINUATION_NOTICE])
-        self.assertEqual(host.retryable, 1)
-        self.assertEqual(len(model.script), 1)
+        # The second sample starts at its first attempt again.
+        self.assertEqual(host.notices, [_EXPIRED_NOTICE.format(1, 2)] * 2)
+        self.assertEqual(self.waits, [1, 1])
+        self.assertEqual(host.retryable, 0)
         self.assertIn(('compacted',), host.events)
+        self.assertEqual([i.recovery for i in context if isinstance(i, SampleMetadata)],
+                         [(kernel.CONTINUATION_RECOVERY,)] * 2)
 
     def test_failed_failure_checkpoint_prevents_relaunch(self):
         class CannotSave(_Host):
@@ -216,6 +250,8 @@ class RunTurnTests(unittest.TestCase):
             self.assertEqual(host.calls_run, 0)
             self.assertEqual(host.notices, [])
             self.assertEqual(len(model.script), 1)
+            # The loop's own check blocks the expiry; the other error never claimed a retry.
+            self.assertIs(error.retry_state, RetryState.BLOCKED if unresolved else RetryState.NONE)
 
     def test_marker_contract_and_loop_defenses_require_metadata_and_no_partial_output(self):
         with self.assertRaises(TypeError):
@@ -231,6 +267,7 @@ class RunTurnTests(unittest.TestCase):
                 run_turn(context, model, _environment(host), _config(), host)
             self.assertEqual(host.notices, [])
             self.assertEqual(host.calls_run, 0)
+            self.assertIs(error.retry_state, RetryState.BLOCKED)
 
     def test_saves_each_result_before_the_next_call_and_ends(self):
         host, context = _Host(), _context()
@@ -989,6 +1026,234 @@ class PreemptionTests(unittest.TestCase):
             preemption.flush(Urgency.PREEMPT)
         self.assertTrue(operation.cancelled)
         self.assertTrue(preemption.due())
+
+
+class RetryStateTests(unittest.TestCase):
+    """ModelError.retry_state: who vouches for a retry, and how it may move."""
+
+    def test_errors_start_none_unless_their_class_vouches_for_a_retry(self):
+        failure = _expired().failure
+        eligible = (NativeToolRejected('probe'), ModelContinuationExpired('expired', failure=failure))
+        none = (ModelError('failed'), ModelCancelled('cancelled'), ModelTransportError('lost'),
+                ModelRefusal({'type': 'refusal'}), MCPError('bad call'),
+                NativeMCPTimeout(ExpiredCall('toolu_a', True, False)), DeliveryUnacknowledged(),
+                NativeStreamInterrupted('cut'),
+                NativeToolInputRewritten('toolu_a', 'probe', 'snapshot', 'detail', adopted=False))
+        for error in eligible + none:
+            with self.subTest(error=type(error).__name__):
+                self.assertIs(error.retry_state,
+                              RetryState.ELIGIBLE if error in eligible else RetryState.NONE)
+        # Every constructor takes it, as it takes failure.
+        self.assertIs(NativeToolRejected('probe', retry_state=RetryState.NONE).retry_state,
+                      RetryState.NONE)
+        self.assertIs(NativeMCPTimeout(ExpiredCall('toolu_a', True, False),
+                                       retry_state=RetryState.ELIGIBLE).retry_state,
+                      RetryState.ELIGIBLE)
+        self.assertIs(ModelRefusal(retry_state=RetryState.ELIGIBLE).retry_state, RetryState.ELIGIBLE)
+        self.assertEqual([state.value for state in RetryState],
+                         ['none', 'eligible', 'blocked', 'retried', 'exhausted'])
+
+    def test_it_only_moves_forward(self):
+        with self.assertRaisesRegex(TypeError, 'retry_state must be a RetryState'):
+            ModelError('failed', retry_state='eligible')
+        for state in (RetryState.BLOCKED, RetryState.RETRIED, RetryState.EXHAUSTED):
+            with self.subTest(state=state), self.assertRaisesRegex(
+                    ValueError, "A new ModelError's retry_state must be NONE or ELIGIBLE"):
+                ModelError('failed', retry_state=state)
+        for settled in (RetryState.BLOCKED, RetryState.RETRIED, RetryState.EXHAUSTED):
+            error = ModelError('failed')
+            with self.assertRaisesRegex(ValueError, "can't move from NONE to " + settled.name):
+                error.retry_state = settled
+            error.retry_state = RetryState.ELIGIBLE
+            error.retry_state = settled
+            for state in RetryState:
+                with self.subTest(settled=settled, state=state), self.assertRaises(ValueError):
+                    error.retry_state = state
+            self.assertIs(error.retry_state, settled)
+        with self.assertRaises(TypeError):
+            ModelError('failed').retry_state = None
+
+
+class SampleRetryTests(unittest.TestCase):
+    """A failure the model vouches for is sampled again, within the sample's attempts."""
+
+    def setUp(self):
+        self.waits = _record_waits(self)
+
+    def test_a_rejected_tool_name_is_sampled_again_until_an_attempt_succeeds(self):
+        host, context = _Host(), _context()
+        errors = [_rejected(), _rejected()]
+        model = _Model(host, *errors, _answer('done'))
+        # Failed attempts don't count toward max_samples.
+        result = run_turn(context, model, _environment(host), _config(max_samples=1), host)
+        self.assertEqual(result, TurnResult('ended', 'done'))
+        self.assertEqual(self.waits, [1, 2])
+        self.assertEqual(host.notices, ['Sampling again in 1 s (2/3).', 'Sampling again in 2 s (3/3).'])
+        self.assertEqual([error.retry_state for error in errors], [RetryState.RETRIED] * 2)
+        self.assertEqual(host.retryable, 0)
+        failures = [item for item in context if isinstance(item, ModelFailure)]
+        self.assertEqual([failure.error_code for failure in failures], ['native_tool_name_rejected'] * 2)
+        [metadata] = [item for item in context if isinstance(item, SampleMetadata)]
+        self.assertEqual(metadata.recovery, ('native_tool_name_rejected_retry',) * 2)
+        # Each attempt samples the context with the failures before it saved.
+        self.assertEqual([e for e in host.events if e[0] == 'sample'],
+                         [('sample', 2), ('sample', 4), ('sample', 6)])
+
+    def test_the_last_attempt_s_failure_ends_the_turn_with_retry_offered(self):
+        for make in (_rejected, _expired):
+            with self.subTest(error=make.__name__):
+                self.waits.clear()
+                host, context = _Host(), _context()
+                errors = [make() for _ in range(3)]
+                model = _Model(host, *errors, _answer('never'))
+                with self.assertRaises(ModelError) as caught:
+                    run_turn(context, model, _environment(host), _config(), host)
+                self.assertIs(caught.exception, errors[2])
+                self.assertEqual([error.retry_state for error in errors],
+                                 [RetryState.RETRIED, RetryState.RETRIED, RetryState.EXHAUSTED])
+                self.assertEqual(self.waits, [1, 2])
+                self.assertEqual(len(host.notices), 2)
+                self.assertEqual(host.retryable, 1)
+                self.assertEqual(len(model.script), 1)
+                self.assertEqual(sum(isinstance(item, ModelFailure) for item in context), 3)
+
+    def test_eligible_failures_share_the_sample_s_attempts(self):
+        host, context = _Host(), _context()
+        model = _Model(host, _expired(), _calls(_call('a')), _rejected(), _expired(), _answer('done'))
+        result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, 'done')
+        self.assertEqual(self.waits, [1, 1, 2])
+        self.assertEqual(host.notices, [_EXPIRED_NOTICE.format(1, 2), 'Sampling again in 1 s (2/3).',
+                                        _EXPIRED_NOTICE.format(2, 3)])
+        self.assertEqual([item.recovery for item in context if isinstance(item, SampleMetadata)],
+                         [(kernel.CONTINUATION_RECOVERY,),
+                          ('native_tool_name_rejected_retry', kernel.CONTINUATION_RECOVERY)])
+
+    def test_errors_not_vouched_for_are_not_retried(self):
+        for error in (ModelTransportError('lost'), ModelResponseError('bad'),
+                      ModelRefusal({'type': 'refusal'}),
+                      NativeToolInputRewritten('toolu_a', 'probe', 'snapshot', 'detail', adopted=False)):
+            host = _Host()
+            model = _Model(host, error, _answer('never'))
+            with self.subTest(error=type(error).__name__), self.assertRaises(ModelError):
+                run_turn(_context(), model, _environment(host), _config(), host)
+            self.assertIs(error.retry_state, RetryState.NONE)
+            self.assertEqual(host.notices, [])
+            self.assertEqual(host.retryable, 1)
+        self.assertEqual(self.waits, [])
+
+    def test_the_loop_blocks_a_retry_it_cannot_make_safely(self):
+        def no_failure(error):
+            error.failure = None
+
+        def completed_output(error):
+            error.completed_items = (_call('x'),)
+        for spoil in (no_failure, completed_output, None):
+            host, context = _Host(), _context()
+            error = _rejected()
+            if spoil is None:
+                context.append(_call('unresolved'))  # the context isn't ready for the model
+            else:
+                spoil(error)  # an adapter breaking ELIGIBLE's contract
+            model = _Model(host, error, _answer('never'))
+            with self.subTest(spoil=getattr(spoil, '__name__', 'unresolved')), \
+                    self.assertRaises(NativeToolRejected):
+                run_turn(context, model, _environment(host), _config(), host)
+            self.assertIs(error.retry_state, RetryState.BLOCKED)
+            self.assertEqual(host.notices, [])
+            self.assertEqual(host.retryable, 1)
+        self.assertEqual(self.waits, [])
+
+    def test_each_decision_is_traced(self):
+        host = _TracingHost()
+        model = _Model(host, _rejected(), _rejected(), _rejected())
+        with self.assertRaises(NativeToolRejected):
+            run_turn(_context(), model, _environment(host), _config(), host)
+        retries = [tags for op, tags in host.traced if op == 'sample_retry']
+        self.assertEqual([(t['attempt'], t['retry_state'], t['delay_seconds']) for t in retries],
+                         [(1, 'retried', 1), (2, 'retried', 2), (3, 'exhausted', None)])
+        self.assertEqual({t['error_code'] for t in retries}, {'native_tool_name_rejected'})
+
+
+class RetryWaitTests(unittest.TestCase):
+    """The wait before a retry: a preemptible operation, in the phase "retrying"."""
+
+    def test_a_host_without_preemption_waits_it_out(self):
+        host = _Host()
+        model = _Model(host, _rejected(), _answer('done'))
+        with mock.patch.object(kernel, 'RETRY_DELAYS_SECONDS', (0.2, 0.2)):
+            started = time.monotonic()
+            result = run_turn(_context(), model, _environment(host), _config(), host)
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.final_text, 'done')
+        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertEqual([e[1] for e in host.events if e[0] == 'phase'],
+                         ['sampling', 'retrying', 'sampling'])
+
+    def test_a_steer_typed_during_the_wait_goes_in_before_the_retry(self):
+        class Host(_SteeringHost):
+            def phase(self, phase):
+                super().phase(phase)
+                if phase == 'retrying':
+                    self.steer('also this', Urgency.QUEUED)
+        host, context = Host(), _context()
+        model = _Model(host, _rejected(), _answer('done'))
+        with mock.patch.object(kernel, 'RETRY_DELAYS_SECONDS', (0.05, 0.05)):
+            run_turn(context, model, _environment(host), _config(), host)
+        items = list(context.items)
+        failure = next(n for n, item in enumerate(items) if isinstance(item, ModelFailure))
+        self.assertLess(failure, items.index(Message('user', 'also this')))
+        self.assertLess(items.index(Message('user', 'also this')), items.index(Message('assistant', 'done')))
+
+    def test_a_preempting_steer_or_stop_cuts_the_wait_short(self):
+        for kind in ('steer', 'stop'):
+            class Host(_LevelHost):
+                def phase(self, phase):
+                    super().phase(phase)
+                    if phase == 'retrying':
+                        if kind == 'steer':
+                            self.steer('now', Urgency.PREEMPT)  # /steer!! now
+                        else:
+                            self.request_stop(Urgency.PREEMPT)  # /exit!!
+            host, context = Host(), _context()
+            model = _Model(host, _rejected(), _answer('done'))
+            with self.subTest(kind=kind), mock.patch.object(kernel, 'RETRY_DELAYS_SECONDS', (30, 30)):
+                started = time.monotonic()
+                result = run_turn(context, model, _environment(host), _config(), host)
+                self.assertLess(time.monotonic() - started, 10)
+                if kind == 'steer':
+                    self.assertEqual(result.final_text, 'done')
+                    self.assertIn(Message('user', 'now'), context.items)
+                else:
+                    self.assertEqual(result.kind, 'stopped')
+                    self.assertEqual(len(model.script), 1)  # no attempt after the stop
+
+    def test_an_earlier_bang_skips_the_wait_and_one_during_it_lets_it_finish(self):
+        host, context = _SteeringHost(), _context()
+
+        def rejected_after_a_steer():
+            host.steer('first', Urgency.IMMEDIATE)  # /steer! during the failing sample
+            return _rejected()
+        model = _Model(host, rejected_after_a_steer, _answer('done'))
+        with mock.patch.object(kernel, 'RETRY_DELAYS_SECONDS', (30, 30)):
+            started = time.monotonic()
+            run_turn(context, model, _environment(host), _config(), host)
+            self.assertLess(time.monotonic() - started, 10)
+        self.assertNotIn(('phase', 'retrying'), host.events)
+        self.assertIn(Message('user', 'first'), context.items)
+
+        class Host(_SteeringHost):
+            def phase(self, phase):
+                super().phase(phase)
+                if phase == 'retrying':
+                    self.steer('second', Urgency.IMMEDIATE)  # /steer! during the wait
+        host, context = Host(), _context()
+        model = _Model(host, _rejected(), _answer('done'))
+        with mock.patch.object(kernel, 'RETRY_DELAYS_SECONDS', (0.3, 0.3)):
+            started = time.monotonic()
+            run_turn(context, model, _environment(host), _config(), host)
+            self.assertGreaterEqual(time.monotonic() - started, 0.3)
+        self.assertIn(Message('user', 'second'), context.items)
 
 
 if __name__ == "__main__":

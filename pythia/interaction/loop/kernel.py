@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import threading
 from dataclasses import dataclass, replace
 from time import monotonic, perf_counter
 from typing import Iterable, Optional, Sequence, Tuple
@@ -64,6 +65,7 @@ from ..model import ModelContextWindowError
 from ..model import ModelContinuationExpired
 from ..model import ModelError
 from ..model import ModelSample
+from ..model import RetryState
 from ..model import park_model
 from ..model import retire_model
 from .preemption import NOT_PREEMPTIBLE
@@ -72,8 +74,15 @@ from .preemption import NOT_PREEMPTIBLE
 NOT_EXECUTED_OUTPUT = "Not executed: the model response did not complete."
 SKIPPED_OUTPUT = "Not executed: the user sent a message before this call started."
 OVERFLOW_NOTICE = "Model context window exceeded; compacting before one retry."
-CONTINUATION_NOTICE = "Model continuation expired; restarting from saved tool results (1/1)."
 CONTINUATION_RECOVERY = "continuation_expired_cold_restart"
+# A failed sample whose error the model vouches for (RetryState.ELIGIBLE) is
+# sampled again, up to MAX_SAMPLE_ATTEMPTS in all, after each wait in turn, in
+# whole seconds: before the 2nd attempt, then the 3rd (_retry).
+MAX_SAMPLE_ATTEMPTS = 3
+RETRY_DELAYS_SECONDS = (1, 2)
+RETRY_NOTICE = "Sampling again in {delay} s ({attempt}/{attempts})."
+CONTINUATION_NOTICE = ("Model continuation expired; restarting from saved tool results "
+                       "in {delay} s ({attempt}/{attempts}).")
 
 
 class SampleLimitExceeded(RuntimeError):
@@ -306,8 +315,10 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
     samples = 0
     # Pi's overflow recovery: one compact-and-retry per turn.
     overflow_recovered = False
-    continuation_recovered = False
-    recovery_pending = False
+    # The current sample's attempt (_retry), and the recovery labels of its
+    # retries, for the metadata of the attempt that succeeds.
+    attempt = 1
+    recovery = []
     while config.max_samples is None or samples < config.max_samples:
         if host.stop_requested():
             return STOPPED
@@ -336,6 +347,16 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                         sample_params=sample_params,
                     )
         except ModelError as exc:
+            # The central handler of failed samples, for every frontend and
+            # model: each adapter raises a ModelError subclass (model.py), and
+            # the Claude relay its own too (claude_relay/), unwrapped on the
+            # way here. Each failure is saved first; then a stop ends the turn,
+            # and the cases that are safe to recover sample again: a preempting
+            # steer; an error the model vouches for (RetryState.ELIGIBLE, such
+            # as an expired continuation or a rejected tool name), within the
+            # sample's attempts (_retry); an overflow. The rest end the turn
+            # with /retry offered. Compaction retries its own requests
+            # (run_compaction).
             record_sample_failure(context, exc, host)
             if host.stop_requested():
                 # The stop caused the failure (e.g. it retired the model), or
@@ -345,23 +366,15 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 # A preempting steer cancelled it: not a failure, and not
                 # counted. The steer is delivered at the interrupt point.
                 continue
-            if isinstance(exc, ModelContinuationExpired):
-                ready = exc.failure is not None and not exc.completed_items
-                try:
-                    context.assert_model_ready()
-                except ValueError:
-                    ready = False
-                allowed = ready and not continuation_recovered
-                with host.trace("continuation_recovery", context_revision=len(context),
-                                allowed=allowed, error_code=exc.failure.error_code if exc.failure else None):
-                    if allowed:
-                        continuation_recovered = True
-                        recovery_pending = True
-                        host.notice(CONTINUATION_NOTICE)
-                if allowed:
-                    # The provider already revoked the old continuation. Repeat
-                    # only sampling, through the normal stop/steering boundary;
-                    # never re-enter the previous host tool batch.
+            if exc.retry_state is RetryState.ELIGIBLE:
+                label = _retry(context, exc, host, attempt)
+                if label is not None:
+                    # The model already dropped the failed attempt (as the
+                    # relay retires its process). Repeat only sampling, through
+                    # the normal stop/steering boundary; never re-enter the
+                    # previous host tool batch.
+                    attempt += 1
+                    recovery.append(label)
                     continue
             if (isinstance(exc, ModelContextWindowError) and not overflow_recovered
                     and config.enable_auto_compaction and uses_host_auto_compaction(model)):
@@ -385,13 +398,14 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             # sampling boundary is still distinct from a failed local effect.
             host.retryable_failure()
             raise
-        # The failed attempt before an overflow retry does not count.
+        # The failed attempts before a retry do not count.
         samples += 1
+        attempt = 1
         if not isinstance(sample, ModelSample):
             raise TypeError("Expected ModelSample.")
-        if recovery_pending:
-            sample = replace(sample, recovery=(*sample.recovery, CONTINUATION_RECOVERY))
-            recovery_pending = False
+        if recovery:
+            sample = replace(sample, recovery=(*sample.recovery, *recovery))
+            recovery = []
         host.after_sample(model, sample)
         host.append(context, sample.context_items())
         host.show(sample.display_items())
@@ -499,6 +513,44 @@ def record_sample_failure(context, exc: ModelError, host: TurnHost) -> None:
         host.show(render_interaction_items(results, source_calls=calls))
 
 
+def _retry(context, exc: ModelError, host: TurnHost, attempt: int) -> Optional[str]:
+    """Settle an eligible failure (``RetryState.ELIGIBLE``) of the sample's
+    ``attempt`` (1 for its first), after it is saved.
+
+    The failure is RETRIED: after its notice and the wait (``_wait_to_retry``),
+    this returns the recovery label for the attempt that succeeds. Or it is
+    BLOCKED, when the loop's own checks fail (no failure was saved, it has
+    completed output, or the context isn't ready for the model), or
+    EXHAUSTED, at ``MAX_SAMPLE_ATTEMPTS``: then this returns None, and the
+    turn ends with /retry offered. Each decision is traced.
+    """
+    ready = exc.failure is not None and not exc.completed_items
+    if ready:
+        try:
+            context.assert_model_ready()
+        except ValueError:
+            ready = False
+    exc.retry_state = (RetryState.BLOCKED if not ready
+                       else RetryState.EXHAUSTED if attempt >= MAX_SAMPLE_ATTEMPTS
+                       else RetryState.RETRIED)
+    retried = exc.retry_state is RetryState.RETRIED
+    delay = RETRY_DELAYS_SECONDS[min(attempt, len(RETRY_DELAYS_SECONDS)) - 1]
+    expired = isinstance(exc, ModelContinuationExpired)
+    with host.trace("sample_retry", context_revision=len(context), attempt=attempt,
+                    retry_state=exc.retry_state.value,
+                    error_code=exc.failure.error_code if exc.failure else None,
+                    delay_seconds=delay if retried else None):
+        if not retried:
+            return None
+        host.notice((CONTINUATION_NOTICE if expired else RETRY_NOTICE).format(
+            delay=delay, attempt=attempt + 1, attempts=MAX_SAMPLE_ATTEMPTS))
+        _wait_to_retry(host, delay)
+    if expired:
+        return CONTINUATION_RECOVERY
+    # The failure's own code (or category), bounded like every recovery label.
+    return f"{(exc.failure.error_code or exc.failure.category)[:240]}_retry"
+
+
 def run_tool_calls(context, environment, calls: Iterable[ToolCall],
                    host: TurnHost, *, results_due: Optional[float] = None) -> bool:
     """Run one batch, one call at a time; False if a stop came first.
@@ -568,3 +620,20 @@ def _retirer(model):
     if callable(getattr(model, "retire", None)):
         return lambda: retire_model(model)
     return None
+
+
+def _wait_to_retry(host: TurnHost, seconds: float) -> None:
+    """Wait ``seconds`` before sampling again, in the phase "retrying".
+
+    The wait is a preemptible operation, as a sample is: a flush or stop at
+    IMMEDIATE or above that came first skips it, and one at PREEMPT ends it
+    through its cancel. One at IMMEDIATE that comes during it lets it finish.
+    A host that doesn't preempt (the default) waits it out.
+    """
+    woken = threading.Event()
+    operation = host.preemptible(woken.set)
+    with operation:
+        if operation.skipped:
+            return
+        host.phase("retrying")
+        woken.wait(seconds)

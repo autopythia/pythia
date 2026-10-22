@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 
-from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelContinuationExpired, ModelSample, _timed_sample
+from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelContinuationExpired, ModelSample, RetryState, _timed_sample
 from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
@@ -136,6 +136,13 @@ class _Kept:
     deadline: float  # time.monotonic()
     reason: str = IDLE_DEADLINE
     timer: threading.Timer | None = None
+
+
+def _note_teardown(error, note):
+    """Add to a failed sample's saved message why its teardown isn't confirmed:
+    the first 880 characters, then ``; note``, within ModelFailure's 1024."""
+    if isinstance(error, ModelError) and error.failure is not None:
+        error.failure = replace(error.failure, message=f'{error.failure.message[:880]}; {note}')
 
 
 class ClaudeRelayModel:
@@ -326,6 +333,9 @@ class ClaudeRelayModel:
                                     else diagnostic.error_code if diagnostic else None),
                         elapsed_seconds=diagnostic.elapsed_seconds if diagnostic else time.monotonic() - started,
                     )
+                # An MCP expiry is raised NONE: it becomes ELIGIBLE here once its
+                # call's result was just delivered, nothing was adopted, and the
+                # history can be cold-imported.
                 eligible = (isinstance(error, NativeMCPTimeout) and executing is runtime
                             and runtime is not None and bool(pending) and results is not None
                             and error.call.native_id in pending.values() and not error.completed_items)
@@ -335,11 +345,12 @@ class ClaudeRelayModel:
                         snapshot.prompt()  # no guessed/missing outcomes in the cold input
                     except (AttributeError, TypeError, ValueError, ModelError):
                         eligible = False
+                if eligible and error.retry_state is RetryState.NONE:
+                    error.retry_state = RetryState.ELIGIBLE
                 retired_epoch = self._retire_after_failure(error, expected_epoch=epoch if eligible else None)
-                with self._state_lock:
-                    recoverable = (eligible and retired_epoch is not None and not self._closed
-                                   and self._epoch == retired_epoch and runtime.retirement_complete)
-                if recoverable:
+                recoverable = (error.retry_state is RetryState.ELIGIBLE
+                               and self._still_eligible(error, retired_epoch, executing))
+                if recoverable and isinstance(error, NativeMCPTimeout):
                     error = ModelContinuationExpired(str(error), failure=replace(
                         error.failure, category='ModelContinuationExpired'))
                 if self.trace:
@@ -353,7 +364,8 @@ class ClaudeRelayModel:
                                      exception_type=type(error).__name__,
                                      last_event_type=error.failure.last_event_type,
                                      elapsed_seconds=error.failure.elapsed_seconds,
-                                     event_count=error.failure.event_count, error_code=error.failure.error_code)
+                                     event_count=error.failure.event_count, error_code=error.failure.error_code,
+                                     retry_state=error.retry_state.value)
                 raise error
             except BaseException as error:
                 if self.trace:
@@ -479,16 +491,46 @@ class ClaudeRelayModel:
             self._stderr = bytes(runtime.stderr_tail)
 
     def _retire_after_failure(self, error, *, expected_epoch=None):
+        """Retire the model after a failed sample: the epoch it retired, or None.
+
+        None when the teardown raised, which adds "cleanup failed (Type)" to the
+        failure's message, or, with ``expected_epoch`` (an eligible MCP expiry),
+        when the model was already retired meanwhile: "retired meanwhile".
+        """
         try:
-            return self._retire(expected_epoch=expected_epoch)
+            retired = self._retire_unless_moved(expected_epoch)
         except Exception as cleanup:
             # Keep the causal error, but never claim that teardown succeeded.
-            if isinstance(error, ModelError) and error.failure is not None:
-                error.failure = replace(error.failure, message=error.failure.message[:880]
-                                        + f'; cleanup failed ({type(cleanup).__name__[:64]})')
+            _note_teardown(error, f'cleanup failed ({type(cleanup).__name__[:64]})')
             if self.trace:
                 self.trace.event('cleanup_failure', exception_type=type(cleanup).__name__)
             return None
+        if retired is None:
+            _note_teardown(error, 'retired meanwhile')
+        return retired
+
+    def _still_eligible(self, error, retired_epoch, executing):
+        """Whether an ELIGIBLE error stays so after its attempt's teardown
+        (``_retire_after_failure``, which gave ``retired_epoch``).
+
+        A retry needs the attempt confirmed gone: retired, the model not
+        retired or closed since (as a cancel or a stop does), and
+        ``executing``, the attempt's runtime, torn down
+        (``Runtime.retirement_complete``). Otherwise the error becomes BLOCKED,
+        and its failure's message says why: as ``_retire_after_failure`` noted,
+        "retired meanwhile", or "cleanup unconfirmed".
+        """
+        if retired_epoch is not None:
+            with self._state_lock:
+                current = not self._closed and self._epoch == retired_epoch
+            if not current:
+                _note_teardown(error, 'retired meanwhile')
+            elif executing is None or not executing.retirement_complete:
+                _note_teardown(error, 'cleanup unconfirmed')
+            else:
+                return True
+        error.retry_state = RetryState.BLOCKED
+        return False
 
     def retire(self):
         """Cancel a live continuation without waiting for the sampling lock.
@@ -500,9 +542,17 @@ class ClaudeRelayModel:
         self._retire()
 
     def _retire(self, expected_epoch=None):
+        epoch = self._retire_unless_moved(expected_epoch)
+        if epoch is None:
+            raise ModelTransportError('Claude Relay was retired before launch')
+        return epoch
+
+    def _retire_unless_moved(self, expected_epoch=None):
+        """Retire the live continuation: the epoch it ends, or None, retiring
+        nothing, if ``expected_epoch`` is given and no longer current."""
         with self._state_lock:
             if expected_epoch is not None and expected_epoch != self._epoch:
-                raise ModelTransportError('Claude Relay was retired before launch')
+                return None
             runtime = self._detach_locked()
             epoch = self._epoch
         if runtime is not None:

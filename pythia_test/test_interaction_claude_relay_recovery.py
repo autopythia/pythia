@@ -19,7 +19,8 @@ from pythia.interaction.context import InteractionContext
 from pythia.interaction.environment import Environment, Tool, ToolOutcome
 from pythia.interaction.items import Message, ModelFailure, SampleMetadata, ToolCall, ToolResult
 from pythia.interaction.loop import TurnHost, run_turn
-from pythia.interaction.model import ModelError, ModelSample
+from pythia.interaction.loop import kernel
+from pythia.interaction.model import ModelError, ModelSample, RetryState
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 from pythia.interaction.save import load_interaction_save, save_interaction_save
 from pythia_test import test_interaction_claude_relay as fixture
@@ -196,8 +197,14 @@ class SavingHost(TurnHost):
 
 @unittest.skipIf(os.getuid() == 0, 'non-root fixture broker required')
 class RecoveryIntegrationTests(unittest.TestCase):
-    setUp = fixture.ModelTests.setUp
     stop_broker = fixture.ModelTests.stop_broker
+
+    def setUp(self):
+        fixture.ModelTests.setUp(self)
+        # The turn loop retries at once here; test_loop_kernel runs its waits.
+        patcher = mock.patch.object(kernel, '_wait_to_retry', lambda host, seconds: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def parked(self, prompt='native-timeout'):
         context = InteractionContext((Message('user', prompt),))
@@ -239,6 +246,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.model._runtime)
         self.assertEqual(caught.exception.failure.error_code, 'native_mcp_timeout')
         self.assertFalse(caught.exception.completed_items)
+        self.assertIs(caught.exception.retry_state, RetryState.ELIGIBLE)
         self.assertTrue(all(s['result'] is None for s in old.mailbox.slots.values()))
         final = self.model.sample(context, tools=fixture.TOOLS)
         self.assertEqual(final.last_assistant_text, 'recovered:host-1|host-2')
@@ -301,6 +309,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         with self.assertRaises(ModelError) as caught:
             self.model.sample(context, tools=fixture.TOOLS)
         self.assertNotIsInstance(caught.exception, ModelContinuationExpired)
+        self.assertIs(caught.exception.retry_state, RetryState.NONE)  # never eligible
         self.assertIsNone(self.model._runtime)
 
     def test_unpublished_proposal_does_not_grant_recovery(self):
@@ -309,8 +318,10 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.wait_claim(runtime)
             self.expire(runtime)
             return next_message(runtime)
-        with mock.patch.object(Runtime, 'next_message', expire_before_delivery), self.assertRaises(NativeMCPTimeout):
+        with mock.patch.object(Runtime, 'next_message', expire_before_delivery), \
+                self.assertRaises(NativeMCPTimeout) as caught:
             self.model.sample(InteractionContext((Message('user', 'native-timeout'),)), tools=fixture.TOOLS)
+        self.assertIs(caught.exception.retry_state, RetryState.NONE)
         self.assertIsNone(self.model._runtime)
 
     def test_cleanup_failure_denies_recovery_permission(self):
@@ -324,6 +335,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.model.sample(context, tools=fixture.TOOLS)
         self.assertIn('cleanup failed', caught.exception.failure.message)
         self.assertNotIn('private cleanup details', caught.exception.failure.message)
+        self.assertIs(caught.exception.retry_state, RetryState.BLOCKED)  # eligible, then blocked
 
     def test_unconfirmed_cleanup_without_exception_also_denies_recovery(self):
         context, sample, old = self.parked()
@@ -332,8 +344,11 @@ class RecoveryIntegrationTests(unittest.TestCase):
         def incomplete(runtime):
             close(runtime)
             runtime.retirement_complete = False
-        with mock.patch.object(Runtime, 'close', incomplete), self.assertRaises(NativeMCPTimeout):
+        with mock.patch.object(Runtime, 'close', incomplete), self.assertRaises(NativeMCPTimeout) as caught:
             self.model.sample(context, tools=fixture.TOOLS)
+        self.assertIs(caught.exception.retry_state, RetryState.BLOCKED)
+        self.assertTrue(caught.exception.failure.message.endswith('; cleanup unconfirmed'),
+                        caught.exception.failure.message)
 
     def test_external_retirement_during_recovery_validation_wins(self):
         context, sample, old = self.parked()
@@ -342,9 +357,36 @@ class RecoveryIntegrationTests(unittest.TestCase):
         def cancel(snapshot):
             self.model.retire()
             return prompt(snapshot)
-        with mock.patch.object(Snapshot, 'prompt', cancel), self.assertRaises(NativeMCPTimeout):
+        with mock.patch.object(Snapshot, 'prompt', cancel), self.assertRaises(NativeMCPTimeout) as caught:
             self.model.sample(context, tools=fixture.TOOLS)
         self.assertIsNone(self.model._runtime)
+        # Nothing failed to tear down: the model was retired meanwhile.
+        self.assertIs(caught.exception.retry_state, RetryState.BLOCKED)
+        self.assertTrue(caught.exception.failure.message.endswith('; retired meanwhile'),
+                        caught.exception.failure.message)
+        self.assertNotIn('cleanup failed', caught.exception.failure.message)
+
+    def test_a_rejected_tool_name_is_sampled_again_from_a_cold_import(self):
+        marker = self.root / 'rejected-once'  # the fixture rejects in its first process only
+        context = InteractionContext((Message('user', f'bare-tool-name-once {marker}'),))
+        host = SavingHost(self.root / 'rejected.jsonl')
+        effects = []
+
+        def execute(arguments, **kwargs):
+            effects.append(arguments)
+            return ToolOutcome(f'host-{len(effects)}')
+        environment = Environment((Tool(fixture.TOOLS[0], execute),))
+        result = run_turn(context, self.model, environment, InteractionConfigSnapshot(), host)
+        self.assertEqual(result.final_text, 'host-1|host-2')
+        self.assertTrue(marker.exists())
+        self.assertEqual(effects, [{'value': 1}] * 2)  # the retried sample's calls, run once
+        self.assertEqual(host.notices, ['Sampling again in 1 s (2/3).'])
+        [failure] = [item for item in context if isinstance(item, ModelFailure)]
+        self.assertEqual((failure.category, failure.error_code),
+                         ('NativeToolRejected', 'native_tool_name_rejected'))
+        self.assertEqual([item.recovery for item in context if isinstance(item, SampleMetadata) and item.recovery],
+                         [('native_tool_name_rejected_retry',)])
+        self.assertEqual(load_interaction_save(host.path).items, context.items)
 
     def test_context_change_already_requires_cold_start(self):
         context, sample, old = self.parked()

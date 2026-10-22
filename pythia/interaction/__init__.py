@@ -90,6 +90,7 @@ from .local_tools import create_update_plan_tool
 from .local_tools import create_write_stdin_tool
 from .loop import Fault
 from .loop import Interrupt
+from .loop import MAX_SAMPLE_ATTEMPTS
 from .loop import MissingFinalText
 from .loop import SampleLimitExceeded
 from .loop import SupervisedHandle
@@ -136,6 +137,7 @@ from .model import ModelTransportError
 from .model import ModelCancelled
 from .model import ModelContinuationExpired
 from .model import ModelRefusal
+from .model import RetryState
 from .model import SampleParams
 from .model import TokenUsage
 from .model_catalog import ModelLimits
@@ -196,6 +198,7 @@ __all__ = [
     "IcronLimits",
     "IcronStatus",
     "Interrupt",
+    "MAX_SAMPLE_ATTEMPTS",
     "MissingFinalText",
     "SampleLimitExceeded",
     "SupervisedHandle",
@@ -284,6 +287,7 @@ __all__ = [
     "ModelCancelled",
     "ModelContinuationExpired",
     "ModelRefusal",
+    "RetryState",
     "NothingToCompact",
     "OpaqueCompaction",
     "MAX_TIMEOUT_SECONDS",

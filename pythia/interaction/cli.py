@@ -93,6 +93,7 @@ from .media import split_leading_references
 from .loop import Interrupt
 from .loop import Icron
 from .loop import IcronError
+from .loop import MAX_SAMPLE_ATTEMPTS
 from .loop import Preemption
 from .loop import Steer
 from .loop import TurnHost
@@ -110,6 +111,7 @@ from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
 from .model import ModelTimeoutError
+from .model import RetryState
 from .model import SampleParams
 from .model import close_model
 from .model_config import DEFAULT_SAVE_PREFIX
@@ -2860,8 +2862,14 @@ async def _drive_interaction_body(
                 # Keep all existing diagnostics above, then append guidance.
                 # Authentication guidance suggests /login; it is not a gate
                 # on /retry, which can reload externally refreshed credentials.
+                # A failure the turn loop retried by itself says how often it
+                # failed (RetryState.EXHAUSTED).
+                exhausted = (isinstance(exc, ModelError)
+                             and exc.retry_state is RetryState.EXHAUSTED)
                 state.notice(
                     state.auth_notice if isinstance(exc, ModelAuthenticationError)
+                    else f"Sampling failed {MAX_SAMPLE_ATTEMPTS} times. Use /retry to try again."
+                    if exhausted
                     else "Sampling failed. Use /retry to try again."
                 )
                 timeout = config.get("request_timeout_seconds")

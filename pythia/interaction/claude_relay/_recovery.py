@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
-from ..model import ModelTransportError
+from ..model import ModelTransportError, RetryState
 
 
 NATIVE_MCP_TIMEOUT = 'native_mcp_timeout'
@@ -90,11 +90,17 @@ class ExpiredCall:
 
 
 class NativeMCPTimeout(ModelTransportError):
-    """Private runtime cause; not permission for the harness to retry yet."""
+    """Private runtime cause; not permission for the harness to retry yet.
+
+    It is raised ``RetryState.NONE``. ClaudeRelayModel.sample makes it ELIGIBLE
+    once its checks pass, then either converts it to ModelContinuationExpired,
+    once the teardown is confirmed, or raises it BLOCKED.
+    """
     rpc_code = -32000
 
-    def __init__(self, call: ExpiredCall):
-        super().__init__('Native MCP operation expired before consuming the host reply')
+    def __init__(self, call: ExpiredCall, *, retry_state=RetryState.NONE):
+        super().__init__('Native MCP operation expired before consuming the host reply',
+                         retry_state=retry_state)
         self.call = call
 
 
@@ -114,6 +120,6 @@ class DeliveryUnacknowledged(ModelTransportError):
     error_code = DELIVERY_UNACKNOWLEDGED
 
     def __init__(self, message='Native CLI did not take up the delivered messages', *,
-                 reason=DELIVERY_UNACKNOWLEDGED):
-        super().__init__(message)
+                 reason=DELIVERY_UNACKNOWLEDGED, retry_state=RetryState.NONE):
+        super().__init__(message, retry_state=retry_state)
         self.reason = reason

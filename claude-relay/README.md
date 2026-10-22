@@ -70,7 +70,9 @@ by these short tests.
   name, the run fails as `NativeToolRejected` (error code
   `native_tool_name_rejected`), naming the tool and its callable name, instead of
   "Native tool result has an unknown or duplicate call ID". Nothing from that
-  response is published or run. See the
+  response is published or run, so once the process is confirmed retired, the
+  turn loop samples the same context again from a cold import, up to 3 attempts
+  per sample (`RetryState.ELIGIBLE`). See the
   [tool-name notes](../doc/claude-relay-tool-name-plan.md).
 - Tool input rewrite: before recording or calling a streamed tool call, CLI
   2.1.289 decodes literal `\uXXXX` text in its input (after an odd run of
@@ -99,9 +101,10 @@ by these short tests.
   [heartbeat compatibility notes](../doc/claude-relay-heartbeat-plan.md).
 - A specifically recognized native MCP timeout invalidates the old continuation;
   its synthetic result and later proposals are not accepted. Once real host
-  outcomes are saved and cleanup is confirmed, the shared turn loop allows one
-  cold inference recovery, without rerunning tool handlers. Generic transport,
-  snapshot/parser and generation-timeout failures remain non-automatic. See the
+  outcomes are saved and cleanup is confirmed, the shared turn loop samples again
+  from a cold import, within the sample's 3 attempts, without rerunning tool
+  handlers. Generic transport, snapshot/parser and generation-timeout failures
+  remain non-automatic. See the
   [recovery contract](../doc/claude-relay-continuation-recovery-plan.md).
 - That native timeout is the CLI's `MCP_TOOL_TIMEOUT`, timed from sending each
   MCP call; unset, a 60 s HTTP abort applies (measured on 2.1.289). The adapter

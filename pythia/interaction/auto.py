@@ -68,7 +68,8 @@ from .user import UserInteraction
 
 _FRAME_INTERVAL = 1 / 128
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_TIMED_PHASES = {"sampling", "compacting", "executing tools", "saving", "awaiting watcher"}
+_TIMED_PHASES = {"sampling", "retrying", "compacting", "executing tools", "saving",
+                 "awaiting watcher"}
 _ACTIVE_PHASES = {"starting", *_TIMED_PHASES}
 # Unfinished in-process tasks admitted without the board (its user-task limit).
 _MAX_PENDING_TASKS = 16

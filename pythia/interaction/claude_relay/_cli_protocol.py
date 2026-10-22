@@ -16,7 +16,7 @@ import json
 import re
 
 from ..items import Message, Reasoning, ToolCall
-from ..model import ModelRefusal, ModelResponseError, ModelTransportError
+from ..model import ModelRefusal, ModelResponseError, ModelTransportError, RetryState
 from ..model_catalog import parse_json_value
 from ..usage import TokenUsage
 from ._diagnostics import identifier
@@ -107,10 +107,11 @@ class NativeToolInputRewritten(ModelResponseError):
 
     error_code = 'native_tool_input_rewritten'
 
-    def __init__(self, ident, name, source, detail, *, adopted):
+    def __init__(self, ident, name, source, detail, *, adopted, retry_state=RetryState.NONE):
         message = (f'Native CLI rewrote tool call {identifier(ident)} ({identifier(name)}) beyond its '
                    f'known \\uXXXX decoding, in its {source}: {detail}')
-        super().__init__(message if adopted else message + '; no tool calls may execute')
+        super().__init__(message if adopted else message + '; no tool calls may execute',
+                         retry_state=retry_state)
 
 
 @dataclass(frozen=True)

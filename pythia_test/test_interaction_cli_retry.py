@@ -21,6 +21,9 @@ from pythia.interaction import (
 )
 from pythia.interaction import user_tools
 from pythia.interaction._cli_editor import Editor
+from pythia.interaction.claude_relay._mcp import NativeToolRejected
+from pythia.interaction.items import SampleMetadata
+from pythia.interaction.loop import kernel
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
 
 
@@ -84,6 +87,62 @@ class RetryInputTests(unittest.TestCase):
                 submit(state)
                 self.assertEqual(len(state.pending), 8)
                 self.assertEqual(state.editor.text, "/retry")
+
+
+def _rejected():
+    """A rejected tool name, as the Claude relay raises it: eligible for a retry."""
+    error = NativeToolRejected("probe", "mcp__pythia__probe")
+    error.failure = ModelFailure("NativeToolRejected", str(error), provider="claude-relay",
+                                 error_code="native_tool_name_rejected")
+    return error
+
+
+class AutomaticRetryTests(_ControllerTestCase):
+    """Failures the model vouches for, which the turn loop samples again by itself."""
+
+    async def test_an_eligible_failure_is_sampled_again_while_the_status_says_retrying(self):
+        model = _Model(self.path, _rejected(), _answer("recovered"))
+        statuses = []
+
+        def frame(terminal, editor, status):
+            statuses.append(status)
+            if status == "idle":
+                terminal.key("c-d")
+        terminal = _Terminal(frame)
+        self.assertEqual(await self._run(model, terminal, [
+            "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+        ]), 0)
+        self.assertEqual(len(model.calls), 2)
+        self.assertTrue(any(status.startswith("retrying") for status in statuses), statuses)
+        shown = [item.text for item in terminal.items]
+        notice = "[cli] Sampling again in 1 s (2/3)."
+        self.assertIn(notice, shown)
+        self.assertNotIn(HINT, shown)
+        saved = load_interaction_save(self.path)
+        failures = [item for item in saved if isinstance(item, ModelFailure)]
+        self.assertEqual([failure.error_code for failure in failures], ["native_tool_name_rejected"])
+        self.assertEqual([item.recovery for item in saved if isinstance(item, SampleMetadata)],
+                         [("native_tool_name_rejected_retry",)])
+        self.assertIsInstance(saved[-1], TurnSummary)
+
+    async def test_the_last_attempt_s_failure_says_how_often_sampling_failed(self):
+        model = _Model(self.path, _rejected(), _rejected(), _rejected(), _answer("recovered"))
+        terminal = _Terminal(retry_then_quit())
+        with mock.patch.object(kernel, "RETRY_DELAYS_SECONDS", (0, 0)):
+            self.assertEqual(await self._run(model, terminal, [
+                "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+            ]), 1)  # the sticky failure exit status
+        self.assertEqual(len(model.calls), 4)  # three attempts, then the /retry
+        shown = [item.text for item in terminal.items]
+        exhausted = "[cli] Sampling failed 3 times. Use /retry to try again."
+        self.assertEqual(shown.count(exhausted), 1)
+        self.assertNotIn(HINT, shown)
+        self.assertLess(shown.index("[cli] NativeToolRejected: Native CLI rejected a call to probe: "
+                                    "no such tool; its callable name is mcp__pythia__probe"),
+                        shown.index(exhausted))
+        saved = load_interaction_save(self.path)
+        self.assertEqual(sum(isinstance(item, ModelFailure) for item in saved), 3)
+        self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["retry"])
 
 
 class RetryControllerTests(_ControllerTestCase):

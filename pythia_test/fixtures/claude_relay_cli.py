@@ -438,6 +438,13 @@ if text == 'park':
 if text == 'stream-cut-tools':
     cut_message('m-cut-0', tool=True)  # the relay must fail closed: its call may have been sent
     wait_for_end()
+if text.startswith('bare-tool-name-once '):
+    # Rejected as bare-tool-name by the first process only: that one creates the
+    # marker file the prompt names, and later ones answer as usual.
+    marker = text.split(' ', 1)[1]
+    if not os.path.exists(marker):
+        open(marker, 'x').close()
+        text = 'bare-tool-name'
 if text in ('bare-tool-name', 'unknown-tool-name', 'tool-input-rejected'):
     # Observed 2.1.289 order, synthetic contents: right after a tool block's
     # snapshot, before the message completes, the CLI answers a call it will

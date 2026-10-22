@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import math
 from dataclasses import dataclass
 from dataclasses import field
@@ -38,14 +39,51 @@ if TYPE_CHECKING:
     from .model_catalog import ModelBinding
 
 
+class RetryState(enum.Enum):
+    """Whether the turn loop may sample a failed sample's context again by
+    itself: ``ModelError.retry_state``. The values are for traces.
+
+    It only moves forward: from ``NONE`` to ``ELIGIBLE``, when a model adapter
+    vouches for a retry, and from ``ELIGIBLE`` to ``BLOCKED``, ``RETRIED`` or
+    ``EXHAUSTED``. So an error a frontend sees is ``NONE``, ``BLOCKED`` or
+    ``EXHAUSTED``: the turn loop settles an eligible one before raising it.
+    """
+
+    NONE = "none"  # no retry is claimed (the default)
+    # The adapter vouches that nothing from the attempt was published or run,
+    # so the same context may be sampled again: set by the error's class
+    # (NativeToolRejected, ModelContinuationExpired) or by the adapter once
+    # it has checked.
+    ELIGIBLE = "eligible"
+    # Eligible, but the retry couldn't be set up: the adapter's teardown of
+    # the attempt failed or wasn't confirmed, or the turn loop's own checks
+    # failed.
+    BLOCKED = "blocked"
+    RETRIED = "retried"  # the turn loop sampled again after it
+    EXHAUSTED = "exhausted"  # eligible, but the sample's attempts were used up
+
+
+_RETRY_MOVES = {
+    RetryState.NONE: (RetryState.ELIGIBLE,),
+    RetryState.ELIGIBLE: (RetryState.BLOCKED, RetryState.RETRIED, RetryState.EXHAUSTED),
+}
+
+
 class ModelError(RuntimeError):
-    """Base model failure with optional safe diagnostics and completed output."""
+    """Base model failure with optional safe diagnostics and completed output.
+
+    ``retry_state`` (``RetryState``) says whether the turn loop may sample the
+    same context again by itself. A new error is ``NONE`` or ``ELIGIBLE``;
+    assigning it later moves it on, as the Claude relay and the turn loop do,
+    and a move that ``RetryState`` doesn't allow raises ValueError.
+    """
 
     def __init__(
         self,
         *args,
         failure: Optional[ModelFailure] = None,
         completed_items: Sequence[InteractionItem] = (),
+        retry_state: RetryState = RetryState.NONE,
     ) -> None:
         super().__init__(*args)
         if failure is not None and not isinstance(failure, ModelFailure):
@@ -57,8 +95,27 @@ class ModelError(RuntimeError):
                     "completed_items must contain model output items; "
                     f"item {index} is {type(item).__name__}"
                 )
+        if not isinstance(retry_state, RetryState):
+            raise TypeError("retry_state must be a RetryState")
+        if retry_state not in (RetryState.NONE, RetryState.ELIGIBLE):
+            raise ValueError("A new ModelError's retry_state must be NONE or ELIGIBLE")
         self.failure = failure
         self.completed_items = items
+        self._retry_state = retry_state
+
+    @property
+    def retry_state(self) -> RetryState:
+        return self._retry_state
+
+    @retry_state.setter
+    def retry_state(self, state: RetryState) -> None:
+        if not isinstance(state, RetryState):
+            raise TypeError("retry_state must be a RetryState")
+        if state not in _RETRY_MOVES.get(self._retry_state, ()):
+            raise ValueError(
+                f"retry_state can't move from {self._retry_state.name} to {state.name}"
+            )
+        self._retry_state = state
 
 
 class ModelConfigurationError(ModelError, ValueError):
@@ -85,15 +142,17 @@ class ModelContinuationExpired(ModelTransportError):
 
     Providers may raise this only after confirming cleanup and complete actual
     host outcomes. It grants no tool replay or generic transport-retry authority.
-    The shared turn loop permits at most one cold recovery per turn.
+    It is ``RetryState.ELIGIBLE``: the shared turn loop samples again, within
+    the sample's attempts, as for any eligible failure (``loop.kernel``).
     """
 
-    def __init__(self, *args, failure=None, completed_items=()):
+    def __init__(self, *args, failure=None, completed_items=(),
+                 retry_state=RetryState.ELIGIBLE):
         if not isinstance(failure, ModelFailure):
             raise TypeError("Continuation recovery requires a safe ModelFailure")
         if tuple(completed_items):
             raise ValueError("Continuation recovery cannot carry completed output")
-        super().__init__(*args, failure=failure)
+        super().__init__(*args, failure=failure, retry_state=retry_state)
 
 
 class ModelAuthenticationError(ModelTransportError):
@@ -152,7 +211,8 @@ class ModelRefusal(ModelResponseError):
     error_code = "refusal"
 
     def __init__(self, details: object = None, *,
-                 failure: Optional[ModelFailure] = None) -> None:
+                 failure: Optional[ModelFailure] = None,
+                 retry_state: RetryState = RetryState.NONE) -> None:
         details = details if isinstance(details, Mapping) else {}
         self.kind = _one_line(details.get("type"), 64)
         self.category = _one_line(details.get("category"), 64)
@@ -165,7 +225,7 @@ class ModelRefusal(ModelResponseError):
             message += ": " + self.explanation
         elif not tags:
             message += " (no reason given)"
-        super().__init__(message, failure=failure)
+        super().__init__(message, failure=failure, retry_state=retry_state)
 
 
 @dataclass(frozen=True)
@@ -528,6 +588,7 @@ __all__ = [
     "ModelThinkingBindingError",
     "ModelTimeoutError",
     "ModelTransportError",
+    "RetryState",
     "SampleParams",
     "TokenUsage",
 ]

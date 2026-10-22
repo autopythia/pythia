@@ -19,6 +19,7 @@ from .icron import IcronError
 from .icron import IcronLimits
 from .icron import IcronStatus
 from .kernel import Interrupt
+from .kernel import MAX_SAMPLE_ATTEMPTS
 from .kernel import MissingFinalText
 from .kernel import SampleLimitExceeded
 from .kernel import Steer
@@ -41,6 +42,7 @@ __all__ = [
     "IcronLimits",
     "IcronStatus",
     "Interrupt",
+    "MAX_SAMPLE_ATTEMPTS",
     "MissingFinalText",
     "Preemption",
     "SampleLimitExceeded",
