@@ -1217,7 +1217,13 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertNotIn(steer, model.calls[0][0].items)
         # Right after the tool result, with no boundary: the turn continues.
         self.assertEqual(model.calls[1][0].items[-2:], (ToolResult("p1", "probed"), steer))
-        self.assertIn("[user] Also check the tests.", [item.text for item in terminal.items])
+        texts = [item.text for item in terminal.items]
+        # Its queue item showed when it was typed, during the tool call; its
+        # [user] message, once, when the turn took it, after the tool's result.
+        result = next(i for i, text in enumerate(texts) if text.startswith("[tool-ret]"))
+        self.assertLess(texts.index("[user (steer)] Also check the tests."), result)
+        self.assertGreater(texts.index("[user] Also check the tests."), result)
+        self.assertEqual(texts.count("[user] Also check the tests."), 1)
         self.assertFalse(any("queued=" in status for _editor, status, _prompt in terminal.frames))
 
     async def test_steer_flushes_the_queued_steer_and_skips_the_rest_of_the_batch(self):
@@ -1273,9 +1279,19 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertNotIn(call, model.calls[1][0].model_items())  # never model input
         self.assertIn("[cli] Flushing 1 steer: delivered once the current sample or tool "
                       "call finishes.", [item.text for item in terminal.items])
-        # The steer showed when it was typed, and not again when the turn took it.
-        self.assertEqual([item.text for item in terminal.items].count(
-            "[user] Also check the tests."), 1)
+        texts = [item.text for item in terminal.items]
+
+        def at(prefix):
+            return next(i for i, text in enumerate(texts) if text.startswith(prefix))
+        # Each showed as it took effect: the steer's queue item when typed;
+        # when the turn took it, after the batch's results, the /steer! record
+        # and then the steer's [user] message, as in the log.
+        order = [at("[user (steer)] Also check the tests."), at("[tool-ret]"),
+                 at(f"[user-tool-call] steer ({call.call.call_id})"), at("[user-tool-ret]"),
+                 at("[user] Also check the tests.")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(texts.count("[user] Also check the tests."), 1)
+        self.assertEqual(texts.count(f"[user-tool-call] steer ({call.call.call_id})"), 1)
 
     async def test_quit_drains_sample_without_executing_returned_tools(self):
         entered, release = threading.Event(), threading.Event()
@@ -1340,9 +1356,14 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(saved[index + 2:index + 4],
                          (Message("user", "more context"), UserInteractionBoundary()))
         texts = [item.text for item in terminal.items]
-        # Shown when typed, and not again when its turn began.
+        # Its queue item showed when typed; where the first turn ended, its
+        # /steer record; its [user] message when it started the next query.
+        order = [texts.index("[user (steer)] more context"),
+                 texts.index("[assistant] first done"),
+                 texts.index(f"[user-tool-call] steer ({call.call.call_id})"),
+                 texts.index("[user] more context")]
+        self.assertEqual(order, sorted(order))
         self.assertEqual(texts.count("[user] more context"), 1)
-        self.assertEqual(texts.count(f"[user-tool-call] steer ({call.call.call_id})"), 1)
         self.assertEqual(sum(t.startswith("[user-tool-ret]  steer") for t in texts), 1)
 
     async def test_an_exit_drops_queued_input_and_says_so(self):
@@ -1358,10 +1379,11 @@ class CLIControllerTests(_ControllerTestCase):
         def frame(t, editor, status):
             nonlocal step
             if step == 0 and entered.is_set():
+                t.submit("Steer this.")
                 t.submit("/task one")
                 t.submit("/task two")
                 step = 1
-            elif step == 1 and "queued=2" in status:
+            elif step == 1 and "steers=1" in status and "queued=2" in status:
                 t.submit("/exit")
                 step = 2
             elif step == 2 and status.startswith("closing"):
@@ -1374,13 +1396,57 @@ class CLIControllerTests(_ControllerTestCase):
         finally:
             release.set()
         texts = [item.text for item in terminal.items]
-        # They showed when typed, so the exit says it dropped them.
-        self.assertLess(texts.index("[user] two"), texts.index(
-            "[cli] Dropped 2 queued inputs; they were not sent."))
+        # Only the steer showed, as its queue item. Nothing reached the model,
+        # so no [user] showed for any of them, and the exit says it dropped them.
+        self.assertIn("[user (steer)] Steer this.", texts)
+        self.assertEqual([text for text in texts if text.startswith("[user]")], ["[user] hello"])
+        self.assertIn("[cli] Dropped 3 queued inputs; they were not sent.", texts)
         self.assertIn("[cli] Closing: stopping before the next sample. Ctrl-C or /exit! stops "
                       "sooner; /exit!! also cancels the current operation where possible.", texts)
         self.assertEqual([item.content_text for item in load_interaction_save(self.path)
                           if isinstance(item, Message) and item.role == "user"], ["hello"])
+
+    async def test_a_compact_typed_during_a_turn_shows_when_it_runs(self):
+        entered, release = threading.Event(), threading.Event()
+        seen = {}
+
+        def first(context):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release model")
+            return _answer("first")
+
+        def calls(t):
+            return [i.text for i in t.items if i.text.startswith("[user-tool-call] compact")]
+
+        def frame(t, editor, status):
+            if entered.is_set() and "typed" not in seen:
+                seen["typed"] = True
+                t.submit("/compact")
+            elif "queued=1" in status and "waiting" not in seen:
+                seen["waiting"] = calls(t)  # the status line counts it; nothing shows yet
+                release.set()
+            elif status == "idle" and any(i.text.startswith("[user-tool-ret]")
+                                          and "compact" in i.text for i in t.items):
+                t.key("c-d")
+
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult((
+            ContextPrefix((Message("assistant", "summary"),)),
+        ))
+        terminal = _Terminal(frame)
+        try:
+            with patch_compaction(cli, "create_default_compactor", return_value=compactor):
+                self.assertEqual(await self._run(_Model(self.path, first), terminal,
+                                                 ["--prompt", "hello"]), 0)
+        finally:
+            release.set()
+        self.assertEqual(seen["waiting"], [])
+        texts = [item.text for item in terminal.items]
+        [call] = calls(terminal)
+        # It showed when it ran, after the turn it waited for.
+        self.assertLess(texts.index("[assistant] first"), texts.index(call))
+        compactor.compact.assert_called_once()
 
     async def test_one_ctrl_c_lets_the_sample_finish_and_saves_it(self):
         entered, release, retires = threading.Event(), threading.Event(), []

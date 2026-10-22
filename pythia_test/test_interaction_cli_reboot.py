@@ -305,32 +305,28 @@ class RebootStateTests(unittest.TestCase):
         self.assertIsInstance(continuation, cli._ContinueIntent)
         self.assertIsNone(rebooted.warning)
 
-    def test_shown_input_stays_shown_and_queued_calls_keep_their_ids(self):
+    def test_the_state_carries_no_display_flags_and_accepts_older_ones(self):
         state = cli._UIState(reboot=cli._Reboot("/reboot"))
         steer = cli._user_call("steer", {"urgency": 1})
         state.pending.extend((
             cli._RecordEntry(steer, 1),  # logged when its turn ended: not carried
-            cli._Submission("typed", Message("user", "typed"), shown=True),
-            cli._Submission("wake", Message("user", "wake")),
-            UserToolIntent("config", '{"key":"max_samples","value":7}', call_id="user_abc"),
-            UserToolIntent("quota", "{}"),  # not recorded: no call shown
+            cli._Submission("typed", Message("user", "typed")),
+            UserToolIntent("compact", "{}"),
         ))
         carried = cli._reboot_state(state, InteractionConfig())
-        self.assertEqual([entry.get("shown", entry.get("call_id")) for entry in carried["queue"]],
-                         [True, False, "user_abc", None])
-        typed, wake, config, quota = cli._parse_reboot_state(json.loads(json.dumps(carried))).queue
-        self.assertEqual((typed.shown, wake.shown), (True, False))
-        self.assertEqual((config.call_id, quota.call_id), ("user_abc", None))
-        # A state from older code has neither field: its text is shown when taken.
-        for entry in carried["queue"]:
-            entry.pop("shown", None)
-            entry.pop("call_id", None)
-        typed, _, config, _ = cli._parse_reboot_state(carried).queue
-        self.assertEqual((typed.shown, config.call_id), (False, None))
-        for call_id in (7, ""):
-            carried["queue"][2]["call_id"] = call_id
-            with self.subTest(call_id=call_id), self.assertRaises(ValueError):
-                cli._parse_reboot_state(carried)
+        # The restarted CLI shows each item when it takes effect.
+        self.assertEqual(carried["queue"], [
+            {"kind": "text", "text": "typed", "steers": True,
+             "message": {"type": "message", "role": "user", "content": "typed"}},
+            {"kind": "command", "name": "compact", "arguments_json": "{}"}])
+        # Code from 2d1d5d5 to ee11c6a also wrote these, for items it showed
+        # when queued: they're accepted, and ignored.
+        carried["queue"][0]["shown"] = True
+        carried["queue"][1]["call_id"] = "user_abc"
+        typed, compact = cli._parse_reboot_state(json.loads(json.dumps(carried))).queue
+        self.assertEqual((typed.text, typed.message, typed.steers),
+                         ("typed", Message("user", "typed"), True))
+        self.assertEqual(compact, UserToolIntent("compact", "{}"))
 
     def test_it_reaches_the_restarted_cli_through_an_inherited_descriptor(self):
         carried = cli._reboot_state(self._state(), InteractionConfig())
@@ -546,20 +542,24 @@ class RebootFlowTests(_RebootCase):
         self.assertEqual(carried["config"], {"auto_compaction_context_tokens": 5000,
                                              "max_samples": 7})
         self.assertEqual(carried["draft"], {"text": "half typed", "cursor": 10})
-        # The queued /compact was shown under its ID, which the restarted CLI
-        # logs it under; the queued text was shown too, and isn't again.
-        command_id = carried["queue"][1].pop("call_id")
-        self.assertTrue(command_id.startswith("user_"), command_id)
-        self.assertTrue(any(item.text == f"[user-tool-call] compact ({command_id})"
-                            for item in terminal.items))
         self.assertEqual(carried["queue"], [
             {"kind": "text", "text": "Then this.", "steers": False,
-             "message": {"type": "message", "role": "user", "content": "Then this."},
-             "shown": True},
+             "message": {"type": "message", "role": "user", "content": "Then this."}},
             {"kind": "command", "name": "compact", "arguments_json": "{}"}])
-        # The change showed with its result when typed, and only then.
-        self.assertEqual(_texts(terminal).count(
-            f"[user-tool-call] config ({change.call.call_id})"), 1)
+        # Each showed as it took effect: the steer's queue item when typed, and
+        # its [user] message when the turn took it; the change and its result
+        # when typed; the reboot's record with its outcome. The queued /task
+        # and /compact haven't taken effect, so they don't show: the restarted
+        # CLI shows them when they do.
+        texts = _texts(terminal)
+        self.assertLess(texts.index("[user (steer)] Also check the docs."),
+                        texts.index("[user] Also check the docs."))
+        self.assertEqual(texts.count(f"[user-tool-call] config ({change.call.call_id})"), 1)
+        self.assertEqual(texts.count(f"[user-tool-call] reboot ({call.call.call_id})"), 1)
+        self.assertLess(texts.index("[user] Also check the docs."),
+                        texts.index(f"[user-tool-call] reboot ({call.call.call_id})"))
+        self.assertFalse([text for text in texts if text == "[user] Then this."
+                          or text.startswith("[user-tool-call] compact")])
         self.assertIn("Rebooting: the CLI restarts on the current code and continues the turn.",
                       _notices(terminal.items))
 
@@ -664,6 +664,18 @@ class RebootFlowTests(_RebootCase):
         self.assertEqual(saved[index + 1].result, ToolResult(
             saved[index].call.call_id, "Reboot cancelled: the restarted CLI would fail to start.",
             success=False))
+        # Its record showed with the cancellation, where it took effect (and not
+        # when typed, before the skipped call's result).
+        texts = _texts(terminal)
+        shown = texts.index(f"[user-tool-call] reboot ({saved[index].call.call_id})")
+        self.assertEqual(texts.count(texts[shown]), 1)
+        self.assertLess(next(i for i, text in enumerate(texts)
+                             if text.startswith("[tool-ret]") and "(l1)" in text), shown)
+        result = next(i for i, text in enumerate(texts)
+                      if i > shown and text.startswith("[user-tool-ret]"))
+        self.assertIn(saved[index].call.call_id, texts[result])
+        self.assertLess(result, texts.index("[cli] Reboot cancelled: the restarted CLI would "
+                                            "fail to start. The turn continues here."))
 
     async def test_an_exit_after_a_reboot_request_wins(self):
         probe, entered, release = _blocking_probe()

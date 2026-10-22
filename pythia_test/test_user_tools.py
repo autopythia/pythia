@@ -380,6 +380,7 @@ class UserToolValueTests(unittest.TestCase):
         self.assertEqual(record.result.result.output, "# init: max_samples = None\nmax_samples = 4")
         self.assertEqual(cli._queued_input(state), 1)  # a record isn't input
         texts = [item.text for item in state.displays]
+        self.assertEqual(texts[0], "[user (steer)] next step")  # the steer's queue item
         self.assertIn(f"[user-tool-call] config ({record.call.call.call_id})", texts)
         self.assertEqual(len([text for text in texts if text.startswith("[user-tool-ret]")]), 1)
         self.assertIn("[cli] config:\n# init: max_samples = None\nmax_samples = 4", texts)
@@ -393,7 +394,6 @@ class UserToolValueTests(unittest.TestCase):
         taken = cli._take_interrupt(state)
         self.assertEqual(taken.records, (record,))
         self.assertEqual(taken.messages, (Message("user", "next step"),))
-        self.assertEqual(taken.shown, (True,))
 
     def test_records_go_before_continuations_and_every_turn_takes_them(self):
         # Between turns: /compact runs, and meanwhile a change and a query come in.

@@ -584,26 +584,17 @@ def _ok(arguments, *, timeout_seconds=None):
 class SteeringTests(unittest.TestCase):
     """Immediate and preempting steers, and preempting stops, in run_turn."""
 
-    def test_a_steer_shows_only_the_messages_its_host_has_not_shown(self):
-        class Shown(_SteeringHost):
-            def interrupt(self):
-                answer = super().interrupt()
-                if not isinstance(answer, Steer):
-                    return answer
-                # The first was typed, so the host showed it when it was queued.
-                flags = (True,) + (False,) * (len(answer.messages) - 1)
-                return Steer(answer.messages, shown=flags)
-        host, context = Shown(), _context()
+    def test_a_steer_shows_its_messages_as_they_are_saved(self):
+        host, context = _SteeringHost(), _context()
 
         def sample():
-            host.steer("typed, so already shown")
-            host.steer("not yet shown")
+            host.steer("first")
+            host.steer("second")
             return _calls(_call("a", "t0"))
         run_turn(context, _Model(host, sample, _answer("done")), _tools(_ok), _config(), host)
+        # Both, right after they're saved, where they enter the context.
         index = host.events.index(("append", ("Message", "Message")))
-        self.assertEqual(host.events[index + 1], ("show", 1))
-        with self.assertRaisesRegex(ValueError, "shown flags must match"):
-            Steer((Message("user", "x"), Message("user", "y")), shown=(True,))
+        self.assertEqual(host.events[index + 1], ("show", 2))
 
     def test_the_host_says_what_a_skipped_call_s_result_is(self):
         class Rebooting(_SteeringHost):

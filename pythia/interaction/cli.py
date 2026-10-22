@@ -20,7 +20,6 @@ from contextlib import nullcontext
 from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import field
-from dataclasses import replace
 from datetime import datetime
 from datetime import time as day_time
 from datetime import timedelta
@@ -149,6 +148,8 @@ _CLOSING_NOTICE = {
 }
 # The result of a tool call that /reboot! or /reboot!! kept from starting.
 REBOOT_SKIPPED_OUTPUT = "Not executed: the user rebooted the CLI before this call started."
+# The label of a steer's queue item (_steer_item).
+_STEER_LABEL = "user (steer)"
 
 
 @dataclass(frozen=True, eq=False)
@@ -190,16 +191,19 @@ class _Submission:
     ``steers`` is false for ``/task <text>``: a running turn never takes it as
     a steer, so it becomes the next query, and text typed after it queues
     behind it (a steer never overtakes input queued before it).
-
-    ``shown`` is true once the transcript shows the message: the CLI shows
-    typed text when it's queued, so the turn that takes it doesn't show it
-    again. A restarted CLI's queue says so too (_reboot_state).
     """
 
     text: str
     message: Message
     steers: bool = True
-    shown: bool = False
+
+
+def _steer_item(submission: _Submission) -> DisplayItem:
+    """A steer's queue item, shown when the steer is accepted: its text as
+    typed, under ``[user (steer)]``. Display only: the steer's ``[user]``
+    message shows, and is logged, when the running turn takes it."""
+    text = submission.text.rstrip("\r\n")
+    return DisplayItem(f"[{_STEER_LABEL}] {text}", label=_STEER_LABEL)
 
 
 @dataclass(frozen=True, eq=False)
@@ -207,15 +211,15 @@ class _RecordEntry:
     """A command's record, waiting for a safe point to log it: a running
     turn's next interrupt point (_take_interrupt), the end of a turn
     (_write_leading_records), or at once between turns. Records stay ahead of
-    the rest of the queue, in the order they came (_queue_front). Its call
-    was shown when the command was accepted. An exit drops it. It isn't the
-    user's input: it never counts toward the queue's limit or its counts
-    (_queued_input).
+    the rest of the queue, in the order they came (_queue_front). An exit
+    drops it. It isn't the user's input: it never counts toward the queue's
+    limit or its counts (_queued_input).
 
-    A /steer's record (``flushed``) stands in front of the steers it flushed,
-    and its result, shown when it's logged, says whether the turn took them.
-    A /config change's record has its ``result`` already, shown with its call:
-    the change applied when it was typed (_UIState._config_command).
+    A /steer's record (``flushed``) stands in front of the steers it flushed:
+    its call and result show when it's logged, where its steers take effect,
+    and its result says whether the turn took them. A /config change's record
+    has its ``result`` already, and showed when it was typed: the change
+    applied then (_UIState._config_command).
     """
 
     call: UserToolCall
@@ -249,8 +253,8 @@ class _Reboot:
     # sooner, as /exit! and /exit!! would; a coldstart reboot is QUEUED.
     urgency: Urgency = Urgency.QUEUED
     # The calls of the /reboot commands that requested it or raised its
-    # level, shown when accepted, and logged with its outcome (_reboot_ready).
-    # An exit drops them. A coldstart reboot that no command asked for has none.
+    # level, logged and shown with its outcome (_reboot_ready). An exit drops
+    # them. A coldstart reboot that no command asked for has none.
     calls: list = field(default_factory=list, compare=False)
 
 
@@ -563,14 +567,11 @@ class _UIState:
             if _queued_input(self) >= _MAX_PENDING_QUERIES:
                 self.notice("Query queue is full; the draft has not been submitted.")
             else:
-                if isinstance(intent, UserToolIntent) and _recorded(intent):
-                    # Shown at once, as the log will record it (under this ID).
-                    intent = replace(intent, call_id=_user_call_id())
+                # It shows when it runs (a /compact's call), as it takes
+                # effect; the status line counts it meanwhile (queued=N).
                 self.pending.append(intent)
                 self.editor = Editor()
                 self.changed.set()
-                if isinstance(intent, UserToolIntent) and intent.call_id is not None:
-                    self.displays.extend(render_interaction_items((_intent_call(intent),)))
                 if isinstance(intent, UserToolIntent) and intent.notice is not None:
                     self.notice(intent.notice)
 
@@ -623,11 +624,13 @@ class _UIState:
         if _queued_input(self) >= _MAX_PENDING_QUERIES:
             self.notice("Query queue is full; the draft has not been submitted.")
             return
-        # The transcript shows queued text at once, as the log will record it;
-        # the turn that takes it doesn't show it again.
-        submission = replace(submission, shown=True)
         self.pending.append(submission)
-        self.displays.extend(render_interaction_items((submission.message,)))
+        # A steer shows its queue item now, and its [user] message when the
+        # running turn takes it. Text that waits as the next query, or starts
+        # a turn at once, shows only its [user] message, as its turn starts.
+        # The status line counts what waits (steers=N, queued=N).
+        if _steer_count(self) == _queued_input(self):
+            self.displays.append(_steer_item(submission))
         if self.editor.text == draft:
             self.editor = Editor()
         self.changed.set()
@@ -657,10 +660,10 @@ class _UIState:
             self.notice("No queued steers to flush.")
             return
         # Its record goes in front of the steers it flushes, after the records
-        # already there, and is written right before them (_RecordEntry).
+        # already there, and is written, and shown, right before them
+        # (_RecordEntry); the status line shows the level meanwhile.
         call = _user_call("steer", {"urgency": int(Urgency(level))})
         self._queue_record(_RecordEntry(call, count))
-        self.displays.extend(render_interaction_items((call,)))
         self.preemption.flush(level)
         level = max(Urgency(level), self.preemption.level)
         steers, them = (f"{count} steers", "them") if count > 1 else ("1 steer", "it")
@@ -706,10 +709,10 @@ class _UIState:
                 return
             self.reboot = reboot = _Reboot("/reboot")
         reboot.urgency = level
-        # Logged with the reboot's outcome (_reboot_ready); shown at once.
+        # Logged and shown with the reboot's outcome (_reboot_ready); the
+        # status line shows it meanwhile (rebooting).
         call = _user_call("reboot", {"urgency": int(level)})
         reboot.calls.append(call)
-        self.displays.extend(render_interaction_items((call,)))
         if self.phase not in {"idle", "failed", "auth needed"}:
             if level > Urgency.QUEUED:
                 # As a flush of steers does: the turn starts nothing new before
@@ -1129,8 +1132,7 @@ async def _compact_user_tool(
     snapshot = config.snapshot()
     call = _intent_call(intent)
     await _append(context, (call,), state, writer)
-    if intent.call_id is None:  # else the transcript showed it when it was queued
-        state.displays.extend(render_interaction_items((call,)))
+    state.displays.extend(render_interaction_items((call,)))
     state.active_user_call = call.call.call_id
 
     if state.closing:
@@ -1277,8 +1279,7 @@ async def _user_tool(
     call = _intent_call(intent)
     if recorded:
         await _append(context, (call,), state, writer)
-        if intent.call_id is None:  # else the transcript showed it when it was queued
-            state.displays.extend(render_interaction_items((call,)))
+        state.displays.extend(render_interaction_items((call,)))
     if state.closing:
         return model
     state.login_cancel.clear()
@@ -1471,26 +1472,23 @@ class _Interrupt:
 
     records: tuple = ()  # _RecordEntry: written right before the messages
     messages: tuple = ()  # user messages: the steers, and icron's wake-ups
-    shown: tuple = ()  # per message: whether the transcript already shows it
 
 
 def _take_interrupt(state: _UIState) -> _Interrupt:
     """What a running turn takes at its interrupt point: its steers, with
     icron's message in a wake-up marker's place among them, and the records
     in front of them (_RecordEntry)."""
-    records, messages, shown = [], [], []
+    records, messages = [], []
     for entry in _take_steers(state):
         if isinstance(entry, _RecordEntry):
             records.append(entry)
         elif not isinstance(entry, _WakeIntent):
             messages.append(entry.message)
-            shown.append(entry.shown)
         else:
             wakeup = None if state.icron is None else state.icron.take_wakes()
             if wakeup is not None:  # None: withdrawn since it was queued
                 messages.append(Message("user", wakeup.text()))
-                shown.append(False)
-    return _Interrupt(tuple(records), tuple(messages), tuple(shown))
+    return _Interrupt(tuple(records), tuple(messages))
 
 
 # Records of the user's commands (doc/cli-slash-commands-plan.md): a
@@ -1510,13 +1508,6 @@ def _user_call_id() -> str:
 def _record(call: UserToolCall, output: str, *, success: bool = True) -> tuple:
     """A command's record: its call, and its result."""
     return (call, UserToolResult(ToolResult(call.call.call_id, output, success=success)))
-
-
-def _record_results(records) -> tuple:
-    """The display of records whose calls the transcript already shows: their
-    calls were shown when their commands were accepted."""
-    return render_interaction_items(tuple(result for _, result in records),
-                                    source_user_calls=tuple(call for call, _ in records))
 
 
 def _steer_record(entry: _RecordEntry, *, delivered: bool) -> tuple:
@@ -1577,27 +1568,27 @@ def _quota_done(state: _UIState, token, result: ToolResult, warning: Optional[st
 
 
 def _intent_call(intent: UserToolIntent) -> UserToolCall:
-    """A queued command's call, as the transcript shows it and the log records it."""
-    return UserToolCall(ToolCall(intent.name, intent.call_id or _user_call_id(),
-                                 intent.arguments_json))
+    """A command's call, as the log records it and the transcript shows it."""
+    return UserToolCall(ToolCall(intent.name, _user_call_id(), intent.arguments_json))
 
 
 def _entry_records(entries, *, delivered: bool) -> tuple:
     """The records of record entries (``(call, result)`` pairs), and what to
-    show when they're logged: the results of /steer records, whose calls
-    showed when accepted (a /config change showed its result too)."""
+    show as they're logged: each /steer's call and result, since its steers
+    take effect there (a /config change showed its record when it was typed,
+    as it took effect then)."""
     records = [entry.record(delivered=delivered) for entry in entries]
-    shown = _record_results([record for entry, record in zip(entries, records)
-                             if entry.result is None])
+    shown = render_interaction_items(tuple(
+        item for entry, record in zip(entries, records) if entry.result is None
+        for item in record))
     return records, shown
 
 
-async def _log_records(context, state, writer, records, *, show_calls=False,
-                       display=None) -> None:
-    """Log commands' records (``(call, result)`` pairs) and show them: their
-    results, and also their calls with ``show_calls``, or else ``display``.
-    Records are audit-only: none is written after a failed checkpoint, or
-    where it would come between tool calls and their results."""
+async def _log_records(context, state, writer, records, *, display=None) -> None:
+    """Log commands' records (``(call, result)`` pairs) and show them, each
+    call with its result, as their commands take effect; or else show
+    ``display``. Records are audit-only: none is written after a failed
+    checkpoint, or where it would come between tool calls and their results."""
     if not records or state.persistence_failed:
         return
     if context.pending_tool_calls() or context.pending_user_tool_calls():
@@ -1610,9 +1601,7 @@ async def _log_records(context, state, writer, records, *, show_calls=False,
         await _append(context, items, state, writer)
     finally:
         state.phase, state.phase_started = phase, started
-    state.displays.extend(display if display is not None
-                          else render_interaction_items(items) if show_calls
-                          else _record_results(records))
+    state.displays.extend(render_interaction_items(items) if display is None else display)
 
 
 async def _write_leading_records(context, state, writer) -> None:
@@ -2037,15 +2026,10 @@ def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> di
     for entry in (state.pending if queued is None else queued):
         if isinstance(entry, _Submission):
             queue.append({"kind": "text", "text": entry.text, "steers": entry.steers,
-                          "message": interaction_item_to_dict(entry.message),
-                          # The terminal keeps the transcript: shown text isn't shown again.
-                          "shown": entry.shown})
+                          "message": interaction_item_to_dict(entry.message)})
         elif isinstance(entry, UserToolIntent):
-            command = {"kind": "command", "name": entry.name,
-                       "arguments_json": entry.arguments_json}
-            if entry.call_id is not None:  # its call is shown, and logged under this ID
-                command["call_id"] = entry.call_id
-            queue.append(command)
+            queue.append({"kind": "command", "name": entry.name,
+                          "arguments_json": entry.arguments_json})
         elif isinstance(entry, (_ContinueIntent, _RetryIntent)):
             # A retry's ticket belongs to this process; /continue reads the
             # log, which has the failure too.
@@ -2063,7 +2047,9 @@ def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> di
 
 def _parse_reboot_state(data) -> _Rebooted:
     """The _Rebooted of _reboot_state's JSON. Raises KeyError, TypeError, or
-    ValueError for anything else."""
+    ValueError for anything else. The ``shown`` and ``call_id`` fields that
+    the code of 2d1d5d5 to ee11c6a wrote, for items it showed when queued, are
+    ignored: the restarted CLI shows each item when it takes effect."""
     if not isinstance(data, dict) or data.get("version") != _REBOOT_STATE_VERSION:
         raise ValueError("unknown reboot state")
     cause, config, draft, queued = data["cause"], data["config"], data["draft"], []
@@ -2078,15 +2064,11 @@ def _parse_reboot_state(data) -> _Rebooted:
             if not (isinstance(entry["text"], str) and isinstance(message, Message)
                     and message.role == "user"):
                 raise ValueError("invalid queued text")
-            queued.append(_Submission(entry["text"], message, entry["steers"] is True,
-                                      shown=entry.get("shown") is True))
+            queued.append(_Submission(entry["text"], message, entry["steers"] is True))
         elif kind == "command":
-            call_id = entry.get("call_id")
-            if not (isinstance(entry["name"], str) and isinstance(entry["arguments_json"], str)
-                    and (call_id is None or isinstance(call_id, str) and call_id)):
+            if not (isinstance(entry["name"], str) and isinstance(entry["arguments_json"], str)):
                 raise ValueError("invalid queued command")
-            queued.append(UserToolIntent(entry["name"], entry["arguments_json"],
-                                         call_id=call_id))
+            queued.append(UserToolIntent(entry["name"], entry["arguments_json"]))
         elif kind == "continue":
             queued.append(_ContinueIntent())
         else:
@@ -2225,8 +2207,9 @@ class _CliHost(TurnHost):
         steers come as its message (_take_interrupt). The records waiting at
         the front of the queue (of /config changes, and of the /steer
         commands that flushed the steers) are logged first, steers or not;
-        the transcript already shows typed text (_Submission.shown), so the
-        turn shows only the rest.
+        a /steer's record shows there, as it takes effect, and the turn loop
+        shows the steers' [user] messages after it (a steer showed only its
+        queue item when it was accepted, _steer_item).
         """
         if not self._steering or self._state.closing:
             return super().interrupt()
@@ -2240,7 +2223,7 @@ class _CliHost(TurnHost):
                 self.show(shown)
         if not taken.messages:
             return Interrupt.CONTINUE
-        return Steer(taken.messages, shown=taken.shown)
+        return Steer(taken.messages)
 
     def append(self, context, items) -> None:
         context.extend(items)
@@ -2714,8 +2697,7 @@ async def _drive_interaction_body(
                             state.set_phase("auth needed")
                             continue
                     await _log_records(context, state, writer, [_record(
-                        _user_call("retry", {}), "Sampling again after the failure.")],
-                        show_calls=True)
+                        _user_call("retry", {}), "Sampling again after the failure.")])
                     query = None  # Continue context; do not append a user turn.
                 elif isinstance(query, _ContinueIntent):
                     # Continue the saved turn where it stopped, without a user
@@ -2743,8 +2725,7 @@ async def _drive_interaction_body(
                             _user_call("continue", {}),
                             "The model follows the coldstart pointer."
                             if _ends_with_coldstart_compact(context)
-                            else "Continuing the turn without a new message.")],
-                            show_calls=True)
+                            else "Continuing the turn without a new message.")])
                     query = None
                 else:
                     await _fail_pending_user_tools(context, state, writer)
@@ -2800,8 +2781,7 @@ async def _drive_interaction_body(
                     turn_text = query
                 user = UserInteraction((message,))
                 await _append(context, user.context_items(), state, writer)
-                if not (isinstance(query, _Submission) and query.shown):
-                    state.displays.extend(user.display_items())
+                state.displays.extend(user.display_items())
             else:  # /retry, /continue, or a resumed save's new instructions
                 turn_text = _last_user_text(context)
             if should_sample:

@@ -103,14 +103,10 @@ class Steer:
     sample. Like messages that tools inject, a steer continues the current
     turn: no ``UserInteractionBoundary`` follows it, so provider turn
     continuity (such as the Responses turn ID and Codex turn state) is kept.
-
-    ``shown`` has a flag per message, true where the host already shows it
-    (the CLI shows typed text when it's queued); the turn loop shows the
-    others. By default it shows them all.
+    The turn loop shows them as they are saved.
     """
 
     messages: Tuple[Message, ...]
-    shown: Tuple[bool, ...] = ()
 
     def __post_init__(self) -> None:
         messages = tuple(self.messages)
@@ -118,10 +114,6 @@ class Steer:
                                    for m in messages):
             raise ValueError("A steer requires one or more user messages.")
         object.__setattr__(self, "messages", messages)
-        shown = tuple(self.shown) or (False,) * len(messages)
-        if len(shown) != len(messages) or not all(isinstance(flag, bool) for flag in shown):
-            raise ValueError("A steer's shown flags must match its messages.")
-        object.__setattr__(self, "shown", shown)
 
 
 TURN_KINDS = ("ended", "yielded", "stopped")
@@ -329,10 +321,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             return STOPPED
         if isinstance(answer, Steer):
             host.append(context, answer.messages)
-            unshown = tuple(message for message, shown in zip(answer.messages, answer.shown)
-                            if not shown)
-            if unshown:
-                host.show(render_interaction_items(unshown))
+            host.show(render_interaction_items(answer.messages))
         if host.reboot_requested():
             return STOPPED  # the restarted program continues the turn
         operation = host.preemptible(_retirer(model))

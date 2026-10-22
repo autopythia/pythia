@@ -307,12 +307,10 @@ class CliSteerInputTests(unittest.TestCase):
             "Usage: /task <text> queues the text as the next query instead of steering the "
             "running turn.",
             "Queued as the next query; it waits for the current turn to end."])
-        # Queued text shows at once, as the log will record it, and says so.
+        # Queued queries show as [user] when their turn starts; meanwhile only
+        # the status line counts them (queued=N).
         self.assertEqual([item.text for item in state.displays][1:], [
-            "[user] check the tests later",
-            "[cli] Queued as the next query; it waits for the current turn to end.",
-            "[user] and this"])
-        self.assertTrue(all(entry.shown for entry in state.pending))
+            "[cli] Queued as the next query; it waits for the current turn to end."])
         idle = cli._UIState(ready=True)  # no turn: plain text, and no notice
         idle.set_phase("idle")
         self._enter(idle, "/task now")
@@ -336,13 +334,39 @@ class CliSteerInputTests(unittest.TestCase):
         self.assertEqual(self._records(state), [1, 2])
         self.assertIsInstance(state.pending[0], cli._RecordEntry)
         self.assertEqual((state.pending[0].call.call.name, state.pending[0].flushed), ("steer", 2))
-        calls = [item.text for item in state.displays if item.text.startswith("[user-tool-call]")]
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(calls[0].startswith(
-            f"[user-tool-call] steer ({state.pending[0].call.call.call_id})"))
+        # The steers show their queue items; the records show when they're
+        # logged, with the steers (the status line shows the level meanwhile).
+        texts = [item.text for item in state.displays]
+        self.assertEqual([text for text in texts if text.startswith("[user")],
+                         ["[user (steer)] first", "[user (steer)] second"])
         self.assertEqual(state.editor.text, "")
         self.assertEqual(cli._take_steers(state)[-1].text, "second")
         self.assertEqual(state.preemption.level, Urgency.QUEUED)  # delivered: reset
+
+    def test_only_a_steer_shows_a_queue_item_when_accepted(self):
+        state = cli._UIState(ready=True, turn_active=True)
+        state.set_phase("sampling")
+        self._enter(state, "first line\nsecond line\n")
+        self._enter(state, "/steer with a slash")
+        self._enter(state, "/task later")
+        self._enter(state, "behind it")  # behind /task: it waits as the next query
+        self.assertEqual(self._texts(state), ["first line\nsecond line\n", "with a slash",
+                                              "later", "behind it"])
+        # The steers' queue items, with their text as typed; nothing for the
+        # queries, which show as [user] when their turn starts.
+        items = [item for item in state.displays if not item.text.startswith("[cli]")]
+        self.assertEqual([item.text for item in items],
+                         ["[user (steer)] first line\nsecond line", "[user (steer)] with a slash"])
+        self.assertEqual({item.label for item in items}, {"user (steer)"})
+        # While idle the text starts a turn at once, and between turns (here
+        # during /compact) it waits for one: either way it shows as [user] then.
+        for phase in ("idle", "compacting"):
+            with self.subTest(phase=phase):
+                other = cli._UIState(ready=True)
+                other.set_phase(phase)
+                self._enter(other, "hello")
+                self.assertEqual(self._texts(other), ["hello"])
+                self.assertEqual(list(other.displays), [])
 
     def test_bare_steer_flushes_nothing_and_reports_when_the_steers_arrive(self):
         state = cli._UIState(ready=True, turn_active=True)

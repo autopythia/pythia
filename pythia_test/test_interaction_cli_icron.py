@@ -483,8 +483,6 @@ class QueueTests(unittest.TestCase):
         before, wake = taken.messages
         self.assertEqual(before, Message("user", "before"))
         self.assertTrue(wake.content_text.endswith("From the host:\nFrom the host."), wake)
-        # The turn shows the wake-up; typed text, it shows only if not yet shown.
-        self.assertEqual(taken.shown, (False, False))
         self.assertEqual((list(state.pending), icron.undelivered()), ([], 0))
 
     def test_due_wake_ups_wait_for_a_model_with_one_notice(self):
