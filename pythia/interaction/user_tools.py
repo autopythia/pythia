@@ -44,7 +44,7 @@ def parse_user_tool(text: str) -> UserToolIntent:
         "/quota",
     }:
         raise ValueError(
-            "Unsupported command. Use /retry, /continue, /steer, /task, "
+            "Unsupported command. Use /retry, /continue, /cancel, /steer, /task, "
             "/compact [focus], /config, /config.json, /login, /quota, /reboot, "
             "/exit, or /quit (/steer, /reboot, /exit, and /quit take ! or !! to act sooner)."
         )

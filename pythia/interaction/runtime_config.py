@@ -27,6 +27,10 @@ from .messages import resolve_messages_max_output_tokens
 from .model import SampleParams
 from .model_catalog import ModelBinding
 from .model_catalog import CompactionDefaults
+from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
+from .model_catalog import PROMPT_CACHING_VALUES
+from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
+from .model_catalog import validate_rate_limit_retries
 from .model_catalog import binding_from_namespace, freeze_extra_sample_params, thaw_json
 from .save import PUBLIC_LOG_REASONING
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -38,7 +42,9 @@ CONFIG_KEYS = (
     "enable_workspace",
     "max_samples",
     "max_output_tokens",
-    "request_timeout_seconds",
+    "timeouts_request_seconds",
+    "endpoint_prompt_caching",
+    "endpoint_rate_limit_retries",
     "enable_auto_compaction",
     "auto_compaction_context_tokens",
     "max_context_tokens",
@@ -52,12 +58,15 @@ CONFIG_KEYS = (
 # Keys renamed in October 2026, from their old names. The old names keep
 # working, with a warning that names the new one: as /config keys, as options,
 # in auto's config files, and as demo.run keywords. Version-3 auto saves use
-# them and load silently. Python fields and InteractionConfig's keyword
-# arguments have only the new names.
+# them and load silently, as version-4 saves do request_timeout_seconds, which
+# became timeouts_request_seconds (named after the model catalog's
+# timeouts.request_seconds) later in October. Python fields and
+# InteractionConfig's keyword arguments have only the new names.
 RENAMED_CONFIG_KEYS = {
     "auto_compact_tokens": "auto_compaction_context_tokens",
     "compaction_keep_recent_tokens": "compaction_pi_keep_recent_tokens",
     "compaction_max_output_tokens": "compaction_pi_max_output_tokens",
+    "request_timeout_seconds": "timeouts_request_seconds",
 }
 _BOOLEAN_KEYS = frozenset((
     "enable_workspace", "enable_auto_compaction", "compaction_coldstart_reboot",
@@ -72,15 +81,20 @@ _OPTIONAL_POSITIVE_INTEGER_KEYS = frozenset((
 # ``null`` restores the default through the config's fallback.
 _OPTIONAL_NONNEGATIVE_INTEGER_KEYS = frozenset(("compaction_pi_keep_recent_tokens",))
 # Optional seconds; ``null`` restores the default through the config's fallback.
-_OPTIONAL_SECONDS_KEYS = frozenset(("request_timeout_seconds",))
+_OPTIONAL_SECONDS_KEYS = frozenset(("timeouts_request_seconds",))
 # Readable in /config, but only set at launch.
 _LAUNCH_ONLY_KEYS = frozenset(("extra_sample_params",))
 _INTEGER_LITERAL_RE = re.compile(r"^[+-]?[0-9]+$")
 # Seconds also accept plain decimals; no exponent, infinity, or NaN spellings.
 _DECIMAL_LITERAL_RE = re.compile(r"^[+-]?[0-9]+\.[0-9]+$")
 _NO_REQUEST_TIMEOUT = (
-    "request_timeout_seconds does not apply to Claude Relay; use the model "
+    "timeouts_request_seconds does not apply to Claude Relay; use the model "
     "catalog's timeouts.generation_seconds or --claude-relay-generation-timeout."
+)
+_NO_PROMPT_CACHING = "endpoint_prompt_caching applies only to the Messages API."
+_NO_RATE_LIMIT_RETRIES = (
+    "endpoint_rate_limit_retries does not apply to Claude Relay, whose native CLI "
+    "retries its own rate limits."
 )
 _SAVE_LOG_REASONING_VALUES = " or ".join(PUBLIC_LOG_REASONING)
 
@@ -112,6 +126,21 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
         if not isinstance(value, str) or value not in PUBLIC_LOG_REASONING:
             raise ConfigError(f"save_log_reasoning requires {_SAVE_LOG_REASONING_VALUES}.")
         return value
+    if key == "endpoint_prompt_caching":
+        # None means the route has none: only Messages caches by request.
+        if value is not None and (not isinstance(value, str) or value not in PROMPT_CACHING_VALUES):
+            raise ConfigError("endpoint_prompt_caching requires 5m, 1h, none, or null.")
+        return value
+    if key == "endpoint_rate_limit_retries":
+        # None means it doesn't apply (Claude Relay), or the default.
+        if value is None:
+            return None
+        try:
+            return validate_rate_limit_retries(value, key)
+        except ValueError:
+            raise ConfigError(
+                f"{key} requires a nonnegative integer, {RATE_LIMIT_RETRIES_UNBOUNDED}, or null."
+            ) from None
     if key == "compaction_mode":
         # A compaction sequence, kept in its normal form. None is the route's
         # default, resolved when a config is bound.
@@ -157,7 +186,9 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     Integers, booleans, and null for every key; seconds keys also take plain
     decimals such as ``90.5``. ``compaction_mode`` takes a compaction
     sequence, such as ``coldstart,pi:2``, or null; ``save_log_reasoning``
-    takes ``nil`` or ``assistant``, as they are.
+    takes ``nil`` or ``assistant``, as they are; ``endpoint_prompt_caching``
+    takes ``5m``, ``1h`` or ``none``, and ``endpoint_rate_limit_retries``
+    ``unbounded`` too.
     """
     key = _require_key(key)
     if key in _LAUNCH_ONLY_KEYS:
@@ -168,6 +199,13 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     if key == "compaction_mode":
         return validate_config_value(key, None if literal in ("null", "None") else literal)
     if key == "save_log_reasoning":
+        return validate_config_value(key, literal)
+    if key == "endpoint_prompt_caching":
+        # none is a value here (no cache_control); null restores the default.
+        return validate_config_value(key, None if literal in ("null", "None") else literal)
+    if (key == "endpoint_rate_limit_retries" and literal not in ("null", "None")
+            and _INTEGER_LITERAL_RE.fullmatch(literal) is None):
+        # unbounded; any other text gets the key's own message, which names it.
         return validate_config_value(key, literal)
     aliases = {
         "null": None,
@@ -308,7 +346,7 @@ def _catalog_default(route: CompactionRoute, configured: Optional[str]) -> str:
 
 
 def resolve_request_timeout_seconds(binding, requested=None) -> Optional[float]:
-    """Resolve ``--request-timeout-seconds`` for one model binding.
+    """Resolve ``--timeouts-request-seconds`` for one model binding.
 
     An explicit request wins, then the bound model's catalog
     ``timeouts.request_seconds``, then ``DEFAULT_REQUEST_TIMEOUT_SECONDS``.
@@ -320,7 +358,7 @@ def resolve_request_timeout_seconds(binding, requested=None) -> Optional[float]:
             raise ConfigError(_NO_REQUEST_TIMEOUT)
         return None
     if requested is not None:
-        return validate_config_value("request_timeout_seconds", requested)
+        return validate_config_value("timeouts_request_seconds", requested)
     configured = binding.timeouts.request_seconds
     return DEFAULT_REQUEST_TIMEOUT_SECONDS if configured is None else configured
 
@@ -373,10 +411,22 @@ class InteractionConfigSnapshot:
     such as ``coldstart,pi:2``; ``None`` means the route's default until a
     config binds it.
 
-    ``request_timeout_seconds`` is projected into sample params as each
+    ``timeouts_request_seconds`` is projected into sample params as each
     request's HTTP timeout. ``None`` leaves the model endpoint's own timeout;
     namespace-bound configs always resolve it except on Claude Relay, where it
     does not apply.
+
+    ``endpoint_prompt_caching`` is projected into sample params as each
+    request's Messages prompt caching: ``5m``, ``1h``, or ``none``, which sends
+    no ``cache_control``. Bound configs resolve it on Messages only; ``None``
+    elsewhere, where it does not apply.
+
+    ``endpoint_rate_limit_retries`` is how many times the turn loop samples
+    again after a rate limit (``ModelRateLimitError``), each after a fixed
+    wait, or ``unbounded``: until a sample succeeds, or the user cancels
+    (the CLI's /cancel) or stops. Bound configs resolve it on every HTTP API;
+    ``None`` on Claude Relay, where it does not apply, and in an unbound
+    config, where the turn loop takes ``DEFAULT_RATE_LIMIT_RETRIES``.
 
     ``compaction_coldstart_reboot`` has the CLI restart itself on the current
     code after each coldstart compaction, as ``/reboot`` does. Only the CLI
@@ -392,7 +442,9 @@ class InteractionConfigSnapshot:
     enable_workspace: bool = True
     max_samples: Optional[int] = None
     max_output_tokens: Optional[int] = None
-    request_timeout_seconds: Optional[float] = None
+    timeouts_request_seconds: Optional[float] = None
+    endpoint_prompt_caching: Optional[str] = None
+    endpoint_rate_limit_retries: Optional[Union[int, str]] = None
     enable_auto_compaction: bool = True
     auto_compaction_context_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
@@ -424,7 +476,8 @@ class InteractionConfigSnapshot:
         return replace(
             base or SampleParams(),
             max_output_tokens=self.max_output_tokens,
-            request_timeout_seconds=self.request_timeout_seconds,
+            request_timeout_seconds=self.timeouts_request_seconds,
+            prompt_caching=self.endpoint_prompt_caching,
             enable_auto_compaction=self.enable_auto_compaction,
             auto_compaction_context_tokens=self.auto_compaction_context_tokens,
         )
@@ -473,8 +526,12 @@ class InteractionConfig:
         auto_compaction_context_tokens_fallback: Optional[int] = None,
         max_context_tokens_fallback: Optional[int] = None,
         min_auto_compaction_context_tokens: Optional[int] = None,
-        request_timeout_seconds_fallback: Optional[float] = None,
+        timeouts_request_seconds_fallback: Optional[float] = None,
         request_timeout_applies: bool = True,
+        endpoint_prompt_caching_fallback: Optional[str] = None,
+        prompt_caching_applies: bool = True,
+        endpoint_rate_limit_retries_fallback: Optional[Union[int, str]] = None,
+        rate_limit_retries_applies: bool = True,
         compaction_route: Optional[CompactionRoute] = None,
         coldstart_unavailable: Optional[str] = None,
         compaction_mode_fallback: Optional[str] = None,
@@ -495,6 +552,10 @@ class InteractionConfig:
             raise TypeError("require_max_output_tokens must be a bool")
         if not isinstance(request_timeout_applies, bool):
             raise TypeError("request_timeout_applies must be a bool")
+        if not isinstance(prompt_caching_applies, bool):
+            raise TypeError("prompt_caching_applies must be a bool")
+        if not isinstance(rate_limit_retries_applies, bool):
+            raise TypeError("rate_limit_retries_applies must be a bool")
         if compaction_route is not None and not isinstance(compaction_route, CompactionRoute):
             raise TypeError("compaction_route must be CompactionRoute or None")
         if coldstart_unavailable is not None and (
@@ -514,7 +575,9 @@ class InteractionConfig:
             key: validate_config_value(key, value)
             for key, value in (
                 ("max_output_tokens", max_output_tokens_fallback),
-                ("request_timeout_seconds", request_timeout_seconds_fallback),
+                ("timeouts_request_seconds", timeouts_request_seconds_fallback),
+                ("endpoint_prompt_caching", endpoint_prompt_caching_fallback),
+                ("endpoint_rate_limit_retries", endpoint_rate_limit_retries_fallback),
                 ("auto_compaction_context_tokens", auto_compaction_context_tokens_fallback),
                 ("max_context_tokens", max_context_tokens_fallback),
                 ("compaction_mode", mode_default),
@@ -524,6 +587,8 @@ class InteractionConfig:
         }
         self._require_max_output_tokens = require_max_output_tokens
         self._request_timeout_applies = request_timeout_applies
+        self._prompt_caching_applies = prompt_caching_applies
+        self._rate_limit_retries_applies = rate_limit_retries_applies
         self._min_auto_compaction_context_tokens = validate_config_value(
             "auto_compaction_context_tokens", min_auto_compaction_context_tokens,
         )
@@ -603,8 +668,12 @@ class InteractionConfig:
     def _validate(self, snapshot: InteractionConfigSnapshot) -> None:
         if self._require_max_output_tokens and snapshot.max_output_tokens is None:
             raise ConfigError("max_output_tokens is required for this Messages model.")
-        if not self._request_timeout_applies and snapshot.request_timeout_seconds is not None:
+        if not self._request_timeout_applies and snapshot.timeouts_request_seconds is not None:
             raise ConfigError(_NO_REQUEST_TIMEOUT)
+        if not self._prompt_caching_applies and snapshot.endpoint_prompt_caching is not None:
+            raise ConfigError(_NO_PROMPT_CACHING)
+        if not self._rate_limit_retries_applies and snapshot.endpoint_rate_limit_retries is not None:
+            raise ConfigError(_NO_RATE_LIMIT_RETRIES)
         threshold = snapshot.auto_compaction_context_tokens
         minimum = self._min_auto_compaction_context_tokens
         if threshold is not None and minimum is not None and threshold < minimum:
@@ -655,14 +724,32 @@ class InteractionConfig:
         # The launch value resolves now (flag, catalog, default); ``null``
         # later restores the catalog value or default, not the flag.
         request_timeout_seconds = resolve_request_timeout_seconds(
-            binding, getattr(args, "request_timeout_seconds", None),
+            binding, getattr(args, "timeouts_request_seconds", None),
         )
+        # Likewise: the launch value is the option's, which the binding also
+        # carries, or the catalog's, else the default; ``null`` restores the
+        # catalog's, else the default. Prompt caching is Messages-only, and
+        # Claude Relay retries its own rate limits.
+        caching_applies = binding.api == "messages"
+        catalog_caching = None if spec is None else spec.endpoint.prompt_caching
+        caching = getattr(args, "endpoint_prompt_caching", None)
+        if caching is None and caching_applies:
+            caching = binding.endpoint.prompt_caching or "5m"
+        retries_apply = binding.api != "claude-relay"
+        catalog_retries = None if spec is None else spec.endpoint.rate_limit_retries
+        retries = getattr(args, "endpoint_rate_limit_retries", None)
+        if retries is None and retries_apply:
+            retries = binding.endpoint.rate_limit_retries
+            if retries is None:
+                retries = DEFAULT_RATE_LIMIT_RETRIES
         return cls(
             InteractionConfigSnapshot(
                 enable_workspace=args.enable_workspace,
                 max_samples=args.max_samples,
                 max_output_tokens=max_output_tokens,
-                request_timeout_seconds=request_timeout_seconds,
+                timeouts_request_seconds=request_timeout_seconds,
+                endpoint_prompt_caching=caching,
+                endpoint_rate_limit_retries=retries,
                 enable_auto_compaction=args.enable_auto_compaction,
                 auto_compaction_context_tokens=getattr(args, "auto_compaction_context_tokens", None),
                 max_context_tokens=getattr(args, "max_context_tokens", None),
@@ -681,8 +768,14 @@ class InteractionConfig:
             on_enable_workspace=on_enable_workspace,
             require_max_output_tokens=binding.api == "messages",
             max_output_tokens_fallback=max_output_tokens_fallback,
-            request_timeout_seconds_fallback=resolve_request_timeout_seconds(binding),
+            timeouts_request_seconds_fallback=resolve_request_timeout_seconds(binding),
             request_timeout_applies=binding.api != "claude-relay",
+            endpoint_prompt_caching_fallback=(catalog_caching or "5m") if caching_applies else None,
+            prompt_caching_applies=caching_applies,
+            endpoint_rate_limit_retries_fallback=(
+                (DEFAULT_RATE_LIMIT_RETRIES if catalog_retries is None else catalog_retries)
+                if retries_apply else None),
+            rate_limit_retries_applies=retries_apply,
             auto_compaction_context_tokens_fallback=(
                 None if limits is None else limits.auto_compaction_context_tokens
             ),
@@ -740,6 +833,9 @@ class InteractionConfig:
         if isinstance(model, MessagesModel):
             endpoint = model.endpoint
             compaction = endpoint.server_compaction
+            # The endpoint's own policy: a Python-built one may differ from its
+            # binding's, and None there sends no cache_control.
+            caching = endpoint.prompt_caching
             snapshot = replace(
                 snapshot,
                 max_output_tokens=(
@@ -750,6 +846,10 @@ class InteractionConfig:
                     compaction.trigger_input_tokens
                     if snapshot.auto_compaction_context_tokens is None and compaction is not None
                     else snapshot.auto_compaction_context_tokens
+                ),
+                endpoint_prompt_caching=(
+                    snapshot.endpoint_prompt_caching if snapshot.endpoint_prompt_caching is not None
+                    else "none" if caching is None else caching.ttl
                 ),
             )
             profile = "messages"
@@ -784,9 +884,9 @@ class InteractionConfig:
                 "extra_sample_params come from the model binding; bind them on "
                 "the model, or pass SampleParams(extra=...) for per-call extras."
             )
-        if snapshot.request_timeout_seconds is None:
+        if snapshot.timeouts_request_seconds is None:
             snapshot = replace(
-                snapshot, request_timeout_seconds=endpoint.request_timeout_seconds,
+                snapshot, timeouts_request_seconds=endpoint.request_timeout_seconds,
             )
         return cls.from_namespace(SimpleNamespace(
             model_api=profile, model=endpoint.model,

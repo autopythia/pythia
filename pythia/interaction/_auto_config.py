@@ -6,7 +6,7 @@ entry, a save, or a catalog [auto] default) and its other per-role settings. A
 role on a different model inherits none of main's model-specific settings, and
 main's connection settings only when it uses the same connection.
 
-An unset request_timeout_seconds resolves per role from its model's catalog
+An unset timeouts_request_seconds resolves per role from its model's catalog
 timeouts.request_seconds, then the default; Claude Relay roles ignore it.
 """
 
@@ -43,7 +43,7 @@ DEFAULTS = {
     "cwd": ".", "max_samples": None, "max_output_tokens": None,
     # None resolves per role at runtime (catalog, then default); saves created
     # before this keep an explicit value.
-    "request_timeout_seconds": None,
+    "timeouts_request_seconds": None,
     "enable_workspace": True, "enable_auto_compaction": True,
     "auto_compaction_context_tokens": None, "max_context_tokens": None,
     "compaction_mode": None, "compaction_pi_keep_recent_tokens": None,
@@ -52,12 +52,16 @@ DEFAULTS = {
     "instructions": None,
 }
 # One per-role JSON format for --context-config files and saved config.json:
-# {"version": 4, "main": {...}, "watcher": {...}, "worker": {...}}.
-CONFIG_VERSION = 4
-# Version 3 has the old names of the keys that version 4 renamed
-# (RENAMED_CONFIG_KEYS). Its saves load with the keys renamed; config files
-# may say 3 or 4, and old names in either load with a FutureWarning.
-_RENAMED_KEYS_VERSION = 3
+# {"version": 5, "main": {...}, "watcher": {...}, "worker": {...}}.
+CONFIG_VERSION = 5
+# The old names (RENAMED_CONFIG_KEYS) that each older version's saves still
+# have: version 4 renamed three keys, and version 5 request_timeout_seconds.
+# Those saves load with the keys renamed; config files may say 3, 4 or 5, and
+# old names in any of them load with a FutureWarning.
+_OLD_NAMES = {
+    3: frozenset(RENAMED_CONFIG_KEYS),
+    4: frozenset(("request_timeout_seconds",)),
+}
 _KEYS = frozenset(DEFAULTS) | {"name"}
 # Per-role identity; never inherited.
 _IDENTITY = ("name", "instructions")
@@ -70,7 +74,7 @@ _CONNECTION = ("endpoint_url", "endpoint_auth", "codex_home", "codex_auth_file")
 # Valid only for a particular model; never carried to another model.
 _MODEL_SPECIFIC = ("extra_sample_params", "max_output_tokens", "auto_compaction_context_tokens",
                    "max_context_tokens", "compaction_mode", "compaction_pi_max_output_tokens")
-_SHARED = ("cwd", "max_samples", "request_timeout_seconds", "enable_workspace",
+_SHARED = ("cwd", "max_samples", "timeouts_request_seconds", "enable_workspace",
            "enable_auto_compaction", "compaction_pi_keep_recent_tokens")
 assert _KEYS == frozenset(_IDENTITY + _ROUTE + _MODEL_SPECIFIC + _SHARED)
 # Where a role's model came from, for display; FOLLOWS_MAIN roles save none.
@@ -232,9 +236,10 @@ def _read_document(path, what):
     return document
 
 
-def _renamed(document):
+def _renamed(document, names=frozenset(RENAMED_CONFIG_KEYS)):
     """``document`` with its roles' renamed keys under their new names, and
-    the old names it used, in RENAMED_CONFIG_KEYS order.
+    the old names it used, in RENAMED_CONFIG_KEYS order. Only the old
+    ``names`` are renamed.
 
     A role that sets both names of a key fails.
     """
@@ -243,7 +248,7 @@ def _renamed(document):
         if name != "version" and isinstance(entry, dict):
             entry = dict(entry)
             for old, new in RENAMED_CONFIG_KEYS.items():
-                if old in entry:
+                if old in entry and old in names:
                     if new in entry:
                         raise ValueError(f"The {name} entry sets both {old} and its new "
                                          f"name {new}; set only the new name.")
@@ -271,19 +276,19 @@ def _entries(document, base):
 
 
 def load_config_file(path):
-    """A --context-config file: {"version": 4, "main": {...}, "watcher": {...}}.
+    """A --context-config file: {"version": 5, "main": {...}, "watcher": {...}}.
 
-    Version 3 loads too. Old key names (RENAMED_CONFIG_KEYS) load under their
-    new names, with one FutureWarning that names the file and the keys.
+    Versions 3 and 4 load too. Old key names (RENAMED_CONFIG_KEYS) load under
+    their new names, with one FutureWarning that names the file and the keys.
     """
     path = Path(path).expanduser().absolute()
     document = _read_document(path, "auto context configuration")
     version = document.get("version")
-    if type(version) is not int or version not in (_RENAMED_KEYS_VERSION, CONFIG_VERSION):
+    if type(version) is not int or version not in (*_OLD_NAMES, CONFIG_VERSION):
         raise ValueError(
             f"Expected auto configuration version {CONFIG_VERSION} (or "
-            f"{_RENAMED_KEYS_VERSION}), with one entry per role: "
-            '{"version": 4, "main": {...}, "watcher": {...}}.'
+            f"{' or '.join(map(str, _OLD_NAMES))}), with one entry per role: "
+            '{"version": 5, "main": {...}, "watcher": {...}}.'
         )
     document, used = _renamed(document)
     # Relative paths are relative to the file.
@@ -303,20 +308,21 @@ def load_config_file(path):
 def load_saved_config(path):
     """A save's config.json: main in full, other roles only what they set.
 
-    A version-3 save loads with its renamed keys under their new names, and
-    without a warning: auto wrote it, and ``start()`` rewrites it as version 4.
+    A version-3 or version-4 save loads with its renamed keys under their new
+    names, and without a warning: auto wrote it, and ``start()`` rewrites it
+    as version 5.
     """
     path = Path(path).expanduser().absolute()
     document = _read_document(path, "saved auto configuration")
     version = document.get("version")
-    if type(version) is int and version < _RENAMED_KEYS_VERSION:
+    if type(version) is int and version < min(_OLD_NAMES):
         raise ValueError("This save was created by an earlier version of auto and cannot "
                          "be resumed; start a new save.")
     try:
-        if type(version) is not int or version not in (_RENAMED_KEYS_VERSION, CONFIG_VERSION):
+        if type(version) is not int or version not in (*_OLD_NAMES, CONFIG_VERSION):
             raise ValueError()
-        if version == _RENAMED_KEYS_VERSION:
-            document, _ = _renamed(document)
+        if version in _OLD_NAMES:
+            document, _ = _renamed(document, _OLD_NAMES[version])
         entries = _entries(document, path.parent)
     except ValueError:
         raise ValueError("Invalid saved auto configuration.") from None
@@ -468,9 +474,9 @@ def _validate(settings, catalog):
     instructions = settings["instructions"]
     if instructions is not None and not isinstance(instructions, str):
         raise ValueError("instructions must be text or null.")
-    timeout = settings["request_timeout_seconds"]
+    timeout = settings["timeouts_request_seconds"]
     if timeout is not None:
-        validate_timeout_seconds(timeout, "request_timeout_seconds")
+        validate_timeout_seconds(timeout, "timeouts_request_seconds")
     samples = settings["max_samples"]
     if samples is not None and (type(samples) is not int or samples <= 0):
         raise ValueError("max_samples must be a positive integer or null.")
@@ -502,7 +508,7 @@ def namespace(settings, catalog=BUILTIN_MODEL_CATALOG, *, binding=None):
     if args.model_binding.api == "claude-relay":
         # Relay sends no HTTP model requests: a shared or inherited request
         # timeout configures only the HTTP roles.
-        args.request_timeout_seconds = None
+        args.timeouts_request_seconds = None
     return args
 
 
@@ -637,7 +643,7 @@ def build_parser():
                         help="Common pi summary output budget; defaults to each turn's budget.")
     parser.add_argument("--max-context-tokens", type=int, default=argparse.SUPPRESS,
                         help="Common informational context ceiling; defaults to each context's catalog.")
-    parser.add_argument("--request-timeout-seconds", type=float, default=argparse.SUPPRESS,
+    parser.add_argument("--timeouts-request-seconds", type=float, default=argparse.SUPPRESS,
                         help=("Common HTTP blocking-I/O timeout of model requests; defaults to "
                               "each context's catalog timeouts.request_seconds, else "
                               f"{DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds. Claude Relay roles "

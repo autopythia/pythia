@@ -221,16 +221,16 @@ class InteractionTimeoutTests(unittest.TestCase):
     def test_launch_option_then_catalog_then_default_for_each_http_api(self):
         catalog = parse_model_catalog(_TIMEOUT_CATALOG)
         for api in ("chat-completions", "messages", "codex", "responses"):
-            for flags, expected in (([], 1800.0), (["--request-timeout-seconds", "9.5"], 9.5)):
+            for flags, expected in (([], 1800.0), (["--timeouts-request-seconds", "9.5"], 9.5)):
                 with self.subTest(api=api, flags=flags):
                     args = prepare_namespace(cli._build_parser().parse_args(
                         ["--model", f"slow-{api}", *flags]), catalog)
                     self.assertEqual(build_model(args).endpoint.request_timeout_seconds, expected)
                     config = InteractionConfig.from_namespace(args)
-                    self.assertEqual(config.get("request_timeout_seconds"), expected)
+                    self.assertEqual(config.get("timeouts_request_seconds"), expected)
                     self.assertEqual(config.snapshot().sample_params().request_timeout_seconds, expected)
                     # null restores the catalog value, not the launch option.
-                    self.assertEqual(config.set("request_timeout_seconds", None), 1800.0)
+                    self.assertEqual(config.set("timeouts_request_seconds", None), 1800.0)
             with self.subTest(api=api, model="uncatalogued"):
                 args = prepare_namespace(cli._build_parser().parse_args([
                     "--endpoint-api", api, "--model", "other", "--endpoint-auth", "none",
@@ -293,7 +293,7 @@ class InteractionTimeoutTests(unittest.TestCase):
             for api in ("chat-completions", "messages", "codex"):
                 for flags, launch, expected in (
                     ([], None, DEFAULT_REQUEST_TIMEOUT_SECONDS),
-                    (["--request-timeout-seconds", "9.5"], 9.5, 9.5),
+                    (["--timeouts-request-seconds", "9.5"], 9.5, 9.5),
                 ):
                     with self.subTest(frontend=frontend.__name__, api=api, flags=flags):
                         args = frontend._build_parser().parse_args([
@@ -311,7 +311,7 @@ class InteractionTimeoutTests(unittest.TestCase):
                         ):
                             model = build_model(args)
                         # An omitted option stays None, so a catalog value can apply.
-                        self.assertEqual(args.request_timeout_seconds, launch)
+                        self.assertEqual(args.timeouts_request_seconds, launch)
                         self.assertEqual(model.endpoint.request_timeout_seconds, expected)
 
     def test_help_displays_the_shared_default_and_io_semantics(self):
@@ -321,7 +321,7 @@ class InteractionTimeoutTests(unittest.TestCase):
                 self.assertIn(f"default: {DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds", help_text)
                 self.assertIn("not an overall deadline", help_text)
                 self.assertIn("timeouts.request_seconds", help_text)
-                self.assertIn("/config request_timeout_seconds", help_text)
+                self.assertIn("/config timeouts_request_seconds", help_text)
 
     def test_direct_account_service_defaults_use_shared_constants(self):
         login_options = inspect.signature(codex_login.login).parameters
@@ -342,14 +342,14 @@ class InteractionTimeoutTests(unittest.TestCase):
 
     def test_user_tools_keep_the_fixed_account_timeout(self):
         # Neither the launch option nor a live /config value reaches /login or /quota.
-        for flags in ([], ["--request-timeout-seconds", "9.5"]):
+        for flags in ([], ["--timeouts-request-seconds", "9.5"]):
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
                 args = cli._build_parser().parse_args([
                     "--endpoint-api", "codex", "--model", "model",
                     "--endpoint-auth-home", directory, *flags,
                 ])
                 config = InteractionConfig.from_namespace(args)
-                config.set("request_timeout_seconds", 600)
+                config.set("timeouts_request_seconds", 600)
                 environment = user_tools.create_user_environment(
                     args, notify=mock.Mock(), cancel=threading.Event(), config=config,
                 )

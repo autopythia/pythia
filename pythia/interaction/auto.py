@@ -54,7 +54,7 @@ from .items import Init, Instructions, Message, ToolResult, Tools, UserInteracti
 from .items import UserToolResult
 from .media import AttachmentError, join_user_messages, parse_user_prompt, require_media_api
 from .model_config import build_model
-from .model_config import CLAUDE_RELAY_FIELDS, MESSAGES_FIELDS, relay_endpoint
+from .model_config import CLAUDE_RELAY_FIELDS, HTTP_FIELDS, MESSAGES_FIELDS, relay_endpoint
 from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
@@ -71,6 +71,10 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TIMED_PHASES = {"sampling", "retrying", "compacting", "executing tools", "saving",
                  "awaiting watcher"}
 _ACTIVE_PHASES = {"starting", *_TIMED_PHASES}
+# The phases a context takes when no turn of its is running: after a board
+# job or a watcher decision ("quiescent"), between main's supervised turns
+# ("awaiting watcher"), at shutdown. Each ends the context's automatic retry.
+_BETWEEN_TURNS_PHASES = {"quiescent", "awaiting watcher", "closed"}
 # Unfinished in-process tasks admitted without the board (its user-task limit).
 _MAX_PENDING_TASKS = 16
 
@@ -283,7 +287,7 @@ def _timeout_summary(settings, binding, relay_options):
                             DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS)
     else:
         label, configured, source = (
-            "request timeout", settings["request_timeout_seconds"], "configured")
+            "request timeout", settings["timeouts_request_seconds"], "configured")
         catalog, default = binding.timeouts.request_seconds, DEFAULT_REQUEST_TIMEOUT_SECONDS
     if configured is None:
         configured, source = ((default, "default") if catalog is None
@@ -451,6 +455,14 @@ class _AutoHost(TurnHost):
         # Every role: a preempting stop cancels each context's operation.
         return self._session._preemption[self._index].operation(cancel)
 
+    def after_sample(self, model, sample):
+        # The sample succeeded: its automatic retries, if any, are over.
+        self._session._end_auto_retry(self._index)
+
+    def retry_cancelled(self):
+        """/cancel stopped this context's automatic retries (_Session.cancel_retry)."""
+        return self._session._retry_cancel[self._index].is_set()
+
 
 class _Session:
     """Private fixed-role runtime; no dynamic manager/template API.
@@ -504,6 +516,7 @@ class _Session:
         self.settings = {i: deepcopy(s) for i, s in settings.items()}
         self._relay_options = dict(getattr(settings, "relay_options", {}))
         self._messages_options = dict(getattr(settings, "messages_options", {}))
+        self._http_options = dict(getattr(settings, "http_options", {}))
         self._models = {}
         self._model_lock = threading.Lock()
         self.sources = dict(getattr(settings, "sources", {}))
@@ -517,6 +530,13 @@ class _Session:
             # other roles ignore it.
             self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, prompt_caching=caching))
                                  if b.api == "messages" else b) for i, b in self.bindings.items()}
+        retries = self._http_options.get("endpoint_rate_limit_retries")
+        if retries is not None:
+            # Launch-only too: every HTTP role's endpoint takes it, and Claude
+            # Relay roles ignore it.
+            self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, rate_limit_retries=retries))
+                                 if b.api != "claude-relay" else b)
+                             for i, b in self.bindings.items()}
         self.names = {i: self.settings[i]["name"] for i in self.roles}
         self._model_factory, self._environment_factory = model_factory, environment_factory
         self._port = board_port
@@ -567,6 +587,13 @@ class _Session:
         self._tool_snapshots = {}
         # Each context's flushed steers (main only) and stop level.
         self._preemption = {i: Preemption() for i in self.roles}
+        # Each context's automatic retry (the turn loop's own, after a failure
+        # it may sample again): in progress from the first "retrying" wait of
+        # a sample until a sample succeeds or the turn ends (a phase in
+        # _BETWEEN_TURNS_PHASES); and whether /cancel stopped it (cancel_retry).
+        # Guarded by _changed.
+        self._auto_retrying = {i: False for i in self.roles}
+        self._retry_cancel = {i: threading.Event() for i in self.roles}
         # The stop's level once one is requested (an Urgency; guarded by
         # _changed): QUEUED for /exit, IMMEDIATE for /exit! or a first
         # Ctrl-C, PREEMPT for /exit!! or a later one. It only rises.
@@ -849,7 +876,37 @@ class _Session:
     def _phase(self, index, phase):
         with self._changed:
             self._states[index] = (phase, time.monotonic())
+            if phase == "retrying":
+                self._auto_retrying[index] = True
+            elif phase in _BETWEEN_TURNS_PHASES:
+                # A /cancel applies to the turn it came in.
+                self._auto_retrying[index] = False
+                self._retry_cancel[index].clear()
             self._changed.notify_all()
+
+    def _end_auto_retry(self, index):
+        """A sample succeeded: no automatic retry is in progress in context
+        ``index``, and a /cancel has nothing left to stop."""
+        with self._changed:
+            self._auto_retrying[index] = False
+            self._retry_cancel[index].clear()
+
+    def cancel_retry(self, index):
+        """/cancel for context ``index``: stop its turn's automatic retries.
+
+        Accepted while one is in progress: a wait ends at once, and a retried
+        attempt in flight finishes, but no retry follows it; the failure then
+        ends the turn. Returns the notice to show.
+        """
+        label = f"#{index} ({self.names[index]})"
+        with self._changed:
+            if not self._auto_retrying[index]:
+                return f"No automatic retry to cancel in {label}."
+            if self._retry_cancel[index].is_set():
+                return f"The automatic retries in {label} are already cancelled."
+            self._retry_cancel[index].set()
+            self._changed.notify_all()
+        return f"Stopped the automatic retries in {label}."
 
     def status(self, index):
         with self._changed:
@@ -1647,8 +1704,13 @@ def _local_command(text, selected, session):
                         else ", ".join(choices[:-1]) + ", or " + choices[-1])
                 raise ValueError(f"Use {hint}.")
         return target, (DisplayItem(f"Selected #{target} ({session.names[target]})."),), None
-    raise ValueError("Use /contexts, /context N, /task, /steer, /continue, /exit, or /quit "
-                     "(/steer, /exit, and /quit take ! or !! to act sooner).")
+    if words and words[0] == "/cancel":
+        # The selected context's automatic retries (_Session.cancel_retry).
+        if words != ["/cancel"]:
+            raise ValueError("Usage: /cancel (no arguments; single line).")
+        return selected, (DisplayItem(session.cancel_retry(selected)),), None
+    raise ValueError("Use /contexts, /context N, /task, /steer, /continue, /cancel, /exit, or "
+                     "/quit (/steer, /exit, and /quit take ! or !! to act sooner).")
 
 
 def _exit_level(words):
@@ -1760,14 +1822,14 @@ def _shell_help(session):
     """The interactive shell's first line: its commands, as the CLI shows its own."""
     if session.worker_board:
         return ("pythia.interaction.auto — plain text or /task <text> posts a new user board "
-                "thread for main; /contexts, /context N, /exit or /quit. /exit waits for the "
-                "current tool batch; with ! it waits only for the current operation, and with "
-                "!! it also cancels it where possible. Ctrl-C/Ctrl-D is /exit!, and a second "
-                "press /exit!!.")
+                "thread for main; /contexts, /context N, /cancel, /exit or /quit. /exit waits "
+                "for the current tool batch; with ! it waits only for the current operation, "
+                "and with !! it also cancels it where possible. Ctrl-C/Ctrl-D is /exit!, and a "
+                "second press /exit!!.")
     return ("pythia.interaction.auto — plain text steers main's open task, or else queues a "
-            "new one; /task <text>, /steer [text], /continue, /contexts, /context N, /exit or "
-            "/quit. /steer and /exit wait for the current tool batch; with ! they wait only "
-            "for the current operation, and with !! they also cancel it where possible. "
+            "new one; /task <text>, /steer [text], /continue, /cancel, /contexts, /context N, "
+            "/exit or /quit. /steer and /exit wait for the current tool batch; with ! they wait "
+            "only for the current operation, and with !! they also cancel it where possible. "
             "Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!.")
 
 
@@ -1998,6 +2060,8 @@ def main(argv=None):
                                   if getattr(args, name, None) is not None}
         settings.messages_options = {name: getattr(args, name) for name in MESSAGES_FIELDS
                                      if getattr(args, name, None) is not None}
+        settings.http_options = {name: getattr(args, name) for name in HTTP_FIELDS
+                                 if getattr(args, name, None) is not None}
         if args.print_config:
             for index in roles:
                 binding = namespace(settings[index], catalog).model_binding

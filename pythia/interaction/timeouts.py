@@ -4,7 +4,7 @@ HTTP timeouts apply to blocking I/O, not whole-operation wall-clock deadlines:
 each blocking operation of each attempt gets the whole budget. A model
 request's timeout comes from, highest first: a per-call
 ``SampleParams.request_timeout_seconds`` (the CLI projects
-``/config request_timeout_seconds``), ``--request-timeout-seconds``, the model
+``/config timeouts_request_seconds``), ``--timeouts-request-seconds``, the model
 catalog's ``timeouts.request_seconds``, then
 ``DEFAULT_REQUEST_TIMEOUT_SECONDS``. Claude Relay deadlines come from their
 launch options, then the catalog's ``timeouts.<name>_seconds``, then the

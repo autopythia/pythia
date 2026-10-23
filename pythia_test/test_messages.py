@@ -30,6 +30,7 @@ from pythia.interaction import ModelConfigurationError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import ModelFailure
+from pythia.interaction import ModelRateLimitError
 from pythia.interaction import ModelRefusal
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSample
@@ -38,6 +39,7 @@ from pythia.interaction import ModelTimeoutError
 from pythia.interaction import ModelTransportError
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
+from pythia.interaction import RetryState
 from pythia.interaction import SampleMetadata
 from pythia.interaction import SampleParams
 from pythia.interaction import SUMMARIZATION_SYSTEM_PROMPT
@@ -1127,6 +1129,75 @@ class MessagesModelTests(unittest.TestCase):
             ("request_timeout_retry", "request_timeout_retry"),
         )
         self.assertNotIn("private timeout detail", str(raised.exception))
+
+    def test_a_rate_limit_after_the_http_retries_is_a_rate_limit_error(self):
+        # Its wording would read as an overflow, but a 429 never is one.
+        body = json.dumps({"type": "error", "error": {
+            "type": "rate_limit_error",
+            "message": "This request would exceed the rate limit of too many tokens per minute",
+        }}).encode("utf-8")
+        opener = _ScriptedOpener(*(
+            _http_error(429, body=body, headers={"retry-after": "120"}) for _ in range(3)
+        ))
+        sleeps = []
+        model = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+
+        error = raised.exception
+        self.assertNotIsInstance(error, ModelContextWindowError)
+        self.assertEqual(sleeps, [60.0, 60.0])  # the adapter's own waits keep their cap
+        self.assertEqual(error.retry_after_seconds, 120.0)  # its error has the whole delay
+        self.assertIs(error.retry_state, RetryState.ELIGIBLE)
+        failure = error.failure
+        self.assertEqual(
+            (failure.category, failure.message, failure.provider, failure.http_status,
+             failure.error_code, failure.attempt_count, failure.recovery),
+            ("rate_limit", "Messages HTTP 429: rate limited", "messages", 429,
+             "rate_limit_error", 3, ("http_429_retry", "http_429_retry")),
+        )
+        self.assertTrue(str(error).startswith("Messages HTTP 429: {"), str(error))
+
+    def test_a_returned_429_response_is_a_rate_limit_error_too(self):
+        responses = [_FakeResponse({"type": "error", "error": {"type": "rate_limit_error"}},
+                                   status=429, headers={"retry-after": "3"}) for _ in range(3)]
+        sleeps = []
+        model = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=_ScriptedOpener(*responses),
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+
+        self.assertEqual(sleeps, [3.0, 3.0])
+        self.assertEqual(raised.exception.retry_after_seconds, 3.0)
+        self.assertEqual(raised.exception.failure.category, "rate_limit")
+        self.assertTrue(all(response.closed for response in responses))
+
+    def test_a_429_naming_an_exhausted_quota_is_retried_as_a_rate_limit_and_says_so(self):
+        # As a Messages-compatible gateway may answer; a top-up may lift it.
+        body = json.dumps({"type": "error", "error": {
+            "type": "insufficient_quota", "message": "Your credits are used up."}}).encode("utf-8")
+        model = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=_ScriptedOpener(*(_http_error(429, body=body) for _ in range(3))),
+            retry_sleep=lambda seconds: None,
+        )
+
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+
+        self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
+        failure = raised.exception.failure
+        self.assertEqual((failure.category, failure.message, failure.error_code),
+                         ("rate_limit", "Messages HTTP 429: quota exceeded", "insufficient_quota"))
 
 
 class ReasoningSignatureTests(unittest.TestCase):

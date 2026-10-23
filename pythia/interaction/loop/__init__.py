@@ -19,7 +19,8 @@ from .icron import IcronError
 from .icron import IcronLimits
 from .icron import IcronStatus
 from .kernel import Interrupt
-from .kernel import MAX_SAMPLE_ATTEMPTS
+from .kernel import AutoRetryPolicy
+from .kernel import auto_retry_policy
 from .kernel import MissingFinalText
 from .kernel import SampleLimitExceeded
 from .kernel import Steer
@@ -42,7 +43,7 @@ __all__ = [
     "IcronLimits",
     "IcronStatus",
     "Interrupt",
-    "MAX_SAMPLE_ATTEMPTS",
+    "AutoRetryPolicy",
     "MissingFinalText",
     "Preemption",
     "SampleLimitExceeded",
@@ -56,6 +57,7 @@ __all__ = [
     "Yield",
     "YieldChannel",
     "YieldTool",
+    "auto_retry_policy",
     "command_urgency",
     "escalated_stop",
     "run_supervised_task",

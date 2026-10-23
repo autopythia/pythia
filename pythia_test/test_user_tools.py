@@ -61,16 +61,16 @@ class UserToolValueTests(unittest.TestCase):
             ),
             # Seconds are float in the canonical arguments.
             (
-                "/config request_timeout_seconds 600",
-                '{"key":"request_timeout_seconds","value":600.0}',
+                "/config timeouts_request_seconds 600",
+                '{"key":"timeouts_request_seconds","value":600.0}',
             ),
             (
-                "/config.json request_timeout_seconds 90.5",
-                '{"key":"request_timeout_seconds","value":90.5,"format":"json"}',
+                "/config.json timeouts_request_seconds 90.5",
+                '{"key":"timeouts_request_seconds","value":90.5,"format":"json"}',
             ),
             (
-                "/config request_timeout_seconds null",
-                '{"key":"request_timeout_seconds","value":null}',
+                "/config timeouts_request_seconds null",
+                '{"key":"timeouts_request_seconds","value":null}',
             ),
         )
         for command, expected in cases:
@@ -86,9 +86,9 @@ class UserToolValueTests(unittest.TestCase):
             ("/config max_output_tokens True", "True"),
             ("/config max_samples FAKE_SECRET", "FAKE_SECRET"),
             ("/config max_samples 1.5", "1.5"),
-            ("/config request_timeout_seconds 1e9", "1e9"),
-            ("/config request_timeout_seconds 100000", "100000"),
-            ("/config request_timeout_seconds FAKE_SECRET", "FAKE_SECRET"),
+            ("/config timeouts_request_seconds 1e9", "1e9"),
+            ("/config timeouts_request_seconds 100000", "100000"),
+            ("/config timeouts_request_seconds FAKE_SECRET", "FAKE_SECRET"),
             ("/config max_output_tokens 1 extra", "1 extra"),
             ("/config.json\nFAKE_SECRET", "FAKE_SECRET"),
         ):
@@ -124,7 +124,9 @@ class UserToolValueTests(unittest.TestCase):
             "enable_workspace = True",
             "max_samples = None",
             "max_output_tokens = None",
-            "request_timeout_seconds = None",
+            "timeouts_request_seconds = None",
+            "endpoint_prompt_caching = None",
+            "endpoint_rate_limit_retries = None",
             "enable_auto_compaction = True",
             "auto_compaction_context_tokens = None",
             "max_context_tokens = None",
@@ -431,7 +433,7 @@ class AuthConfigurationTests(unittest.TestCase):
             base = ["--endpoint-api", "codex", "--model", "test", "--endpoint-auth-home", directory,
                     "--save", str(Path(directory) / "session.jsonl")]
             for extra, code, opens in (([], 0, True), (["--endpoint-url", "bad-url"], 1, False),
-                                       (["--request-timeout-seconds", "0"], 1, False)):
+                                       (["--timeouts-request-seconds", "0"], 1, False)):
                 with self.subTest(extra=extra):
                     stream = SimpleNamespace(isatty=lambda: True)
                     with mock.patch.object(cli.sys, "stdin", stream), mock.patch.object(cli.sys, "stdout", stream):
@@ -452,7 +454,7 @@ class AuthConfigurationTests(unittest.TestCase):
             argv = ["--endpoint-api", "codex", "--model", "test", "--endpoint-auth-home", directory]
             with self.assertRaises(CodexAuthUnavailable):
                 build_model(cli._build_parser().parse_args(argv))
-            for extra in (["--endpoint-url", "not-a-url"], ["--request-timeout-seconds", "nan"],
+            for extra in (["--endpoint-url", "not-a-url"], ["--timeouts-request-seconds", "nan"],
                           ["--endpoint-api-key", "secret"], ["--endpoint-auth-home", ""]):
                 with self.subTest(extra=extra):
                     with self.assertRaises(ValueError) as error:
@@ -560,7 +562,9 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "enable_workspace": True,
             "max_samples": None,
             "max_output_tokens": None,
-            "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            "timeouts_request_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            "endpoint_prompt_caching": None,  # Messages only
+            "endpoint_rate_limit_retries": 5,
             "enable_auto_compaction": True,
             "auto_compaction_context_tokens": None,
             "max_context_tokens": None,

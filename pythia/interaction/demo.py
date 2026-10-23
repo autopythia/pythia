@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import inspect
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -90,12 +91,15 @@ class _DemoHost(TurnHost):
 def _accept_old_keywords(run):
     """Let ``run`` take the old names of its renamed keywords, with a warning.
 
-    They are the old names of the config keys in RENAMED_CONFIG_KEYS.
+    They are the old names of the config keys in RENAMED_CONFIG_KEYS that are
+    ``run`` keywords (its request timeout comes with ``sample_params``).
     """
+    keywords = inspect.signature(run).parameters
+    renamed = {old: new for old, new in RENAMED_CONFIG_KEYS.items() if new in keywords}
 
     @functools.wraps(run)
     def call(*args, **kwargs):
-        for old, new in RENAMED_CONFIG_KEYS.items():
+        for old, new in renamed.items():
             if old in kwargs:
                 if new in kwargs:
                     raise TypeError(f"run() got both {old!r} and its new name {new!r}")
@@ -192,7 +196,7 @@ def run(
         enable_workspace=enable_workspace,
         max_samples=max_samples,
         max_output_tokens=base_params.max_output_tokens,
-        request_timeout_seconds=base_params.request_timeout_seconds,
+        timeouts_request_seconds=base_params.request_timeout_seconds,
         enable_auto_compaction=(
             enable_auto_compaction and base_params.enable_auto_compaction is not False
         ),

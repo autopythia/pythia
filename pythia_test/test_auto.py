@@ -24,6 +24,7 @@ import warnings
 from pythia.interaction import DisplayItem, Environment, Message, ModelSample, ModelSampleBoundary, Tool, ToolCall
 from pythia.interaction import ToolOutcome, ToolSpec, ToolResult, TurnSummary, Tools
 from pythia.interaction import ModelFailure, ModelTransportError, Reasoning, OpaqueCompaction
+from pythia.interaction import ModelRateLimitError, RetryState
 from pythia.interaction import CompactionContextWindowError, CompactionResult, CompactionSettings
 from pythia.interaction import ContextPrefix, ModelContextWindowError, NothingToCompact
 from pythia.interaction import CompactionError
@@ -264,13 +265,13 @@ class ConfigTests(unittest.TestCase):
                             auto.load_saved_config(path)
                 snapshot["main"][key] = original
 
-    def test_saved_config_is_version_4_and_older_saves_are_rejected(self):
+    def test_saved_config_is_version_5_and_older_saves_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             current = resolve_config(overrides={"cwd": tmp, "model": "saved-model"})
             document = auto.saved_document(current)
             self.assertEqual(set(document), {"version", "main", "worker", "watcher"})
-            self.assertEqual(document["version"], 4)
+            self.assertEqual(document["version"], 5)
             self.assertEqual(set(document["main"]), set(auto.DEFAULTS) | {"name"})
             path.write_text(json.dumps(document))
             self.assertEqual(resolve_config(saved=auto.load_saved_config(path)), current)
@@ -280,7 +281,7 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "earlier version of auto"):
                         auto.load_saved_config(path)
             incomplete = {key: value for key, value in document["main"].items() if key != "cwd"}
-            for broken in ({**document, "version": 5}, {**document, "main": incomplete},
+            for broken in ({**document, "version": 6}, {**document, "main": incomplete},
                            {**document, "watcher": {"model": "no identity"}},
                            {**document, "observer": {"name": "x", "instructions": None}}):
                 with self.subTest(broken=broken):
@@ -381,7 +382,7 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(settings["max_samples"])
             self.assertIsNone(settings["max_output_tokens"])
             # Unset, so each role resolves its own model's catalog timeout.
-            self.assertIsNone(settings["request_timeout_seconds"])
+            self.assertIsNone(settings["timeouts_request_seconds"])
             snapshot = InteractionConfig.from_namespace(namespace(settings)).snapshot()
             self.assertIsNone(snapshot.max_samples)
             self.assertEqual(snapshot.sample_params(), SampleParams(
@@ -464,7 +465,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings[1]["instructions"], "")
         self.assertIsNone(settings[2]["instructions"])
         self.assertIsNone(settings[-1]["instructions"])
-        bad = ({"max_samples": 0}, {"request_timeout_seconds": float("nan")},
+        bad = ({"max_samples": 0}, {"timeouts_request_seconds": float("nan")},
                {"endpoint_url": "http://user:secret@localhost"}, {"api_key": "SECRET"},
                {"model_api": "other"}, {"max_output_tokens": True},
                {"cwd": None}, {"endpoint_url": True},
@@ -484,7 +485,7 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         resolve_config(path)
             path.write_text('{"version":1,"contexts":{}}')
-            with self.assertRaisesRegex(ValueError, "version 4"):
+            with self.assertRaisesRegex(ValueError, "version 5"):
                 resolve_config(path)
             # Instructions are per role; the command line's win over the file's.
             path.write_text(json.dumps({"version": 3, "main": {"instructions": "file main"},
@@ -524,18 +525,18 @@ class TimeoutConfigTests(unittest.TestCase):
     def timeouts(self, settings):
         """Each role's config timeout, as its runtime owner resolves it."""
         return {index: InteractionConfig.from_namespace(namespace(value, self.catalog))
-                .get("request_timeout_seconds") for index, value in settings.items()}
+                .get("timeouts_request_seconds") for index, value in settings.items()}
 
     def test_each_role_resolves_its_own_model_catalog_timeout(self):
         settings = self.resolve(overrides={"model": "slow"}, role_models={-1: "fast"})
-        self.assertTrue(all(value["request_timeout_seconds"] is None for value in settings.values()))
+        self.assertTrue(all(value["timeouts_request_seconds"] is None for value in settings.values()))
         self.assertEqual(self.timeouts(settings), {1: 1800.0, -1: DEFAULT_REQUEST_TIMEOUT_SECONDS})
-        settings = self.resolve(overrides={"model": "slow", "request_timeout_seconds": 600.0},
+        settings = self.resolve(overrides={"model": "slow", "timeouts_request_seconds": 600.0},
                                 role_models={-1: "fast"})
         self.assertEqual(self.timeouts(settings), {1: 600.0, -1: 600.0})
 
     def test_a_common_timeout_configures_only_http_roles(self):
-        settings = self.resolve(overrides={"model": "slow", "request_timeout_seconds": 600.0},
+        settings = self.resolve(overrides={"model": "slow", "timeouts_request_seconds": 600.0},
                                 role_models={-1: "relay"})
         self.assertEqual(self.timeouts(settings), {1: 600.0, -1: None})
         # This used to fail startup for the relay watcher.
@@ -548,22 +549,22 @@ class TimeoutConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             document = auto.saved_document(self.resolve(overrides={"model": "slow", "cwd": tmp}))
-            self.assertIsNone(document["main"]["request_timeout_seconds"])
-            document["main"]["request_timeout_seconds"] = 300.0  # as saved before catalog timeouts
+            self.assertIsNone(document["main"]["timeouts_request_seconds"])
+            document["main"]["timeouts_request_seconds"] = 300.0  # as saved before catalog timeouts
             path.write_text(json.dumps(document))
             saved = auto.load_saved_config(path)
             self.assertEqual(self.timeouts(self.resolve(saved=saved)), {1: 300.0, -1: 300.0})
             # A config-file null, or an explicit option, replaces the saved value.
             entries = Path(tmp) / "contexts.json"
-            entries.write_text(json.dumps({"version": 3, "main": {"request_timeout_seconds": None}}))
+            entries.write_text(json.dumps({"version": 5, "main": {"timeouts_request_seconds": None}}))
             self.assertEqual(self.timeouts(self.resolve(entries, saved=saved)), {1: 1800.0, -1: 1800.0})
             self.assertEqual(self.timeouts(self.resolve(
-                overrides={"request_timeout_seconds": 90.0}, saved=saved)), {1: 90.0, -1: 90.0})
+                overrides={"timeouts_request_seconds": 90.0}, saved=saved)), {1: 90.0, -1: 90.0})
             # A relay main resumed from an older save ignores the saved value.
             document["main"].update(model="relay", model_api=None)
             path.write_text(json.dumps(document))
             settings = self.resolve(roles=(1,), saved=auto.load_saved_config(path))
-            self.assertEqual(settings[1]["request_timeout_seconds"], 300.0)
+            self.assertEqual(settings[1]["timeouts_request_seconds"], 300.0)
             self.assertEqual(self.timeouts(settings), {1: None})
             auto._check_credentials(settings, (1,), self.catalog)
 
@@ -576,7 +577,7 @@ class TimeoutConfigTests(unittest.TestCase):
                       "request timeout 1800s (model catalog); compaction coldstart,warmpi:2",
                       "#-1 (watcher): claude-relay / relay (command line); "
                       "generation timeout 2400s (model catalog); compaction warmpi:2"]),
-                (["--request-timeout-seconds", "600", "--claude-relay-generation-timeout", "60"],
+                (["--timeouts-request-seconds", "600", "--claude-relay-generation-timeout", "60"],
                  ["#1 (main): chat-completions / slow (command line); "
                   "request timeout 600s (configured); compaction coldstart,warmpi:2",
                   "#-1 (watcher): claude-relay / relay (command line); "
@@ -1915,11 +1916,58 @@ class RuntimeTests(unittest.TestCase):
     def test_shell_help_names_the_commands_of_each_mode(self):
         plain = auto._shell_help(SimpleNamespace(worker_board=False))
         board = auto._shell_help(SimpleNamespace(worker_board=True))
-        for command in ("/task <text>", "/steer [text]", "/continue", "/contexts"):
+        for command in ("/task <text>", "/steer [text]", "/continue", "/cancel", "/contexts"):
             self.assertIn(command, plain)
         self.assertIn("plain text or /task <text> posts a new user board thread", board)
+        self.assertIn("/cancel", board)
         self.assertNotIn("/steer", board)
         self.assertNotIn("/continue", board)
+
+    def test_cancel_applies_to_one_automatic_retry_of_one_context(self):
+        session = self.session({}, worker_board=False)
+        host = auto._AutoHost(session, 1)
+        session._phase(1, "retrying")
+        self.assertEqual(session.cancel_retry(1), "Stopped the automatic retries in #1 (main).")
+        self.assertTrue(host.retry_cancelled())
+        self.assertFalse(auto._AutoHost(session, -1).retry_cancelled())
+        self.assertEqual(session.cancel_retry(1),
+                         "The automatic retries in #1 (main) are already cancelled.")
+        self.assertEqual(session.cancel_retry(-1), "No automatic retry to cancel in #-1 (watcher).")
+        session._phase(1, "sampling")  # a retried attempt: the same automatic retry
+        self.assertTrue(host.retry_cancelled())
+        host.after_sample(None, None)  # it succeeded
+        self.assertFalse(host.retry_cancelled())
+        self.assertEqual(session.cancel_retry(1), "No automatic retry to cancel in #1 (main).")
+        for phase in ("quiescent", "awaiting watcher", "closed"):  # the turn ended
+            session._phase(1, "retrying")
+            session.cancel_retry(1)
+            session._phase(1, phase)
+            self.assertFalse(host.retry_cancelled(), phase)
+            self.assertEqual(session.cancel_retry(1), "No automatic retry to cancel in #1 (main).")
+
+    def test_cancel_ends_main_s_rate_limit_wait_and_its_task(self):
+        error = ModelRateLimitError("Messages HTTP 429: slow down", failure=ModelFailure(
+            "rate_limit", "Messages HTTP 429: rate limited", http_status=429, attempt_count=3))
+        session = self.session({1: [error, answer("never")]}, worker_board=False,
+                               watcher_observe_only=True)
+        self.assertEqual([item.text for item in auto._local_command("/cancel", 1, session)[1]],
+                         ["No automatic retry to cancel in #1 (main)."])
+        with self.assertRaisesRegex(ValueError, r"^Usage: /cancel \(no arguments; single line\)\.$"):
+            auto._local_command("/cancel now", 1, session)
+        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (30,)):
+            submitted = session.submit("task")
+            wait_for(lambda: session.status(1).startswith("#1 (main) - retrying"))
+            started = time.monotonic()
+            selected, items, stop = auto._local_command("/cancel", 1, session)
+            self.assertEqual((selected, stop), (1, None))
+            self.assertEqual([item.text for item in items],
+                             ["Stopped the automatic retries in #1 (main)."])
+            self.assertFalse(self.settled(session, submitted))
+            self.assertLess(time.monotonic() - started, 10)
+        self.assertIs(error.retry_state, RetryState.CANCELLED)
+        self.assertEqual(len(self.calls[1]), 1)  # no attempt after it
+        wait_for(lambda: session.status(1).startswith("#1 (main) - quiescent"))
+        self.assertEqual(session.cancel_retry(1), "No automatic retry to cancel in #1 (main).")
 
     def start_with_real_environments(self, path, **options):
         settings = resolve_config(overrides={"cwd": self.temp.name})
@@ -2466,10 +2514,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(any(isinstance(i, Message) and i.role == "assistant" for i in saved))
         self.assertFalse(any(e.kind == "debug" for e in session.drain_events()))
 
-    def test_saved_config_is_version_4_with_running_roles(self):
+    def test_saved_config_is_version_5_with_running_roles(self):
         session = self.session({}, role_models={2: "worker-model"})
         document = json.loads((self.path / "config.json").read_text())
-        self.assertEqual(document["version"], 4)
+        self.assertEqual(document["version"], 5)
         self.assertEqual(set(document), {"version", "main", "worker", "watcher"})
         for key in ("compaction_mode", "compaction_pi_keep_recent_tokens",
                     "compaction_pi_max_output_tokens"):
@@ -3075,28 +3123,34 @@ class RuntimeTests(unittest.TestCase):
                                  enable_experimental_worker_board=True).start()
         repeated.close()
 
-    def test_a_version_3_save_resumes_renamed_and_is_saved_as_version_4(self):
+    def test_version_3_and_4_saves_resume_renamed_and_are_saved_as_version_5(self):
         session = self.session({}, settings_overrides={"compaction_pi_max_output_tokens": 9},
                                worker_board=False)
         session.close()
         config = self.path / "config.json"
         document = json.loads(config.read_text())
-        self.assertEqual(document["version"], 4)
-        old_names = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
-        config.write_text(json.dumps({"version": 3, **{
-            role: {old_names.get(key, key): value for key, value in entry.items()}
-            for role, entry in document.items() if role != "version"
-        }}))
-        self.assertIn('"compaction_max_output_tokens": 9', config.read_text())
-        # Auto wrote the save, so it resumes without a deprecation warning.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            session = self.session({}, worker_board=False, resume=True)
-        session.close()
-        self.assertEqual([str(warning.message) for warning in caught
-                          if issubclass(warning.category, FutureWarning)], [])
-        self.assertEqual(session.settings[1]["compaction_pi_max_output_tokens"], 9)
-        self.assertEqual(json.loads(config.read_text()), document)
+        self.assertEqual(document["version"], 5)
+        # Version 3 has every old name; version 4 only request_timeout_seconds.
+        all_old = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
+        for version, old_names, marker in (
+                (3, all_old, '"compaction_max_output_tokens": 9'),
+                (4, {"timeouts_request_seconds": "request_timeout_seconds"},
+                 '"request_timeout_seconds": null')):
+            with self.subTest(version=version):
+                config.write_text(json.dumps({"version": version, **{
+                    role: {old_names.get(key, key): value for key, value in entry.items()}
+                    for role, entry in document.items() if role != "version"
+                }}))
+                self.assertIn(marker, config.read_text())
+                # Auto wrote the save, so it resumes without a deprecation warning.
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    session = self.session({}, worker_board=False, resume=True)
+                session.close()
+                self.assertEqual([str(warning.message) for warning in caught
+                                  if issubclass(warning.category, FutureWarning)], [])
+                self.assertEqual(session.settings[1]["compaction_pi_max_output_tokens"], 9)
+                self.assertEqual(json.loads(config.read_text()), document)
 
     def test_resume_missing_directory_is_fresh_and_pending_call_is_not_rerun(self):
         session = self.session({}, resume=True)
@@ -3931,7 +3985,7 @@ class EntryPointTests(unittest.TestCase):
                     return subprocess.run([
                         sys.executable, "-m", "pythia.interaction.auto",
                         "--model-catalog", str(root / "catalog.ini"),
-                        "--request-timeout-seconds", "3", "--cwd", tmp,
+                        "--timeouts-request-seconds", "3", "--cwd", tmp,
                         "--save", str(root / "run"), *extra, "--prompt", "Do the task",
                     ], capture_output=True, text=True, timeout=30)
 
@@ -4012,7 +4066,7 @@ class EntryPointTests(unittest.TestCase):
                 result = subprocess.run([
                     sys.executable, "-m", "pythia.interaction.auto", "--no-user-model-catalog",
                     "--endpoint-url", f"http://127.0.0.1:{gateway.server_port}/v1/chat/completions",
-                    "--model", "main", "--request-timeout-seconds", "3", "--cwd", tmp,
+                    "--model", "main", "--timeouts-request-seconds", "3", "--cwd", tmp,
                     "--save", str(run), "--prompt", "Do the task",
                 ], capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -4079,7 +4133,7 @@ class EntryPointTests(unittest.TestCase):
             process = subprocess.Popen([
                 sys.executable, "-m", "pythia.interaction.auto", "--no-user-model-catalog",
                 "--save", str(path), "--endpoint-url", "http://127.0.0.1:1/v1/chat/completions",
-                "--request-timeout-seconds", "1",
+                "--timeouts-request-seconds", "1",
             ], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                env={**os.environ, "TERM": "xterm-256color"})
             os.close(slave)
@@ -4413,7 +4467,7 @@ class EntryPointTests(unittest.TestCase):
                     "main": {"model_api": "codex", "model": "codex-gpt-6-astra-max",
                              "endpoint_url": f"http://127.0.0.1:{gateway.server_port}/responses",
                              "endpoint_auth": "codex-login",
-                             "codex_auth_file": str(auth), "request_timeout_seconds": 3,
+                             "codex_auth_file": str(auth), "timeouts_request_seconds": 3,
                              "cwd": tmp},
                     "worker": {"model": "codex-gpt-5.6-sol-max"},
                 }))
@@ -4460,7 +4514,7 @@ class EntryPointTests(unittest.TestCase):
                 sys.executable, "-m", "pythia.interaction.auto", "--enable-experimental-worker-board",
                 "--save", str(path),
                 "--endpoint-url", "http://127.0.0.1:1/v1/chat/completions",
-                "--request-timeout-seconds", "1",
+                "--timeouts-request-seconds", "1",
             ], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                env={**os.environ, "TERM": "xterm-256color"})
             os.close(slave)
@@ -4539,7 +4593,7 @@ class EntryPointTests(unittest.TestCase):
                 settings.write_text(json.dumps({
                     "version": 3, "main": {"model_api": "chat-completions",
                         "endpoint_url": url + "/v1/chat/completions",
-                        "model": "main", "request_timeout_seconds": 3, "cwd": tmp},
+                        "model": "main", "timeouts_request_seconds": 3, "cwd": tmp},
                     "worker": {"model_api": "messages", "model": "worker",
                                "endpoint_url": url + "/v1/messages",
                                "endpoint_auth": "env:AUTO_TEST_KEY",

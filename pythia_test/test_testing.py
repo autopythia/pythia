@@ -144,7 +144,7 @@ class WorkerAndSchedulerTests(unittest.TestCase):
                 ("pythia_test.test_transport_retry",), path,
             ), 0)
             records = testing._load_worker_result(path)
-        self.assertEqual(len(records), 4)
+        self.assertEqual(len(records), 7)
         self.assertTrue(all(record.status == "success" for record in records))
         self.assertTrue(all(record.test_id.startswith("pythia_test.test_transport_retry.")
                             for record in records))
@@ -217,9 +217,9 @@ class WorkerAndSchedulerTests(unittest.TestCase):
         )
         text = output.getvalue()
         self.assertEqual(status, 0, text)
-        self.assertEqual(text.count("\nok "), 4)
+        self.assertEqual(text.count("\nok "), 7)
         self.assertIn("# workers: 2; levels: P0=2", text)
-        self.assertTrue(text.endswith("1..4\n"))
+        self.assertTrue(text.endswith("1..7\n"))
 
 
 if __name__ == "__main__":

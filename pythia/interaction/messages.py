@@ -23,6 +23,9 @@ from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
+from ._transport_retry import body_error_codes
+from ._transport_retry import quota_error_code
+from ._transport_retry import retry_after_seconds
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
 from .context import InteractionContext
@@ -45,6 +48,7 @@ from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
 from .model import ModelError
+from .model import ModelRateLimitError
 from .model import ModelRefusal
 from .model import ModelResponseError
 from .model import ModelSample
@@ -824,8 +828,10 @@ def _messages_http_failure(
     model: str,
     attempt_count: int,
     recovery: Tuple[str, ...],
+    headers: Any = None,
 ) -> ModelError:
-    context_window = status == 413 or _is_context_window_error(detail)
+    # A 429 is a rate limit, or an exhausted quota, never an overflow.
+    context_window = status != 429 and (status == 413 or _is_context_window_error(detail))
     thinking = (not context_window and status == 400
                 and _is_thinking_binding_error(detail))
     message = (
@@ -833,6 +839,21 @@ def _messages_http_failure(
         if detail
         else f"Messages HTTP {status}: request failed"
     )
+    if status == 429:
+        # A rate limit, or an exhausted quota or plan (QUOTA_ERROR_CODES):
+        # the turn loop retries either, and the failure says which.
+        codes = body_error_codes(detail)
+        reason = "quota exceeded" if quota_error_code(detail) else "rate limited"
+        return ModelRateLimitError(message, failure=ModelFailure(
+            category="rate_limit",
+            message=f"Messages HTTP {status}: {reason}",
+            provider="messages",
+            model=model,
+            http_status=status,
+            error_code=codes[0] if codes else None,
+            attempt_count=attempt_count,
+            recovery=recovery,
+        ), retry_after_seconds=retry_after_seconds(headers, cap=None))
     failure = ModelFailure(
         category=(
             "context_window" if context_window
@@ -968,20 +989,23 @@ class MessagesModel:
         encoded_tools = _encode_tools(tools)
         if encoded_tools:
             payload["tools"] = encoded_tools
-        if self.endpoint.prompt_caching is not None:
+        # This call's policy (SampleParams.prompt_caching, from /config
+        # endpoint_prompt_caching), else the endpoint's.
+        prompt_caching = self.endpoint.prompt_caching
+        if sample_params is not None and sample_params.prompt_caching is not None:
+            prompt_caching = (None if sample_params.prompt_caching == "none"
+                              else MessagesPromptCaching(ttl=sample_params.prompt_caching))
+        if prompt_caching is not None:
             # The top-level control lets the API place its automatic breakpoint
             # at the last cacheable block. The same control also marks the
             # rightmost block that accepts an explicit breakpoint (never
             # thinking or empty blocks, nor system or tools). The TTLs must
             # match: a different TTL on the block the automatic breakpoint
             # lands on is an HTTP 400, while the same TTL makes it a no-op.
-            # TODO: Add a per-call ``SampleParams.enable_prompt_caching``
-            # (None inherits this policy, False omits both the top-level and
-            # the block cache_control, True creates no policy), and set it to
-            # False for pi summary requests: nothing reads their cache
-            # entries, and 5-minute writes cost 1.25x base input (pi sends
-            # summaries with cacheRetention "none").
-            prompt_caching = self.endpoint.prompt_caching
+            # TODO: Send pi summary requests with SampleParams.prompt_caching
+            # "none": nothing reads their cache entries, and 5-minute writes
+            # cost 1.25x base input (pi sends summaries with cacheRetention
+            # "none").
             payload["cache_control"] = prompt_caching.request_cache_control()
             _mark_last_cacheable_block(
                 payload["messages"],
@@ -1086,7 +1110,7 @@ class MessagesModel:
                     exc.close()
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
-                        and not _is_context_window_error(detail)
+                        and (status == 429 or not _is_context_window_error(detail))
                         and retries < DEFAULT_MAX_TRANSIENT_RETRIES
                     ):
                         retries += 1
@@ -1100,6 +1124,7 @@ class MessagesModel:
                         model=self.endpoint.model,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
+                        headers=response_headers,
                     ) from exc
 
                 status = getattr(response, "status", None)
@@ -1111,7 +1136,7 @@ class MessagesModel:
                     detail = bytes(raw).decode("utf-8", errors="replace")[:4096]
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
-                        and not _is_context_window_error(detail)
+                        and (status == 429 or not _is_context_window_error(detail))
                         and retries < DEFAULT_MAX_TRANSIENT_RETRIES
                     ):
                         retries += 1
@@ -1127,6 +1152,7 @@ class MessagesModel:
                         model=self.endpoint.model,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
+                        headers=response_headers,
                     )
                 try:
                     text = bytes(raw).decode("utf-8")

@@ -23,6 +23,9 @@ from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
+from ._transport_retry import body_error_codes
+from ._transport_retry import quota_error_code
+from ._transport_retry import retry_after_seconds
 from ._transport_retry import retry_delay_seconds
 from .context import ContextValidationError
 from .context import InteractionContext
@@ -46,6 +49,7 @@ from .items import UserInteractionBoundary
 from .model import ModelConfigurationError
 from .model import ModelContextWindowError
 from .model import ModelError
+from .model import ModelRateLimitError
 from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
@@ -64,6 +68,10 @@ from .timeouts import validate_timeout_seconds
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# An error body is kept to this many characters, as Messages keeps it: the
+# error shows it, on every attempt of a long rate-limit retry, and a proxy's
+# HTML error page can be long. The debug trace keeps the whole body.
+_MAX_ERROR_DETAIL_CHARS = 4096
 
 
 @dataclass(frozen=True)
@@ -515,7 +523,7 @@ def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
         return ""
     if not isinstance(payload, (bytes, bytearray)):
         return ""
-    return bytes(payload).decode("utf-8", errors="replace")
+    return bytes(payload).decode("utf-8", errors="replace")[:_MAX_ERROR_DETAIL_CHARS]
 
 
 def _is_context_window_error(text: str) -> bool:
@@ -538,13 +546,30 @@ def _chat_http_failure(
     model: Optional[str],
     attempt_count: int,
     recovery: Tuple[str, ...],
+    headers: Any = None,
 ) -> ModelError:
-    context_window = _is_context_window_error(detail)
+    # A 429 is a rate limit, or an exhausted quota, never an overflow.
+    context_window = status != 429 and _is_context_window_error(detail)
     message = (
         f"Chat Completions HTTP {status}: {detail}"
         if detail
         else f"Chat Completions HTTP {status}: request failed"
     )
+    if status == 429:
+        # A rate limit, or an exhausted quota or plan (QUOTA_ERROR_CODES):
+        # the turn loop retries either, and the failure says which.
+        codes = body_error_codes(detail)
+        reason = "quota exceeded" if quota_error_code(detail) else "rate limited"
+        return ModelRateLimitError(message, failure=ModelFailure(
+            category="rate_limit",
+            message=f"Chat Completions HTTP {status}: {reason}",
+            provider="chat-completions",
+            model=model,
+            http_status=status,
+            error_code=codes[0] if codes else None,
+            attempt_count=attempt_count,
+            recovery=recovery,
+        ), retry_after_seconds=retry_after_seconds(headers, cap=None))
     failure = ModelFailure(
         category="context_window" if context_window else "http_error",
         message=(
@@ -713,7 +738,7 @@ class ChatCompletionsModel:
                     exc.close()
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
-                        and not _is_context_window_error(detail)
+                        and (status == 429 or not _is_context_window_error(detail))
                         and retries < DEFAULT_MAX_TRANSIENT_RETRIES
                     ):
                         retries += 1
@@ -727,6 +752,7 @@ class ChatCompletionsModel:
                         model=self.endpoint.model,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
+                        headers=response_headers,
                     ) from exc
 
                 status = getattr(response, "status", None)
@@ -735,10 +761,10 @@ class ChatCompletionsModel:
                 if not isinstance(raw, (bytes, bytearray)):
                     raise ModelResponseError("HTTP response body must be bytes")
                 if isinstance(status, int) and not 200 <= status < 300:
-                    detail = bytes(raw).decode("utf-8", errors="replace")
+                    detail = bytes(raw).decode("utf-8", errors="replace")[:_MAX_ERROR_DETAIL_CHARS]
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
-                        and not _is_context_window_error(detail)
+                        and (status == 429 or not _is_context_window_error(detail))
                         and retries < DEFAULT_MAX_TRANSIENT_RETRIES
                     ):
                         retries += 1
@@ -754,6 +780,7 @@ class ChatCompletionsModel:
                         model=self.endpoint.model,
                         attempt_count=attempts,
                         recovery=tuple(recovery),
+                        headers=response_headers,
                     )
 
                 try:

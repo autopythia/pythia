@@ -4,16 +4,27 @@ from __future__ import annotations
 
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+import json
 import math
+import re
 import time
 from typing import Any
+from typing import Mapping
 from typing import Optional
+from typing import Tuple
 
 
 DEFAULT_MAX_TRANSIENT_RETRIES = 2
 INITIAL_RETRY_DELAY_SECONDS = 0.25
 MAX_BACKOFF_DELAY_SECONDS = 2.0
 MAX_RETRY_AFTER_SECONDS = 60.0
+# The error codes or types of a 429 that names an exhausted quota or plan
+# (OpenAI's insufficient_quota; Codex's usage_limit_reached and
+# usage_not_included, which last until the plan resets). The turn loop retries
+# it like any other 429, since it may be lifted meanwhile, as by a top-up, a
+# plan reset or another account; its failure says so (quota_error_code).
+QUOTA_ERROR_CODES = frozenset(("insufficient_quota", "usage_limit_reached", "usage_not_included"))
+_ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
 def _header_value(headers: Any, name: str) -> Optional[str]:
@@ -46,8 +57,13 @@ def retry_after_seconds(
     headers: Any,
     *,
     now_seconds: Optional[float] = None,
+    cap: Optional[float] = MAX_RETRY_AFTER_SECONDS,
 ) -> Optional[float]:
-    """Decode a bounded Retry-After delta or HTTP date; malformed means absent."""
+    """Decode a Retry-After delta or HTTP date; malformed means absent.
+
+    The result is at most ``cap`` (an adapter's own wait); ``cap=None`` keeps
+    the provider's whole delay, as a rate limit's error reports it.
+    """
     value = _header_value(headers, "Retry-After")
     if value is None:
         return None
@@ -68,7 +84,27 @@ def retry_after_seconds(
         return None
     if delay < 0:
         return 0.0 if parsed_date else None
-    return min(delay, MAX_RETRY_AFTER_SECONDS)
+    return delay if cap is None else min(delay, cap)
+
+
+def body_error_codes(detail: str) -> Tuple[str, ...]:
+    """A JSON error body's ``error.code`` and ``error.type``, where each is an
+    identifier (never free text, which may hold a secret)."""
+    try:
+        value = json.loads(detail)
+    except (TypeError, ValueError, RecursionError):
+        return ()
+    error = value.get("error") if isinstance(value, Mapping) else None
+    if not isinstance(error, Mapping):
+        return ()
+    return tuple(item for item in (error.get("code"), error.get("type"))
+                 if isinstance(item, str) and _ERROR_CODE.fullmatch(item))
+
+
+def quota_error_code(detail: str) -> Optional[str]:
+    """The exhausted quota or plan that an error body names in its
+    ``error.code`` or ``error.type`` (QUOTA_ERROR_CODES), or None."""
+    return next((code for code in body_error_codes(detail) if code in QUOTA_ERROR_CODES), None)
 
 
 def retry_delay_seconds(
@@ -108,6 +144,9 @@ __all__ = [
     "INITIAL_RETRY_DELAY_SECONDS",
     "MAX_BACKOFF_DELAY_SECONDS",
     "MAX_RETRY_AFTER_SECONDS",
+    "QUOTA_ERROR_CODES",
+    "body_error_codes",
+    "quota_error_code",
     "retry_after_seconds",
     "retry_delay_seconds",
 ]

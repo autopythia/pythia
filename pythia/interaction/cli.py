@@ -25,6 +25,7 @@ from datetime import time as day_time
 from datetime import timedelta
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -93,7 +94,7 @@ from .media import split_leading_references
 from .loop import Interrupt
 from .loop import Icron
 from .loop import IcronError
-from .loop import MAX_SAMPLE_ATTEMPTS
+from .loop import auto_retry_policy
 from .loop import Preemption
 from .loop import Steer
 from .loop import TurnHost
@@ -110,6 +111,7 @@ from .loop.tail import turn_tail
 from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
+from .model import ModelRateLimitError
 from .model import ModelTimeoutError
 from .model import RetryState
 from .model import SampleParams
@@ -125,6 +127,7 @@ from .model_config import frontend_catalog, prepare_namespace, render_model_cata
 from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import ConfigError
 from .runtime_config import InteractionConfig
+from .runtime_config import RENAMED_CONFIG_KEYS
 from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
 from .save import InteractionSaveWriter
@@ -219,14 +222,14 @@ class _RecordEntry:
 
     A /steer's record (``flushed``) stands in front of the steers it flushed:
     its call and result show when it's logged, where its steers take effect,
-    and its result says whether the turn took them. A /config change's record
-    has its ``result`` already, and showed when it was typed: the change
-    applied then (_UIState._config_command).
+    and its result says whether the turn took them. A /config change's record,
+    or a /cancel's, has its ``result`` already, and showed when it was typed:
+    the command took effect then (_UIState._config_command, _cancel_command).
     """
 
     call: UserToolCall
     flushed: int = 0  # a /steer's: the steers queued when the command was accepted
-    result: Optional[UserToolResult] = None  # a /config change's
+    result: Optional[UserToolResult] = None  # a /config change's or a /cancel's
 
     def record(self, *, delivered: bool) -> tuple:
         """Its ``(call, result)``; a /steer's says whether its steers were delivered."""
@@ -362,9 +365,21 @@ class _UIState:
     # request if it hasn't yet, and its answer is dropped.
     quota: Optional[object] = None
     quota_cancel: threading.Event = field(default_factory=threading.Event)
+    # An automatic retry in progress: from the turn loop's first "retrying"
+    # wait of a sample until the sample succeeds or the turn ends. /cancel
+    # stops it (retry_cancel, which the turn's host reports).
+    auto_retrying: bool = False
+    retry_cancel: threading.Event = field(default_factory=threading.Event)
+    # The config snapshot of the turn running, or the last one (_turn): the
+    # one its automatic retries followed, which a failure's notice names.
+    turn_config: Optional[object] = None
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
+        if phase == "retrying":
+            self.auto_retrying = True
+        elif phase in {"idle", "failed", "auth needed"}:
+            self.auto_retrying = False
 
     def notice(self, text: str) -> None:
         text = text.rstrip("\r\n")
@@ -542,6 +557,9 @@ class _UIState:
                 return
             elif command_urgency(head, "/reboot") is not None:
                 self._request_reboot(text)
+                return
+            elif head == "/cancel":
+                self._cancel_command(text)
                 return
             elif head in ("/config", "/config.json"):
                 self._config_command(text)
@@ -730,6 +748,32 @@ class _UIState:
         the queue, and before everything else (_RecordEntry)."""
         _queue_front(self, entry)
         self.changed.set()
+
+    def _cancel_command(self, text: str) -> None:
+        """/cancel: stop the running turn's automatic retries (the turn
+        loop's, after a failure that it may sample again; TurnHost.retry_cancelled).
+
+        Accepted while one is in progress, from the sample's first "retrying"
+        wait until the sample succeeds or the turn ends: a wait ends at once,
+        and a retried attempt in flight finishes, but no retry follows it. The
+        failure then ends the turn, with /retry offered. It takes effect at
+        once, so its record shows now, and is logged at the next safe point
+        (_RecordEntry), like a /config change's.
+        """
+        self.editor = Editor()
+        if text.strip() != "/cancel" or "\n" in text or "\r" in text:
+            self.notice("Usage: /cancel (no arguments; single line).")
+            return
+        if not self.auto_retrying or self.phase in {"idle", "failed", "auth needed"}:
+            self.notice("No automatic retry to cancel.")
+            return
+        if self.retry_cancel.is_set():
+            self.notice("The automatic retries are already cancelled.")
+            return
+        self.retry_cancel.set()
+        call, result = _record(_user_call("cancel", {}), "Stopped the automatic retries.")
+        self.displays.extend(render_interaction_items((call, result)))
+        self._queue_record(_RecordEntry(call, result=result))
 
     def _config_command(self, text: str) -> None:
         """/config and /config.json, at once, even while a turn runs.
@@ -1357,6 +1401,11 @@ def _mark_persistence_failed(state: _UIState) -> None:
 
 def _arm_retry(state: _UIState) -> None:
     state.retry = _RetryIntent()
+
+
+def _end_auto_retry(state: _UIState) -> None:
+    """A sample succeeded: its automatic retries, if any, are over (/cancel)."""
+    state.auto_retrying = False
 
 
 def _bind_account(state: _UIState, account_id: str) -> None:
@@ -2310,9 +2359,22 @@ class _CliHost(TurnHost):
         account_id = getattr(getattr(model, "endpoint", None), "account_id", None)
         if account_id is not None:
             self._post(_bind_account, self._state, account_id)
+        # The sample succeeded: no automatic retry is in progress, and a
+        # /cancel that came during it has nothing left to stop.
+        self._state.retry_cancel.clear()
+        self._post(_end_auto_retry, self._state)
 
     def retryable_failure(self) -> None:
         self._post(_arm_retry, self._state)
+
+    def retry_cancelled(self) -> bool:
+        """/cancel stopped this turn's automatic retries (_UIState._cancel_command)."""
+        return self._state.retry_cancel.is_set()
+
+    def show_error(self, exc) -> None:
+        """A failed attempt that the turn loop retries, from its 3rd: its
+        error, as a failed turn shows it (TurnHost.show_error)."""
+        self.notice(_error_notice(exc))
 
 
 async def _turn(context, model, environment, state, writer, config, *, steering=False,
@@ -2333,6 +2395,10 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     # failure the loop reports as retryable arms a new one.
     state.retry = None
     snapshot = config.snapshot()
+    # A /cancel applies to the turn it came in; this one starts afresh.
+    state.retry_cancel.clear()
+    state.auto_retrying = False
+    state.turn_config = snapshot
     _apply_workspace(environment, snapshot)
     host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot,
                     context=context)
@@ -2829,7 +2895,7 @@ async def _drive_interaction_body(
                 model = None
                 state.active_model = None
                 _mark_auth_required(state, exc)
-            state.notice(f"{type(exc).__name__}: {exc}")
+            state.notice(_error_notice(exc))
             if _queued_input(state):
                 state.notice(
                     "Queued queries discarded after failure; submit again explicitly."
@@ -2862,24 +2928,39 @@ async def _drive_interaction_body(
                 # Keep all existing diagnostics above, then append guidance.
                 # Authentication guidance suggests /login; it is not a gate
                 # on /retry, which can reload externally refreshed credentials.
-                # A failure the turn loop retried by itself says how often it
-                # failed (RetryState.EXHAUSTED).
-                exhausted = (isinstance(exc, ModelError)
-                             and exc.retry_state is RetryState.EXHAUSTED)
-                state.notice(
-                    state.auth_notice if isinstance(exc, ModelAuthenticationError)
-                    else f"Sampling failed {MAX_SAMPLE_ATTEMPTS} times. Use /retry to try again."
-                    if exhausted
-                    else "Sampling failed. Use /retry to try again."
-                )
-                timeout = config.get("request_timeout_seconds")
+                state.notice(state.auth_notice if isinstance(exc, ModelAuthenticationError)
+                             else _retry_hint(exc, state.turn_config))
+                timeout = config.get("timeouts_request_seconds")
                 if isinstance(exc, ModelTimeoutError) and timeout is not None:
                     # Claude Relay has no HTTP request timeout (None), and its
                     # deadlines are launch-only, so it gets no /config advice.
                     state.notice(
                         f"The request timeout is {timeout:g} seconds; to wait "
-                        "longer, use /config request_timeout_seconds N before /retry."
+                        "longer, use /config timeouts_request_seconds N before /retry."
                     )
+
+
+def _error_notice(exc: Exception) -> str:
+    """A failure's error as a notice shows it: when a turn fails, and for the
+    failed attempts that an automatic retry goes on from (_CliHost.show_error)."""
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _retry_hint(exc: Exception, turn_config) -> str:
+    """What a failed sample's notice says about /retry, after the turn loop's
+    automatic retries (``RetryState``) under the turn's config."""
+    state = getattr(exc, "retry_state", None)
+    if state is RetryState.CANCELLED:
+        return "Automatic retry cancelled. Use /retry to try again."
+    policy = auto_retry_policy(exc, turn_config) if isinstance(exc, ModelError) else None
+    if state is RetryState.EXHAUSTED and policy.attempts is not None and policy.attempts > 1:
+        return f"Sampling failed {policy.attempts} times. Use /retry to try again."
+    if (state is RetryState.BLOCKED and isinstance(exc, ModelRateLimitError)
+            and exc.retry_after_seconds is not None and policy.max_retry_after is not None
+            and exc.retry_after_seconds > policy.max_retry_after):
+        return (f"Rate limited; the provider asks to wait {math.ceil(exc.retry_after_seconds)} s. "
+                "Use /retry after that.")
+    return "Sampling failed. Use /retry to try again."
 
 
 def _coldstart_unavailable(environment, args, path) -> Optional[str]:
@@ -2989,8 +3070,11 @@ def _startup_notices(state, args, save, config=None):
 
 def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted) -> None:
     """Restore what a restarted CLI carries over, but the draft (see _run):
-    the /config changes, the queued input, and the exit status."""
+    the /config changes, the queued input, and the exit status. A change made
+    under a key's old name (RENAMED_CONFIG_KEYS), by the code that rebooted,
+    is restored under its new name."""
     for key, value in rebooted.config.items():
+        key = RENAMED_CONFIG_KEYS.get(key, key)
         try:
             config.set(key, value)
         except (ConfigError, TypeError, ValueError) as exc:
@@ -3080,11 +3164,11 @@ async def _run(
         rebooted=rebooted,
     )
     state.notice(
-        "pythia.interaction — /retry, /continue, /steer [text], /task <text>, /compact [focus], "
-        "/config, /config.json, /login, /quota, /reboot, /exit or /quit. /steer, /reboot and "
-        "/exit wait for the current tool batch; with ! they wait only for the current operation, "
-        "and with !! they also cancel it where possible. Ctrl-C/Ctrl-D is /exit!, and a second "
-        "press /exit!!."
+        "pythia.interaction — /retry, /continue, /cancel, /steer [text], /task <text>, "
+        "/compact [focus], /config, /config.json, /login, /quota, /reboot, /exit or /quit. "
+        "/steer, /reboot and /exit wait for the current tool batch; with ! they wait only for "
+        "the current operation, and with !! they also cancel it where possible. Ctrl-C/Ctrl-D "
+        "is /exit!, and a second press /exit!!."
     )
     _startup_notices(state, args, save, config)
     if rebooted is not None:

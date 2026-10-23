@@ -202,7 +202,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
     def setUp(self):
         fixture.ModelTests.setUp(self)
         # The turn loop retries at once here; test_loop_kernel runs its waits.
-        patcher = mock.patch.object(kernel, '_wait_to_retry', lambda host, seconds: None)
+        patcher = mock.patch.object(kernel, '_wait_to_auto_retry', lambda host, seconds: None)
         patcher.start()
         self.addCleanup(patcher.stop)
 

@@ -37,6 +37,7 @@ from pythia.interaction import ModelConfigurationError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import ModelFailure
+from pythia.interaction import ModelRateLimitError
 from pythia.interaction import ModelSample
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import ModelTimeoutError
@@ -1028,6 +1029,83 @@ class ChatCompletionsModelTests(unittest.TestCase):
         self.assertTrue(success.closed)
         request_bodies = tuple(call[0].data for call in opener.calls)
         self.assertEqual(request_bodies, (request_bodies[0],) * 3)
+
+    def test_a_rate_limit_after_the_http_retries_is_a_rate_limit_error(self):
+        # Its wording would read as an overflow, but a 429 never is one.
+        body = json.dumps({"error": {
+            "code": "rate_limit_exceeded", "type": "tokens",
+            "message": "Rate limit reached: too many tokens per min. Please try again in 90s.",
+        }}).encode("utf-8")
+        opener = _ScriptedOpener(*(
+            _http_error(429, body=body, headers={"Retry-After": "90"}) for _ in range(3)
+        ))
+        sleeps = []
+        model = ChatCompletionsModel(
+            chat_endpoint(api_url="https://api.example.test"),
+            opener=opener,
+            retry_sleep=sleeps.append,
+        )
+
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+
+        error = raised.exception
+        self.assertNotIsInstance(error, ModelContextWindowError)
+        self.assertEqual(sleeps, [60.0, 60.0])  # the adapter's own waits keep their cap
+        self.assertEqual(error.retry_after_seconds, 90.0)
+        self.assertEqual(
+            (error.failure.category, error.failure.message, error.failure.provider,
+             error.failure.http_status, error.failure.error_code, error.failure.attempt_count,
+             error.failure.recovery),
+            ("rate_limit", "Chat Completions HTTP 429: rate limited", "chat-completions", 429,
+             "rate_limit_exceeded", 3, ("http_429_retry", "http_429_retry")),
+        )
+
+    def test_an_exhausted_quota_is_retried_as_a_rate_limit_and_says_so(self):
+        # OpenAI's out-of-credit answer is a 429 too. A top-up may lift it
+        # meanwhile, so the turn loop retries it like any other.
+        body = json.dumps({"error": {
+            "code": "insufficient_quota", "type": "insufficient_quota",
+            "message": "You exceeded your current quota, please check your plan.",
+        }}).encode("utf-8")
+        opener = _ScriptedOpener(*(_http_error(429, body=body) for _ in range(3)))
+        model = ChatCompletionsModel(
+            chat_endpoint(api_url="https://api.example.test"),
+            opener=opener,
+            retry_sleep=lambda seconds: None,
+        )
+
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+
+        self.assertIs(raised.exception.retry_state, interaction.RetryState.ELIGIBLE)
+        failure = raised.exception.failure
+        self.assertEqual(
+            (failure.category, failure.message, failure.http_status, failure.error_code,
+             failure.attempt_count),
+            ("rate_limit", "Chat Completions HTTP 429: quota exceeded", 429,
+             "insufficient_quota", 3),
+        )
+
+    def test_an_error_body_is_kept_to_4096_characters_as_messages_keeps_it(self):
+        # Such as a proxy's HTML error page: the error shows it, on every
+        # attempt of a long rate-limit retry. The debug trace keeps it whole.
+        page = "<html><body>" + "Too Many Requests. " * 1000 + "</body></html>"
+        for name, outcome, body in (
+            ("raised", lambda: _http_error(429, body=page.encode("utf-8")), page),
+            ("returned", lambda: _FakeHTTPResponse(page, status=429), json.dumps(page)),
+        ):
+            with self.subTest(name):
+                model = ChatCompletionsModel(
+                    chat_endpoint(api_url="https://api.example.test"),
+                    opener=_ScriptedOpener(*(outcome() for _ in range(3))),
+                    retry_sleep=lambda seconds: None,
+                )
+                with self.assertRaises(ModelRateLimitError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)))
+                self.assertGreater(len(body), 4096)
+                self.assertEqual(str(raised.exception),
+                                 "Chat Completions HTTP 429: " + body[:4096])
 
     def test_connection_and_body_read_failures_are_retried(self):
         failed_read = _ReadFailureResponse(OSError("body disconnected"))

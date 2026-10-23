@@ -29,6 +29,9 @@ from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
 from ._request_gate import uncancellable
 from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
+from ._transport_retry import QUOTA_ERROR_CODES
+from ._transport_retry import quota_error_code
+from ._transport_retry import retry_after_seconds
 from ._transport_retry import retry_delay_seconds
 from .codex_auth import CodexAuth
 from .codex_auth import CodexCredentials
@@ -65,6 +68,7 @@ from .model import ModelConfigurationError
 from .model import ModelAuthenticationError
 from .model import ModelContextWindowError
 from .model import ModelError
+from .model import ModelRateLimitError
 from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
@@ -88,6 +92,10 @@ _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 # Codes meaning the request exceeded the model's context window, whether in an
 # HTTP error body or in a ``response.failed`` or ``error`` stream event.
 _CONTEXT_WINDOW_ERROR_CODES = frozenset({"context_length_exceeded"})
+# Codes meaning a rate limit, or an exhausted quota or plan, in a
+# ``response.failed`` or ``error`` stream event; the turn loop retries them as
+# it does an HTTP 429 (ModelRateLimitError).
+_RATE_LIMIT_ERROR_CODES = frozenset({"rate_limit_exceeded", *QUOTA_ERROR_CODES})
 _MAX_TRANSIENT_RETRIES = DEFAULT_MAX_TRANSIENT_RETRIES
 _MAX_DIAGNOSTIC_VALUE_CHARS = 256
 _MAX_DIAGNOSTIC_EVENT_TYPES = 32
@@ -1062,7 +1070,7 @@ def _stream_failure(
     attempt_count: int,
     recovery: Tuple[str, ...],
     headers: Any,
-) -> ModelResponseError:
+) -> ModelError:
     completed = _ordered_output_items(output_items)
     # An overflow can arrive as a failed response or error event (as from
     # Codex) instead of an HTTP 400; classify it so overflow recovery runs.
@@ -1070,9 +1078,19 @@ def _stream_failure(
         category in {"response_failed", "response_error_event"}
         and trace.error_code in _CONTEXT_WINDOW_ERROR_CODES
     )
+    # So can a rate limit or an exhausted quota; the turn loop retries either
+    # (ModelRateLimitError).
+    rate_limit = (
+        category in {"response_failed", "response_error_event"}
+        and trace.error_code in _RATE_LIMIT_ERROR_CODES
+    )
     if context_window:
         category = "context_window"
         message = f"{message}: context window exceeded"
+    elif rate_limit:
+        category = "rate_limit"
+        quota = trace.error_code in QUOTA_ERROR_CODES
+        message = f"{message}: {'quota exceeded' if quota else 'rate limited'}"
     failure = ModelFailure(
         category=category,
         message=message,
@@ -1103,7 +1121,8 @@ def _stream_failure(
         last_sequence_number=trace.last_sequence_number,
         recovery=recovery,
     )
-    error_type = ModelContextWindowError if context_window else ModelResponseError
+    error_type = (ModelContextWindowError if context_window
+                  else ModelRateLimitError if rate_limit else ModelResponseError)
     return error_type(
         exception_message or message,
         failure=failure,
@@ -1577,7 +1596,16 @@ def _http_failure(
             message = f"{label} HTTP {status}: {reason}"
     category = "http_error"
     error_type = ModelTransportError
-    if _is_context_window_error(detail):
+    rate_limit = status == 429
+    if rate_limit:
+        # A rate limit, or an exhausted quota or plan (QUOTA_ERROR_CODES),
+        # never an overflow: the turn loop retries either, and the failure
+        # says which. Codex names a plan's limit in error.type only.
+        quota = quota_error_code(detail)
+        message = f"{label} HTTP {status}: {'quota exceeded' if quota else 'rate limited'}"
+        category = "rate_limit"
+        error_code = error_code or quota
+    elif _is_context_window_error(detail):
         message = f"{label} HTTP {status}: context window exceeded"
         category = "context_window"
         error_type = ModelContextWindowError
@@ -1612,6 +1640,9 @@ def _http_failure(
         attempt_count=attempt_count,
         recovery=recovery,
     )
+    if rate_limit:
+        return ModelRateLimitError(message, failure=failure,
+                                   retry_after_seconds=retry_after_seconds(headers, cap=None))
     return error_type(message, failure=failure)
 
 
@@ -2140,7 +2171,8 @@ class _ResponsesModelBase:
                     # error response while sleeping or making another request.
                     _close_response(response)
                     response = None
-                    context_window_error = _is_context_window_error(detail)
+                    # A 429 is a rate limit, or an exhausted quota, never an overflow.
+                    context_window_error = status != 429 and _is_context_window_error(detail)
                     if (
                         status == 401
                         and self.endpoint.api_provider == "codex"

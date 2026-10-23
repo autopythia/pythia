@@ -146,6 +146,35 @@ class MessagesPromptCachingTests(unittest.TestCase):
         self.assertEqual(len(opener.calls), 1)
         self.assertIn("cache_control", _payload(opener))
 
+    def test_a_call_s_prompt_caching_overrides_the_endpoint_s(self):
+        # SampleParams.prompt_caching is the CLI's /config endpoint_prompt_caching.
+        context = InteractionContext((Message("user", "Hello."),))
+        for endpoint_caching, call_caching, expected in (
+            (MessagesPromptCaching(), "1h", "1h"),  # 5m -> 1h
+            (MessagesPromptCaching(ttl="1h"), "none", None),  # -> none
+            (None, "1h", "1h"),  # none -> 1h
+            (None, "5m", "5m"),
+            (MessagesPromptCaching(ttl="1h"), None, "1h"),  # unset keeps the endpoint's
+            (None, None, None),
+        ):
+            with self.subTest(endpoint=endpoint_caching, call=call_caching):
+                model = MessagesModel(messages_endpoint(
+                    api_url="http://localhost", model="model", max_output_tokens=100,
+                    prompt_caching=endpoint_caching,
+                ), opener=_ScriptedOpener())
+                payload = model._build_request_payload(
+                    context, (), SampleParams(prompt_caching=call_caching))
+                block = {"type": "text", "text": "Hello."}
+                if expected is None:
+                    self.assertNotIn("cache_control", payload)
+                else:
+                    control = {"type": "ephemeral", "ttl": expected}
+                    self.assertEqual(payload["cache_control"], control)
+                    block["cache_control"] = control
+                self.assertEqual(payload["messages"], [{"role": "user", "content": [block]}])
+        with self.assertRaisesRegex(ValueError, "^prompt_caching must be 5m, 1h, none, or None$"):
+            SampleParams(prompt_caching="2h")
+
     def test_caching_across_tool_turns_advances_breakpoint_and_preserves_blocks(self):
         for ttl in ("5m", "1h"):
             with self.subTest(ttl=ttl):
@@ -483,7 +512,7 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
         self.assertNotIn("prompt_caching", render_model_catalog(cleared).splitlines()[-1])
         self.assertEqual(_debug_entry(catalog.bind("messages", "cached"))["endpoint"], {
             "api": "messages", "url": "http://127.0.0.1:9/v1/messages", "model": "fixture",
-            "auth": "none", "prompt_caching": "1h",
+            "auth": "none", "prompt_caching": "1h", "rate_limit_retries": None,
         })
 
     def test_catalog_prompt_caching_is_checked(self):

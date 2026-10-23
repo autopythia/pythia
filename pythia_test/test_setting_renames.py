@@ -1,8 +1,10 @@
-"""Part 5 of the warm-cold compaction plan: three settings take new names.
+"""Renamed settings: three in part 5 of the warm-cold compaction plan, then
+request_timeout_seconds, which became timeouts_request_seconds.
 
 The new names work everywhere. The old ones keep working with a warning that
 names the new one: as options, as /config keys, in auto's config files, and as
-demo.run keywords. Auto saves are version 4, and version-3 saves load silently.
+demo.run keywords (the three that are). Auto saves are version 5, and
+version-3 and version-4 saves load silently.
 """
 
 from __future__ import annotations
@@ -33,7 +35,10 @@ RENAMES = {
     "compaction_keep_recent_tokens": "compaction_pi_keep_recent_tokens",
     "compaction_max_output_tokens": "compaction_pi_max_output_tokens",
 }
-OLD_NAMES = {new: old for old, new in RENAMES.items()}
+# Named after the model catalog's timeouts.request_seconds; not a demo.run keyword.
+TIMEOUT_RENAME = {"request_timeout_seconds": "timeouts_request_seconds"}
+ALL_RENAMES = {**RENAMES, **TIMEOUT_RENAME}
+OLD_NAMES = {new: old for old, new in ALL_RENAMES.items()}
 
 
 def _option(key):
@@ -48,10 +53,10 @@ def _caught():
 
 
 class OptionAndConfigKeyTests(unittest.TestCase):
-    def test_one_mapping_names_the_three_renames(self):
-        self.assertEqual(RENAMED_CONFIG_KEYS, RENAMES)
-        self.assertLessEqual(set(RENAMES.values()), set(CONFIG_KEYS))
-        self.assertFalse(set(RENAMES) & set(CONFIG_KEYS))
+    def test_one_mapping_names_every_rename(self):
+        self.assertEqual(RENAMED_CONFIG_KEYS, ALL_RENAMES)
+        self.assertLessEqual(set(ALL_RENAMES.values()), set(CONFIG_KEYS))
+        self.assertFalse(set(ALL_RENAMES) & set(CONFIG_KEYS))
 
     def test_old_options_are_hidden_aliases_that_warn(self):
         for frontend, parser, unset in (("cli", cli._build_parser(), None),
@@ -59,7 +64,7 @@ class OptionAndConfigKeyTests(unittest.TestCase):
                                         ("auto", build_auto_parser(), "absent")):
             usage = parser.format_help()
             defaults = vars(parser.parse_args([]))
-            for old, new in RENAMES.items():
+            for old, new in ALL_RENAMES.items():
                 with self.subTest(frontend=frontend, old=old):
                     self.assertIn(_option(new), usage)
                     self.assertNotIn(_option(old), usage)
@@ -74,9 +79,13 @@ class OptionAndConfigKeyTests(unittest.TestCase):
                         args = parser.parse_args([_option(old), "7"])
                     self.assertEqual(getattr(args, new), 7)
                     self.assertNotIn(old, vars(args))
+        # The timeout's old option takes decimal seconds, as its new one does.
+        with self.assertWarns(FutureWarning):
+            args = cli._build_parser().parse_args(["--request-timeout-seconds", "7.5"])
+        self.assertEqual(args.timeouts_request_seconds, 7.5)
 
     def test_old_config_keys_parse_as_the_new_ones_with_a_notice(self):
-        for old, new in RENAMES.items():
+        for old, new in ALL_RENAMES.items():
             for command in ("/config {}", "/config {} 5", "/config.json {}", "/config.json {} null"):
                 with self.subTest(command=command.format(old)):
                     intent = user_tools.parse_user_tool(command.format(old))
@@ -145,16 +154,16 @@ class AutoConfigTests(unittest.TestCase):
         self.path.write_text(json.dumps(document))
         return self.path
 
-    def test_config_files_may_say_version_3_or_4(self):
-        self.assertEqual(CONFIG_VERSION, 4)
-        for version in (3, 4):
+    def test_config_files_may_say_version_3_4_or_5(self):
+        self.assertEqual(CONFIG_VERSION, 5)
+        for version in (3, 4, 5):
             with self.subTest(version=version), _caught() as caught:
                 entries = load_config_file(self.write({
                     "version": version, "main": {"compaction_pi_max_output_tokens": 9}}))
                 self.assertEqual(entries, {1: {"compaction_pi_max_output_tokens": 9}})
                 self.assertEqual(caught, [])
-        for version in (2, 5, "4", None):
-            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "version 4"):
+        for version in (2, 6, "5", None):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "version 5"):
                 load_config_file(self.write({"version": version, "main": {}}))
 
     def test_old_keys_load_renamed_with_one_warning_naming_the_file_and_keys(self):
@@ -183,6 +192,13 @@ class AutoConfigTests(unittest.TestCase):
         self.assertEqual([str(warning.message) for warning in caught], [
             f"Auto configuration {str(self.path)!r} uses the deprecated "
             "compaction_keep_recent_tokens; rename it to compaction_pi_keep_recent_tokens."])
+        with _caught() as caught:
+            entries = load_config_file(self.write({
+                "version": 5, "main": {"request_timeout_seconds": 90.0}}))
+        self.assertEqual(entries, {1: {"timeouts_request_seconds": 90.0}})
+        self.assertEqual([str(warning.message) for warning in caught], [
+            f"Auto configuration {str(self.path)!r} uses the deprecated "
+            "request_timeout_seconds; rename it to timeouts_request_seconds."])
 
     def test_a_role_that_sets_both_names_fails(self):
         self.write({"version": 4, "watcher": {
@@ -193,27 +209,36 @@ class AutoConfigTests(unittest.TestCase):
             load_config_file(self.path)
         self.assertEqual(caught, [])
 
-    def test_saves_are_version_4_and_version_3_saves_load_renamed_silently(self):
+    def test_saves_are_version_5_and_older_saves_load_renamed_silently(self):
         current = resolve_config(overrides={
             "cwd": str(self.root), "model": "saved-model", "auto_compaction_context_tokens": 500,
             "compaction_pi_keep_recent_tokens": 0, "compaction_pi_max_output_tokens": 9,
+            "timeouts_request_seconds": 90.0,
         })
         document = saved_document(current)
-        self.assertEqual(document["version"], 4)
+        self.assertEqual(document["version"], 5)
         version_3 = {"version": 3, **{
             role: {OLD_NAMES.get(key, key): value for key, value in entry.items()}
             for role, entry in document.items() if role != "version"
         }}
-        self.assertLessEqual(set(RENAMES), set(version_3["main"]))
+        self.assertLessEqual(set(ALL_RENAMES), set(version_3["main"]))
+        # Version 4 kept only the timeout's old name.
+        version_4 = {"version": 4, **{
+            role: {("request_timeout_seconds" if key == "timeouts_request_seconds" else key): value
+                   for key, value in entry.items()}
+            for role, entry in document.items() if role != "version"
+        }}
+        self.assertIn("request_timeout_seconds", version_4["main"])
         path = self.root / "config.json"
-        for saved in (document, version_3):
+        for saved in (document, version_3, version_4):
             with self.subTest(version=saved["version"]), _caught() as caught:
                 path.write_text(json.dumps(saved))
                 self.assertEqual(resolve_config(saved=load_saved_config(path)), current)
                 self.assertEqual(caught, [])
-        # Only version 3 has the old names, and a role may not set both.
+        # Each version has only its own old names, and a role may not set both.
         for label, broken in (
                 ("old names in version 4", {**version_3, "version": 4}),
+                ("old names in version 5", {**version_4, "version": 5}),
                 ("both names", {**version_3, "main": {
                     **version_3["main"], "auto_compaction_context_tokens": 500}})):
             with self.subTest(label), self.assertRaisesRegex(ValueError, "^Invalid saved"):
@@ -255,6 +280,14 @@ class DemoRunTests(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, re.escape(
                         f"run() got both {old!r} and its new name {new!r}")):
                     demo.run(_DemoModel(), Environment(), **{old: 1, new: 1})
+
+    def test_the_timeout_is_not_a_run_keyword_under_either_name(self):
+        # demo.run's request timeout comes with sample_params.
+        for name in (*TIMEOUT_RENAME, *TIMEOUT_RENAME.values()):
+            with self.subTest(name=name), _caught() as caught, self.assertRaises(TypeError):
+                demo.run(_DemoModel(), Environment(), **{name: 1})
+            self.assertEqual([warning for warning in caught
+                              if issubclass(warning.category, FutureWarning)], [])
 
 
 if __name__ == "__main__":

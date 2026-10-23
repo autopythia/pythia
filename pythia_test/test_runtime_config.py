@@ -43,7 +43,9 @@ class InteractionConfigTests(unittest.TestCase):
                 "enable_workspace = True",
                 "max_samples = None",
                 "max_output_tokens = None",
-                "request_timeout_seconds = None",
+                "timeouts_request_seconds = None",
+                "endpoint_prompt_caching = None",
+                "endpoint_rate_limit_retries = None",
                 "enable_auto_compaction = True",
                 "auto_compaction_context_tokens = None",
                 "max_context_tokens = None",
@@ -60,7 +62,9 @@ class InteractionConfigTests(unittest.TestCase):
             "enable_workspace": True,
             "max_samples": None,
             "max_output_tokens": None,
-            "request_timeout_seconds": None,
+            "timeouts_request_seconds": None,
+            "endpoint_prompt_caching": None,
+            "endpoint_rate_limit_retries": None,
             "enable_auto_compaction": True,
             "auto_compaction_context_tokens": None,
             "max_context_tokens": None,
@@ -96,7 +100,9 @@ class InteractionConfigTests(unittest.TestCase):
                 "enable_workspace = True",
                 "max_samples = None",
                 "max_output_tokens = None",
-                "request_timeout_seconds = None",
+                "timeouts_request_seconds = None",
+                "endpoint_prompt_caching = None",
+                "endpoint_rate_limit_retries = None",
                 "enable_auto_compaction = True",
                 "# init: auto_compaction_context_tokens = 500000",
                 "auto_compaction_context_tokens = 100",
@@ -136,7 +142,9 @@ class InteractionConfigTests(unittest.TestCase):
             "enable_workspace": False,
             "max_samples": 3,
             "max_output_tokens": 2048,
-            "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            "timeouts_request_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            "endpoint_prompt_caching": None,
+            "endpoint_rate_limit_retries": 5,
             "enable_auto_compaction": False,
             "auto_compaction_context_tokens": 500000,
             "max_context_tokens": 1000000,
@@ -163,42 +171,42 @@ class InteractionConfigTests(unittest.TestCase):
         )
 
     def test_request_timeout_is_live_and_null_restores_the_default(self):
-        args = cli._build_parser().parse_args(["--request-timeout-seconds", "60"])
+        args = cli._build_parser().parse_args(["--timeouts-request-seconds", "60"])
         config = InteractionConfig.from_namespace(args)
-        self.assertEqual(config.get("request_timeout_seconds"), 60.0)
-        self.assertEqual(config.set("request_timeout_seconds", 90.5), 90.5)
+        self.assertEqual(config.get("timeouts_request_seconds"), 60.0)
+        self.assertEqual(config.set("timeouts_request_seconds", 90.5), 90.5)
         self.assertEqual(config.snapshot().sample_params().request_timeout_seconds, 90.5)
         self.assertEqual(
-            config.render("request_timeout_seconds", json_output=False),
-            "# init: request_timeout_seconds = 60.0\nrequest_timeout_seconds = 90.5",
+            config.render("timeouts_request_seconds", json_output=False),
+            "# init: timeouts_request_seconds = 60.0\ntimeouts_request_seconds = 90.5",
         )
         # null stores the catalog value or default, not the launch value;
         # reset restores the launch value.
-        self.assertEqual(config.set("request_timeout_seconds", None), DEFAULT_REQUEST_TIMEOUT_SECONDS)
-        self.assertEqual(config.reset("request_timeout_seconds").request_timeout_seconds, 60.0)
+        self.assertEqual(config.set("timeouts_request_seconds", None), DEFAULT_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(config.reset("timeouts_request_seconds").timeouts_request_seconds, 60.0)
         for value in (0, -1, True, "600", float("inf"), float("nan"),
                       MAX_TIMEOUT_SECONDS + 1, 1e12):
             with self.subTest(value=value), self.assertRaises(ConfigError):
-                config.set("request_timeout_seconds", value)
-        self.assertEqual(config.get("request_timeout_seconds"), 60.0)
-        self.assertEqual(config.set("request_timeout_seconds", MAX_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS)
-        self.assertIsInstance(config.set("request_timeout_seconds", 600), float)
+                config.set("timeouts_request_seconds", value)
+        self.assertEqual(config.get("timeouts_request_seconds"), 60.0)
+        self.assertEqual(config.set("timeouts_request_seconds", MAX_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS)
+        self.assertIsInstance(config.set("timeouts_request_seconds", 600), float)
         # Without a bound fallback, None leaves each endpoint's own timeout.
-        self.assertIsNone(InteractionConfig().get("request_timeout_seconds"))
+        self.assertIsNone(InteractionConfig().get("timeouts_request_seconds"))
         self.assertIsNone(InteractionConfig().snapshot().sample_params().request_timeout_seconds)
 
     def test_request_timeout_does_not_apply_to_claude_relay(self):
         relay = ["--endpoint-api", "claude-relay", "--model", "claude-opus-5-5"]
         config = InteractionConfig.from_namespace(cli._build_parser().parse_args(relay))
-        self.assertIsNone(config.get("request_timeout_seconds"))
+        self.assertIsNone(config.get("timeouts_request_seconds"))
         self.assertIsNone(config.snapshot().sample_params().request_timeout_seconds)
-        self.assertIsNone(config.set("request_timeout_seconds", None))
+        self.assertIsNone(config.set("timeouts_request_seconds", None))
         with self.assertRaisesRegex(ConfigError, "does not apply to Claude Relay"):
-            config.set("request_timeout_seconds", 600)
-        self.assertIsNone(config.get("request_timeout_seconds"))
+            config.set("timeouts_request_seconds", 600)
+        self.assertIsNone(config.get("timeouts_request_seconds"))
         with self.assertRaisesRegex(ConfigError, "does not apply to Claude Relay"):
             InteractionConfig.from_namespace(cli._build_parser().parse_args(
-                [*relay, "--request-timeout-seconds", "60"]))
+                [*relay, "--timeouts-request-seconds", "60"]))
 
     def test_context_limit_keys_validate_and_stay_independent(self):
         for key in ("auto_compaction_context_tokens", "max_context_tokens"):
@@ -419,10 +427,10 @@ class InteractionConfigTests(unittest.TestCase):
         # Seconds also take plain decimals; integers become float seconds.
         for literal, expected in (("600", 600.0), ("90.5", 90.5), ("+1.25", 1.25)):
             with self.subTest(literal=literal):
-                value = parse_config_literal("request_timeout_seconds", literal)
+                value = parse_config_literal("timeouts_request_seconds", literal)
                 self.assertEqual(value, expected)
                 self.assertIsInstance(value, float)
-        self.assertIsNone(parse_config_literal("request_timeout_seconds", "null"))
+        self.assertIsNone(parse_config_literal("timeouts_request_seconds", "null"))
 
         for key, literal in (
             ("enable_workspace", "None"),
@@ -432,13 +440,13 @@ class InteractionConfigTests(unittest.TestCase):
             ("max_output_tokens", "1.5"),
             ("max_samples", "-1"),
             ("max_samples", "2.5"),
-            ("request_timeout_seconds", "1e3"),
-            ("request_timeout_seconds", "Infinity"),
-            ("request_timeout_seconds", "nan"),
-            ("request_timeout_seconds", ".5"),
-            ("request_timeout_seconds", "-7"),
-            ("request_timeout_seconds", "86401"),
-            ("request_timeout_seconds", "true"),
+            ("timeouts_request_seconds", "1e3"),
+            ("timeouts_request_seconds", "Infinity"),
+            ("timeouts_request_seconds", "nan"),
+            ("timeouts_request_seconds", ".5"),
+            ("timeouts_request_seconds", "-7"),
+            ("timeouts_request_seconds", "86401"),
+            ("timeouts_request_seconds", "true"),
         ):
             with self.subTest(key=key, literal=literal):
                 with self.assertRaises(ConfigError) as raised:

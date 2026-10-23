@@ -27,6 +27,7 @@ from typing import Iterable
 from typing import Mapping
 from typing import Optional
 from typing import Tuple
+from typing import Union
 from urllib.parse import urlsplit
 
 
@@ -48,6 +49,7 @@ _RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
     "max_context_tokens", "context_management", "api", "model_api", "api_model",
     "api_url", "api_key", "api_key_env", "headers", "authorization",
     "bearer_token", "access_token", "account_id", "request_timeout_seconds",
+    "timeouts_request_seconds",
 ))
 # Each API's adapter also owns these top-level fields, including those holding
 # typed catalog defaults (Responses reasoning/text).
@@ -85,6 +87,21 @@ MODEL_TIMEOUT_FIELDS = ("request_seconds", *_RELAY_TIMEOUT_FIELDS)
 # entries that each request writes, or none, which sends no cache_control (for
 # servers that reject it). Unset, it is 5m.
 PROMPT_CACHING_VALUES = ("5m", "1h", "none")
+# endpoint.rate_limit_retries, all but Claude Relay: how many times the turn
+# loop samples again after a rate limit (ModelRateLimitError), each after a
+# fixed wait (loop.kernel); "unbounded" retries until a sample succeeds or the
+# user cancels or stops. Unset, it is DEFAULT_RATE_LIMIT_RETRIES.
+RATE_LIMIT_RETRIES_UNBOUNDED = "unbounded"
+DEFAULT_RATE_LIMIT_RETRIES = 5
+
+
+def validate_rate_limit_retries(value, name="endpoint.rate_limit_retries"):
+    """A rate-limit retry count: a nonnegative integer, or ``"unbounded"``."""
+    if value == RATE_LIMIT_RETRIES_UNBOUNDED:
+        return value
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer or {RATE_LIMIT_RETRIES_UNBOUNDED}")
+    return value
 
 
 def parse_json_value(text: str):
@@ -264,6 +281,9 @@ class EndpointSpec:
     auth_file: Optional[str] = None
     # PROMPT_CACHING_VALUES; None is 5m. Not part of the connection identity.
     prompt_caching: Optional[str] = None
+    # A count or RATE_LIMIT_RETRIES_UNBOUNDED; None is DEFAULT_RATE_LIMIT_RETRIES.
+    # Not part of the connection identity.
+    rate_limit_retries: Optional[Union[int, str]] = None
 
     def __post_init__(self):
         object.__setattr__(self, "api", _normalize_profile(self.api))
@@ -291,6 +311,10 @@ class EndpointSpec:
                 raise ValueError("endpoint.prompt_caching must be 5m, 1h, or none")
             if self.api != "messages":
                 raise ValueError("endpoint.prompt_caching requires the Messages API")
+        if self.rate_limit_retries is not None:
+            validate_rate_limit_retries(self.rate_limit_retries)
+            if self.api == "claude-relay":
+                raise ValueError("endpoint.rate_limit_retries does not apply to Claude Relay")
 
     @property
     def environment_variable(self):
@@ -894,7 +918,7 @@ class ModelCatalog:
 
     def bind(self, api=None, name=None, *, extra_sample_params=None,
              endpoint_url=None, endpoint_model=None, endpoint_auth=None,
-             endpoint_prompt_caching=None):
+             endpoint_prompt_caching=None, endpoint_rate_limit_retries=None):
         if name is not None:
             if not isinstance(name, str):
                 raise TypeError("model name must be a string or None")
@@ -924,6 +948,12 @@ class ModelCatalog:
             if endpoint.api != "messages":
                 raise ValueError("--endpoint-prompt-caching requires --endpoint-api messages")
             changes["prompt_caching"] = endpoint_prompt_caching
+        if endpoint_rate_limit_retries is not None:
+            if endpoint.api == "claude-relay":
+                raise ValueError("--endpoint-rate-limit-retries does not apply to "
+                                 "--endpoint-api claude-relay")
+            changes["rate_limit_retries"] = validate_rate_limit_retries(
+                endpoint_rate_limit_retries, "--endpoint-rate-limit-retries")
         endpoint = replace(endpoint, **changes)
         binding = ModelBinding(
             name, endpoint, spec,
@@ -964,6 +994,7 @@ def binding_from_namespace(args, catalog=None):
         endpoint_model=getattr(args, "endpoint_model", None),
         endpoint_auth=auth,
         endpoint_prompt_caching=getattr(args, "endpoint_prompt_caching", None),
+        endpoint_rate_limit_retries=getattr(args, "endpoint_rate_limit_retries", None),
         extra_sample_params=getattr(args, "extra_sample_params", None),
     )
     if inferred_supplied and binding.api == "codex" and (

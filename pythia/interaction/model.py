@@ -26,6 +26,7 @@ from .items import ToolCall
 from .items import SampleMetadata
 from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
+from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import freeze_extra_sample_params
 from .model_catalog import thaw_json
@@ -44,9 +45,10 @@ class RetryState(enum.Enum):
     itself: ``ModelError.retry_state``. The values are for traces.
 
     It only moves forward: from ``NONE`` to ``ELIGIBLE``, when a model adapter
-    vouches for a retry, and from ``ELIGIBLE`` to ``BLOCKED``, ``RETRIED`` or
-    ``EXHAUSTED``. So an error a frontend sees is ``NONE``, ``BLOCKED`` or
-    ``EXHAUSTED``: the turn loop settles an eligible one before raising it.
+    vouches for a retry, and from ``ELIGIBLE`` to ``BLOCKED``, ``RETRIED``,
+    ``EXHAUSTED`` or ``CANCELLED``. So an error a frontend sees is ``NONE``,
+    ``BLOCKED``, ``EXHAUSTED`` or ``CANCELLED``: the turn loop settles an
+    eligible one before raising it.
     """
 
     NONE = "none"  # no retry is claimed (the default)
@@ -61,11 +63,14 @@ class RetryState(enum.Enum):
     BLOCKED = "blocked"
     RETRIED = "retried"  # the turn loop sampled again after it
     EXHAUSTED = "exhausted"  # eligible, but the sample's attempts were used up
+    # Eligible, but the user stopped the automatic retries (the CLI's /cancel).
+    CANCELLED = "cancelled"
 
 
 _RETRY_MOVES = {
     RetryState.NONE: (RetryState.ELIGIBLE,),
-    RetryState.ELIGIBLE: (RetryState.BLOCKED, RetryState.RETRIED, RetryState.EXHAUSTED),
+    RetryState.ELIGIBLE: (RetryState.BLOCKED, RetryState.RETRIED, RetryState.EXHAUSTED,
+                          RetryState.CANCELLED),
 }
 
 
@@ -176,6 +181,32 @@ class ModelTimeoutError(ModelTransportError):
     pass
 
 
+class ModelRateLimitError(ModelTransportError):
+    """The provider rate-limited the request, or reported an exhausted quota or
+    plan, after the adapter's own retries: HTTP 429, or such a code in a stream.
+
+    Nothing of the response was generated, so it is ``RetryState.ELIGIBLE``:
+    the turn loop samples again under its rate-limit policy, as many times as
+    the config's ``endpoint_rate_limit_retries`` allows (``loop.kernel``).
+    That includes a quota, such as OpenAI's ``insufficient_quota``: a top-up, a
+    plan reset or another account may lift it meanwhile. Its failure says
+    ``quota exceeded`` instead of ``rate limited``. ``retry_after_seconds`` is
+    the last response's ``Retry-After``, uncapped, or None.
+    """
+
+    def __init__(self, *args, failure=None, completed_items=(),
+                 retry_state=RetryState.ELIGIBLE, retry_after_seconds=None):
+        if retry_after_seconds is not None and (
+                isinstance(retry_after_seconds, bool)
+                or not isinstance(retry_after_seconds, (int, float))
+                or not math.isfinite(retry_after_seconds) or retry_after_seconds < 0):
+            raise ValueError("retry_after_seconds must be a non-negative number or None")
+        super().__init__(*args, failure=failure, completed_items=completed_items,
+                         retry_state=retry_state)
+        self.retry_after_seconds = (None if retry_after_seconds is None
+                                    else float(retry_after_seconds))
+
+
 class ModelResponseError(ModelError):
     pass
 
@@ -246,6 +277,11 @@ class SampleParams:
     ``request_timeout_seconds`` is host transport policy, never a wire field:
     the HTTP blocking-I/O timeout of each operation of this call's requests.
     ``None`` uses the adapter endpoint's timeout.
+
+    ``prompt_caching`` is the Messages prompt-caching policy of this call's
+    requests (``5m``, ``1h``, or ``none``, which sends no ``cache_control``);
+    ``None`` uses the endpoint's. The CLI projects ``/config
+    endpoint_prompt_caching``. Other adapters ignore it.
     """
 
     max_output_tokens: Optional[int] = None
@@ -259,6 +295,7 @@ class SampleParams:
     auto_compaction_context_tokens: Optional[int] = None
     extra: Optional[Mapping] = None
     request_timeout_seconds: Optional[float] = None
+    prompt_caching: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.max_output_tokens is not None:
@@ -307,6 +344,8 @@ class SampleParams:
             object.__setattr__(self, "request_timeout_seconds", validate_timeout_seconds(
                 self.request_timeout_seconds, "request_timeout_seconds",
             ))
+        if self.prompt_caching is not None and self.prompt_caching not in PROMPT_CACHING_VALUES:
+            raise ValueError("prompt_caching must be 5m, 1h, none, or None")
 
 
 def _request_timeout_seconds(endpoint, sample_params: Optional[SampleParams]) -> float:
@@ -582,6 +621,7 @@ __all__ = [
     "ModelContextWindowError",
     "ModelContinuationExpired",
     "ModelError",
+    "ModelRateLimitError",
     "ModelRefusal",
     "ModelResponseError",
     "ModelSample",

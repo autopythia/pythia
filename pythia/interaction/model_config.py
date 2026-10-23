@@ -25,8 +25,10 @@ from .model import Model
 from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
 from .model_catalog import COMPACTION_DEFAULT_FIELDS
+from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
+from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
@@ -64,6 +66,22 @@ CLAUDE_RELAY_FIELDS = (
 )
 # Likewise; auto gives them to its Messages roles only.
 MESSAGES_FIELDS = ("endpoint_prompt_caching",)
+# Likewise; auto gives them to its HTTP roles, all but Claude Relay.
+HTTP_FIELDS = ("endpoint_rate_limit_retries",)
+
+
+def _rate_limit_retries_argument(text: str):
+    """``--endpoint-rate-limit-retries``: a nonnegative integer, or ``unbounded``."""
+    if text == RATE_LIMIT_RETRIES_UNBOUNDED:
+        return text
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a nonnegative integer or {RATE_LIMIT_RETRIES_UNBOUNDED}")
+    return value
 
 
 def relay_endpoint(args, binding):
@@ -80,7 +98,7 @@ def relay_endpoint(args, binding):
         # TODO(claude-relay output-budgets): remove this guard only alongside the
         # verified _sampling/runtime mapping and relay/wrapper capability checks.
         raise ValueError("Claude Relay does not yet support explicit output-token budgets")
-    if getattr(args, "request_timeout_seconds", None) is not None:
+    if getattr(args, "timeouts_request_seconds", None) is not None:
         raise ValueError("Use --claude-relay-generation-timeout or the model catalog's "
                          "timeouts.generation_seconds; HTTP request timeouts do not apply")
 
@@ -159,13 +177,16 @@ def add_renamed_options(parser: argparse.ArgumentParser) -> None:
     """Add the old names of renamed options (RENAMED_CONFIG_KEYS), hidden.
 
     Each sets its new option's destination, with a FutureWarning that names
-    the new option. All three take an integer. They set no default, so the
-    new option's default stands.
+    the new option. Each takes what its new option takes: decimal seconds for
+    --request-timeout-seconds, an integer for the others. They set no
+    default, so the new option's default stands.
     """
     for old, new in RENAMED_CONFIG_KEYS.items():
+        seconds = new.endswith("_seconds")
         parser.add_argument(
             _option(old), action=_RenamedOption, new_option=_option(new), dest=new,
-            type=int, default=argparse.SUPPRESS, metavar="N", help=argparse.SUPPRESS,
+            type=float if seconds else int, default=argparse.SUPPRESS,
+            metavar="SECONDS" if seconds else "N", help=argparse.SUPPRESS,
         )
 
 
@@ -250,6 +271,8 @@ def render_model_catalog(catalog):
             *(f"compaction.{name}={value}" for name, value in _compaction_settings(spec.compaction))))
         caching = ("" if spec.endpoint.prompt_caching is None
                    else f", prompt_caching={spec.endpoint.prompt_caching}")
+        if spec.endpoint.rate_limit_retries is not None:
+            caching += f", rate_limit_retries={spec.endpoint.rate_limit_retries}"
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
                      f"url={spec.endpoint.url}, auth={spec.endpoint.auth}{caching}, "
                      f"source={origin}{settings}")
@@ -322,8 +345,21 @@ def add_endpoint_arguments(parser, *, auto=False):
         help=("Messages prompt caching: 5m or 1h, the lifetime of the cache entries that each "
               "request writes (1h writes cost 2x base input, against 1.25x; a conversation "
               "resumed with 1h after 5m writes its whole prefix again once), or none, which "
-              "sends no cache_control, for servers that reject it; launch-only (default: the "
-              "model catalog's endpoint.prompt_caching, else 5m)"))
+              "sends no cache_control, for servers that reject it"
+              + ("" if auto else "; the CLI's /config endpoint_prompt_caching changes it later")
+              + " (default: the model catalog's endpoint.prompt_caching, else 5m)"))
+    parser.add_argument(
+        "--endpoint-rate-limit-retries", type=_rate_limit_retries_argument,
+        default=argparse.SUPPRESS, metavar="N|unbounded",
+        help=("how many times a turn samples again after a rate limit (HTTP 429), waiting 5, "
+              "10, 20, then 30 seconds each time, or longer if the provider's Retry-After says "
+              "so; each try includes the request's own HTTP retries. 0 turns it off, and "
+              "unbounded retries until a sample succeeds or the turn is stopped (/cancel in "
+              "the CLI and auto). Not for Claude Relay"
+              + ("" if auto else "; the CLI's /config endpoint_rate_limit_retries changes it "
+                 "later")
+              + f" (default: the model catalog's endpoint.rate_limit_retries, else "
+                f"{DEFAULT_RATE_LIMIT_RETRIES})"))
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")
@@ -400,7 +436,7 @@ def build_model(
     # The adapter's default for calls without a per-call timeout: the launch
     # option, then the catalog's timeouts.request_seconds, then the default.
     request_timeout_seconds = resolve_request_timeout_seconds(
-        binding, getattr(args, "request_timeout_seconds", None),
+        binding, getattr(args, "timeouts_request_seconds", None),
     )
     if trace is not None:
         from ._account_http import default_account_opener
@@ -659,14 +695,14 @@ def build_parser(description: str, *, allow_prompt_file: bool = False,
     )
     parser.add_argument("--max-output-tokens", type=int)
     parser.add_argument(
-        "--request-timeout-seconds",
+        "--timeouts-request-seconds",
         type=float,
         default=None,
         help=(
             "HTTP blocking-I/O timeout for model requests (default: "
             f"{DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds unless the model catalog "
             "sets timeouts.request_seconds; not an overall deadline); tunable "
-            "with /config request_timeout_seconds. /login and /quota keep "
+            "with /config timeouts_request_seconds. /login and /quota keep "
             "their fixed timeout"
         ),
     )

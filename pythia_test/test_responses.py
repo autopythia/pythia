@@ -36,6 +36,7 @@ from pythia.interaction import ModelAuthenticationError
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import ModelContextWindowError
 from pythia.interaction import InteractionContext
+from pythia.interaction import ModelRateLimitError
 from pythia.interaction import ModelResponseError
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import ModelTransportError
@@ -44,6 +45,7 @@ from pythia.interaction import PiCompactor
 from pythia.interaction import Reasoning
 from pythia.interaction import REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS
 from pythia.interaction import ResponsesOpaqueCompactor
+from pythia.interaction import RetryState
 from pythia.interaction import SampleParams
 from pythia.interaction import StreamingResponsesEndpoint
 from pythia.interaction import TokenUsage
@@ -2780,6 +2782,81 @@ class GenericResponsesWireTests(unittest.TestCase):
             }))
         self.assertNotIsInstance(raised.exception, ModelContextWindowError)
         self.assertEqual(raised.exception.failure.category, "response_failed")
+
+    def test_rate_limits_classify_http_and_stream_failures(self):
+        body = json.dumps({"error": {
+            "type": "requests", "code": "rate_limit_exceeded",
+            "message": "Rate limit reached for requests.",
+        }}).encode()
+        for api_provider, label in (("api", "Responses"), ("codex", "Codex Responses")):
+            with self.subTest("http", api_provider=api_provider):
+                # After the adapter's own HTTP attempts.
+                with self.assertRaises(ModelRateLimitError) as raised:
+                    self._sample(api_provider, *(_http_error(429, body=body, headers={
+                        "Retry-After": "75", "x-request-id": "req_rate"}) for _ in range(3)))
+                failure = raised.exception.failure
+                self.assertEqual(
+                    (failure.category, failure.message, failure.http_status, failure.error_code,
+                     failure.request_id, failure.attempt_count),
+                    ("rate_limit", f"{label} HTTP 429: rate limited", 429, "rate_limit_exceeded",
+                     "req_rate", 3),
+                )
+                self.assertEqual(raised.exception.retry_after_seconds, 75.0)
+                self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
+        streams = {
+            "response.failed": lambda: _FakeSSEResponse({
+                "type": "response.failed",
+                "response": {"error": {"code": "rate_limit_exceeded", "message": "x"}},
+            }),
+            "public error event": lambda: _FakeSSEResponse({
+                "type": "error", "code": "rate_limit_exceeded", "message": "x",
+                "param": None, "sequence_number": 1,
+            }),
+        }
+        for name, outcome in streams.items():
+            with self.subTest(name):
+                with self.assertRaises(ModelRateLimitError) as raised:
+                    self._sample("api", outcome())
+                self.assertEqual(raised.exception.failure.category, "rate_limit")
+                self.assertEqual(raised.exception.failure.error_code, "rate_limit_exceeded")
+                self.assertTrue(raised.exception.failure.message.endswith(": rate limited"),
+                                raised.exception.failure.message)
+                self.assertIsNone(raised.exception.retry_after_seconds)
+
+    def test_an_exhausted_quota_or_plan_is_retried_as_a_rate_limit_and_says_so(self):
+        # OpenAI's out-of-credit answer names it in error.code, and a Codex
+        # plan's usage limit in error.type only. A top-up, a plan reset or
+        # another account may lift either meanwhile, so the turn loop retries
+        # them like any other 429.
+        for api_provider, label, error in (
+            ("api", "Responses", {"code": "insufficient_quota", "type": "insufficient_quota",
+                                  "message": "You exceeded your current quota."}),
+            ("codex", "Codex Responses", {
+                "type": "usage_limit_reached", "message": "The usage limit has been reached",
+                "plan_type": "plus", "resets_in_seconds": 9000}),
+            ("codex", "Codex Responses", {"type": "usage_not_included",
+                                          "message": "Upgrade to use Codex."}),
+        ):
+            body = json.dumps({"error": error}).encode()
+            with self.subTest(api_provider=api_provider, error=error["type"]):
+                with self.assertRaises(ModelRateLimitError) as raised:
+                    self._sample(api_provider, *(_http_error(429, body=body) for _ in range(3)))
+                self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
+                failure = raised.exception.failure
+                self.assertEqual(
+                    (failure.category, failure.message, failure.error_code, failure.attempt_count),
+                    ("rate_limit", f"{label} HTTP 429: quota exceeded", error["type"], 3),
+                )
+        # The same in a stream.
+        with self.assertRaises(ModelRateLimitError) as raised:
+            self._sample("api", _FakeSSEResponse({
+                "type": "response.failed",
+                "response": {"error": {"code": "insufficient_quota", "message": "x"}},
+            }))
+        self.assertEqual(raised.exception.failure.category, "rate_limit")
+        self.assertEqual(raised.exception.failure.error_code, "insufficient_quota")
+        self.assertTrue(raised.exception.failure.message.endswith(": quota exceeded"),
+                        raised.exception.failure.message)
 
 
 if __name__ == "__main__":

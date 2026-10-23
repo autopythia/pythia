@@ -35,6 +35,9 @@ def _debug_entry(binding):
             # None means the built-in default (5m on Messages). Added without
             # a version change.
             "prompt_caching": binding.endpoint.prompt_caching,
+            # None means the built-in default (5 retries). Added without a
+            # version change, likewise.
+            "rate_limit_retries": binding.endpoint.rate_limit_retries,
         },
         "limits": {
             name: getattr(binding.limits, name)

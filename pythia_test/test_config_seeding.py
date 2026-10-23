@@ -104,14 +104,17 @@ class ConfigSeedingTests(unittest.TestCase):
                 self.assertEqual(config.get("auto_compaction_context_tokens"), 872_000)
                 self.assertEqual(config.get("max_context_tokens"), 1_000_000)
                 self.assertEqual(config.get("max_output_tokens"), budget)
-                self.assertEqual(config.get("request_timeout_seconds"), DEFAULT_REQUEST_TIMEOUT_SECONDS)
+                self.assertEqual(config.get("timeouts_request_seconds"), DEFAULT_REQUEST_TIMEOUT_SECONDS)
                 # Catalog extras (thinking, effort) seed the read-only view; the
                 # projection leaves them to the binding, as for every request.
                 self.assertEqual(config.get("extra_sample_params"), extra_sample_params)
+                # Messages requests also take the config's prompt caching, 5m by default.
                 self.assertEqual(config.snapshot().sample_params(), SampleParams(
                     auto_compaction_context_tokens=872_000, max_output_tokens=budget,
                     enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                    prompt_caching="5m" if api == "messages" else None,
                 ))
+                self.assertEqual(config.get("endpoint_rate_limit_retries"), 5)
 
     def test_unknown_or_wrong_profile_never_inherits_codex_limits(self):
         for api, model in (
@@ -131,7 +134,8 @@ class ConfigSeedingTests(unittest.TestCase):
         config = InteractionConfig.from_model(model)
         self.assertEqual(config.snapshot(), InteractionConfigSnapshot(
             compaction_mode="coldstart,warmpi:2",
-            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            timeouts_request_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            endpoint_rate_limit_retries=5,
         ))
 
     def test_python_models_infer_the_compaction_mode(self):
@@ -191,7 +195,7 @@ class ConfigSeedingTests(unittest.TestCase):
         ):
             config = InteractionConfig.from_namespace(
                 prepare_namespace(arguments("codex", "codex-gpt-6-astra"), registry))
-        self.assertEqual(config.get("request_timeout_seconds"), 1800.0)
+        self.assertEqual(config.get("timeouts_request_seconds"), 1800.0)
         self.assertEqual(config.initial_snapshot(), config.snapshot())
         # A Python endpoint's timeout seeds the launch value; null restores the
         # binding's catalog value or default, and a snapshot value wins.
@@ -205,26 +209,26 @@ class ConfigSeedingTests(unittest.TestCase):
         ):
             with self.subTest(model=type(model).__name__):
                 config = InteractionConfig.from_model(model)
-                self.assertEqual(config.get("request_timeout_seconds"), 17.5)
+                self.assertEqual(config.get("timeouts_request_seconds"), 17.5)
                 self.assertEqual(config.snapshot().sample_params().request_timeout_seconds, 17.5)
                 self.assertEqual(
-                    config.set("request_timeout_seconds", None), DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                    config.set("timeouts_request_seconds", None), DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 )
                 self.assertEqual(InteractionConfig.from_model(
-                    model, InteractionConfigSnapshot(request_timeout_seconds=5),
-                ).get("request_timeout_seconds"), 5.0)
+                    model, InteractionConfigSnapshot(timeouts_request_seconds=5),
+                ).get("timeouts_request_seconds"), 5.0)
         # Custom models get none unless the caller supplies one.
         custom = SimpleNamespace(sample=lambda context, **kwargs: None)
-        self.assertIsNone(InteractionConfig.from_model(custom).get("request_timeout_seconds"))
+        self.assertIsNone(InteractionConfig.from_model(custom).get("timeouts_request_seconds"))
         self.assertEqual(InteractionConfig.from_model(
-            custom, InteractionConfigSnapshot(request_timeout_seconds=5),
-        ).get("request_timeout_seconds"), 5.0)
+            custom, InteractionConfigSnapshot(timeouts_request_seconds=5),
+        ).get("timeouts_request_seconds"), 5.0)
         # Claude Relay has no HTTP request timeout.
         relay = ClaudeRelayModel(ClaudeRelayEndpoint("native-model", "/a", "/b", 1000, "2.1.0"))
         self.addCleanup(relay.close)
-        self.assertIsNone(InteractionConfig.from_model(relay).get("request_timeout_seconds"))
+        self.assertIsNone(InteractionConfig.from_model(relay).get("timeouts_request_seconds"))
         with self.assertRaisesRegex(ConfigError, "does not apply to Claude Relay"):
-            InteractionConfig.from_model(relay, InteractionConfigSnapshot(request_timeout_seconds=5))
+            InteractionConfig.from_model(relay, InteractionConfigSnapshot(timeouts_request_seconds=5))
 
     def test_null_resolves_immediately_but_reset_restores_launch_override(self):
         config = InteractionConfig.from_namespace(arguments(
@@ -431,6 +435,7 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
             _traced_operation=lambda *args, **kwargs: nullcontext(),
             _take_steers=lambda: (),
             _preemption={1: Preemption()},
+            _end_auto_retry=lambda index: None,
         )
         for model in (CaptureHost(), CaptureMessages(trigger=150_000)):
             for threshold in (None, 100_000):

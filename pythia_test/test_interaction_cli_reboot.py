@@ -305,6 +305,17 @@ class RebootStateTests(unittest.TestCase):
         self.assertIsInstance(continuation, cli._ContinueIntent)
         self.assertIsNone(rebooted.warning)
 
+    def test_a_change_carried_under_an_old_key_name_is_restored_under_the_new_one(self):
+        # A reboot from code that still called it request_timeout_seconds.
+        carried = cli._reboot_state(self._state(), InteractionConfig())
+        carried["config"] = {"request_timeout_seconds": 90.0, "max_samples": 4}
+        rebooted = cli._parse_reboot_state(json.loads(json.dumps(carried)))
+        state, config = cli._UIState(), InteractionConfig()
+        cli._carry_over(state, config, rebooted)
+        self.assertEqual(config.get("timeouts_request_seconds"), 90.0)
+        self.assertEqual(config.get("max_samples"), 4)
+        self.assertFalse(any("didn't carry over" in item.text for item in state.displays))
+
     def test_the_state_carries_no_display_flags_and_accepts_older_ones(self):
         state = cli._UIState(reboot=cli._Reboot("/reboot"))
         steer = cli._user_call("steer", {"urgency": 1})
