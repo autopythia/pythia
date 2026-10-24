@@ -61,6 +61,7 @@ from ..compaction import uses_host_auto_compaction
 from ..display import render_interaction_items
 from ..environment import CancelToken
 from ..environment import cancel_scope
+from ..environment import EnvironmentResult
 from ..environment import results_due_scope
 from ..items import InteractionItem
 from ..items import Message
@@ -241,6 +242,16 @@ class TurnHost:
     def tool_phase(self, call: ToolCall) -> None:
         """Report that one tool call is about to run."""
         self.phase("executing tools")
+
+    def tool_approval(self, call: ToolCall) -> Optional[ToolResult]:
+        """Approve one tool call before its environment runs.
+
+        Return ``None`` to execute the call normally. Return a ``ToolResult``
+        to use that result instead: the environment is not called and the
+        result is not traced as a tool operation. This is normally a failed
+        result naming ``call.call_id``.
+        """
+        return None
 
     def should_stop(self) -> bool:
         """True once the turn must start no new effects. May raise.
@@ -692,6 +703,8 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
 
     Each result is saved and shown as it arrives, and each call runs with a
     cancel token (``cancel_scope``) that a preempting steer or stop can set.
+    Before execution, a host may return its result from ``tool_approval``;
+    that replacement is not traced and does not call the environment.
     Each call also runs with the batch's ``results_due`` (``results_due_scope``),
     when the sample's model needs the results (``ModelSample.results_due``),
     and is traced as a ``tool_call`` operation.
@@ -711,11 +724,25 @@ def run_tool_calls(context, environment, calls: Iterable[ToolCall],
             with operation:
                 if not operation.skipped:
                     host.tool_phase(call)
-                    with host.trace("tool_call", context_revision=len(context),
-                                    call_id=call.call_id, tool=call.name,
-                                    results_due_in_seconds=_seconds_until(results_due)), \
-                            cancel_scope(token), results_due_scope(results_due):
-                        result = environment.execute_tool_calls((call,))
+                    approved = host.tool_approval(call)
+                    if approved is not None:
+                        if not isinstance(approved, ToolResult):
+                            raise TypeError(
+                                "tool_approval must return ToolResult or None, got "
+                                f"{type(approved).__name__}"
+                            )
+                        if approved.call_id != call.call_id:
+                            raise ValueError(
+                                "tool_approval's result does not name the pending call: "
+                                f"{approved.call_id!r} != {call.call_id!r}"
+                            )
+                        result = EnvironmentResult((approved,), ())
+                    else:
+                        with host.trace("tool_call", context_revision=len(context),
+                                        call_id=call.call_id, tool=call.name,
+                                        results_due_in_seconds=_seconds_until(results_due)), \
+                                cancel_scope(token), results_due_scope(results_due):
+                            result = environment.execute_tool_calls((call,))
         if operation.skipped:
             if host.should_stop():
                 return False  # a stop, not a steer

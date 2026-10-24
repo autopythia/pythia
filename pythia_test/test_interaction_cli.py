@@ -34,6 +34,7 @@ from pythia.interaction import InteractionContext
 from pythia.interaction import ModelAuthenticationError
 from pythia.interaction import ModelFailure
 from pythia.interaction import ModelSample
+from pythia.interaction import NothingToCompact
 from pythia.interaction import ModelSampleBoundary
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import Reasoning
@@ -214,6 +215,7 @@ for module in (cli, demo):
             cli_args = vars(cli._build_parser().parse_args(argv))
             self.assertTrue(cli_args.pop("enable_default_tools"))
             self.assertFalse(cli_args.pop("headless"))
+            self.assertFalse(cli_args.pop("require_tool_approval"))
             self.assertFalse(cli_args.pop("debug_trace"))
             self.assertIsNone(cli_args.pop("enable_icron"))
             self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
@@ -349,6 +351,36 @@ for module in (cli, demo):
                 parser.parse_args(["--enable-default-tools=False"])
         self.assertEqual(raised.exception.code, 2)
 
+    def test_tool_approval_flag_is_not_a_demo_option(self):
+        parser = demo._build_parser()
+        self.assertFalse(hasattr(parser.parse_args([]), "require_tool_approval"))
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["--require-tool-approval"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertFalse(cli._build_parser().parse_args([]).require_tool_approval)
+        self.assertTrue(
+            cli._build_parser().parse_args(["--require-tool-approval"]).require_tool_approval
+        )
+
+    def test_tool_approval_boolean_spellings_follow_the_cli_convention(self):
+        for argv, expected in (
+            (["--require-tool-approval"], True),
+            (["--require-tool-approval=True"], True),
+            (["--require-tool-approval=False"], False),
+            (["--require-tool-approval", "false"], False),
+        ):
+            with self.subTest(argv=argv):
+                self.assertIs(
+                    cli._build_parser().parse_args(argv).require_tool_approval, expected,
+                )
+        for value in ("", "0", "1", "yes", "no", "enabled"):
+            with self.subTest(value=value):
+                with mock.patch("sys.stderr", new=io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli._build_parser().parse_args([f"--require-tool-approval={value}"])
+                self.assertEqual(raised.exception.code, 2)
+
     def test_non_tty_fails_before_model_environment_or_session_effects(self):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):
             with mock.patch.object(cli, "build_model") as model:
@@ -430,6 +462,7 @@ for module in (cli, demo):
         self.assertIn("--save PREFIX", result.stdout)
         self.assertIn("--auto-migrate-save", result.stdout)
         self.assertIn("--enable-default-tools", result.stdout)
+        self.assertIn("--require-tool-approval", result.stdout)
         self.assertIn("--headless", result.stdout)
         self.assertIn("--prompt-file PATH", result.stdout)
 
@@ -894,6 +927,116 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(model.calls[1][0].items[-2:], (
             ToolResult("one", "recorded"), ToolResult("two", "recorded"),
         ))
+
+    async def test_tool_approval_denies_approves_and_never_batches_a_decision(self):
+        executed = []
+
+        def record(arguments, *, timeout_seconds=None):
+            executed.append(arguments["id"])
+            return ToolOutcome("ran")
+
+        environment = Environment((Tool(ToolSpec("record", "", {}), record),))
+        calls = (
+            ToolCall("record", "one", '{"id":"one"}'),
+            ToolCall("record", "two", '{"id":"two"}'),
+        )
+        model = _Model(self.path, ModelSample(items=calls), _answer("done"))
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            first_result = "[tool-ret]  record (one)"
+            if step == 0 and status.startswith("approval:") and not any(
+                    item.text.startswith(first_result) for item in terminal.items):
+                terminal.submit("/n not safe")
+                step = 1
+            elif step == 1 and any(item.text.startswith(first_result)
+                                   for item in terminal.items):
+                step = 2
+            elif step == 2 and status.startswith("approval:"):
+                terminal.submit("/y")
+                step = 3
+            elif step == 3 and status == "idle" and any(
+                    item.text == "[assistant] done" for item in terminal.items):
+                terminal.key("c-d")
+                step = 4
+
+        terminal = _Terminal(frame)
+        self.assertEqual(await self._run(
+            model, terminal, ["--prompt", "tools", "--require-tool-approval"], environment,
+        ), 0)
+        self.assertEqual(step, 4)
+        self.assertEqual(executed, ["two"])
+        saved = load_interaction_save(self.path)
+        self.assertEqual(
+            [item for item in saved if isinstance(item, ToolResult)],
+            [ToolResult("one", "Tool call not approved: not safe", success=False),
+             ToolResult("two", "ran")],
+        )
+        self.assertIn("[cli] Approve tool call 'record'? /yes or /no [reason].",
+                      [item.text for item in terminal.items])
+        self.assertTrue(any("approve with /yes or /no" in status
+                            for _editor, status, _prompt in terminal.frames))
+
+    async def test_stop_while_awaiting_approval_does_not_execute_the_call(self):
+        def record(arguments, *, timeout_seconds=None):
+            raise AssertionError("a stopped approval must not execute")
+
+        environment = Environment((Tool(ToolSpec("record", "", {}), record),))
+        model = _Model(self.path, ModelSample(items=(ToolCall("record", "one", "{}"),)))
+        pressed = []
+
+        def frame(terminal, editor, status):
+            if status.startswith("approval:") and not pressed:
+                terminal.key("c-c")
+                pressed.append(True)
+
+        terminal = _Terminal(frame)
+        self.assertEqual(await self._run(
+            model, terminal, ["--prompt", "hello", "--require-tool-approval"], environment,
+        ), 0)
+        self.assertEqual(
+            load_interaction_save(self.path).items[-1],
+            ToolResult("one", cli._TOOL_APPROVAL_STOPPED_OUTPUT, success=False),
+        )
+
+    async def test_user_tools_are_not_tool_approval_gated(self):
+        commands = deque(("/compact", "/quit"))
+        terminal = _Terminal(lambda t, e, s: t.submit(commands.popleft())
+                             if s == "idle" and commands else None)
+        model = _Model(self.path, _answer("done"))
+        with mock.patch.object(cli._CliHost, "tool_approval") as approval, \
+                patch_compaction(cli, "run_compaction",
+                                 side_effect=NothingToCompact("nothing")):
+            self.assertEqual(await self._run(
+                model, terminal, ["--prompt", "tools", "--require-tool-approval"],
+            ), 0)
+        approval.assert_not_called()
+        saved = load_interaction_save(self.path)
+        results = [item.result for item in saved if isinstance(item, UserToolResult)]
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].success)
+
+    async def test_a_reboot_request_denies_a_pending_tool_approval(self):
+        state = cli._UIState(require_tool_approval=True)
+        host = cli._CliHost(state, mock.Mock(), asyncio.get_running_loop())
+        call = ToolCall("record", "one", "{}")
+        with mock.patch.object(cli, "_reboot_argv", ["/bin/true"]):
+            state.reboot = cli._Reboot("/reboot")
+            answer = asyncio.create_task(
+                asyncio.to_thread(host.tool_approval, call))
+            for _ in range(100):
+                if state.pending_tool_approval is not None:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("the approval was not published")
+            result = await asyncio.wait_for(answer, 2)
+        self.assertEqual(
+            result,
+            ToolResult("one", cli._TOOL_APPROVAL_REBOOT_OUTPUT, success=False),
+        )
+        self.assertIsNone(state.pending_tool_approval)
 
     async def test_pending_resume_precedes_empty_override_and_follow_up(self):
         call = ToolCall("missing", "pending", "{}")
@@ -1616,6 +1759,49 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertFalse(state.preemption.due())
         self.assertEqual(state.stop_level, Urgency.IMMEDIATE)
         self.assertTrue(state.closing)
+
+    def test_approval_is_modal_and_no_takes_an_optional_reason(self):
+        state = cli._UIState(ready=True, turn_active=True, require_tool_approval=True)
+        approval = cli._ToolApproval(ToolCall("record", "one", "{}"))
+        state.pending_tool_approval = approval
+        state.editor = Editor("/yes maybe", 9)
+        state.handle_key("c-m", "\r")
+        self.assertFalse(approval.answered)
+        self.assertEqual(state.editor.text, "")
+        self.assertTrue(any(item.text.startswith("[cli] Usage: /yes (no arguments)")
+                            for item in state.displays))
+
+        state.editor = Editor("/n", 2)
+        state.handle_key("c-m", "\r")
+        self.assertTrue(approval.answered)
+        self.assertFalse(approval.approved)
+        self.assertIsNone(approval.denial_reason)
+        self.assertIn("[cli] Tool call 'record' not approved.",
+                      [item.text for item in state.displays])
+
+        state.pending_tool_approval = cli._ToolApproval(ToolCall("record", "two", "{}"))
+        state.editor = Editor("/no needs review", 15)
+        state.handle_key("c-m", "\r")
+        self.assertTrue(state.pending_tool_approval.answered)
+        self.assertEqual(state.pending_tool_approval.denial_reason, "needs review")
+
+        state.pending_tool_approval = cli._ToolApproval(ToolCall("record", "two", "{}"))
+        state.editor = Editor("  /no needs review", 18)
+        state.handle_key("c-m", "\r")
+        self.assertEqual(state.pending_tool_approval.denial_reason, "needs review")
+
+        state.pending_tool_approval = cli._ToolApproval(ToolCall("record", "three", "{}"))
+        for text in ("/config.json", "later work"):
+            state.editor = Editor(text, len(text))
+            state.handle_key("c-m", "\r")
+            self.assertEqual(state.editor.text, text)
+        self.assertFalse(state.pending_tool_approval.answered)
+        self.assertEqual(len(state.pending), 0)
+        self.assertTrue(any(
+            item.text == "[cli] Only /yes or /no is accepted while a tool call awaits "
+            "approval. Draft preserved."
+            for item in state.displays
+        ))
 
     async def test_exit_during_a_tool_lets_the_batch_finish_and_leaves_nothing_unanswered(self):
         entered, release, executions = threading.Event(), threading.Event(), []

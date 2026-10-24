@@ -659,6 +659,33 @@ def _ok(arguments, *, timeout_seconds=None):
     return ToolOutcome("ok")
 
 
+class ToolApprovalTests(unittest.TestCase):
+    def test_a_host_denial_replaces_execution_and_is_not_traced(self):
+        host, context = _TracingHost(), _context()
+
+        def denied(call):
+            host.approvals.append(call.call_id)
+            return ToolResult(call.call_id, "denied", success=False)
+        host.approvals = []
+        host.tool_approval = denied
+        result = run_turn(context, _Model(host, _calls(_call("a")), _answer("done")),
+                          _environment(host), _config(), host)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(host.calls_run, 0)
+        self.assertEqual(host.approvals, ["a"])
+        self.assertEqual(_results(context), [("a", "denied", False)])
+        self.assertNotIn(("trace", "tool_call"), host.traced)
+
+    def test_a_host_approval_runs_the_tool_normally(self):
+        host, context = _Host(), _context()
+        host.tool_approval = lambda call: None
+        result = run_turn(context, _Model(host, _calls(_call("a")), _answer("done")),
+                          _environment(host), _config(), host)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(host.calls_run, 1)
+        self.assertEqual(_results(context), [("a", "ran 1", True)])
+
+
 class SteeringTests(unittest.TestCase):
     """Immediate and preempting steers, and preempting stops, in run_turn."""
 

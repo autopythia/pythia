@@ -99,6 +99,7 @@ class SaveArgumentTests(_SavePathTestCase):
         self.assertTrue(cli_args.pop("enable_default_tools"))
         self.assertTrue(cli_args.pop("auto_migrate_save"))
         self.assertFalse(cli_args.pop("headless"))
+        self.assertFalse(cli_args.pop("require_tool_approval"))
         self.assertFalse(cli_args.pop("debug_trace"))
         self.assertIsNone(cli_args.pop("enable_icron"))
         self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))

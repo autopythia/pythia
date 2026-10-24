@@ -154,6 +154,25 @@ _CLOSING_NOTICE = {
 REBOOT_SKIPPED_OUTPUT = "Not executed: the user rebooted the CLI before this call started."
 # The label of a steer's queue item (_steer_item).
 _STEER_LABEL = "user (steer)"
+_APPROVAL_YES = frozenset(("/yes", "/y"))
+_APPROVAL_NO = frozenset(("/no", "/n"))
+_TOOL_NOT_APPROVED_OUTPUT = "Tool call not approved."
+_TOOL_APPROVAL_REFUSAL = (
+    "Only /yes or /no is accepted while a tool call awaits approval."
+)
+_TOOL_APPROVAL_STOPPED_OUTPUT = (
+    "Not executed: the stop arrived before the tool call was approved."
+)
+_TOOL_APPROVAL_STEER_OUTPUT = (
+    "Not executed: a steer arrived before the tool call was approved."
+)
+_TOOL_APPROVAL_REBOOT_OUTPUT = (
+    "Not executed: a reboot was requested before the tool call was approved."
+)
+_TOOL_APPROVAL_HEADLESS_ERROR = (
+    "--require-tool-approval requires the interactive CLI; "
+    "headless has no /yes or /no input."
+)
 
 
 @dataclass(frozen=True, eq=False)
@@ -284,6 +303,46 @@ def _plain_message(text: str) -> Message:
     return Message("user", text)
 
 
+class _ToolApproval:
+    """One tool call awaiting its interactive approval decision."""
+
+    def __init__(self, call: ToolCall) -> None:
+        self.call = call
+        self._event = threading.Event()
+        self._approved: Optional[bool] = None
+        self._reason: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def answer(self, approved: bool, reason: Optional[str] = None) -> bool:
+        """Record the first decision; False when the call was already decided."""
+        with self._lock:
+            if self._event.is_set():
+                return False
+            self._approved = approved
+            self._reason = None if approved or not reason else reason
+            self._event.set()
+            return True
+
+    @property
+    def answered(self) -> bool:
+        return self._event.is_set()
+
+    @property
+    def approved(self) -> bool:
+        """The recorded decision; read only after ``answered``."""
+        with self._lock:
+            return self._approved is True
+
+    @property
+    def denial_reason(self) -> Optional[str]:
+        """The optional ``/no`` reason; read only after ``answered``."""
+        with self._lock:
+            return self._reason
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        return self._event.wait(timeout)
+
+
 def _reads_no_files(text: str) -> bool:
     return False
 
@@ -309,6 +368,8 @@ class _UIState:
     login_cancel: threading.Event = field(default_factory=threading.Event)
     transient: queue.Queue[tuple[str, str]] = field(default_factory=lambda: queue.Queue(maxsize=8))
     active_user_call: Optional[str] = None
+    require_tool_approval: bool = False
+    pending_tool_approval: Optional[_ToolApproval] = None
     trace: Optional[DebugTrace] = None
     active_model: object = field(default=None, repr=False)
     # True while a model turn runs that started with nothing queued: plain text
@@ -494,6 +555,31 @@ class _UIState:
                 return
             if self.reading is not None:
                 self.notice("A submission is still pending. Draft preserved.")
+                return
+            approval = self.pending_tool_approval
+            if approval is not None and head in (*_APPROVAL_YES, *_APPROVAL_NO):
+                error = None
+                reason = text.lstrip()[len(head):].strip() if head in _APPROVAL_NO else None
+                if "\n" in text or "\r" in text or (
+                        head in _APPROVAL_YES and text.strip() != head):
+                    error = ("Usage: /yes (no arguments) or /no [reason] "
+                             "(single line).")
+                elif not approval.answer(head in _APPROVAL_YES, reason):
+                    error = "This tool call already has an approval decision."
+                if error is not None:
+                    self.notice(error)
+                    self.editor = Editor()
+                    return
+                self.editor = Editor()
+                self.notice(
+                    f"Tool call {approval.call.name!r} "
+                    + ("approved." if approval.approved else "not approved.")
+                )
+                return
+            if approval is not None and text.strip():
+                # Approval is modal: no steering, commands, or queued queries
+                # until this call is answered. /exit and Ctrl-C remain global.
+                self.notice(f"{_TOOL_APPROVAL_REFUSAL} Draft preserved.")
                 return
             intent = text
             steer = command_urgency(head, "/steer")
@@ -2226,6 +2312,28 @@ def _reboot_exec(state: dict) -> int:
             return 1
 
 
+def _begin_tool_approval(state: _UIState, request: _ToolApproval) -> None:
+    """Publish an approval request and its slash-command affordance."""
+    state.pending_tool_approval = request
+    state.set_phase(f"approval: {request.call.name}")
+    state.notice(
+        f"Approve tool call {request.call.name!r}? /yes or /no [reason]."
+    )
+
+
+def _end_tool_approval(state: _UIState, request: _ToolApproval) -> None:
+    if state.pending_tool_approval is request:
+        state.pending_tool_approval = None
+        state.set_phase(f"tool: {request.call.name}")
+
+
+def _not_approved_output(reason: Optional[str] = None) -> str:
+    """The tool result for a denial, with the user's optional reason."""
+    if reason is None:
+        return _TOOL_NOT_APPROVED_OUTPUT
+    return f"Tool call not approved: {_one_line(reason, 512)}"
+
+
 class _CliHost(TurnHost):
     """The CLI's side of the shared turn loop.
 
@@ -2302,6 +2410,38 @@ class _CliHost(TurnHost):
 
     def tool_phase(self, call) -> None:
         self.phase(f"tool: {call.name}")
+
+    def tool_approval(self, call) -> Optional[ToolResult]:
+        """Ask the terminal for /yes or /no before one model tool call."""
+        if not self._state.require_tool_approval:
+            return None
+        request = _ToolApproval(call)
+        self._post(_begin_tool_approval, self._state, request)
+        try:
+            while True:
+                answered = request.wait(0.1)
+                if self._state.closing or self._state.stop_level is not None:
+                    return ToolResult(
+                        call.call_id, _TOOL_APPROVAL_STOPPED_OUTPUT, success=False,
+                    )
+                if self.reboot_requested():
+                    return ToolResult(
+                        call.call_id, _TOOL_APPROVAL_REBOOT_OUTPUT, success=False,
+                    )
+                if self.should_steer():
+                    return ToolResult(
+                        call.call_id, _TOOL_APPROVAL_STEER_OUTPUT, success=False,
+                    )
+                if answered:
+                    if request.approved:
+                        return None
+                    return ToolResult(
+                        call.call_id,
+                        _not_approved_output(request.denial_reason),
+                        success=False,
+                    )
+        finally:
+            self._post(_end_tool_approval, self._state, request)
 
     def should_stop(self) -> bool:
         # A stop at IMMEDIATE or above: start no new sample or tool call.
@@ -3099,10 +3239,13 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
     """One explicit task, quiet context display, and orderly effect draining."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
+    if getattr(args, "require_tool_approval", False):
+        raise ValueError(_TOOL_APPROVAL_HEADLESS_ERROR)
     save = _prepared_save(path, args)
     config = _runtime_config(environment, args, save.shown)
     state = _UIState(
         headless=True,
+        require_tool_approval=getattr(args, "require_tool_approval", False),
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
@@ -3167,6 +3310,7 @@ async def _run(
     state = _UIState(
         editor=Editor(prompt, len(prompt)) if rebooted is None else rebooted.draft,
         auth_required=model is None,
+        require_tool_approval=getattr(args, "require_tool_approval", False),
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
@@ -3182,6 +3326,11 @@ async def _run(
     _startup_notices(state, args, save, config)
     if rebooted is not None:
         _carry_over(state, config, rebooted)
+    if getattr(args, "require_tool_approval", False):
+        state.notice(
+            "Tool-call approval is enabled; answer /yes or /no [reason] "
+            "for each tool call."
+        )
     worker = None
     frame = 0
     with terminal:
@@ -3225,6 +3374,9 @@ async def _run(
                 queued = _queued_input(state) - steers
                 if queued > 0:
                     status += f" | queued={queued}"
+                if (state.pending_tool_approval is not None
+                        and state.stop_level is None):
+                    status += " | approve with /yes or /no"
                 if state.quota is not None:
                     status += " | quota"
                 if state.icron is not None and state.stop_level is None:
@@ -3312,6 +3464,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "enable default model tools (exec_command, write_stdin, apply_patch, "
             "update_plan); user commands remain available when False. "
             "Launch-only: repeat when resuming. A bare flag means True "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--require-tool-approval",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "require /yes or /no [reason] approval for every model tool call before "
+            "execution; not available with --headless and launch-only "
             "(default: %(default)s)"
         ),
     )
@@ -3415,6 +3580,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ValueError("max_samples must be a positive integer or None")
         if args.max_output_tokens is not None:
             SampleParams(max_output_tokens=args.max_output_tokens)
+        if args.headless and args.require_tool_approval:
+            raise ValueError(_TOOL_APPROVAL_HEADLESS_ERROR)
         save_path = resolve_save_path(args.save_path)
         if (args.headless and args.prompt is None and rebooted is None
                 and not (args.resume and args.instructions is not None

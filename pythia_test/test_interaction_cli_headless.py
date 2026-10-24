@@ -63,6 +63,19 @@ class HeadlessCLITests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             demo._build_parser().parse_args(["--headless"])
 
+    def test_tool_approval_rejects_headless_before_effects(self):
+        with mock.patch.object(cli, "build_model") as model, \
+                mock.patch.object(cli, "DefaultEnvironment") as environment, \
+                redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(cli.main([
+                "--headless", "--cwd", str(self.root), "--save", str(self.path),
+                "--require-tool-approval", "--prompt", "hello",
+            ]), 1)
+        self.assertIn("--require-tool-approval requires the interactive CLI", stderr.getvalue())
+        model.assert_not_called()
+        environment.assert_not_called()
+        self.assertFalse(self.path.exists())
+
     def test_headless_false_still_requires_tty(self):
         for argv in ([], ["--headless=False"]):
             with mock.patch.object(cli.sys, "stdin", io.StringIO()), \
