@@ -280,6 +280,7 @@ class DemoStartupBaselineTests(unittest.TestCase):
         )
         self.assertEqual(options, SampleParams(
             enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            transient_retries=0,
         ))
 
     def test_initial_query_is_one_item_once_across_tool_follow_up(self):
@@ -328,7 +329,8 @@ class DemoStartupBaselineTests(unittest.TestCase):
             self.assertEqual(
                 options,
                 SampleParams(max_output_tokens=77, enable_auto_compaction=True,
-                             request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
+                             request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                             transient_retries=0),
             )
         self.assertEqual(
             tuple(

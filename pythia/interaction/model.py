@@ -33,6 +33,7 @@ from .model_catalog import thaw_json
 from .model_catalog import validate_temperature
 from .model_catalog import validate_top_p
 from .timeouts import validate_timeout_seconds
+from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 
 if TYPE_CHECKING:
     from .display import DisplayItem
@@ -54,7 +55,9 @@ class RetryState(enum.Enum):
     NONE = "none"  # no retry is claimed (the default)
     # The adapter vouches that nothing from the attempt was published or run,
     # so the same context may be sampled again: set by the error's class
-    # (NativeToolRejected, ModelContinuationExpired) or by the adapter once
+    # (NativeToolRejected, ModelContinuationExpired, ModelRateLimitError), by
+    # an HTTP adapter for a transient failure (a retryable HTTP status, a
+    # timeout, a connection error, a broken stream), or by the adapter once
     # it has checked.
     ELIGIBLE = "eligible"
     # Eligible, but the retry couldn't be set up: the adapter's teardown of
@@ -183,7 +186,9 @@ class ModelTimeoutError(ModelTransportError):
 
 class ModelRateLimitError(ModelTransportError):
     """The provider rate-limited the request, or reported an exhausted quota or
-    plan, after the adapter's own retries: HTTP 429, or such a code in a stream.
+    plan: HTTP 429, or such a code in a stream, after the adapter's own
+    retries, if any (the turn loop's own samples get none:
+    ``SampleParams.transient_retries``).
 
     Nothing of the response was generated, so it is ``RetryState.ELIGIBLE``:
     the turn loop samples again under its rate-limit policy, as many times as
@@ -191,7 +196,8 @@ class ModelRateLimitError(ModelTransportError):
     That includes a quota, such as OpenAI's ``insufficient_quota``: a top-up, a
     plan reset or another account may lift it meanwhile. Its failure says
     ``quota exceeded`` instead of ``rate limited``. ``retry_after_seconds`` is
-    the last response's ``Retry-After``, uncapped, or None.
+    the last response's ``Retry-After``, uncapped, or None. The turn loop
+    traces it, but doesn't wait on it yet: its waits follow its own schedule.
     """
 
     def __init__(self, *args, failure=None, completed_items=(),
@@ -270,6 +276,11 @@ class SampleParams:
     ``sample_params.*``). Adapters reject typed fields that their API cannot
     send.
 
+    ``prompt_caching`` is the Messages prompt-caching policy of this call's
+    requests (``5m``, ``1h``, or ``none``, which sends no ``cache_control``);
+    ``None`` uses the endpoint's. The CLI projects ``/config
+    endpoint_prompt_caching``. Other adapters ignore it.
+
     ``extra`` holds request-body extensions for this call. A mapping replaces
     the binding's ``extra_sample_params`` (``{}`` sends none); ``None``
     inherits them.
@@ -278,10 +289,14 @@ class SampleParams:
     the HTTP blocking-I/O timeout of each operation of this call's requests.
     ``None`` uses the adapter endpoint's timeout.
 
-    ``prompt_caching`` is the Messages prompt-caching policy of this call's
-    requests (``5m``, ``1h``, or ``none``, which sends no ``cache_control``);
-    ``None`` uses the endpoint's. The CLI projects ``/config
-    endpoint_prompt_caching``. Other adapters ignore it.
+    ``transient_retries`` is host transport policy too: how many times an HTTP
+    adapter sends this call's request again by itself after a transient
+    failure (a retryable HTTP status such as 429 or 503, a timeout, a
+    connection error, or a broken stream). ``None`` uses the adapter's own
+    budget, ``DEFAULT_MAX_TRANSIENT_RETRIES``. The turn loop passes 0 for its
+    own samples and retries such failures itself, visibly (``loop.kernel``);
+    compaction and direct callers keep the adapter's retries. Interim: to be
+    deprecated once every caller retries that way. Claude Relay ignores it.
     """
 
     max_output_tokens: Optional[int] = None
@@ -289,13 +304,16 @@ class SampleParams:
     top_p: Optional[float] = None
     stop: Tuple[str, ...] = ()
     seed: Optional[int] = None
+    prompt_caching: Optional[str] = None
+    extra: Optional[Mapping] = None
     # Host/provider context-management control, never a sampling wire field.
     enable_auto_compaction: Optional[bool] = None
-    # Host context-management threshold override, never a sampling wire field.
+    # Host/provider context-management threshold override, never a sampling
+    # wire field.
     auto_compaction_context_tokens: Optional[int] = None
-    extra: Optional[Mapping] = None
+    # Host transport policy, never wire fields.
     request_timeout_seconds: Optional[float] = None
-    prompt_caching: Optional[str] = None
+    transient_retries: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.max_output_tokens is not None:
@@ -323,6 +341,10 @@ class SampleParams:
             isinstance(self.seed, bool) or not isinstance(self.seed, int)
         ):
             raise TypeError("seed must be an integer or None")
+        if self.prompt_caching is not None and self.prompt_caching not in PROMPT_CACHING_VALUES:
+            raise ValueError("prompt_caching must be 5m, 1h, none, or None")
+        if self.extra is not None:
+            object.__setattr__(self, "extra", freeze_extra_sample_params(self.extra))
         if self.enable_auto_compaction is not None and not isinstance(
             self.enable_auto_compaction,
             bool,
@@ -338,20 +360,29 @@ class SampleParams:
             raise ValueError(
                 "auto_compaction_context_tokens must be a positive integer or None"
             )
-        if self.extra is not None:
-            object.__setattr__(self, "extra", freeze_extra_sample_params(self.extra))
         if self.request_timeout_seconds is not None:
             object.__setattr__(self, "request_timeout_seconds", validate_timeout_seconds(
                 self.request_timeout_seconds, "request_timeout_seconds",
             ))
-        if self.prompt_caching is not None and self.prompt_caching not in PROMPT_CACHING_VALUES:
-            raise ValueError("prompt_caching must be 5m, 1h, none, or None")
+        if self.transient_retries is not None and (
+            isinstance(self.transient_retries, bool)
+            or not isinstance(self.transient_retries, int)
+            or self.transient_retries < 0
+        ):
+            raise ValueError("transient_retries must be a nonnegative integer or None")
 
 
 def _request_timeout_seconds(endpoint, sample_params: Optional[SampleParams]) -> float:
     """One call's HTTP timeout: the per-call value, else the endpoint's."""
     timeout = None if sample_params is None else sample_params.request_timeout_seconds
     return endpoint.request_timeout_seconds if timeout is None else timeout
+
+
+def _transient_retries(sample_params: Optional[SampleParams]) -> int:
+    """How many times one call's HTTP adapter retries a transient failure
+    itself: the per-call value, else DEFAULT_MAX_TRANSIENT_RETRIES."""
+    retries = None if sample_params is None else sample_params.transient_retries
+    return DEFAULT_MAX_TRANSIENT_RETRIES if retries is None else retries
 
 
 def _timeout_message(message: str, timeout_seconds: Optional[float]) -> str:

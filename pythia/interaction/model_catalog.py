@@ -87,12 +87,13 @@ MODEL_TIMEOUT_FIELDS = ("request_seconds", *_RELAY_TIMEOUT_FIELDS)
 # entries that each request writes, or none, which sends no cache_control (for
 # servers that reject it). Unset, it is 5m.
 PROMPT_CACHING_VALUES = ("5m", "1h", "none")
-# endpoint.rate_limit_retries, all but Claude Relay: how many times the turn
-# loop samples again after a rate limit (ModelRateLimitError), each after a
-# fixed wait (loop.kernel); "unbounded" retries until a sample succeeds or the
-# user cancels or stops. Unset, it is DEFAULT_RATE_LIMIT_RETRIES.
+# endpoint.rate_limit_retries, all but Claude Relay: how many times in all the
+# turn loop samples again after a rate limit (ModelRateLimitError), each after
+# a fixed wait (loop.kernel), with no retries of the adapter's own; "unbounded"
+# retries until a sample succeeds or the user cancels or stops. Unset, it is
+# DEFAULT_RATE_LIMIT_RETRIES.
 RATE_LIMIT_RETRIES_UNBOUNDED = "unbounded"
-DEFAULT_RATE_LIMIT_RETRIES = 5
+DEFAULT_RATE_LIMIT_RETRIES = 7
 
 
 def validate_rate_limit_retries(value, name="endpoint.rate_limit_retries"):

@@ -74,7 +74,8 @@ class RateLimitRetriesCatalogTests(unittest.TestCase):
                 # null restores the catalog's value, else the default; not the option's.
                 self.assertEqual(config.set("endpoint_rate_limit_retries", None),
                                  catalog_values[model])
-        self.assertEqual(DEFAULT_RATE_LIMIT_RETRIES, 5)
+        # Every retry counts: the turn's own requests get no HTTP retries.
+        self.assertEqual(DEFAULT_RATE_LIMIT_RETRIES, 7)
         # null in an override removes an entry's value, so the default applies.
         cleared = parse_model_catalog(
             "[catalog]\nversion = 4\n[model.chat]\noverride = true\n"

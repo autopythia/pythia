@@ -24,7 +24,6 @@ from ._provider_text import quoted
 from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
-from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 from ._transport_retry import body_error_codes
 from ._transport_retry import quota_error_code
 from ._transport_retry import retry_after_seconds
@@ -57,11 +56,13 @@ from .model import ModelSample
 from .model import ModelThinkingBindingError
 from .model import ModelTimeoutError
 from .model import ModelTransportError
+from .model import RetryState
 from .model import SampleParams
 from .model import _apply_extra_sample_params
 from .model import _request_timeout_seconds
 from .model import _timed_sample
 from .model import _timeout_message
+from .model import _transient_retries
 from .model import _with_sample_param_defaults
 from .model_catalog import ModelBinding
 from .model_catalog import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
@@ -885,7 +886,11 @@ def _messages_http_failure(
         else ModelThinkingBindingError if thinking
         else ModelTransportError
     )
-    return error_type(message, failure=failure)
+    # A transient status: nothing of a response was kept, so the turn loop
+    # may sample again (RetryState.ELIGIBLE), as this adapter's retries do.
+    transient = error_type is ModelTransportError and status in _RETRYABLE_HTTP_STATUSES
+    return error_type(message, failure=failure,
+                      retry_state=RetryState.ELIGIBLE if transient else RetryState.NONE)
 
 
 def _messages_transport_failure(
@@ -910,7 +915,9 @@ def _messages_transport_failure(
         recovery=recovery,
     )
     error_type = ModelTimeoutError if timeout else ModelTransportError
-    return error_type(message, failure=failure)
+    # Transient: nothing of a response was kept, so the turn loop may sample
+    # again (RetryState.ELIGIBLE), as this adapter's retries do.
+    return error_type(message, failure=failure, retry_state=RetryState.ELIGIBLE)
 
 
 def _close_response(response: Any) -> None:
@@ -1090,6 +1097,9 @@ class MessagesModel:
         if self.endpoint.api_key is not None:
             headers["X-API-Key"] = self.endpoint.api_key
         timeout_seconds = _request_timeout_seconds(self.endpoint, sample_params)
+        # The transient failures this call retries itself (none for the turn
+        # loop's samples, which it retries instead).
+        max_retries = _transient_retries(sample_params)
         attempts = 0
         retries = 0
         recovery: List[str] = []
@@ -1118,7 +1128,7 @@ class MessagesModel:
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
                         and (status == 429 or not _is_context_window_error(detail))
-                        and retries < DEFAULT_MAX_TRANSIENT_RETRIES
+                        and retries < max_retries
                     ):
                         retries += 1
                         recovery.append(f"http_{status}_retry")
@@ -1144,7 +1154,7 @@ class MessagesModel:
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
                         and (status == 429 or not _is_context_window_error(detail))
-                        and retries < DEFAULT_MAX_TRANSIENT_RETRIES
+                        and retries < max_retries
                     ):
                         retries += 1
                         recovery.append(f"http_{status}_retry")
@@ -1199,7 +1209,7 @@ class MessagesModel:
                     exc.reason,
                     (TimeoutError, socket.timeout),
                 )
-                if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
+                if retries < max_retries:
                     retries += 1
                     recovery.append(
                         "request_timeout_retry"
@@ -1218,7 +1228,7 @@ class MessagesModel:
                     timeout_seconds=timeout_seconds,
                 ) from exc
             except (TimeoutError, socket.timeout) as exc:
-                if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
+                if retries < max_retries:
                     retries += 1
                     recovery.append("request_timeout_retry")
                     _close_response(response)
@@ -1233,7 +1243,7 @@ class MessagesModel:
                     timeout_seconds=timeout_seconds,
                 ) from exc
             except (OSError, http.client.HTTPException) as exc:
-                if retries < DEFAULT_MAX_TRANSIENT_RETRIES:
+                if retries < max_retries:
                     retries += 1
                     recovery.append("connection_retry")
                     _close_response(response)

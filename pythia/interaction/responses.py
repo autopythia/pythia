@@ -76,11 +76,13 @@ from .model import ModelResponseError
 from .model import ModelSample
 from .model import ModelTimeoutError
 from .model import ModelTransportError
+from .model import RetryState
 from .model import SampleParams
 from .model import _apply_extra_sample_params
 from .model import _request_timeout_seconds
 from .model import _timed_sample
 from .model import _timeout_message
+from .model import _transient_retries
 from .model import _with_sample_param_defaults
 from .model_catalog import ModelSpec
 from .model_catalog import ModelBinding
@@ -99,7 +101,6 @@ _CONTEXT_WINDOW_ERROR_CODES = frozenset({"context_length_exceeded"})
 # ``response.failed`` or ``error`` stream event; the turn loop retries them as
 # it does an HTTP 429 (ModelRateLimitError).
 _RATE_LIMIT_ERROR_CODES = frozenset({"rate_limit_exceeded", *QUOTA_ERROR_CODES})
-_MAX_TRANSIENT_RETRIES = DEFAULT_MAX_TRANSIENT_RETRIES
 _MAX_DIAGNOSTIC_VALUE_CHARS = 256
 _MAX_DIAGNOSTIC_EVENT_TYPES = 32
 
@@ -1652,7 +1653,11 @@ def _http_failure(
     if rate_limit:
         return ModelRateLimitError(message, failure=failure,
                                    retry_after_seconds=retry_after_seconds(headers, cap=None))
-    return error_type(message, failure=failure)
+    # A transient status: nothing of a response was kept, so the turn loop
+    # may sample again (RetryState.ELIGIBLE), as this adapter's retries do.
+    transient = error_type is ModelTransportError and status in _RETRYABLE_HTTP_STATUSES
+    return error_type(message, failure=failure,
+                      retry_state=RetryState.ELIGIBLE if transient else RetryState.NONE)
 
 
 def _request_transport_failure(
@@ -1682,7 +1687,9 @@ def _request_transport_failure(
         recovery=recovery,
     )
     error_type = ModelTimeoutError if timeout else ModelTransportError
-    return error_type(message, failure=failure)
+    # Transient: nothing of a response was kept, so the turn loop may sample
+    # again (RetryState.ELIGIBLE), as this adapter's retries do.
+    return error_type(message, failure=failure, retry_state=RetryState.ELIGIBLE)
 
 
 def _stream_retry_label(exc: ModelError) -> Optional[str]:
@@ -2078,6 +2085,7 @@ class _ResponsesModelBase:
             provider_state,
             collector=_collect_sample,
             timeout_seconds=_request_timeout_seconds(self.endpoint, sample_params),
+            max_transient_retries=_transient_retries(sample_params),
         )
 
     def _compact_responses_v2(
@@ -2100,6 +2108,7 @@ class _ResponsesModelBase:
                 collector=_collect_remote_compaction_v2,
                 beta_features=("remote_compaction_v2",),
                 timeout_seconds=_request_timeout_seconds(self.endpoint, sample_params),
+                max_transient_retries=_transient_retries(sample_params),
             )
 
     def _execute_request_locked(
@@ -2111,9 +2120,12 @@ class _ResponsesModelBase:
         collector: Callable[..., Any],
         beta_features: Sequence[str] = (),
         timeout_seconds: Optional[float] = None,
+        max_transient_retries: int = DEFAULT_MAX_TRANSIENT_RETRIES,
     ) -> Any:
         # One blocking-I/O budget for this call's attempts, reads, and any
-        # OAuth refresh; None is the endpoint's own timeout.
+        # OAuth refresh; None is the endpoint's own timeout. The call retries
+        # up to max_transient_retries transient failures itself (none for the
+        # turn loop's samples, which it retries instead).
         if timeout_seconds is None:
             timeout_seconds = self.endpoint.request_timeout_seconds
         try:
@@ -2236,7 +2248,7 @@ class _ResponsesModelBase:
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
                         and not context_window_error
-                        and transient_retries < _MAX_TRANSIENT_RETRIES
+                        and transient_retries < max_transient_retries
                     ):
                         transient_retries += 1
                         recovery.append(f"http_{status}_retry")
@@ -2289,7 +2301,7 @@ class _ResponsesModelBase:
                     retry_label = _stream_retry_label(exc)
                     if (
                         retry_label is not None
-                        and transient_retries < _MAX_TRANSIENT_RETRIES
+                        and transient_retries < max_transient_retries
                     ):
                         transient_retries += 1
                         recovery.append(retry_label)
@@ -2298,9 +2310,15 @@ class _ResponsesModelBase:
                         call.wait(retry_delay_seconds(transient_retries, headers),
                                   self._retry_sleep, cause=exc)
                         continue
+                    if retry_label is not None and exc.retry_state is RetryState.NONE:
+                        # A broken stream, which the turn loop may sample
+                        # again, as this loop would: its partial output goes,
+                        # as it would here (the failure keeps its count).
+                        exc.completed_items = ()
+                        exc.retry_state = RetryState.ELIGIBLE
                     raise
                 except (TimeoutError, socket.timeout) as exc:
-                    if transient_retries < _MAX_TRANSIENT_RETRIES:
+                    if transient_retries < max_transient_retries:
                         transient_retries += 1
                         recovery.append("stream_timeout_retry")
                         _close_response(response)
@@ -2318,7 +2336,7 @@ class _ResponsesModelBase:
                         timeout_seconds=timeout_seconds,
                     ) from exc
                 except (OSError, http.client.HTTPException) as exc:
-                    if transient_retries < _MAX_TRANSIENT_RETRIES:
+                    if transient_retries < max_transient_retries:
                         transient_retries += 1
                         recovery.append("stream_transport_retry")
                         _close_response(response)
@@ -2337,7 +2355,7 @@ class _ResponsesModelBase:
                     ) from exc
             except urllib.error.URLError as exc:
                 timeout = isinstance(exc.reason, (TimeoutError, socket.timeout))
-                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                if transient_retries < max_transient_retries:
                     transient_retries += 1
                     recovery.append(
                         "request_timeout_retry"
@@ -2359,7 +2377,7 @@ class _ResponsesModelBase:
                     timeout_seconds=timeout_seconds,
                 ) from exc
             except (TimeoutError, socket.timeout) as exc:
-                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                if transient_retries < max_transient_retries:
                     transient_retries += 1
                     recovery.append("request_timeout_retry")
                     _close_response(response)
@@ -2377,7 +2395,7 @@ class _ResponsesModelBase:
                     timeout_seconds=timeout_seconds,
                 ) from exc
             except (OSError, http.client.HTTPException) as exc:
-                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                if transient_retries < max_transient_retries:
                     transient_retries += 1
                     recovery.append("connection_retry")
                     _close_response(response)

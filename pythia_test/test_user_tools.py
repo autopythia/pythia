@@ -531,7 +531,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(model.calls[0][2], SampleParams(
             max_output_tokens=17, enable_auto_compaction=True,
-            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS, transient_retries=0,
         ))
         self.assertFalse(any(
             isinstance(item, (UserToolCall, UserToolResult))
@@ -564,7 +564,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "max_output_tokens": None,
             "timeouts_request_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             "endpoint_prompt_caching": None,  # Messages only
-            "endpoint_rate_limit_retries": 5,
+            "endpoint_rate_limit_retries": 7,
             "enable_auto_compaction": True,
             "auto_compaction_context_tokens": None,
             "max_context_tokens": None,
@@ -669,6 +669,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(model.calls[0][2], SampleParams(
             enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            transient_retries=0,
         ))
         self.assertTrue(any(
             "saved config commands were not replayed" in item.text
@@ -715,7 +716,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             model.calls[0][2],
             SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100,
-                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
+                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                         transient_retries=0),
         )
 
     async def test_config_max_samples_applies_to_the_next_turn(self):
@@ -1164,10 +1166,12 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(seen["answered during the sample"])
         # The running turn kept the config it started with; the next one has the change.
         params = SampleParams(enable_auto_compaction=True,
-                              request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)
+                              request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                              transient_retries=0)
         self.assertEqual([call[2] for call in model.calls], [
             params, params, SampleParams(max_output_tokens=17, enable_auto_compaction=True,
-                                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)])
+                                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                                         transient_retries=0)])
         # The change's record went in at the turn's next pause between steps,
         # right after the tool's result.
         self.assertFalse(any(isinstance(i, UserToolCall) for i in model.checkpoints[0]))

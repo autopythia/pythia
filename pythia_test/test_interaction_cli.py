@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from dataclasses import replace
 import io
 import json
 import os
@@ -813,7 +814,8 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(
             [call[2] for call in model.calls],
             [SampleParams(max_output_tokens=77, enable_auto_compaction=True,
-                          request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS)] * 2,
+                          request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                          transient_retries=0)] * 2,
         )
         texts = [item.text for item in terminal.items]
         self.assertEqual(texts.count("[assistant] first"), 1)
@@ -1083,8 +1085,9 @@ class CLIControllerTests(_ControllerTestCase):
                                        reason="threshold")
         self.assertEqual(len(compacted), 1)
         self.assertIn(Message("user", "follow up"), compacted[0][0])
-        # The turn's params, without focus text.
-        self.assertEqual(compacted[0][2], model.calls[0][2])
+        # The turn's params, without focus text. Its own samples also ask for
+        # no transient retries; compaction keeps the adapters'.
+        self.assertEqual(replace(compacted[0][2], transient_retries=0), model.calls[0][2])
         self.assertEqual(compacted[0][2], SampleParams(
             enable_auto_compaction=True, auto_compaction_context_tokens=100,
             request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -1154,7 +1157,8 @@ class CLIControllerTests(_ControllerTestCase):
         self.assertEqual(
             model.calls[0][2],
             SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100,
-                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS),
+                         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                         transient_retries=0),
         )
         self.assertIn(
             Message("assistant", "uncompacted answer"),

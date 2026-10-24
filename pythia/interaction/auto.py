@@ -463,6 +463,10 @@ class _AutoHost(TurnHost):
         """/cancel stopped this context's automatic retries (_Session.cancel_retry)."""
         return self._session._retry_cancel[self._index].is_set()
 
+    def retry_progress(self, failed, attempts):
+        """An automatic retry's (failed, attempts), for the status line."""
+        self._session._set_retry_progress(self._index, (failed, attempts))
+
 
 class _Session:
     """Private fixed-role runtime; no dynamic manager/template API.
@@ -594,6 +598,10 @@ class _Session:
         # Guarded by _changed.
         self._auto_retrying = {i: False for i in self.roles}
         self._retry_cancel = {i: threading.Event() for i in self.roles}
+        # Its latest (failed, attempts), as its notice says, shown with the
+        # context's status while it waits and while the retried sample runs
+        # (TurnHost.retry_progress); None once it is over. Guarded by _changed.
+        self._retry_progress = {i: None for i in self.roles}
         # The stop's level once one is requested (an Urgency; guarded by
         # _changed): QUEUED for /exit, IMMEDIATE for /exit! or a first
         # Ctrl-C, PREEMPT for /exit!! or a later one. It only rises.
@@ -882,6 +890,7 @@ class _Session:
                 # A /cancel applies to the turn it came in.
                 self._auto_retrying[index] = False
                 self._retry_cancel[index].clear()
+                self._retry_progress[index] = None
             self._changed.notify_all()
 
     def _end_auto_retry(self, index):
@@ -890,6 +899,12 @@ class _Session:
         with self._changed:
             self._auto_retrying[index] = False
             self._retry_cancel[index].clear()
+            self._retry_progress[index] = None
+
+    def _set_retry_progress(self, index, progress):
+        with self._changed:
+            self._retry_progress[index] = progress
+            self._changed.notify_all()
 
     def cancel_retry(self, index):
         """/cancel for context ``index``: stop its turn's automatic retries.
@@ -914,9 +929,14 @@ class _Session:
             task = self._open_task if index == 1 else None
             continuable = (index == 1 and phase == "quiescent" and self._continuable_locked())
             urgency = self._preemption[1].level if task is not None else Urgency.QUEUED
+            progress = self._retry_progress[index]
         text = f"#{index} ({self.names[index]}) - {phase}"
         if phase in _TIMED_PHASES:
             text += f"... {int(time.monotonic() - started)}s"
+        if progress is not None and phase in {"retrying", "sampling"}:
+            # An automatic retry: its wait, and the retried sample.
+            failed, attempts = progress
+            text += f" ({failed}/{'∞' if attempts is None else attempts})"
         if urgency >= Urgency.IMMEDIATE:
             text += " | steer pending" + urgency_marker(urgency)
         if continuable:

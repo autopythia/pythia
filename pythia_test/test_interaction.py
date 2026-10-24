@@ -46,6 +46,7 @@ from pythia.interaction import NothingToCompact
 from pythia.interaction import OpaqueCompaction
 from pythia.interaction import PiCompactor
 from pythia.interaction import Reasoning
+from pythia.interaction import RetryState
 from pythia.interaction import SampleParams
 from pythia.interaction import SUMMARIZATION_PROMPT
 from pythia.interaction import SUMMARIZATION_SYSTEM_PROMPT
@@ -1121,6 +1122,34 @@ class ChatCompletionsModelTests(unittest.TestCase):
             model.sample(InteractionContext((Message("user", "hello"),)))
         self.assertEqual(str(raised.exception),
                          "Chat Completions HTTP 429: " + ("HTTP Error 429: " + reason)[:4096])
+
+    def test_the_call_s_transient_retries_set_the_adapter_s_own_budget(self):
+        # None is the adapter's 2; the turn loop asks for 0 and retries itself.
+        for retries, requests in ((None, 3), (1, 2), (0, 1)):
+            with self.subTest(retries=retries):
+                opener = _ScriptedOpener(*(_FakeHTTPResponse({"error": {}}, status=503)
+                                           for _ in range(3)))
+                sleeps = []
+                model = ChatCompletionsModel(chat_endpoint(api_url="https://api.example.test"),
+                                             opener=opener, retry_sleep=sleeps.append)
+                with self.assertRaises(ModelTransportError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)),
+                                 sample_params=SampleParams(transient_retries=retries))
+                self.assertEqual((len(opener.calls), len(sleeps)), (requests, requests - 1))
+                # Eligible for the turn loop either way: nothing of a response was kept.
+                self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
+                self.assertEqual(raised.exception.failure.attempt_count, requests)
+        # A timeout and a connection error likewise; a 400 stays final.
+        for outcome, state in ((socket.timeout("slow"), RetryState.ELIGIBLE),
+                               (urllib.error.URLError(OSError("refused")), RetryState.ELIGIBLE),
+                               (_http_error(400), RetryState.NONE)):
+            with self.subTest(outcome=repr(outcome)):
+                model = ChatCompletionsModel(chat_endpoint(api_url="https://api.example.test"),
+                                             opener=_ScriptedOpener(outcome))
+                with self.assertRaises(ModelTransportError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)),
+                                 sample_params=SampleParams(transient_retries=0))
+                self.assertIs(raised.exception.retry_state, state)
 
     def test_a_lone_surrogate_in_a_response_becomes_the_replacement_character(self):
         # As a server that decodes bad bytes with surrogateescape may send it

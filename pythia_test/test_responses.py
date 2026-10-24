@@ -35,6 +35,7 @@ from pythia.interaction import Message
 from pythia.interaction import ModelAuthenticationError
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import ModelContextWindowError
+from pythia.interaction import ModelError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelRateLimitError
 from pythia.interaction import ModelResponseError
@@ -1801,10 +1802,11 @@ class CodexResponsesModelTests(unittest.TestCase):
             ).sample(
                 InteractionContext([Message(role="user", content="hello")])
             )
-        self.assertEqual(
-            raised.exception.completed_items,
-            (Message(role="assistant", content="partial"),),
-        )
+        # A broken stream, which the turn loop may sample again as the
+        # adapter would: its partial output goes, as an adapter retry drops
+        # it, and the failure counts it (completed_item_count, below).
+        self.assertEqual(raised.exception.completed_items, ())
+        self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
         failure = raised.exception.failure
         self.assertIsNotNone(failure)
         self.assertEqual(failure.category, "stream_closed")
@@ -2437,16 +2439,48 @@ class CodexResponsesModelTests(unittest.TestCase):
 
         self.assertEqual(len(opener.calls), 3)
         self.assertEqual(sleeps, [0.25, 0.5])
-        self.assertEqual(
-            raised.exception.completed_items,
-            (Message("assistant", "d final"),),
-        )
+        # Eligible for the turn loop, without the last attempt's partial output.
+        self.assertEqual(raised.exception.completed_items, ())
+        self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
+        self.assertEqual(raised.exception.failure.completed_item_count, 1)
         self.assertEqual(raised.exception.failure.attempt_count, 3)
         self.assertEqual(
             raised.exception.failure.recovery,
             ("stream_closed_retry", "stream_closed_retry"),
         )
         self.assertTrue(all(response.closed for response in responses))
+
+    def test_without_retries_of_its_own_a_transient_failure_is_eligible_at_once(self):
+        # As the turn loop asks for its own samples: one request, and an
+        # error the loop may sample again; a broken stream's partial output
+        # goes, as the adapter's own retry drops it. A 400 stays final.
+        cases = (
+            (_FakeSSEResponse(_message_event(0, "partial")), "stream_closed", RetryState.ELIGIBLE),
+            (_http_error(503), "http_error", RetryState.ELIGIBLE),
+            (socket.timeout("slow"), "request_timeout", RetryState.ELIGIBLE),
+            (urllib.error.URLError(OSError("refused")), "request_transport", RetryState.ELIGIBLE),
+            (_http_error(400), "http_error", RetryState.NONE),
+        )
+        for outcome, category, state in cases:
+            with self.subTest(category=category, state=state):
+                opener = _ScriptedOpener(outcome)
+                sleeps = []
+                model = codex_model(
+                    responses_endpoint(api_url="https://api.example.test/v1",
+                                       model="generic-model", bearer_token="api-key"),
+                    opener=opener,
+                    retry_sleep=sleeps.append,
+                )
+                with self.assertRaises(ModelError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)),
+                                 sample_params=SampleParams(transient_retries=0))
+                self.assertEqual((len(opener.calls), sleeps), (1, []))
+                self.assertEqual(raised.exception.failure.category, category)
+                self.assertIs(raised.exception.retry_state, state)
+                self.assertEqual(raised.exception.completed_items, ())
+                self.assertEqual(raised.exception.failure.recovery, ())
+                if category == "stream_closed":
+                    self.assertEqual(raised.exception.failure.completed_item_count, 1)
 
     def test_connection_and_timeout_failures_are_retried(self):
         opener = _ScriptedOpener(

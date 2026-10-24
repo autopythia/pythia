@@ -380,7 +380,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(result.final_text, 'host-1|host-2')
         self.assertTrue(marker.exists())
         self.assertEqual(effects, [{'value': 1}] * 2)  # the retried sample's calls, run once
-        self.assertEqual(host.notices, ['Sampling again in 1 s (2/3).'])
+        self.assertEqual(host.notices, ['Sampling again in 2 s (1/3).'])
         [failure] = [item for item in context if isinstance(item, ModelFailure)]
         self.assertEqual((failure.category, failure.error_code),
                          ('NativeToolRejected', 'native_tool_name_rejected'))

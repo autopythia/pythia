@@ -173,6 +173,34 @@ class InteractionItemRendererTests(unittest.TestCase):
             "model failure", "sample", "compaction", "context prefix",
         ))
 
+    def test_recovery_lists_show_runs_bounded_and_attempts_past_one(self):
+        # An automatic retry adds a label each time, without limit when
+        # unbounded. A line shows each run of labels once, with its length
+        # past 1; past 4 runs, the first and the last, with the labels between
+        # counted. Saves keep the whole list.
+        usage = TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2, cached_input_tokens=0)
+        cases = (
+            (("http_503_retry",), "http_503_retry"),
+            (("http_503_retry",) + ("rate_limit_retry",) * 36,
+             "http_503_retry,rate_limit_retry(36)"),
+            (("a", "b", "b", "a"), "a,b(2),a"),
+            (("a", "a", "b", "c", "b", "b", "d"), "a(2),…(4),d"),
+        )
+        for labels, shown in cases:
+            with self.subTest(shown=shown):
+                items = (
+                    SampleMetadata(usage=usage, recovery=labels),
+                    CompactionMetadata(usage=usage, protocol="pi", recovery=labels),
+                    ModelFailure(category="http_error", message="Messages HTTP 503: request failed",
+                                 attempt_count=1, recovery=labels),
+                )
+                sample, compaction, failure = (item.text for item in render_interaction_items(items))
+                self.assertTrue(sample.endswith(f" recovery={shown}"), sample)
+                self.assertTrue(compaction.endswith(f" recovery={shown}"), compaction)
+                self.assertTrue(failure.endswith(f" recovery={shown}"), failure)
+                # One request: a failure line shows its attempts past 1, as the others do.
+                self.assertNotIn("attempts=", failure)
+
     def test_signed_thinking_without_text_renders_redacted_placeholder(self):
         # Messages counterpart of encrypted-only Responses reasoning: the
         # signature is replay data, so only the placeholder may be shown.

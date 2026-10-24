@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
 import io
@@ -1933,16 +1934,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(session.cancel_retry(1),
                          "The automatic retries in #1 (main) are already cancelled.")
         self.assertEqual(session.cancel_retry(-1), "No automatic retry to cancel in #-1 (watcher).")
+        # The status shows the retry's (failed/attempts) while it waits.
+        host.retry_progress(2, None)
+        self.assertTrue(session.status(1).endswith("s (2/∞)"), session.status(1))
         session._phase(1, "sampling")  # a retried attempt: the same automatic retry
+        self.assertTrue(session.status(1).endswith("s (2/∞)"), session.status(1))
         self.assertTrue(host.retry_cancelled())
         host.after_sample(None, None)  # it succeeded
         self.assertFalse(host.retry_cancelled())
+        self.assertNotIn("(2/∞)", session.status(1))
         self.assertEqual(session.cancel_retry(1), "No automatic retry to cancel in #1 (main).")
         for phase in ("quiescent", "awaiting watcher", "closed"):  # the turn ended
             session._phase(1, "retrying")
+            host.retry_progress(1, 8)
             session.cancel_retry(1)
             session._phase(1, phase)
             self.assertFalse(host.retry_cancelled(), phase)
+            self.assertNotIn("(1/8)", session.status(1))
             self.assertEqual(session.cancel_retry(1), "No automatic retry to cancel in #1 (main).")
 
     def test_cancel_ends_main_s_rate_limit_wait_and_its_task(self):
@@ -1957,6 +1965,7 @@ class RuntimeTests(unittest.TestCase):
         with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (30,)):
             submitted = session.submit("task")
             wait_for(lambda: session.status(1).startswith("#1 (main) - retrying"))
+            self.assertRegex(session.status(1), r"^#1 \(main\) - retrying\.\.\. \d+s \(1/8\)")
             started = time.monotonic()
             selected, items, stop = auto._local_command("/cancel", 1, session)
             self.assertEqual((selected, stop), (1, None))
@@ -2363,8 +2372,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(self.finished(session, source["thread_id"]))
         for index in (1, 2):
             self.assertEqual(len(self.calls[index]), 10)
+            # The turn loop's own samples ask for no transient retries.
             self.assertTrue(all(options == SampleParams(
                 enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                transient_retries=0,
             ) for options in self.options[index]))
 
     def test_explicit_limits_still_apply(self):
@@ -2549,7 +2560,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(create.call_args.args[1], CompactionSettings(
             mode="warmpi", keep_recent_tokens=0, max_output_tokens=64,
         ))
-        self.assertEqual(compactor.compact.call_args.kwargs["sample_params"], self.options[1][0])
+        # The turn's params: compaction keeps the adapters' transient retries.
+        self.assertEqual(compactor.compact.call_args.kwargs["sample_params"],
+                         replace(self.options[1][0], transient_retries=None))
         self.assertEqual(self.calls[1][0].model_items(), (Message("user", "summary"),))
 
     def test_threshold_nothing_to_compact_samples_normally(self):

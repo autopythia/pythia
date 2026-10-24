@@ -1,15 +1,17 @@
 """Explicit, CLI-local retries: no new user turn and no old tool replay."""
 
 from collections import deque
+from dataclasses import replace
 import json
 import threading
 from types import SimpleNamespace
 import unittest
-from pythia_test.interaction_helpers import patch_compaction, patch_saves, real_save, seed_cli_save
+from pythia_test.interaction_helpers import chat_endpoint, full_log, patch_compaction, patch_saves
+from pythia_test.interaction_helpers import real_save, seed_cli_save
 from unittest import mock
 
 from pythia.interaction import (
-    CompactionContextWindowError, CompactionMetadata, CompactionResult,
+    ChatCompletionsModel, CompactionContextWindowError, CompactionMetadata, CompactionResult,
     CompactionSettings, ContextPrefix, DEFAULT_REQUEST_TIMEOUT_SECONDS, Environment, Init,
     InteractionContext,
     Message, ModelAuthenticationError, ModelContextWindowError, ModelFailure, ModelRateLimitError,
@@ -24,6 +26,7 @@ from pythia.interaction._cli_editor import Editor
 from pythia.interaction.claude_relay._mcp import NativeToolRejected
 from pythia.interaction.items import SampleMetadata
 from pythia.interaction.loop import kernel
+from pythia_test.test_interaction import _FakeHTTPResponse, _ScriptedOpener
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
 
 
@@ -110,6 +113,20 @@ def _notices(state):
     return texts
 
 
+class _Adapter(_Model):
+    """A real model adapter, recorded as the scripted model is."""
+
+    def __init__(self, path, adapter):
+        super().__init__(path)
+        self.adapter = adapter
+
+    def sample(self, context, *, tools=(), sample_params=None):
+        self.calls.append((context.copy(), tuple(tools), sample_params))
+        self.checkpoints.append(load_interaction_save(full_log(self.path)).items)
+        self.threads.append(threading.get_ident())
+        return self.adapter.sample(context, tools=tools, sample_params=sample_params)
+
+
 class CancelInputTests(unittest.TestCase):
     """/cancel stops the running turn's automatic retries, and only those."""
 
@@ -175,9 +192,12 @@ class AutomaticRetryTests(_ControllerTestCase):
             "--resume=False", "--prompt", "original", "--enable-default-tools=False",
         ]), 0)
         self.assertEqual(len(model.calls), 2)
-        self.assertTrue(any(status.startswith("retrying") for status in statuses), statuses)
+        # The status shows how many of the sample's attempts failed, of all.
+        self.assertTrue(any(status.startswith("retrying") and status.endswith(" (1/3)")
+                            for status in statuses), statuses)
+        self.assertFalse(any("(1/3)" in status for status in statuses[statuses.index("idle"):]))
         shown = [item.text for item in terminal.items]
-        notice = "[cli] Sampling again in 1 s (2/3)."
+        notice = "[cli] Sampling again in 2 s (1/3)."
         self.assertIn(notice, shown)
         self.assertNotIn(HINT, shown)
         saved = load_interaction_save(self.path)
@@ -231,7 +251,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         self.assertEqual(len(model.calls), 4)  # three attempts, then one after /retry
         shown = [item.text for item in terminal.items]
         self.assertEqual([text for text in shown if text.startswith("[cli] Sampling")], [
-            "[cli] Sampling again in 0 s (2/3).", "[cli] Sampling again in 0 s (3/3).",
+            "[cli] Sampling again in 0 s (1/3).", "[cli] Sampling again in 0 s (2/3).",
             "[cli] Sampling failed 3 times. Use /retry to try again.",
             HINT,  # no retries: the one attempt failed
         ])
@@ -258,10 +278,10 @@ class AutomaticRetryTests(_ControllerTestCase):
                  for text in (item.text for item in terminal.items)
                  if text.startswith(("[model failure]", "[cli] Sampling")) or text == error]
         self.assertEqual(shown, [
+            "failure", "[cli] Sampling again in 0 s (1/∞).",
             "failure", "[cli] Sampling again in 0 s (2/∞).",
-            "failure", "[cli] Sampling again in 0 s (3/∞).",
+            "failure", error, "[cli] Sampling again in 0 s (3/∞).",
             "failure", error, "[cli] Sampling again in 0 s (4/∞).",
-            "failure", error, "[cli] Sampling again in 0 s (5/∞).",
         ])
 
     async def test_a_bounded_retry_shows_its_errors_as_an_unbounded_one_does(self):
@@ -279,10 +299,10 @@ class AutomaticRetryTests(_ControllerTestCase):
                  for text in (item.text for item in terminal.items)
                  if text.startswith(("[model failure]", "[cli] Sampling")) or text == error]
         self.assertEqual(shown, [
+            "failure", "[cli] Sampling again in 0 s (1/5).",
             "failure", "[cli] Sampling again in 0 s (2/5).",
-            "failure", "[cli] Sampling again in 0 s (3/5).",
+            "failure", error, "[cli] Sampling again in 0 s (3/5).",
             "failure", error, "[cli] Sampling again in 0 s (4/5).",
-            "failure", error, "[cli] Sampling again in 0 s (5/5).",
             "failure", error, "[cli] Sampling failed 5 times. Use /retry to try again.",
         ])
 
@@ -294,16 +314,17 @@ class AutomaticRetryTests(_ControllerTestCase):
             nonlocal cancelled
             if status.startswith("retrying") and not cancelled:
                 cancelled = True
-                terminal.submit("/cancel")  # during a 5 s wait
+                terminal.submit("/cancel")  # during a 30 s wait
             elif status == "failed":
                 terminal.key("c-d")
         terminal = _Terminal(frame)
-        self.assertEqual(await self._run(model, terminal, [
-            "--resume=False", "--prompt", "original", "--enable-default-tools=False",
-        ]), 1)
+        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (30,)):
+            self.assertEqual(await self._run(model, terminal, [
+                "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+            ]), 1)
         self.assertEqual(len(model.calls), 1)
         shown = [item.text for item in terminal.items]
-        self.assertIn("[cli] Sampling again in 5 s (2/6).", shown)
+        self.assertIn("[cli] Sampling again in 30 s (1/8).", shown)
         cancel_hint = "[cli] Automatic retry cancelled. Use /retry to try again."
         self.assertIn(cancel_hint, shown)
         self.assertNotIn(HINT, shown)
@@ -324,11 +345,13 @@ class AutomaticRetryTests(_ControllerTestCase):
             raise _rate_limited()
         model = _Model(self.path, _rate_limited(), second_attempt, _answer("never"))
         cancelled = False
+        cancelled_during = None
 
         def frame(terminal, editor, status):
-            nonlocal cancelled
+            nonlocal cancelled, cancelled_during
             if len(model.calls) == 2 and status.startswith("sampling") and not cancelled:
                 cancelled = True
+                cancelled_during = status
                 terminal.submit("/cancel")
             elif cancelled and not go.is_set() and any(
                     item.text.startswith("[user-tool-call] cancel") for item in terminal.items):
@@ -341,22 +364,56 @@ class AutomaticRetryTests(_ControllerTestCase):
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
             ]), 1)
         self.assertEqual(len(model.calls), 2)
+        # The retried attempt's status keeps the retry's count.
+        self.assertTrue(cancelled_during.endswith(" (1/8)"), cancelled_during)
         shown = [item.text for item in terminal.items]
         self.assertEqual(shown.count("[cli] Automatic retry cancelled. Use /retry to try again."), 1)
         saved = load_interaction_save(self.path)
         self.assertEqual(sum(isinstance(item, ModelFailure) for item in saved), 2)
 
-    async def test_a_rate_limit_asking_for_a_long_wait_says_when_to_retry(self):
-        model = _Model(self.path, _rate_limited(retry_after=900.5))
-        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "failed" else None)
-        self.assertEqual(await self._run(model, terminal, [
-            "--resume=False", "--prompt", "original", "--enable-default-tools=False",
-        ]), 1)
+    async def test_a_provider_s_long_retry_after_is_not_followed_yet(self):
+        # The turn loop's own schedule sets the wait, however long it asks.
+        model = _Model(self.path, _rate_limited(retry_after=900.5), _answer("recovered"))
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (0,)):
+            self.assertEqual(await self._run(model, terminal, [
+                "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+            ]), 0)
+        self.assertEqual(len(model.calls), 2)
         shown = [item.text for item in terminal.items]
-        self.assertIn("[cli] Rate limited; the provider asks to wait 901 s. Use /retry after that.",
-                      shown)
-        self.assertNotIn(HINT, shown)
-        self.assertFalse(any(text.startswith("[cli] Sampling again") for text in shown))
+        self.assertIn("[cli] Sampling again in 0 s (1/8).", shown)
+        self.assertFalse(any("asks to wait" in text for text in shown))
+
+    async def test_a_transient_http_failure_is_sampled_again_by_the_turn_loop(self):
+        # With a real adapter: the turn's own requests get no HTTP retries of
+        # their own, so each failed request shows, and the loop retries it.
+        opener = _ScriptedOpener(
+            _FakeHTTPResponse({"error": {"message": "busy"}}, status=503),
+            _FakeHTTPResponse({"choices": [{
+                "message": {"role": "assistant", "content": "recovered"},
+                "finish_reason": "stop",
+            }]}),
+        )
+        model = _Adapter(self.path, ChatCompletionsModel(
+            chat_endpoint(api_url="https://api.example.test"), opener=opener))
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
+        with mock.patch.object(kernel, "DEFAULT_AUTO_RETRY",
+                               replace(kernel.DEFAULT_AUTO_RETRY, delays=(0,))):
+            self.assertEqual(await self._run(model, terminal, [
+                "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+            ]), 0)
+        self.assertEqual(len(opener.calls), 2)
+        shown = [item.text for item in terminal.items]
+        [failure] = [text for text in shown if text.startswith("[model failure]")]
+        self.assertTrue(failure.startswith(
+            "[model failure] Chat Completions HTTP 503: request failed kind=http_error"), failure)
+        self.assertNotIn("attempts=", failure)  # one request: shown past 1 only
+        self.assertIn("[cli] Sampling again in 0 s (1/3).", shown)
+        [sample] = [text for text in shown if text.startswith("[sample]")]
+        self.assertTrue(sample.endswith(" recovery=http_503_retry"), sample)
+        saved = load_interaction_save(self.path)
+        self.assertEqual([item.recovery for item in saved if isinstance(item, SampleMetadata)],
+                         [("http_503_retry",)])
 
 
 class RetryControllerTests(_ControllerTestCase):
@@ -488,9 +545,11 @@ class RetryControllerTests(_ControllerTestCase):
         login.assert_called_once()
         build.assert_called_once()  # /login activation only; retry reuses it.
         self.assertEqual(len(model.calls), 2)
+        # The turn loop's own sample asks the model for no transient retries:
+        # the loop retries those itself.
         self.assertEqual(model.calls[1][2], SampleParams(
             max_output_tokens=17, enable_auto_compaction=True,
-            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS, transient_retries=0,
         ))
         self.assertEqual(model.calls[1][1], ())
         self.assertIn(Message("user", "summary"), model.calls[1][0].model_items())
@@ -779,7 +838,11 @@ class OverflowRecoveryTests(_ControllerTestCase):
         create.assert_called_once_with(model, CompactionSettings(mode="warmpi"),
                                        reason="overflow")
         compactor.compact.assert_called_once()
-        self.assertEqual(compactor.compact.call_args.kwargs["sample_params"], model.calls[0][2])
+        # Compaction gets the turn's params, so the adapters' transient retries
+        # stay on for it; only the turn loop's own samples turn them off.
+        self.assertEqual(model.calls[0][2].transient_retries, 0)
+        self.assertEqual(compactor.compact.call_args.kwargs["sample_params"],
+                         replace(model.calls[0][2], transient_retries=None))
         self.assertEqual(len(model.calls), 2)
         self.assertEqual(model.calls[1][0].model_items(), (Message("user", "summary"),))
         saved = load_interaction_save(self.path)

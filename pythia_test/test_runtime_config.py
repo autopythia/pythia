@@ -144,7 +144,7 @@ class InteractionConfigTests(unittest.TestCase):
             "max_output_tokens": 2048,
             "timeouts_request_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             "endpoint_prompt_caching": None,
-            "endpoint_rate_limit_retries": 5,
+            "endpoint_rate_limit_retries": 7,
             "enable_auto_compaction": False,
             "auto_compaction_context_tokens": 500000,
             "max_context_tokens": 1000000,

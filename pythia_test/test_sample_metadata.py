@@ -430,7 +430,8 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             model.sample_params,
-            [SampleParams(auto_compaction_context_tokens=100, enable_auto_compaction=True)],
+            [SampleParams(auto_compaction_context_tokens=100, enable_auto_compaction=True,
+                          transient_retries=0)],
         )
         self.assertEqual(model.contexts[0].model_items(), (
             Message("user", "follow up"),
@@ -470,7 +471,9 @@ class SampleMetadataTests(unittest.TestCase):
         create.assert_called_once_with(model, CompactionSettings(
             mode="pi", keep_recent_tokens=0, max_output_tokens=64,
         ))
-        self.assertEqual(compactor.compact.call_args.kwargs["sample_params"], model.sample_params[0])
+        # The turn's params: compaction keeps the adapters' transient retries.
+        self.assertEqual(compactor.compact.call_args.kwargs["sample_params"],
+                         replace(model.sample_params[0], transient_retries=None))
         self.assertEqual(len(model.sample_params), 2)
 
         # Nothing to compact leaves the sampling error.
@@ -522,7 +525,8 @@ class SampleMetadataTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 1)
         self.assertEqual(
             model.sample_params,
-            [SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100)],
+            [SampleParams(enable_auto_compaction=False, auto_compaction_context_tokens=100,
+                          transient_retries=0)],
         )
         self.assertIn(
             Message("assistant", "uncompacted"),

@@ -114,7 +114,7 @@ class ConfigSeedingTests(unittest.TestCase):
                     enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
                     prompt_caching="5m" if api == "messages" else None,
                 ))
-                self.assertEqual(config.get("endpoint_rate_limit_retries"), 5)
+                self.assertEqual(config.get("endpoint_rate_limit_retries"), 7)
 
     def test_unknown_or_wrong_profile_never_inherits_codex_limits(self):
         for api, model in (
@@ -135,7 +135,7 @@ class ConfigSeedingTests(unittest.TestCase):
         self.assertEqual(config.snapshot(), InteractionConfigSnapshot(
             compaction_mode="coldstart,warmpi:2",
             timeouts_request_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
-            endpoint_rate_limit_retries=5,
+            endpoint_rate_limit_retries=7,
         ))
 
     def test_python_models_infer_the_compaction_mode(self):
@@ -426,7 +426,9 @@ class FrontendPolicyTests(unittest.IsolatedAsyncioTestCase):
                     await cli._turn(previous_context(), model, Environment(), cli._UIState(headless=True),
                                     InteractionSaveWriter(Path(directory) / "log.jsonl"), config)
                 self.assertEqual(compactor.compact.call_count, int(threshold is not None))
-                self.assertEqual(model.sample_params, [config.snapshot().sample_params()])
+                # Its own samples also ask the model for no transient retries.
+                self.assertEqual(model.sample_params,
+                                 [replace(config.snapshot().sample_params(), transient_retries=0)])
 
     def test_auto_turn_uses_context_policy_not_model_metadata(self):
         session = SimpleNamespace(

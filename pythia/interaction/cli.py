@@ -25,7 +25,6 @@ from datetime import time as day_time
 from datetime import timedelta
 import importlib
 import json
-import math
 import os
 from pathlib import Path
 import queue
@@ -41,6 +40,7 @@ import uuid
 from typing import Callable
 from typing import Optional
 from typing import Sequence
+from typing import Tuple
 from typing import Union
 
 from ._account_http import default_account_opener
@@ -111,7 +111,6 @@ from .loop.tail import turn_tail
 from .model import Model
 from .model import ModelAuthenticationError
 from .model import ModelError
-from .model import ModelRateLimitError
 from .model import ModelTimeoutError
 from .model import RetryState
 from .model import SampleParams
@@ -370,6 +369,10 @@ class _UIState:
     # stops it (retry_cancel, which the turn's host reports).
     auto_retrying: bool = False
     retry_cancel: threading.Event = field(default_factory=threading.Event)
+    # Its latest (failed, attempts), as its notice says (attempts None:
+    # unbounded), shown with the status while it waits and while the retried
+    # sample runs (TurnHost.retry_progress); None once it is over.
+    retry_progress: Optional[Tuple[int, Optional[int]]] = None
     # The config snapshot of the turn running, or the last one (_turn): the
     # one its automatic retries followed, which a failure's notice names.
     turn_config: Optional[object] = None
@@ -380,6 +383,7 @@ class _UIState:
             self.auto_retrying = True
         elif phase in {"idle", "failed", "auth needed"}:
             self.auto_retrying = False
+            self.retry_progress = None
 
     def notice(self, text: str) -> None:
         text = text.rstrip("\r\n")
@@ -1406,6 +1410,11 @@ def _arm_retry(state: _UIState) -> None:
 def _end_auto_retry(state: _UIState) -> None:
     """A sample succeeded: its automatic retries, if any, are over (/cancel)."""
     state.auto_retrying = False
+    state.retry_progress = None
+
+
+def _set_retry_progress(state: _UIState, progress) -> None:
+    state.retry_progress = progress
 
 
 def _bind_account(state: _UIState, account_id: str) -> None:
@@ -2376,6 +2385,10 @@ class _CliHost(TurnHost):
         error, as a failed turn shows it (TurnHost.show_error)."""
         self.notice(_error_notice(exc))
 
+    def retry_progress(self, failed, attempts) -> None:
+        """An automatic retry's (failed, attempts), for the status line."""
+        self._post(_set_retry_progress, self._state, (failed, attempts))
+
 
 async def _turn(context, model, environment, state, writer, config, *, steering=False,
                 job_text="", resumes=0):
@@ -2398,6 +2411,7 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     # A /cancel applies to the turn it came in; this one starts afresh.
     state.retry_cancel.clear()
     state.auto_retrying = False
+    state.retry_progress = None
     state.turn_config = snapshot
     _apply_workspace(environment, snapshot)
     host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot,
@@ -2955,11 +2969,6 @@ def _retry_hint(exc: Exception, turn_config) -> str:
     policy = auto_retry_policy(exc, turn_config) if isinstance(exc, ModelError) else None
     if state is RetryState.EXHAUSTED and policy.attempts is not None and policy.attempts > 1:
         return f"Sampling failed {policy.attempts} times. Use /retry to try again."
-    if (state is RetryState.BLOCKED and isinstance(exc, ModelRateLimitError)
-            and exc.retry_after_seconds is not None and policy.max_retry_after is not None
-            and exc.retry_after_seconds > policy.max_retry_after):
-        return (f"Rate limited; the provider asks to wait {math.ceil(exc.retry_after_seconds)} s. "
-                "Use /retry after that.")
     return "Sampling failed. Use /retry to try again."
 
 
@@ -3201,6 +3210,12 @@ async def _run(
                           else _CLOSING_STATUS[state.stop_level])
                 if busy:
                     status += f" {int(time.monotonic() - state.phase_started)}s"
+                progress = state.retry_progress
+                if (progress is not None and state.stop_level is None
+                        and state.phase in {"retrying", "sampling"}):
+                    # An automatic retry: its wait, and the retried sample.
+                    failed, attempts = progress
+                    status += f" ({failed}/{'∞' if attempts is None else attempts})"
                 reboot = state.reboot
                 if reboot is not None and state.stop_level is None and state.phase != "rebooting":
                     status += " | rebooting" + urgency_marker(reboot.urgency)

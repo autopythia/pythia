@@ -29,6 +29,7 @@ from pythia.interaction import MessagesServerCompaction
 from pythia.interaction import ModelConfigurationError
 from pythia.interaction import InteractionContext
 from pythia.interaction import ModelContextWindowError
+from pythia.interaction import ModelError
 from pythia.interaction import ModelFailure
 from pythia.interaction import ModelRateLimitError
 from pythia.interaction import ModelRefusal
@@ -1129,6 +1130,43 @@ class MessagesModelTests(unittest.TestCase):
             ("request_timeout_retry", "request_timeout_retry"),
         )
         self.assertNotIn("private timeout detail", str(raised.exception))
+
+    def test_without_retries_of_its_own_a_transient_failure_is_eligible_at_once(self):
+        # As the turn loop asks for its own samples: one request, and an
+        # error the loop may sample again. Other failures stay final.
+        cases = (
+            (_http_error(503), ModelTransportError, RetryState.ELIGIBLE),
+            (_http_error(529), ModelTransportError, RetryState.ELIGIBLE),
+            (_http_error(429), ModelRateLimitError, RetryState.ELIGIBLE),
+            (socket.timeout("slow"), ModelTimeoutError, RetryState.ELIGIBLE),
+            (urllib.error.URLError(OSError("refused")), ModelTransportError, RetryState.ELIGIBLE),
+            (_http_error(400), ModelTransportError, RetryState.NONE),
+        )
+        for outcome, error_type, state in cases:
+            with self.subTest(outcome=repr(outcome)):
+                opener = _ScriptedOpener(outcome)
+                sleeps = []
+                model = MessagesModel(
+                    _endpoint(api_url="https://api.anthropic.com", model="model"),
+                    opener=opener,
+                    retry_sleep=sleeps.append,
+                )
+                with self.assertRaises(ModelError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)),
+                                 sample_params=SampleParams(transient_retries=0))
+                self.assertIs(type(raised.exception), error_type)
+                self.assertIs(raised.exception.retry_state, state)
+                self.assertEqual((len(opener.calls), sleeps), (1, []))
+                self.assertEqual(raised.exception.failure.attempt_count, 1)
+                self.assertEqual(raised.exception.failure.recovery, ())
+
+    def test_transient_retries_is_a_count_or_none(self):
+        self.assertIsNone(SampleParams().transient_retries)
+        self.assertEqual(SampleParams(transient_retries=0).transient_retries, 0)
+        for value in (-1, True, 1.5, "2"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, "^transient_retries must be a nonnegative integer or None$"):
+                SampleParams(transient_retries=value)
 
     def test_a_rate_limit_after_the_http_retries_is_a_rate_limit_error(self):
         # Its wording would read as an overflow, but a 429 never is one.

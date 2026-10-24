@@ -351,11 +351,11 @@ def add_endpoint_arguments(parser, *, auto=False):
     parser.add_argument(
         "--endpoint-rate-limit-retries", type=_rate_limit_retries_argument,
         default=argparse.SUPPRESS, metavar="N|unbounded",
-        help=("how many times a turn samples again after a rate limit (HTTP 429), waiting 5, "
-              "10, 20, then 30 seconds each time, or longer if the provider's Retry-After says "
-              "so; each try includes the request's own HTTP retries. 0 turns it off, and "
-              "unbounded retries until a sample succeeds or the turn is stopped (/cancel in "
-              "the CLI and auto). Not for Claude Relay"
+        help=("how many times a turn samples again after a rate limit (HTTP 429), waiting 2, "
+              "2, 5, 10, 20, then 30 seconds each time; each try is one request, as a turn's "
+              "requests get no HTTP retries of their own. 0 turns it off, and unbounded "
+              "retries until a sample succeeds or the turn is stopped (/cancel in the CLI "
+              "and auto). Not for Claude Relay"
               + ("" if auto else "; the CLI's /config endpoint_rate_limit_retries changes it "
                  "later")
               + f" (default: the model catalog's endpoint.rate_limit_retries, else "

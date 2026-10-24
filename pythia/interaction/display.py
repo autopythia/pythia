@@ -472,7 +472,7 @@ def _render_sample_metadata(item: SampleMetadata) -> Tuple[str, ...]:
         "" if item.request_attempts == 1 else f" attempts={item.request_attempts}"
     )
     recovery = (
-        "" if not item.recovery else f" recovery={','.join(item.recovery)}"
+        "" if not item.recovery else f" recovery={_recovery_text(item.recovery)}"
     )
     return (
         "[sample] "
@@ -500,8 +500,32 @@ def _render_compaction_metadata(
     if item.request_attempts != 1:
         fields.append(f"attempts={item.request_attempts}")
     if item.recovery:
-        fields.append(f"recovery={','.join(item.recovery)}")
+        fields.append(f"recovery={_recovery_text(item.recovery)}")
     return (" ".join(fields),)
+
+
+# A shown recovery list has one entry per run of equal labels, with the run's
+# length in parentheses past 1, such as rate_limit_retry(36). Past this many
+# runs, it shows the first and the last, with the number of labels between
+# them: http_503_retry(2),…(33),connection_retry.
+_MAX_RECOVERY_RUNS = 4
+
+
+def _recovery_text(labels: Tuple[str, ...]) -> str:
+    """A ``recovery`` list as a line shows it, bounded: an automatic retry
+    adds a label each time, without limit when unbounded. Saves keep the
+    whole list."""
+    runs: List[List] = []
+    for label in labels:
+        if runs and runs[-1][0] == label:
+            runs[-1][1] += 1
+        else:
+            runs.append([label, 1])
+    shown = [label if count == 1 else f"{label}({count})" for label, count in runs]
+    if len(runs) > _MAX_RECOVERY_RUNS:
+        between = sum(count for _label, count in runs[1:-1])
+        shown = [shown[0], f"…({between})", shown[-1]]
+    return ",".join(shown)
 
 
 def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
@@ -511,7 +535,8 @@ def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
         ("model", item.model),
         ("auth_source", item.auth_source),
         ("status", item.http_status),
-        ("attempts", item.attempt_count),
+        # The requests of this one attempt, as on a [sample] line: shown past 1.
+        ("attempts", None if item.attempt_count == 1 else item.attempt_count),
         ("request_id", item.request_id),
         ("response_id", item.response_id),
         ("cf_ray", item.cf_ray),
@@ -530,7 +555,7 @@ def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
         if value is not None:
             fields.append(f"{name}={value}")
     if item.recovery:
-        fields.append(f"recovery={','.join(item.recovery)}")
+        fields.append(f"recovery={_recovery_text(item.recovery)}")
     if item.event_types:
         fields.append(f"event_types={','.join(item.event_types)}")
     return (" ".join(fields),)
