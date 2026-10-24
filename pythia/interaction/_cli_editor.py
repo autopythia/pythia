@@ -6,15 +6,7 @@ from dataclasses import dataclass
 from typing import Tuple
 import unicodedata
 
-
-# Shown as escapes too, besides controls and lone surrogates: format
-# characters, which are invisible (zero-width spaces, word joiners, byte order
-# marks, soft hyphens, tag characters), and bidi controls, which can reorder
-# the rest of a line in a terminal that implements right-to-left text; and the
-# line and paragraph separators, which show as nothing. The zero-width joiner
-# and non-joiner stay: emoji sequences and some scripts need them.
-_ESCAPED_CATEGORIES = frozenset({"Cc", "Cs", "Cf", "Zl", "Zp"})
-_KEPT_FORMAT_CHARACTERS = frozenset("\u200c\u200d")
+from ._provider_text import escaped_character, escaped_characters
 
 
 def safe_text(text: str) -> str:
@@ -22,14 +14,18 @@ def safe_text(text: str) -> str:
 
     Each control character but newline and tab, lone surrogate, invisible or
     bidi format character, and line or paragraph separator shows as its code
-    point: ``\\u001b``, ``\\u202e``, or ``\\U000e0041`` beyond U+FFFF.
+    point: ``\\u001b``, ``\\u202e``, or ``\\U000e0041`` beyond U+FFFF. The
+    files Pythia writes escape the same characters
+    (``_provider_text.ESCAPED_CATEGORIES``).
     """
-    return "".join(
-        char if char in "\n\t" or char in _KEPT_FORMAT_CHARACTERS
-        or unicodedata.category(char) not in _ESCAPED_CATEGORIES
-        else f"\\u{ord(char):04x}" if ord(char) <= 0xFFFF else f"\\U{ord(char):08x}"
-        for char in text
-    )
+    return escaped_characters().sub(_shown_escape, text)
+
+
+def _shown_escape(match) -> str:
+    char = match[0]
+    if not escaped_character(char):  # beyond U+FFFF, the pattern matches all
+        return char
+    return f"\\u{ord(char):04x}" if ord(char) <= 0xFFFF else f"\\U{ord(char):08x}"
 
 
 def cell_width(char: str) -> int:

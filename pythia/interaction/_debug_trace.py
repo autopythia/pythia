@@ -44,6 +44,8 @@ from typing import Optional
 import urllib.error
 import uuid
 
+from ._provider_text import json_text_escaped
+
 
 TRACE_REQUEST_SUFFIX = ".trace.req.jsonl"
 TRACE_RESPONSE_SUFFIX = ".trace.res.jsonl"
@@ -388,9 +390,11 @@ class DebugTrace:
             if self._failed:
                 return
             try:
-                line = json.dumps(row, ensure_ascii=False) + "\n"
-                # A lone surrogate (from undecodable argv or exception text)
-                # is written as a backslash escape, a valid JSON string escape.
+                # Characters that show as nothing or act on a terminal are
+                # written as JSON escapes too (json_text_escaped). A lone
+                # surrogate (from undecodable argv or exception text) is
+                # written as a backslash escape, a valid JSON string escape.
+                line = json_text_escaped(json.dumps(row, ensure_ascii=False)) + "\n"
                 with open(
                     path,
                     "a",

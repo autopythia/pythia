@@ -17,6 +17,8 @@ from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 import uuid
 
+from ._provider_text import json_text_escaped
+
 
 MAX_BODY = 1_048_576
 MAX_CONTENT = 262_144
@@ -289,7 +291,9 @@ class Board:
             record = Record(sequence, str(sequence),
                             thread_id or "thread_" + uuid.uuid4().hex,
                             author, kind, content, request_id, reply_to, success)
-            line = json.dumps(asdict(record), ensure_ascii=False) + "\n"
+            # Characters that show as nothing or act on a terminal are
+            # written as JSON escapes (json_text_escaped).
+            line = json_text_escaped(json.dumps(asdict(record), ensure_ascii=False)) + "\n"
             encoded_size = len(line.encode("utf-8"))
             if len(self._records) >= self._max_records or self._bytes + encoded_size > self._max_bytes:
                 raise BoardError("Board storage limit reached; request was not accepted.", 507)

@@ -15,7 +15,7 @@ from unittest import mock
 
 from pythia.interaction import (
     Environment, Init, InteractionContext, InteractionSaveWriter, Message, ModelSample,
-    ModelSampleBoundary, SaveError, Tool, ToolCall, ToolOutcome, ToolSpec, Tools,
+    ModelSampleBoundary, SaveError, Tool, ToolCall, ToolOutcome, ToolResult, ToolSpec, Tools,
     TurnSummary, UserInteractionBoundary, demo, interaction_item_to_dict,
     load_interaction_save, render_interaction_items, resume_interaction_save,
     save_interaction_save,
@@ -158,6 +158,34 @@ class WriterTests(_SaveTestCase):
         self.assertEqual(self.path.read_bytes(), legacy + _line(Message("assistant", "hello")))
         self.assertEqual(self.path.stat().st_ino, inode)
         self.assertEqual(load_interaction_save(self.path).items, context.items)
+
+    def test_characters_that_act_on_a_terminal_are_saved_as_escapes(self):
+        # Bidi and other format characters, separators, DEL and C1 controls are
+        # written as JSON escapes, so viewing the save can't drive or garble a
+        # terminal. Lines written before hold them raw: both load, mixed too.
+        text = "rlo\u202e ls\u2028 nel\x85 del\x7f zwsp\u200b tag\U000e0041 kept: é – 😀 zwj\u200d"
+        old = (Init("prefix"), Message("user", text))
+        new = (ToolCall("exec_command", "call_1", json.dumps({"cmd": text}, ensure_ascii=False)),
+               ToolResult("call_1", text))
+        self.path.write_bytes(_lines(old))
+        self.assertIn("\u202e".encode(), self.path.read_bytes())
+        context, writer, _ = resume_interaction_save(self.path)
+        self.assertEqual(context.items, old)
+        context.extend(new)
+        writer.save(context)
+        data = self.path.read_bytes()
+        self.assertTrue(data.startswith(_lines(old)))  # saved lines are never rewritten
+        appended = data[len(_lines(old)):]
+        for char in "\u202e\u2028\x85\x7f\u200b\U000e0041":
+            self.assertNotIn(char.encode(), appended)
+        self.assertIn(b"rlo\\u202e ls\\u2028 nel\\u0085 del\\u007f zwsp\\u200b tag\\udb40\\udc41 kept: "
+                      + "é – 😀 zwj\u200d".encode(), appended)
+        self.assertEqual(load_interaction_save(self.path).items, (*old, *new))
+        # A lone surrogate is still refused, as UTF-8 can't encode one.
+        context.append(Message("assistant", "bad \ud800"))
+        with self.assertRaises(UnicodeEncodeError):
+            writer.save(context)
+        self.assertEqual(self.path.read_bytes(), data)
 
 
 class IncompleteLineTests(_SaveTestCase):

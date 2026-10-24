@@ -405,6 +405,29 @@ class ModelExchangeTests(_TraceTestCase):
         self.assertEqual(reply["payload"], response.body.decode("utf-8"))
         self.assertIsNone(reply["exception"])
 
+    def test_characters_that_act_on_a_terminal_are_written_as_escapes(self):
+        # The payloads stay verbatim as values. In the files, characters that
+        # show as nothing or act on a terminal are JSON escapes, so viewing a
+        # trace can't drive or garble the terminal.
+        text = "rlo\u202e ls\u2028 nel\x85 tag\U000e0041 kept: é"
+        body = json.dumps({"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": text}}]}, ensure_ascii=False).encode("utf-8")
+        model, inner = self.chat_model(_JSONResponse(body))
+        self.context.append(Message("user", text))
+        with trace_operation("sample"):
+            self.assertEqual(model.sample(self.context).last_assistant_text, text)
+        [(request, reply)] = self.pairs()
+        sent, _ = inner.calls[0]
+        self.assertEqual(request["payload"], sent.data.decode("utf-8"))
+        self.assertIn(text, request["payload"])
+        self.assertEqual(reply["payload"], body.decode("utf-8"))
+        for path in (self.trace.request_path, self.trace.response_path):
+            with self.subTest(path=path.name):
+                data = path.read_bytes()
+                for char in "\u202e\u2028\x85\U000e0041":
+                    self.assertNotIn(char.encode(), data)
+                self.assertIn(b"rlo\\u202e ls\\u2028 nel\\u0085 tag\\udb40\\udc41 kept: \xc3\xa9", data)
+
     def test_messages_retry_keeps_the_error_payload_and_headers(self):
         url = "http://127.0.0.1:9/v1/messages"
         error_body = b'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}'

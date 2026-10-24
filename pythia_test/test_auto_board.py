@@ -443,16 +443,26 @@ class BoardTests(unittest.TestCase):
                 journal.write_bytes(original)
 
     def test_restore_round_trips_unicode_and_escaped_newlines_without_rewrite(self):
-        contents = ("valid Unicode: a\u2028b\u0085c\u2029d", "ordinary\nescaped newline")
+        contents = ("valid Unicode: a\u2028b\u0085c\u2029d\u202ee", "ordinary\nescaped newline")
         for index, content in enumerate(contents):
             self.user.create_thread(content, request_id=f"unicode-{index}")
         self.service.close()
         journal = self.path / "index.jsonl"
-        original = journal.read_bytes()
-        restored = Board.restore(self.path)
-        self.assertEqual([record.content for record, _size in restored], list(contents))
-        self.assertEqual(journal.read_bytes(), original)
-        self.assertEqual(sum(size for _record, size in restored), len(original))
+        escaped = journal.read_bytes()
+        # Characters that act on a terminal are written as JSON escapes.
+        self.assertIn(b"a\\u2028b\\u0085c\\u2029d\\u202ee", escaped)
+        # A journal from before holds them raw; it restores, and so does a mix.
+        raw = b"".join(json.dumps(json.loads(line), ensure_ascii=False).encode() + b"\n"
+                       for line in escaped.split(b"\n")[:-1])
+        self.assertIn("a\u2028b\u0085c\u2029d\u202ee".encode(), raw)
+        mixed = raw.split(b"\n")[0] + b"\n" + escaped.split(b"\n")[1] + b"\n"
+        for original in (escaped, raw, mixed):
+            with self.subTest(original=original):
+                journal.write_bytes(original)
+                restored = Board.restore(self.path)
+                self.assertEqual([record.content for record, _size in restored], list(contents))
+                self.assertEqual(journal.read_bytes(), original)
+                self.assertEqual(sum(size for _record, size in restored), len(original))
 
     def test_restore_reads_only_through_configured_byte_limit(self):
         self.user.create_thread("larger than tiny limit", request_id="limited")

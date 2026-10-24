@@ -295,6 +295,31 @@ class PublicLogTests(_FilesTestCase):
         self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
         self.assertEqual(self.path.read_bytes(), compact)
 
+    def test_lines_written_before_characters_were_escaped_are_no_difference(self):
+        # Characters that act on a terminal are written as JSON escapes now; a
+        # session's files from before hold them raw, and the logs go on.
+        text = "rlo\u202e ls\u2028 nel\x85 tag\U000e0041 kept: é"
+        items = (*_HISTORY[:4], Message("assistant", text),
+                 ContextPrefix((Message("user", text), _REASONING)), ModelSampleBoundary())
+        full = _encoded(items)  # raw, as the full log was written before
+        public = b"".join(json.dumps(json.loads(line), ensure_ascii=False).encode() + b"\n"
+                          for line in public_log_lines(full))
+        self.assertIn("\u202e".encode(), public)
+        self.path.write_bytes(public)
+        writer = PublicLogWriter(self.path)
+        writer.sync(full, len(items))
+        self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
+        new = (Message("user", text), ContextPrefix((Message("user", text), _REASONING)))
+        writer.save(InteractionContext((*items, *new)))
+        added = self.path.read_bytes()[len(public):]
+        self.assertEqual(added, b"".join(public_log_line(item) for item in new))
+        self.assertEqual([json.loads(line) for line in added.splitlines()], [
+            interaction_item_to_dict(new[0]),
+            {"type": "context_prefix", "prefix_items": [interaction_item_to_dict(new[0])]}])
+        self.assertNotIn("\u202e".encode(), added)
+        self.assertEqual(added.count(b"rlo\\u202e ls\\u2028 nel\\u0085 tag\\udb40\\udc41 kept: \xc3\xa9"), 2)
+        self.assertEqual(writer.take_warnings(), ())
+
     def test_a_missing_public_log_is_written_on_resume(self):
         writer = PublicLogWriter(self.path)
         writer.sync(_encoded(_HISTORY), len(_HISTORY))

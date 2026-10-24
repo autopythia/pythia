@@ -47,6 +47,7 @@ from .items import UserToolCall
 from .items import UserToolResult
 from .items import _validate_elapsed_seconds
 from .usage import TokenUsage
+from ._provider_text import json_text_escaped
 from ._tool_spec import ToolSpec
 from ._tool_spec import _copy_schema
 
@@ -792,9 +793,13 @@ _OPEN_FLAGS = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
 
 
 def _encode_items(items: Iterable[InteractionItem]) -> bytes:
-    """One JSON line per item, encoded completely before any file is touched."""
+    """One JSON line per item, encoded completely before any file is touched.
+
+    Characters that show as nothing or act on a terminal are written as JSON
+    escapes (json_text_escaped), so viewing the file can't drive the terminal.
+    """
     return "".join(
-        json.dumps(encoded, ensure_ascii=False) + "\n"
+        json_text_escaped(json.dumps(encoded, ensure_ascii=False)) + "\n"
         for encoded in iter_interaction_items(items)
     ).encode("utf-8")
 
@@ -910,8 +915,9 @@ def _parse_lines(
     offset = 0
     terminated = True
     unparsed: Optional[_Unparsed] = None
-    # Split on b"\n" only: ensure_ascii=False lines may contain other line
-    # separators (such as U+2028) inside strings.
+    # Split on b"\n" only: a line written before such characters were escaped
+    # (json_text_escaped), or by hand, may hold another line separator, such
+    # as U+2028, inside a string.
     for line_number, line in enumerate(file, 1):
         if unparsed is not None:
             # Data follows the line, so no interrupted append left it.
@@ -1213,7 +1219,7 @@ def _shown_record(record: Dict[str, Any], reasoning: str,
 
 
 def _record_line(record: Mapping[str, Any]) -> bytes:
-    return (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    return (json_text_escaped(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
 
 
 def _public_line(line: bytes, reasoning: str = "nil", thinking: bool = False) -> bytes:
