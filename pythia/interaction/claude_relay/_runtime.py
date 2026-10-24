@@ -699,7 +699,7 @@ class Runtime:
                             raise ModelResponseError('Native continued before host handoff or run completion')
                         items, calls = message.sample_items(self.generation, self.names)
                         if calls:
-                            self.mailbox.register(calls)
+                            self.mailbox.register(calls, rewritten=message.rewritten_tool_ids)
                             self.diagnostics.set_phase('awaiting_host_results')
                             self.batch_origin = self.reply_origin
                             self._put((message, items, calls))

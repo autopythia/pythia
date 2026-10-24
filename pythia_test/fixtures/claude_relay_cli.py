@@ -558,6 +558,14 @@ elif text in ('rewritten-tool-input', 'rewritten-tool-input-beyond') and not any
     except (KeyError, OSError):
         pass  # the relay retires this process rather than answer it
     wait_for_end()
+elif text == 'rewritten-tool-input-kept' and not any(row['kind'] == 'result' for row in history):
+    # Observed 2.1.289 behavior, synthetic contents: an input with an escape
+    # the rule decodes, which the CLI's copies keep as streamed, as it keeps a
+    # whole string at times. Its history is the stream's, so the turn goes on.
+    block = {'type': 'tool_use', 'id': 'toolu_kept', 'name': names[0],
+             'input': {'value': 1, 'note': 'rlo \\u202e kept'}}
+    stream_message('m-kept', [block], {'input_tokens': 10, 'output_tokens': 2}, 'tool_use')
+    answer = 'kept:' + tool_result(block)
 elif text == 'icron-yield' and not any(row['kind'] == 'result' for row in history):
     # The CLI's scheduler, icron, through the relay: the model schedules a
     # message a second away and yields in one batch. The process waits for the

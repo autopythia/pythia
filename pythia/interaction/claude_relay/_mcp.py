@@ -95,7 +95,10 @@ class Mailbox:
         self.on_failure(first)
         return first
 
-    def register(self, calls):
+    def register(self, calls, *, rewritten=()):
+        """Register a batch's calls, as streamed. Those named in ``rewritten``
+        (NativeMessage.rewritten_tool_ids) may also be called with the CLI's
+        rewrite of their input; every other call must match as streamed."""
         with self.condition:
             if self.closed:
                 raise self.failure or ModelResponseError('Mailbox retired')
@@ -106,10 +109,10 @@ class Mailbox:
             for ident, name, args in calls:
                 if name not in self.tools:
                     raise self.fail('Native tool is not in the current catalog')
-                # The CLI calls with its rewrite of the streamed input, if any
-                # (native_input_rewrite). Either form matches; the host runs
-                # the streamed one, never the callback's arguments.
-                native = native_input_rewrite(args)
+                # The CLI calls with its rewrite of the streamed input, when its
+                # copies showed one (native_input_rewrite). Either form matches;
+                # the host runs the streamed one, never the callback's arguments.
+                native = native_input_rewrite(args) if ident in rewritten else args
                 self.slots[ident] = dict(name=name, args=canonical(args),
                                          native_args=None if native is args else canonical(native),
                                          claimed=False, returned=False, result=None, registered=registered)

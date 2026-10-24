@@ -222,7 +222,7 @@ class WarmTurnTests(WarmTests):
         self.assertEqual([row['uuid'] for row in deliveries], [turn['uuid'] for turn in turns])
         self.assertEqual(len(self.trace.of('continuation_kept')), 3)
         self.assertEqual(self.trace.of('claude_invocation')[-1]['profile'], PROFILE)
-        self.assertEqual(PROFILE, 'claude-stream-json-v9')
+        self.assertEqual(PROFILE, 'claude-stream-json-v10')
 
     def test_a_changed_history_or_nothing_new_starts_a_new_process(self):
         context = self.answered()

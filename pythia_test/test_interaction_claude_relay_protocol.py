@@ -105,16 +105,17 @@ NATIVE_PATCH = ('+    self.assertIn("lines 1\u201311;", pointer)\n'
 TOOL_START = {'type': 'tool_use', 'id': 'toolu_x', 'name': 'mcp__pythia__echo', 'input': {}, 'caller': {'type': 'direct'}}
 
 
-def rewrite_records(snapshot_input, *, fragment=7):
+def rewrite_records(snapshot_input, *, fragment=7, streamed=None):
     """The failing message's observed shape: thinking, text, then a tool block
-    streamed in many fragments, each block followed by the CLI's snapshot."""
-    raw = json.dumps({'patch': STREAMED_PATCH})
+    streamed in many fragments, each block followed by the CLI's snapshot (none
+    of the tool block for ``snapshot_input=None``)."""
+    raw = json.dumps({'patch': STREAMED_PATCH} if streamed is None else streamed)
     return [*observed_records()[:-2],
             stream_event('content_block_start', index=2, content_block=TOOL_START),
             *(stream_event('content_block_delta', index=2,
                            delta={'type': 'input_json_delta', 'partial_json': raw[start:start + fragment]})
               for start in range(0, len(raw), fragment)),
-            snapshot([{**TOOL_START, 'input': snapshot_input}]),
+            *(() if snapshot_input is None else (snapshot([{**TOOL_START, 'input': snapshot_input}]),)),
             stream_event('content_block_stop', index=2),
             stream_event('message_delta', delta={'stop_reason': 'tool_use'},
                          usage={'input_tokens': 468, 'output_tokens': 546}),
@@ -243,20 +244,31 @@ class NativeStreamTests(unittest.TestCase):
 
 class NativeInputRewriteTests(unittest.TestCase):
     def test_the_rule_decodes_unicode_escapes_after_an_odd_backslash_run(self):
+        # All observed on 2.1.289, in traces or the live probe (October 24).
         cases = {
-            'lines 1\\u201311': 'lines 1\u201311',  # observed: one backslash
-            '\\\\u2013': '\\\\u2013',  # observed: two, an escaped backslash
-            '\\\\\\\\u2013': '\\\\\\\\u2013',  # observed: four
-            '\\ufeffone\\r\\ntwo': '\ufeffone\\r\\ntwo',  # observed: lowercase hex; \r and \n stay text
+            'lines 1\\u201311': 'lines 1\u201311',  # one backslash
             '\\\\\\u2013': '\\\\\u2013',  # three: an escaped backslash, then an escape
-            '\\uFEFF': '\ufeff',
-            '\\ud83d\\ude00': '\U0001F600',  # decoded surrogate halves pair up
-            '\\ud83d': '\ud83d',
-            '\\u201 \\u20G3 \\U0001F600 \\x41 u2013': '\\u201 \\u20G3 \\U0001F600 \\x41 u2013',
+            '\\\\\\\\\\u2013': '\\\\\\\\\u2013',  # five
+            '\\ufeffone\\r\\ntwo': '\ufeffone\\r\\ntwo',  # \r and \n stay text
+            '\\uFEFF \\u00E9 \\u00eA': '\ufeff \u00e9 \u00ea',  # either hex case
+            '\\u0022\\u0027\\u005c \\u0041 \\u00a0 \\ufffe': '"\'\\ A \u00a0 \ufffe',  # ASCII, U+00A0, noncharacters
+            '\\u005cu2013': '\\u2013',  # one pass: a decoded backslash starts no escape
+            '\\ud83d\\ude00 \\uD83D\\uDE00': '\U0001F600 \U0001F600',  # a valid pair is one character
+            '\\ud83d\\ud83d\\ude00': '\\ud83d\U0001F600',  # a lone high, then a pair
+            '\\u2013\\udc00 \\u001b\\udc00': '\u2013\\udc00 \\u001b\\udc00',  # a low after any other escape is lone
         }
         for streamed, native in cases.items():
             with self.subTest(streamed=streamed):
                 self.assertEqual(native_input_rewrite(streamed), native)
+        for kept in (
+            '\\\\u2013', '\\\\\\\\u2013', '\\\\\\\\\\\\u2013',  # even runs: escaped backslashes
+            # Controls and lone surrogates stay as written, in either case.
+            '\\u0000 \\u0009 \\u000a \\u000d \\u001B \\u001f \\u007f \\u0080 \\u0085 \\u009B \\u009f',
+            '\\ud83d x \\ude00 \\ude00\\ud83d \\ude00\\ude00 \\uDC80',
+            '\\u201 \\u20G3 \\U0001F600 \\U2013 \\x41 u2013',  # not escapes
+        ):
+            with self.subTest(kept=kept):
+                self.assertIs(native_input_rewrite(kept), kept)
         value = {'cmd': 'a\\u2013', 'plan': [{'step': 'b\\u2013', 'status': 'pending'}], 'k\\u2013': 1, 'yes': True}
         self.assertEqual(native_input_rewrite(value), {'cmd': 'a\u2013', 'plan': [{'step': 'b\u2013', 'status': 'pending'}],
                                                        'k\\u2013': 1, 'yes': True})  # keys are left alone
@@ -270,10 +282,41 @@ class NativeInputRewriteTests(unittest.TestCase):
                 self.assertEqual(message.rewritten_tool_ids, ('toolu_x',))
                 self.assertEqual(calls, [('toolu_x', 'echo', {'patch': STREAMED_PATCH})])
                 self.assertEqual(json.loads(items[-1].arguments_json), {'patch': STREAMED_PATCH})
-        # A copy as streamed is accepted too; the CLI's history is still not trusted.
-        message, (_, calls) = outcome(rewrite_records({'patch': STREAMED_PATCH}))
-        self.assertEqual((message.rewritten_tool_ids, calls[0][2]), (('toolu_x',), {'patch': STREAMED_PATCH}))
         self.assertEqual(outcome(observed_records())[0].rewritten_tool_ids, ())
+
+    def test_controls_and_lone_surrogates_stay_as_written_in_the_copies(self):
+        # The shape of the October 23 and 24 failures, synthetic contents: the
+        # CLI decodes the bidi escape and the pair, and keeps the others.
+        streamed = {'cmd': 'print({"csi": "\\u009b31m", "nel": "a\\u0085b", "rlo": "f\\u202eg", '
+                           '"lone": ["\\ud800", "\\udc80"], "pair": "\\ud83d\\ude00", "esc": "\\u001b[0m"})'}
+        copy = {'cmd': 'print({"csi": "\\u009b31m", "nel": "a\\u0085b", "rlo": "f\u202eg", '
+                       '"lone": ["\\ud800", "\\udc80"], "pair": "\U0001F600", "esc": "\\u001b[0m"})'}
+        message, (items, calls) = outcome(rewrite_records(copy, streamed=streamed))
+        self.assertEqual(message.rewritten_tool_ids, ('toolu_x',))
+        self.assertEqual(calls, [('toolu_x', 'echo', streamed)])
+        self.assertEqual(json.loads(items[-1].arguments_json), streamed)
+
+    def test_a_call_is_rewritten_only_when_the_cli_s_copies_show_it(self):
+        # A copy as streamed (2.1.289 kept a whole string at times) is the CLI's
+        # history: no rewrite, so the warm process goes on.
+        for snapshot_input, rewritten in (({'patch': STREAMED_PATCH}, ()), ({'patch': NATIVE_PATCH}, ('toolu_x',)),
+                                          (None, ('toolu_x',))):  # no copy: the rule decides
+            with self.subTest(rewritten=rewritten, snapshot=snapshot_input is not None):
+                message, (_, calls) = outcome(rewrite_records(snapshot_input))
+                self.assertEqual((message.rewritten_tool_ids, calls[0][2]), (rewritten, {'patch': STREAMED_PATCH}))
+        # A complete record decides as a block snapshot does.
+        usage = {'input_tokens': 468, 'output_tokens': 546}
+        for copy, rewritten in ((STREAMED_PATCH, ()), (NATIVE_PATCH, ('toolu_x',))):
+            with self.subTest(complete=rewritten):
+                records = rewrite_records(None)
+                records.insert(-1, snapshot([THINKING, TEXT, {**TOOL_START, 'input': {'patch': copy}}],
+                                            reason='tool_use', usage=usage))
+                self.assertEqual(feed_all(Assembler(), records).rewritten_tool_ids, rewritten)
+        # Once judged as streamed, a later record can't show the rewrite.
+        assembler = Assembler()
+        self.assertEqual(feed_all(assembler, rewrite_records({'patch': STREAMED_PATCH})).rewritten_tool_ids, ())
+        with self.assertRaisesRegex(ModelResponseError, 'snapshot disagrees'):
+            assembler.feed(snapshot([{**TOOL_START, 'input': {'patch': NATIVE_PATCH}}]))
 
     def test_any_other_difference_fails_naming_the_call_and_where_it_differs(self):
         prefix = ('Native CLI rewrote tool call toolu_x (mcp__pythia__echo) beyond its known \\uXXXX decoding, '

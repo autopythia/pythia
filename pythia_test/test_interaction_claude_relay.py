@@ -24,7 +24,7 @@ from pythia.interaction.environment import ToolSpec
 from pythia.interaction.items import Instructions, Message, ToolCall, ToolResult, Tools, SampleMetadata, ModelSampleBoundary, ContextPrefix
 from pythia.interaction.loop import TurnHost, run_turn
 from pythia.interaction.model import ModelError, ModelConfigurationError, RetryState, SampleParams, TokenUsage
-from pythia.interaction.claude_relay._cli_protocol import Assembler, decode
+from pythia.interaction.claude_relay._cli_protocol import Assembler, NativeToolInputRewritten, decode
 from pythia.interaction.claude_relay._context import Snapshot
 from pythia.interaction.claude_relay._mcp import Mailbox, MCPServer, NativeToolRejected
 from pythia.interaction.claude_relay._runtime import PREAMBLE, Runtime, system_prompt
@@ -173,7 +173,8 @@ class MailboxTests(unittest.TestCase):
                                 emit=lambda kind, **fields: events.append((kind, fields)))
         box = Mailbox(TOOLS, wait_seconds=2, trace=trace)
         streamed = {'value': 1, 'note': STREAMED_NOTE}
-        box.register([('a', 'echo', streamed), ('b', 'echo', streamed), ('c', 'echo', {'value': 2})])
+        box.register([('a', 'echo', streamed), ('b', 'echo', streamed), ('c', 'echo', {'value': 2})],
+                     rewritten=('a', 'b', 'c'))  # as the CLI's snapshots showed them
         self.assertIsNone(box.slots['c']['native_args'])  # nothing to rewrite
         box.release({'a': ('one', True), 'b': ('two', True), 'c': ('three', True)})
         self.assertEqual(box.call('a', 'echo', {'value': 1, 'note': NATIVE_NOTE})['content'][0]['text'], 'one')
@@ -182,13 +183,19 @@ class MailboxTests(unittest.TestCase):
         claims = [(fields['native_tool_use_id'], fields.get('native_input_rewrite'))
                   for kind, fields in events if kind == 'mailbox_claim']
         self.assertEqual(claims, [('a', True), ('b', None), ('c', None)])
+        # A call whose snapshots showed no rewrite must come as streamed.
+        box = Mailbox(TOOLS, wait_seconds=2)
+        box.register([('a', 'echo', streamed)])
+        self.assertIsNone(box.slots['a']['native_args'])
+        with self.assertRaises(NativeToolInputRewritten):
+            box.call('a', 'echo', {'value': 1, 'note': NATIVE_NOTE})
         prefix = 'Native CLI rewrote tool call a (echo) beyond its known \\uXXXX decoding, in its MCP call: '
         for other, detail in (({'value': 1, 'note': NATIVE_NOTE.replace('\\\\u2013', '\\\u2013')},  # another rewrite
                                'argument note has a non-ASCII character at line 1, column 18, where a backslash '
                                'was expected (18 characters, 23 expected)'),
                               ({'value': 2, 'note': NATIVE_NOTE}, 'argument value is a different number')):
             box = Mailbox(TOOLS, wait_seconds=2)
-            box.register([('a', 'echo', streamed)])
+            box.register([('a', 'echo', streamed)], rewritten=('a',))
             with self.subTest(other=other), self.assertRaises(ModelError) as caught:
                 box.call('a', 'echo', other)
             self.assertEqual(str(caught.exception), prefix + detail)  # its calls may run as streamed
@@ -593,6 +600,22 @@ class ModelTests(unittest.TestCase):
         self.assertNotEqual(state['pid'], pid)
         self.assertEqual(state['history_call_arguments'], [{'value': 1, 'note': STREAMED_NOTE}])
         self.assertEqual(state['history_result_ids'], [call.call_id])
+
+    def test_a_call_the_cli_kept_as_streamed_keeps_the_warm_process(self):
+        # Its input holds an escape the rule decodes, but the CLI's copies kept
+        # it, so its history is the stream's: the turn goes on in the process.
+        context = InteractionContext((Instructions(''), Message('user', 'rewritten-tool-input-kept')))
+        sample = self.model.sample(context, tools=TOOLS)
+        [call] = sample.tool_calls
+        self.assertEqual(json.loads(call.arguments_json), {'value': 1, 'note': 'rlo \\u202e kept'})
+        self.assertIsNotNone(sample.results_due)  # the native clock applies
+        self.assertIsNotNone(self.model._runtime)
+        pid = self.fixture_state()['pid']
+        context.extend(sample.context_items())
+        context.append(ToolResult(call.call_id, 'done'))
+        final = self.model.sample(context, tools=TOOLS)
+        self.assertEqual(final.last_assistant_text, 'kept:done')
+        self.assertEqual(self.fixture_state()['pid'], pid)
 
     def test_a_rewrite_beyond_the_known_rule_fails_naming_the_call_and_where(self):
         with self.assertRaises(ModelError) as caught:

@@ -31,7 +31,10 @@ from ._diagnostics import identifier
 # completed (command_lifecycle), writes a system/init at each turn's start,
 # echoes the uuid on the turn's first reply, and numbers its results
 # (result_index). A record read while tool calls wait goes with their results.
-PROFILE = 'claude-stream-json-v9'
+# v10 adds, since v9: the rewrite's exceptions, control characters and lone
+# surrogates, which the CLI keeps as text; and a call counts as rewritten only
+# when a copy of it from the CLI shows the rewrite.
+PROFILE = 'claude-stream-json-v10'
 # CLI 2.1.289 gives up on an MCP tools/call MCP_TOOL_TIMEOUT milliseconds after
 # sending it, and answers the call itself (_recovery.native_timeout_texts).
 # Unset, it aborts the call's HTTP request after 60 s instead. The relay sets it
@@ -62,10 +65,13 @@ USAGE_FIELDS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cac
 # CLI 2.1.289 rewrites a streamed tool input before it records or calls it
 # (doc/claude-relay-tool-input-rewrite-plan.md): in each string, it decodes
 # literal \uXXXX text (once the JSON is decoded: a backslash, u, four hex
-# digits) into that character. A backslash that is itself escaped, an even run
-# before the u, is left alone, as is all other text, such as \n or \x41.
+# digits) into that character, and a high and a low surrogate escape side by
+# side into one character. It keeps a control character or a lone surrogate as
+# text, as written. A backslash that is itself escaped, an even run before the
+# u, is left alone, as is all other text, such as \n, \x41 or \U2013.
 NATIVE_INPUT_REWRITE = 'native_input_rewrite'  # its trace label
-_UNICODE_ESCAPE = re.compile(r'(?<!\\)((?:\\\\)*)\\u([0-9A-Fa-f]{4})')
+# An escape, and the low surrogate escape right after it, if any.
+_UNICODE_ESCAPE = re.compile(r'(?<!\\)((?:\\\\)*)\\u([0-9A-Fa-f]{4})(\\u[dD][c-fC-F][0-9A-Fa-f]{2})?')
 
 
 def normalized_stop_reason(value, *, allow_missing=False):
@@ -122,8 +128,9 @@ class NativeMessage:
     usage: TokenUsage
     stop_reason: str | None
     stop_details: dict | None = None  # a refusal's reason (NativeRefusal), as streamed
-    # Native IDs of the streamed tool blocks whose input native_input_rewrite
-    # changes: the CLI's copies of them, and so its history, differ from these.
+    # Native IDs of the streamed tool blocks that the CLI's copies show with
+    # their input rewritten (native_input_rewrite), so its history differs from
+    # these; or, with no copy of a block, whose input the rule would rewrite.
     rewritten_tool_ids: tuple = ()
 
     def sample_items(self, generation, names):
@@ -216,21 +223,20 @@ def native_input_rewrite(value):
     """A streamed tool input as CLI 2.1.289 records it, in its block snapshot,
     its MCP call and presumably its own history; the model streamed ``value``.
 
-    Traced on 6 of 2,864 calls: each copy matched this rule exactly, and no
-    call showed any other difference. Seen: one backslash (decoded), two and
-    four (left alone), lowercase hex, top-level strings. Uppercase hex, longer
-    odd runs, nested strings and surrogate pairs (joined, as UTF-16 strings
-    are) follow the same reading, unobserved; where the CLI differs, the
-    comparison still fails closed. Keys and non-strings are left alone.
-    Returns ``value`` itself when nothing changes.
+    Pinned by traces and a live probe (doc/claude-relay-tool-input-rewrite-plan.md):
+    an escape decodes after an odd run of backslashes (1, 3 and 5 seen; 2, 4
+    and 6 left alone), in either hex case, in nested strings too, one pass
+    only; a valid surrogate pair decodes to one character. A control
+    character (U+0000 to U+001F, U+007F to U+009F) or a lone surrogate stays
+    as written. Keys and non-strings are left alone. Where the CLI differs,
+    the comparison still fails closed. Returns ``value`` itself when nothing
+    changes.
     """
     if isinstance(value, str):
         if '\\u' not in value:
             return value
-        text = _UNICODE_ESCAPE.sub(lambda match: match[1] + chr(int(match[2], 16)), value)
-        if text == value:
-            return value
-        return text.encode('utf-16-le', 'surrogatepass').decode('utf-16-le', 'surrogatepass')
+        text = _UNICODE_ESCAPE.sub(_decoded_escape, value)
+        return value if text == value else text
     if isinstance(value, list):
         items = [native_input_rewrite(item) for item in value]
         return value if all(new is old for new, old in zip(items, value)) else items
@@ -238,6 +244,18 @@ def native_input_rewrite(value):
         items = {key: native_input_rewrite(item) for key, item in value.items()}
         return value if all(items[key] is item for key, item in value.items()) else items
     return value
+
+
+def _decoded_escape(match):
+    """One escape (and the low surrogate escape right after it, if any) as CLI
+    2.1.289 rewrites it."""
+    backslashes, code, low = match[1], int(match[2], 16), match[3]
+    if low and 0xD800 <= code <= 0xDBFF:  # a valid pair: one character
+        return backslashes + chr(0x10000 + ((code - 0xD800) << 10) + (int(low[2:], 16) - 0xDC00))
+    escape = match[0][:len(match[0]) - len(low or '')]
+    kept = code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF
+    # A low surrogate escape after anything but a high one is lone: kept.
+    return (escape if kept else backslashes + chr(code)) + (low or '')
 
 
 def native_view(block):
@@ -601,18 +619,21 @@ class Assembler:
             # The CLI's records may show its rewrite of tool input. Only that
             # difference is accepted, and only the streamed blocks are adopted.
             views = [native_view(block) for block in blocks]
-            rewritten = tuple(block.get('id') for block, view in zip(blocks, views) if view is not block)
-            native = block_fingerprints(views) if rewritten else complete
-            accepted = set(complete) | set(native)
+            predicted = (block_fingerprints(views) if any(view is not block for block, view in zip(blocks, views))
+                         else complete)
+            accepted = set(complete) | set(predicted)
+            shown = set()  # the blocks as the CLI's own copies of this message show them
             for parts, hint_reason, hint_usage, copies in self.hints:
                 if hint_reason is None:
-                    if not shadow_matches(parts, complete, native):
+                    if not shadow_matches(parts, complete, predicted):
                         raise copy_mismatch(parts, copies, blocks, accepted, 'snapshot',
                                             'Native assistant snapshot disagrees with its stream')
+                    shown.update(parts)
                     continue
-                if parts not in (complete, native):
+                if parts not in (complete, predicted):
                     raise copy_mismatch(parts, copies, blocks, accepted, 'complete record',
                                         'Streamed and completed native content disagree')
+                shown.update(parts)
                 if self.stop_reason is not None and hint_reason != self.stop_reason:
                     raise ModelResponseError('Streamed and completed stop reasons disagree')
                 self.stop_reason = hint_reason
@@ -622,6 +643,13 @@ class Assembler:
                     self.usage[key] = value
             if 'output_tokens' not in self.usage:
                 raise ModelResponseError('Native stream lacks final output usage')
+            # A call counts as rewritten when a copy of it from the CLI shows
+            # the rewrite, or when none shows it as streamed (with no copy, the
+            # rule decides). Only a rewritten call may show it in later records.
+            views = [view if view is not block and (rule in shown or plain not in shown) else block
+                     for block, view, plain, rule in zip(blocks, views, complete, predicted)]
+            rewritten = tuple(block.get('id') for block, view in zip(blocks, views) if view is not block)
+            native = block_fingerprints(views) if rewritten else complete
             result = self.emit(self.current, blocks, self.usage, self.stop_reason,
                                stop_details=self.stop_details, streamed=True, native=native, rewritten=rewritten)
             self.current = None
