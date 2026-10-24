@@ -1199,6 +1199,59 @@ class MessagesModelTests(unittest.TestCase):
         self.assertEqual((failure.category, failure.message, failure.error_code),
                          ("rate_limit", "Messages HTTP 429: quota exceeded", "insufficient_quota"))
 
+    def test_without_a_body_the_status_line_s_text_is_kept_to_4096_characters(self):
+        # A server's status line can be long; the error shows it on every
+        # attempt of a long rate-limit retry.
+        reason = "Too Many Requests " * 1000
+        model = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=_ScriptedOpener(*(urllib.error.HTTPError(
+                "https://api.anthropic.com/v1/messages", 429, reason, {}, io.BytesIO(b""))
+                for _ in range(3))),
+            retry_sleep=lambda seconds: None,
+        )
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+        self.assertEqual(str(raised.exception),
+                         "Messages HTTP 429: " + ("HTTP Error 429: " + reason)[:4096])
+
+    def test_an_unexpected_value_is_quoted_in_at_most_80_characters(self):
+        for payload, prefix in (
+            ({"type": "message", "role": "assistant", "stop_reason": "end_turn",
+              "content": [{"type": "x" * 10_000}]}, "unsupported message.content[0] type: "),
+            ({"type": {"nested": ["y" * 10_000]}}, "Messages response has unsupported type: "),
+            ({"type": "message", "role": "\x1b[2J" * 5_000},
+             "Messages response has unsupported role: "),
+        ):
+            with self.subTest(prefix=prefix):
+                model = MessagesModel(
+                    _endpoint(api_url="https://api.anthropic.com", model="model"),
+                    opener=_ScriptedOpener(_FakeResponse(payload)),
+                )
+                with self.assertRaises(ModelResponseError) as raised:
+                    model.sample(InteractionContext((Message("user", "hello"),)))
+                text = str(raised.exception)
+                self.assertTrue(text.startswith(prefix), text)
+                self.assertEqual(len(text), len(prefix) + 80)
+                self.assertTrue(text.endswith("..."), text)
+                self.assertNotIn("\x1b", text)  # repr shows controls as escapes
+
+    def test_a_lone_surrogate_in_a_response_becomes_the_replacement_character(self):
+        # As a server that decodes bad bytes with surrogateescape may send it:
+        # UTF-8 can't encode one, so the save would fail.
+        body = (b'{"type": "message", "role": "assistant", "stop_reason": "tool_use",'
+                b' "content": [{"type": "text", "text": "ok \\udc80"},'
+                b' {"type": "tool_use", "id": "toolu_a", "name": "probe",'
+                b' "input": {"cmd": "echo \\ud800"}}],'
+                b' "usage": {"input_tokens": 2, "output_tokens": 1}}')
+        sample = MessagesModel(
+            _endpoint(api_url="https://api.anthropic.com", model="model"),
+            opener=_ScriptedOpener(_FakeResponse(body)),
+        ).sample(InteractionContext((Message("user", "hello"),)))
+        message, call = sample.items
+        self.assertEqual(message, Message("assistant", "ok \ufffd"))
+        self.assertEqual(json.loads(call.arguments_json), {"cmd": "echo \ufffd"})
+
 
 class ReasoningSignatureTests(unittest.TestCase):
     def test_signature_is_validated_and_redacted(self):

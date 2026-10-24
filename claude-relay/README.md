@@ -87,6 +87,12 @@ by these short tests.
   `native_tool_input_rewritten`), naming the call and where the CLI's copy
   differs: argument, line, column and kind of character, never the text. See the
   [tool-input rewrite notes](../doc/claude-relay-tool-input-rewrite-plan.md).
+- Lone surrogates: a JSON `\udXXX` escape can name half of a UTF-16 pair
+  alone, which UTF-8 can't encode, so a save holding one would fail. The relay
+  replaces each one with U+FFFD in the items it builds (text, thinking and
+  tool input), as the HTTP adapters do, and the host runs the repaired input.
+  The CLI's copies and its MCP call are still compared with the input as
+  streamed. A native tool ID holding one is malformed.
 - Native `stream_event/ping` keepalives are no-ops. Early MCP callbacks get a
   registration grace derived from the existing generation timeout instead of a
   separate ten-second cap; full-message validation still precedes tool execution.

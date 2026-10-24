@@ -18,6 +18,9 @@ DEFAULT_MAX_TRANSIENT_RETRIES = 2
 INITIAL_RETRY_DELAY_SECONDS = 0.25
 MAX_BACKOFF_DELAY_SECONDS = 2.0
 MAX_RETRY_AFTER_SECONDS = 60.0
+# A Retry-After over a year counts as malformed, as a negative delta does: no
+# limit lasts that long, and a delay that size can't be waited out or shown.
+MAX_PLAUSIBLE_RETRY_AFTER_SECONDS = 366 * 86400.0
 # The error codes or types of a 429 that names an exhausted quota or plan
 # (OpenAI's insufficient_quota; Codex's usage_limit_reached and
 # usage_not_included, which last until the plan resets). The turn loop retries
@@ -62,7 +65,8 @@ def retry_after_seconds(
     """Decode a Retry-After delta or HTTP date; malformed means absent.
 
     The result is at most ``cap`` (an adapter's own wait); ``cap=None`` keeps
-    the provider's whole delay, as a rate limit's error reports it.
+    the provider's whole delay, as a rate limit's error reports it. A delay
+    over MAX_PLAUSIBLE_RETRY_AFTER_SECONDS (a year) is malformed too.
     """
     value = _header_value(headers, "Retry-After")
     if value is None:
@@ -80,7 +84,7 @@ def retry_after_seconds(
             parsed_date = True
         except (TypeError, ValueError, OverflowError, OSError):
             return None
-    if not math.isfinite(delay):
+    if not math.isfinite(delay) or delay > MAX_PLAUSIBLE_RETRY_AFTER_SECONDS:
         return None
     if delay < 0:
         return 0.0 if parsed_date else None
@@ -143,6 +147,7 @@ __all__ = [
     "DEFAULT_MAX_TRANSIENT_RETRIES",
     "INITIAL_RETRY_DELAY_SECONDS",
     "MAX_BACKOFF_DELAY_SECONDS",
+    "MAX_PLAUSIBLE_RETRY_AFTER_SECONDS",
     "MAX_RETRY_AFTER_SECONDS",
     "QUOTA_ERROR_CODES",
     "body_error_codes",

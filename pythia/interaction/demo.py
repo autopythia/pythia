@@ -11,9 +11,11 @@ from typing import Sequence
 from typing import Union
 import warnings
 
+from ._cli_editor import safe_text
 from .compaction import coldstart_unavailable
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
+from .display import DisplayItem
 from .display import render_interaction_items
 from .environment import Environment
 from .experimental_tools import create_inject_user_message_tool
@@ -69,6 +71,13 @@ EXPERIMENTAL_USER_MESSAGE_PROMPT = (
 )
 
 
+def _show(item: DisplayItem) -> None:
+    """Print a display item, its content's controls made visible first, as the
+    CLI and auto print theirs (safe_text): model and provider text must not
+    drive the terminal."""
+    print(DisplayItem(safe_text(item.text), is_diff=item.is_diff))
+
+
 class _DemoHost(TurnHost):
     """The demo's side of the shared loop: save after each change, print items."""
 
@@ -85,7 +94,7 @@ class _DemoHost(TurnHost):
 
     def show(self, items):
         for item in items:
-            print(item)
+            _show(item)
 
 
 def _accept_old_keywords(run):
@@ -232,7 +241,7 @@ def run(
 
         # Restore the human-visible transcript as well as the model state.
         for display_item in render_interaction_items(context.items):
-            print(display_item)
+            _show(display_item)
         if incomplete_line is not None:
             # The startup save below truncates the line.
             print(incomplete_line.warning(Path(save_path).name), file=sys.stderr)
@@ -283,15 +292,15 @@ def run(
         context.extend(result.context_items())
         _persist()
         for display_item in result.display_items(source_calls=pending_calls):
-            print(display_item)
+            _show(display_item)
     if tools_snapshot != context.latest_tools():
         context.append(tools_snapshot)
         _persist()
         for display_item in render_interaction_items((tools_snapshot,)):
-            print(display_item)
+            _show(display_item)
     elif not resumed_existing_save:
         for display_item in render_interaction_items((tools_snapshot,)):
-            print(display_item)
+            _show(display_item)
 
     if (
         not pending_calls and resumed_existing_save
@@ -308,7 +317,7 @@ def run(
         context.extend((instructions_item,))
         _persist()
         for display_item in render_interaction_items((instructions_item,)):
-            print(display_item)
+            _show(display_item)
 
     if prompt is not None:
         # For a resumed save, add the follow-up only after any pending
@@ -325,7 +334,7 @@ def run(
         context.extend(user_interaction.context_items())
         _persist()
         for display_item in user_interaction.display_items():
-            print(display_item)
+            _show(display_item)
 
     result = run_turn(context, model, environment, turn_config,
                       _DemoHost(_persist, None if save_path is None else Path(save_path)),
@@ -443,7 +452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 compaction_pi_max_output_tokens=config.compaction_pi_max_output_tokens,
             )
     except Exception as exc:
-        print(f"demo failed: {exc}", file=sys.stderr)
+        print(safe_text(f"demo failed: {exc}"), file=sys.stderr)
         return 1
 
     return 0

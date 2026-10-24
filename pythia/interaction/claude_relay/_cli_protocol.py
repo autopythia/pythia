@@ -18,6 +18,7 @@ import re
 from ..items import Message, Reasoning, ToolCall
 from ..model import ModelRefusal, ModelResponseError, ModelTransportError, RetryState
 from ..model_catalog import parse_json_value
+from .._provider_text import repaired_json, repaired_text
 from ..usage import TokenUsage
 from ._diagnostics import identifier
 
@@ -139,6 +140,12 @@ class NativeMessage:
         if not has_tools and reason == 'tool_use':
             raise ModelResponseError('Native tool stop has no tool calls')
         items, calls = [], []
+        # The items are saved, so a lone surrogate in what the model streamed
+        # becomes U+FFFD there (_provider_text), as in the HTTP adapters, and
+        # the host runs a call with its repaired input. The calls keep the
+        # model's own input, which the CLI's MCP call must match. A native ID
+        # can't be repaired, since it names the call to the CLI: one with a
+        # lone surrogate is malformed.
         for block in self.blocks:
             kind = block.get('type')
             if kind == 'text':
@@ -146,19 +153,21 @@ class NativeMessage:
                 if not isinstance(text, str):
                     raise ModelResponseError('Invalid native text block')
                 if text:
-                    items.append(Message('assistant', text))
+                    items.append(Message('assistant', repaired_text(text)))
             elif kind == 'thinking':
                 text = block.get('thinking')
                 if not isinstance(text, str):
                     raise ModelResponseError('Invalid native thinking block')
                 if text:
-                    items.append(Reasoning(text))
+                    items.append(Reasoning(repaired_text(text)))
             elif kind == 'tool_use':
                 native_id, name, args = block.get('id'), block.get('name'), block.get('input')
                 if (not isinstance(native_id, str) or not 0 < len(native_id) <= 256
-                        or any(ord(c) < 32 for c in native_id) or name not in names or not isinstance(args, dict)):
+                        or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in native_id)
+                        or name not in names or not isinstance(args, dict)):
                     raise ModelResponseError('Unknown/built-in or malformed native tool use')
-                encoded = json.dumps(args, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(',', ':'))
+                encoded = json.dumps(repaired_json(args), ensure_ascii=False, sort_keys=True,
+                                     allow_nan=False, separators=(',', ':'))
                 items.append(ToolCall(names[name], generation + ':' + native_id, encoded))
                 calls.append((native_id, names[name], args))
             else:
@@ -542,7 +551,9 @@ class Assembler:
                             or not isinstance(block.get(field, ''), str)):
                         raise ModelResponseError('Invalid streamed delta')
                     block[field] = block.get(field, '') + delta[wire_key]
-                    self.size += len(delta[wire_key].encode('utf-8'))
+                    # surrogatepass: a lone surrogate counts, and sample_items
+                    # repairs it (_provider_text), instead of failing the record.
+                    self.size += len(delta[wire_key].encode('utf-8', 'surrogatepass'))
                     if len(block[field]) > MAX_RECORD:
                         raise ModelResponseError('Native block exceeds limit')
                 elif delta.get('type') == 'signature_delta':

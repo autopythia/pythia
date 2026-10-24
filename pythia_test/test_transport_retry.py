@@ -6,6 +6,7 @@ from email.utils import format_datetime
 import unittest
 
 from pythia.interaction._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
+from pythia.interaction._transport_retry import MAX_PLAUSIBLE_RETRY_AFTER_SECONDS
 from pythia.interaction._transport_retry import MAX_RETRY_AFTER_SECONDS
 from pythia.interaction._transport_retry import QUOTA_ERROR_CODES
 from pythia.interaction._transport_retry import body_error_codes
@@ -79,6 +80,18 @@ class TransportRetryPolicyTests(unittest.TestCase):
         self.assertIsNone(retry_after_seconds({"Retry-After": "soon"}, cap=None))
         self.assertIsNone(retry_after_seconds({}, cap=None))
         self.assertIsNone(retry_after_seconds(None, cap=None))
+        # Over a year counts as malformed, as a negative delta does, delta or
+        # date: no limit lasts that long, and such a delay can't be waited out.
+        year = MAX_PLAUSIBLE_RETRY_AFTER_SECONDS
+        self.assertEqual(year, 366 * 86400)
+        self.assertEqual(retry_after_seconds({"Retry-After": str(int(year))}, cap=None), year)
+        now = 1_800_000_000.0
+        for value in (str(int(year) + 1), "1e300", format_datetime(
+                datetime.fromtimestamp(now + year + 86400, timezone.utc), usegmt=True)):
+            with self.subTest(value=value):
+                self.assertIsNone(retry_after_seconds({"Retry-After": value}, cap=None,
+                                                      now_seconds=now))
+                self.assertIsNone(retry_after_seconds({"Retry-After": value}, now_seconds=now))
 
 
 class RateLimitClassificationTests(unittest.TestCase):

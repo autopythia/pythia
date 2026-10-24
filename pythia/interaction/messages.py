@@ -19,6 +19,8 @@ from typing import Optional
 from typing import Tuple
 
 from ._http import USER_AGENT
+from ._provider_text import loads_json
+from ._provider_text import quoted
 from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
@@ -73,6 +75,10 @@ MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
 _RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 409, 425, 429, 500, 502, 503, 504, 529}
 )
+# An error body, or the status line's text in its place, is kept to this
+# many characters: the error shows it, on every attempt of a long rate-limit
+# retry too. The debug trace keeps the whole body.
+_MAX_ERROR_DETAIL_CHARS = 4096
 
 
 def resolve_messages_max_output_tokens(
@@ -655,7 +661,7 @@ def _decode_content(value: Any) -> Tuple[InteractionItem, ...]:
             )
             continue
         raise ModelResponseError(
-            f"unsupported message.content[{index}] type: {block_type!r}"
+            f"unsupported message.content[{index}] type: {quoted(block_type)}"
         )
     return tuple(items)
 
@@ -768,11 +774,11 @@ def _decode_response(payload: Any) -> ModelSample:
         raise ModelResponseError("Messages response must be an object")
     if payload.get("type") != "message":
         raise ModelResponseError(
-            f"Messages response has unsupported type: {payload.get('type')!r}"
+            f"Messages response has unsupported type: {quoted(payload.get('type'))}"
         )
     if payload.get("role") != "assistant":
         raise ModelResponseError(
-            f"Messages response has unsupported role: {payload.get('role')!r}"
+            f"Messages response has unsupported role: {quoted(payload.get('role'))}"
         )
     stop_reason = (
         None
@@ -798,7 +804,7 @@ def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
         return ""
     if not isinstance(payload, (bytes, bytearray)):
         return ""
-    return bytes(payload).decode("utf-8", errors="replace")[:4096]
+    return bytes(payload).decode("utf-8", errors="replace")[:_MAX_ERROR_DETAIL_CHARS]
 
 
 def _is_context_window_error(text: str) -> bool:
@@ -1104,7 +1110,8 @@ class MessagesModel:
                         timeout=timeout_seconds,
                     )
                 except urllib.error.HTTPError as exc:
-                    detail = _read_http_error_body(exc) or str(exc)
+                    # Without a body, the status line's text, which can be long.
+                    detail = (_read_http_error_body(exc) or str(exc))[:_MAX_ERROR_DETAIL_CHARS]
                     status = exc.code
                     response_headers = exc.headers
                     exc.close()
@@ -1133,7 +1140,7 @@ class MessagesModel:
                 if not isinstance(raw, (bytes, bytearray)):
                     raise ModelResponseError("HTTP response body must be bytes")
                 if isinstance(status, int) and not 200 <= status < 300:
-                    detail = bytes(raw).decode("utf-8", errors="replace")[:4096]
+                    detail = bytes(raw).decode("utf-8", errors="replace")[:_MAX_ERROR_DETAIL_CHARS]
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
                         and (status == 429 or not _is_context_window_error(detail))
@@ -1159,7 +1166,8 @@ class MessagesModel:
                 except UnicodeDecodeError as exc:
                     raise ModelResponseError("response is not UTF-8 JSON") from exc
                 try:
-                    decoded = json.loads(text)
+                    # Lone surrogates become U+FFFD: UTF-8 can't save them.
+                    decoded = loads_json(text)
                 except json.JSONDecodeError as exc:
                     raise ModelResponseError("response is not valid JSON") from exc
                 try:

@@ -6,7 +6,10 @@ from unittest import mock
 from pythia.interaction.claude_relay._cli_protocol import Assembler, MAX_CONSECUTIVE_INTERRUPTIONS
 from pythia.interaction.claude_relay._cli_protocol import NativeRefusal, NativeStreamInterrupted, native_input_rewrite
 from pythia.interaction.claude_relay._cli_protocol import NativeToolInputRewritten, block_difference, input_difference
+from pythia.interaction.claude_relay._mcp import Mailbox
 from pythia.interaction.claude_relay._runtime import Runtime
+from pythia.interaction.environment import ToolSpec
+from pythia.interaction.items import Message, Reasoning, ToolCall
 from pythia.interaction.model import ModelRefusal, ModelResponseError
 
 
@@ -347,6 +350,58 @@ class NativeInputRewriteTests(unittest.TestCase):
         records[-2] = snapshot([THINKING, TEXT, wrong], reason='tool_use', usage=usage)
         with self.assertRaisesRegex(NativeToolInputRewritten, 'in its complete record: argument patch has whitespace'):
             feed_all(Assembler(), records)
+
+
+def surrogate_records(tool_id='toolu_x'):
+    """A message whose thinking, text and tool input hold lone surrogates, as
+    JSON escapes decode them (\\udc80): the stream's and the CLI's copies agree."""
+    thinking = {**THINKING, 'thinking': 'think \ud800'}
+    tool = {**TOOL_START, 'id': tool_id}
+    return [
+        stream_event('message_start', message={'id': 'm', 'usage': {'input_tokens': 468, 'output_tokens': 4}}),
+        stream_event('content_block_start', index=0, content_block={'type': 'thinking', 'thinking': ''}),
+        stream_event('content_block_delta', index=0, delta={'type': 'thinking_delta', 'thinking': 'think \ud800'}),
+        stream_event('content_block_delta', index=0, delta={'type': 'signature_delta', 'signature': THINKING['signature']}),
+        snapshot([thinking]),
+        stream_event('content_block_stop', index=0),
+        stream_event('content_block_start', index=1, content_block={'type': 'text', 'text': ''}),
+        stream_event('content_block_delta', index=1, delta={'type': 'text_delta', 'text': 'ok \udc80'}),
+        snapshot([{'type': 'text', 'text': 'ok \udc80'}]),
+        stream_event('content_block_stop', index=1),
+        stream_event('content_block_start', index=2, content_block=tool),
+        stream_event('content_block_delta', index=2,
+                     delta={'type': 'input_json_delta', 'partial_json': '{"cmd": "echo \\udc80"}'}),
+        snapshot([{**tool, 'input': {'cmd': 'echo \udc80'}}]),
+        stream_event('content_block_stop', index=2),
+        stream_event('message_delta', delta={'stop_reason': 'tool_use'}, usage={'input_tokens': 468, 'output_tokens': 546}),
+        stream_event('message_stop'),
+    ]
+
+
+class LoneSurrogateTests(unittest.TestCase):
+    """A lone surrogate can't be saved (UTF-8 can't encode one): the saved items
+    hold U+FFFD instead, but the CLI's MCP call is matched with the stream."""
+
+    def test_the_items_are_repaired_and_the_calls_keep_the_streamed_input(self):
+        message, (items, calls) = outcome(surrogate_records())
+        self.assertEqual(items, (Reasoning('think \ufffd'), Message('assistant', 'ok \ufffd'),
+                                 ToolCall('echo', 'generation:toolu_x', '{"cmd":"echo \ufffd"}')))
+        self.assertEqual(calls, [('toolu_x', 'echo', {'cmd': 'echo \udc80'})])
+        # The CLI's MCP call carries the input as streamed, which matches the
+        # call; the repaired input would not (the host runs that one).
+        box = Mailbox((ToolSpec('echo', 'Return a value', {'type': 'object'}),), wait_seconds=2)
+        box.register(calls)
+        box.release({'toolu_x': ('done', True)})
+        self.assertEqual(box.call('toolu_x', 'echo', {'cmd': 'echo \udc80'})['content'][0]['text'], 'done')
+        box = Mailbox((ToolSpec('echo', 'Return a value', {'type': 'object'}),), wait_seconds=2)
+        box.register(calls)
+        with self.assertRaises(NativeToolInputRewritten):
+            box.call('toolu_x', 'echo', {'cmd': 'echo \ufffd'})
+
+    def test_a_native_tool_id_with_one_is_malformed(self):
+        # The ID names the call to the CLI, so it can't be repaired.
+        with self.assertRaisesRegex(ModelResponseError, 'malformed native tool use'):
+            outcome(surrogate_records(tool_id='toolu_\udc80'))
 
 
 class RefusalTests(unittest.TestCase):

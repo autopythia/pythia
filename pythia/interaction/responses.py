@@ -24,6 +24,8 @@ from typing import Optional
 from typing import Tuple
 
 from ._http import USER_AGENT
+from ._provider_text import loads_json
+from ._provider_text import quoted
 from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
@@ -590,7 +592,8 @@ def _parse_sse_payload(
     if data == "[DONE]":
         return None
     try:
-        payload = json.loads(data)
+        # Lone surrogates become U+FFFD: UTF-8 can't save them.
+        payload = loads_json(data)
     except json.JSONDecodeError as exc:
         raise ModelResponseError(
             f"Responses stream contains invalid JSON: {exc}"
@@ -692,7 +695,7 @@ def _decode_text_entries(
         entry_type = entry.get("type")
         if entry_type != expected_type:
             raise ModelResponseError(
-                f"unsupported {field_name}[{index}] type: {entry_type!r}"
+                f"unsupported {field_name}[{index}] type: {quoted(entry_type)}"
             )
         decoded.append(
             _require_output_string(
@@ -719,7 +722,7 @@ def _decode_message_content(value: Any) -> str:
             field_name = "refusal"
         else:
             raise ModelResponseError(
-                f"unsupported message.content[{index}] type: {entry_type!r}"
+                f"unsupported message.content[{index}] type: {quoted(entry_type)}"
             )
         decoded.append(
             _require_output_string(
@@ -754,7 +757,7 @@ def _decode_output_item(value: Any) -> InteractionItem:
         role = value.get("role")
         if role != "assistant":
             raise ModelResponseError(
-                f"Responses output message has unsupported role: {role!r}"
+                f"Responses output message has unsupported role: {quoted(role)}"
             )
         text = _decode_message_content(value.get("content"))
         return Message(role="assistant", content=text)
@@ -825,7 +828,7 @@ def _decode_output_item(value: Any) -> InteractionItem:
         )
 
     raise ModelResponseError(
-        f"unsupported Responses output item type: {item_type!r}"
+        f"unsupported Responses output item type: {quoted(item_type)}"
     )
 
 
@@ -981,7 +984,8 @@ def _http_auth_error_code(
     if encoded is not None and len(encoded) <= 4096:
         try:
             decoded = base64.b64decode(encoded, validate=True)
-            code = _error_code_from_json(json.loads(decoded))
+            # The code is saved: lone surrogates become U+FFFD.
+            code = _error_code_from_json(loads_json(decoded))
             if code is not None:
                 return code
         except Exception:
@@ -994,7 +998,8 @@ def _http_body_error_code(
     forbidden_values: Tuple[str, ...],
 ) -> Optional[str]:
     try:
-        code = _error_code_from_json(json.loads(detail))
+        # The code is saved: lone surrogates become U+FFFD.
+        code = _error_code_from_json(loads_json(detail))
         if code is not None and any(
             secret and secret in code for secret in forbidden_values
         ):

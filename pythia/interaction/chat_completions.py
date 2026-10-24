@@ -19,6 +19,7 @@ from typing import Optional
 from typing import Tuple
 
 from ._http import USER_AGENT
+from ._provider_text import loads_json
 from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
@@ -68,9 +69,10 @@ from .timeouts import validate_timeout_seconds
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-# An error body is kept to this many characters, as Messages keeps it: the
-# error shows it, on every attempt of a long rate-limit retry, and a proxy's
-# HTML error page can be long. The debug trace keeps the whole body.
+# An error body, or the status line's text in its place, is kept to this many
+# characters, as Messages keeps it: the error shows it, on every attempt of a
+# long rate-limit retry, and a proxy's HTML error page can be long. The debug
+# trace keeps the whole body.
 _MAX_ERROR_DETAIL_CHARS = 4096
 
 
@@ -732,7 +734,8 @@ class ChatCompletionsModel:
                     )
                 except urllib.error.HTTPError as exc:
                     body = _read_http_error_body(exc)
-                    detail = body or str(exc)
+                    # Without a body, the status line's text, which can be long.
+                    detail = (body or str(exc))[:_MAX_ERROR_DETAIL_CHARS]
                     status = exc.code
                     response_headers = exc.headers
                     exc.close()
@@ -788,7 +791,8 @@ class ChatCompletionsModel:
                 except UnicodeDecodeError as exc:
                     raise ModelResponseError("response is not UTF-8 JSON") from exc
                 try:
-                    decoded = json.loads(text)
+                    # Lone surrogates become U+FFFD: UTF-8 can't save them.
+                    decoded = loads_json(text)
                 except json.JSONDecodeError as exc:
                     raise ModelResponseError("response is not valid JSON") from exc
                 try:

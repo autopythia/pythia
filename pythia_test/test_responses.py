@@ -2858,6 +2858,64 @@ class GenericResponsesWireTests(unittest.TestCase):
         self.assertTrue(raised.exception.failure.message.endswith(": quota exceeded"),
                         raised.exception.failure.message)
 
+    def test_an_unexpected_value_is_quoted_in_at_most_80_characters(self):
+        long, clear = "x" * 10_000, "\x1b[2J" * 5_000
+        for item, prefix in (
+            ({"type": long}, "unsupported Responses output item type: "),
+            ({"type": "message", "role": clear, "content": []},
+             "Responses output message has unsupported role: "),
+            ({"type": "message", "role": "assistant", "content": [{"type": long}]},
+             "unsupported message.content[0] type: "),
+            ({"type": "reasoning", "summary": [{"type": {"nested": [long]}}]},
+             "unsupported reasoning.summary[0] type: "),
+        ):
+            with self.subTest(prefix=prefix):
+                with self.assertRaises(ModelResponseError) as raised:
+                    self._sample("api", _FakeSSEResponse(
+                        {"type": "response.output_item.done", "output_index": 0, "item": item},
+                        _completed_event(),
+                    ))
+                text = str(raised.exception)
+                self.assertTrue(text.startswith(prefix), text[:200])
+                self.assertEqual(len(text), len(prefix) + 80)
+                self.assertTrue(text.endswith("..."), text)
+                self.assertNotIn("\x1b", text)  # repr shows controls as escapes
+
+    def test_a_lone_surrogate_in_a_stream_becomes_the_replacement_character(self):
+        # As a server that decodes bad bytes with surrogateescape may send it
+        # (JSON escapes it as \udc80): UTF-8 can't encode one, so the save failed.
+        sample, _ = self._sample(
+            "api",
+            _FakeSSEResponse(
+                _reasoning_event(0, text="think \ud800", summary="sum \udfff", encrypted_content="enc"),
+                _message_event(1, "ok \udc80"),
+                {"type": "response.output_item.done", "output_index": 2, "item": {
+                    "type": "function_call", "name": "lookup", "call_id": "call-1",
+                    "arguments": '{"query": "\udc80"}'}},
+                _completed_event(),
+            ),
+            tools=(self.TOOL,),
+        )
+        reasoning, message, call = (item for item in sample.items
+                                    if isinstance(item, (Reasoning, Message, ToolCall)))
+        self.assertEqual((reasoning.content, reasoning.summary), ("think \ufffd", ("sum \ufffd",)))
+        self.assertEqual(message, Message("assistant", "ok \ufffd"))
+        self.assertEqual(json.loads(call.arguments_json), {"query": "\ufffd"})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "log.jsonl"
+            save_interaction_save(path, InteractionContext((Init(model="m"), *sample.context_items())))
+            self.assertEqual(load_interaction_save(path).items[1:], sample.context_items())
+
+    def test_an_error_s_saved_codes_hold_no_lone_surrogate(self):
+        # They are saved with the failure, which UTF-8 couldn't encode.
+        header = base64.b64encode(b'{"error": {"code": "auth\\udc80"}}').decode("ascii")
+        with self.assertRaises(ModelTransportError) as raised:
+            self._sample("api", _http_error(
+                400, body=b'{"error": {"code": "bad\\udc80code", "message": "x"}}',
+                headers={"x-error-json": header}))
+        failure = raised.exception.failure
+        self.assertEqual((failure.error_code, failure.auth_error_code), ("bad\ufffdcode", "auth\ufffd"))
+
 
 if __name__ == "__main__":
     unittest.main()

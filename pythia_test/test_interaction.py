@@ -1107,6 +1107,45 @@ class ChatCompletionsModelTests(unittest.TestCase):
                 self.assertEqual(str(raised.exception),
                                  "Chat Completions HTTP 429: " + body[:4096])
 
+    def test_without_a_body_the_status_line_s_text_is_kept_to_4096_characters(self):
+        # A server's status line can be long too: the error shows its text instead.
+        reason = "Too Many Requests " * 1000
+        model = ChatCompletionsModel(
+            chat_endpoint(api_url="https://api.example.test"),
+            opener=_ScriptedOpener(*(urllib.error.HTTPError(
+                "https://api.example.test/v1/chat/completions", 429, reason, {}, io.BytesIO(b""))
+                for _ in range(3))),
+            retry_sleep=lambda seconds: None,
+        )
+        with self.assertRaises(ModelRateLimitError) as raised:
+            model.sample(InteractionContext((Message("user", "hello"),)))
+        self.assertEqual(str(raised.exception),
+                         "Chat Completions HTTP 429: " + ("HTTP Error 429: " + reason)[:4096])
+
+    def test_a_lone_surrogate_in_a_response_becomes_the_replacement_character(self):
+        # As a server that decodes bad bytes with surrogateescape may send it
+        # (JSON escapes it as \udc80): UTF-8 can't encode one, so the save failed.
+        # Arguments come as a JSON string, or as an object from some servers.
+        for arguments in ('{"cmd": "echo \ud800"}', {"cmd": "echo \ud800"}):
+            with self.subTest(arguments=type(arguments).__name__):
+                model = ChatCompletionsModel(
+                    chat_endpoint(api_url="https://api.example.test"),
+                    opener=_ScriptedOpener(_FakeHTTPResponse({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "ok \udc80", "tool_calls": [{
+                                "id": "call_a", "type": "function",
+                                "function": {"name": "probe", "arguments": arguments},
+                            }]},
+                            "finish_reason": "tool_calls",
+                        }],
+                        "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+                    })),
+                )
+                sample = model.sample(InteractionContext((Message("user", "hello"),)))
+                message, call = sample.items
+                self.assertEqual(message, Message("assistant", "ok \ufffd"))
+                self.assertEqual(json.loads(call.arguments_json), {"cmd": "echo \ufffd"})
+
     def test_connection_and_body_read_failures_are_retried(self):
         failed_read = _ReadFailureResponse(OSError("body disconnected"))
         success = _FakeHTTPResponse({

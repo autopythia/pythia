@@ -60,6 +60,7 @@ from pythia.interaction._cli_editor import Editor
 from pythia.interaction._cli_editor import Layout
 from pythia.interaction._cli_editor import cell_width
 from pythia.interaction._cli_editor import layout_editor
+from pythia.interaction._cli_editor import safe_text
 from pythia.interaction._cli_terminal import PosixTerminal
 
 
@@ -447,6 +448,37 @@ for module in (cli, demo):
 
 
 class TerminalRenderTests(unittest.TestCase):
+    def test_invisible_bidi_and_separator_characters_show_as_escapes(self):
+        # Besides controls (but newline and tab) and lone surrogates: format
+        # characters, which are invisible or reorder a line, and the line and
+        # paragraph separators. Their code point shows instead.
+        for char, shown in (
+            ("\x1b", "\\u001b"), ("\x9b", "\\u009b"), ("\ud800", "\\ud800"),
+            ("\u202e", "\\u202e"), ("\u2066", "\\u2066"), ("\u2069", "\\u2069"),
+            ("\u200b", "\\u200b"), ("\u2060", "\\u2060"), ("\ufeff", "\\ufeff"),
+            ("\u00ad", "\\u00ad"), ("\U000e0041", "\\U000e0041"),
+            ("\u2028", "\\u2028"), ("\u2029", "\\u2029"),
+        ):
+            with self.subTest(char=f"U+{ord(char):04X}"):
+                self.assertEqual(safe_text(f"a{char}b"), f"a{shown}b")
+        # Kept: the joiners, which emoji sequences and some scripts need, and
+        # everything visible.
+        kept = "a\tb\nc 👩\u200d💻 \u200c e\u0301 界 \ufffd ü"
+        self.assertEqual(safe_text(kept), kept)
+
+    def test_a_frontend_s_failed_line_shows_controls_as_escapes(self):
+        # Its error may quote a provider's text, or a file's.
+        from pythia.interaction import auto
+        error = ValueError("bad \x1b[2J\u202e value")
+        for module, prefix in ((cli, "interaction CLI failed: "), (demo, "demo failed: "),
+                               (auto, "auto failed: ")):
+            with self.subTest(prefix=prefix):
+                stderr = io.StringIO()
+                with (mock.patch.object(module, "frontend_catalog", side_effect=error),
+                      mock.patch("sys.stderr", stderr)):
+                    self.assertEqual(module.main(["--no-user-model-catalog"]), 1)
+                self.assertEqual(stderr.getvalue(), prefix + "bad \\u001b[2J\\u202e value\n")
+
     def test_content_controls_are_visible_and_decoration_is_applied_once(self):
         class Output(io.StringIO):
             def fileno(self):
@@ -454,20 +486,21 @@ class TerminalRenderTests(unittest.TestCase):
 
         output = Output()
         terminal = PosixTerminal(io.StringIO(), output)
-        item = DisplayItem("-old\n+new\x1b[2J", is_diff=True)
+        item = DisplayItem("-old\n+new\x1b[2J\u202e", is_diff=True)
         with mock.patch("os.get_terminal_size", return_value=os.terminal_size((40, 8))):
             terminal.render(Editor("draft", 5), "tool: name\nextra", (item,))
             rendered = output.getvalue()
             self.assertIn("tool: name extra", rendered)
             self.assertNotIn("\x1b[2J", rendered)
-            self.assertIn("\\u001b[2J", rendered)
+            self.assertNotIn("\u202e", rendered)
+            self.assertIn("\\u001b[2J\\u202e", rendered)
             self.assertEqual(rendered.count("\x1b[90m⌜"), 1)
             self.assertEqual(rendered.count("\x1b[90m⌞"), 1)
             self.assertIn("\x1b[31m-old", rendered)
             self.assertIn("\x1b[32m+new", rendered)
             terminal.render(Editor("draft", 5), "tool: name\nextra", ())
             self.assertEqual(output.getvalue(), rendered)
-        self.assertEqual(item.text, "-old\n+new\x1b[2J")
+        self.assertEqual(item.text, "-old\n+new\x1b[2J\u202e")
 
     def test_prompt_change_redraws_without_mutating_editor_or_cursor(self):
         class Output(io.StringIO):

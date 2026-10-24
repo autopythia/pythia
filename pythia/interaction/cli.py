@@ -3433,7 +3433,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        print(f"interaction CLI failed: {exc}", file=sys.stderr)
+        # The error may quote a provider's text: its controls show as escapes.
+        print(safe_text(f"interaction CLI failed: {exc}"), file=sys.stderr)
         return 1
     finally:
         try:

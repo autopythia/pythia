@@ -426,6 +426,26 @@ class DemoStartupBaselineTests(unittest.TestCase):
             Reasoning(content="", content_signature=signature), signature,
         )
 
+    def test_controls_and_bidi_characters_show_as_escapes_live_and_on_resume(self):
+        # As the CLI and auto show them (safe_text): model text must not drive
+        # the terminal.
+        sample = ModelSample(
+            items=(Message(role="assistant", content="Done \x1b[2J\u202e."),),
+            stop_reason="end_turn",
+        )
+        for argv, samples in ((["--prompt", "Inspect \x1b]0;title\x07."], (sample,)),
+                              (["--resume"], ())):
+            with self.subTest(argv=argv[0]):
+                status, _model, printed = self._run_demo(argv, samples)
+                self.assertEqual(status, 0)
+                shown = "\n".join(
+                    item.text for item in printed if isinstance(item, DisplayItem)
+                )
+                self.assertIn("Inspect \\u001b]0;title\\u0007.", shown)
+                self.assertIn("Done \\u001b[2J\\u202e.", shown)
+                self.assertNotIn("\x1b", shown)
+                self.assertNotIn("\u202e", shown)
+
     def test_fresh_start_replaces_launch_session_not_workspace_session(self):
         save_interaction_save(
             self.path, InteractionContext(COMPLETED_SESSION_ITEMS)

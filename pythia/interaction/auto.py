@@ -2113,7 +2113,7 @@ def main(argv=None):
         # exceptions are deliberately not stringified here.
         detail = (str(exc) if isinstance(exc, (ValueError, BoardError, FileExistsError, _StartupError))
                   else type(exc).__name__)
-        print(f"auto failed: {detail}", file=sys.stderr)
+        print(safe_text(f"auto failed: {detail}"), file=sys.stderr)
     finally:
         try:
             if session is not None:
