@@ -117,10 +117,10 @@ class IdleSettingTests(unittest.TestCase):
         return relay_endpoint(args, args.model_binding)
 
     def test_the_deadline_comes_from_the_launch_option_the_catalog_or_the_default(self):
-        self.assertEqual(DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS, 3300)  # 55 minutes
-        self.assertEqual(DEFAULT_CLAUDE_RELAY_SHORT_CACHE_IDLE_TIMEOUT_SECONDS, 450)
+        self.assertEqual(DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS, 3595)  # an hour, less 5 s
+        self.assertEqual(DEFAULT_CLAUDE_RELAY_SHORT_CACHE_IDLE_TIMEOUT_SECONDS, 305)  # 5 minutes, plus 5 s
         endpoint = self.endpoint()
-        self.assertEqual((endpoint.idle_timeout_seconds, endpoint.short_cache_idle_timeout_seconds), (3300, 450))
+        self.assertEqual((endpoint.idle_timeout_seconds, endpoint.short_cache_idle_timeout_seconds), (3595, 305))
         catalog = parse_model_catalog(self.CATALOG + 'timeouts.idle_seconds=600\n')
         self.assertEqual(self.endpoint(model='relay-test', catalog=catalog).idle_timeout_seconds, 600)
         self.assertEqual(self.endpoint('--claude-relay-idle-timeout', '120', model='relay-test',

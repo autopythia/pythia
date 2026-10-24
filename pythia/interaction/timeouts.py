@@ -52,9 +52,10 @@ DEFAULT_CLAUDE_RELAY_STARTUP_TIMEOUT_SECONDS = 30.0
 DEFAULT_CLAUDE_RELAY_STOP_TIMEOUT_SECONDS = 5.0
 # How long the relay keeps a native process after a final answer, for the
 # next turn, counted from the start of that answer's request, where its prompt
-# cache lifetime starts: 59 minutes, before the 1-hour lifetime that Claude
-# Code gets on a subscription ends. After a response that wrote 5-minute cache
-# entries (on usage credits, or an API key), the shorter one applies.
+# cache lifetime starts: an hour less 5 s, just before the 1-hour lifetime that
+# Claude Code gets on a subscription ends. After a response that wrote 5-minute
+# cache entries (on usage credits, or an API key), the shorter one applies:
+# 305 s, 5 s past that lifetime.
 # doc/claude-relay-warm-delivery-plan.md, section 3.3.
 DEFAULT_CLAUDE_RELAY_IDLE_TIMEOUT_SECONDS = 3595.0
 DEFAULT_CLAUDE_RELAY_SHORT_CACHE_IDLE_TIMEOUT_SECONDS = 305.0

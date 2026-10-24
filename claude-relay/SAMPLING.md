@@ -255,10 +255,10 @@ probes saw them:
   abort of a call silent for 300 s) with MCP tools.
 
 A kept process waits at most `timeouts.idle_seconds` or
-`--claude-relay-idle-timeout` (3595 s, 59 minutes, by default), counted from
-the start of the final answer's request (its `system/status` `requesting`),
-where its prompt-cache lifetime starts. After a reply that wrote 5-minute
-cache entries (`cache_creation.ephemeral_5m_input_tokens` in its
+`--claude-relay-idle-timeout` (3595 s, an hour less 5 s, by default), counted
+from the start of the final answer's request (its `system/status`
+`requesting`), where its prompt-cache lifetime starts. After a reply that
+wrote 5-minute cache entries (`cache_creation.ephemeral_5m_input_tokens` in its
 `message_start`) the limit is 305 s, or the configured one if shorter. 0 keeps
 no process: the old behavior. The turn loop retires the process at a turn's
 end unless the turn ended with a final answer or yielded, and every compaction
