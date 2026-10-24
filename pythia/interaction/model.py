@@ -355,10 +355,14 @@ def _request_timeout_seconds(endpoint, sample_params: Optional[SampleParams]) ->
 
 
 def _timeout_message(message: str, timeout_seconds: Optional[float]) -> str:
-    """Name the budget a timed-out request used; the value is not a secret."""
+    """Name the budget a timed-out request used; the value is not a secret.
+
+    In words, not by a field name: callers set it as ``request_timeout_seconds``
+    and CLI users as ``/config timeouts_request_seconds``.
+    """
     if timeout_seconds is None:
         return message
-    return f"{message} (request_timeout_seconds={timeout_seconds:g})"
+    return f"{message} (request timeout {timeout_seconds:g} s)"
 
 
 def _with_sample_param_defaults(

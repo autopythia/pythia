@@ -172,8 +172,8 @@ class InteractionTimeoutTests(unittest.TestCase):
                     self.assertTrue(all(
                         call.kwargs["timeout"] == 17.5 for call in opener.call_args_list
                     ))
-                    self.assertIn("(request_timeout_seconds=17.5)", str(raised.exception))
-                    self.assertIn("(request_timeout_seconds=17.5)", raised.exception.failure.message)
+                    self.assertIn("(request timeout 17.5 s)", str(raised.exception))
+                    self.assertIn("(request timeout 17.5 s)", raised.exception.failure.message)
                     # Calls without a per-call value keep the endpoint's own timeout.
                     self.assertEqual(
                         model.endpoint.request_timeout_seconds, DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -192,7 +192,7 @@ class InteractionTimeoutTests(unittest.TestCase):
             )
         self.assertEqual(opener.call_count, 3)
         self.assertTrue(all(call.kwargs["timeout"] == 17.5 for call in opener.call_args_list))
-        self.assertIn("(request_timeout_seconds=17.5)", str(raised.exception))
+        self.assertIn("(request timeout 17.5 s)", str(raised.exception))
 
     def test_in_sample_oauth_refresh_uses_the_call_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
