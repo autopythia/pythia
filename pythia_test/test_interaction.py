@@ -1146,6 +1146,29 @@ class ChatCompletionsModelTests(unittest.TestCase):
                 self.assertEqual(message, Message("assistant", "ok \ufffd"))
                 self.assertEqual(json.loads(call.arguments_json), {"cmd": "echo \ufffd"})
 
+    def test_an_escaped_lone_surrogate_in_string_arguments_reaches_no_tool(self):
+        # Arguments as a JSON string can spell one as an escape, \udc80, which
+        # the tool would get when it runs: it becomes \ufffd in that text. A
+        # pair stays, and so does the rest of the text, byte for byte.
+        model = ChatCompletionsModel(
+            chat_endpoint(api_url="https://api.example.test"),
+            opener=_ScriptedOpener(_FakeHTTPResponse({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok", "tool_calls": [{
+                        "id": "call_a", "type": "function", "function": {
+                            "name": "probe",
+                            "arguments": '{"cmd":  "echo \\udc80 \\ud83d\\ude00 \\\\udc80 \\u00e9"}'},
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+            })),
+        )
+        _message, call = model.sample(InteractionContext((Message("user", "hello"),))).items
+        self.assertEqual(call.arguments_json,
+                         '{"cmd":  "echo \\ufffd \\ud83d\\ude00 \\\\udc80 \\u00e9"}')
+        self.assertEqual(json.loads(call.arguments_json),
+                         {"cmd": "echo \ufffd \U0001f600 \\udc80 \u00e9"})
+
     def test_connection_and_body_read_failures_are_retried(self):
         failed_read = _ReadFailureResponse(OSError("body disconnected"))
         success = _FakeHTTPResponse({

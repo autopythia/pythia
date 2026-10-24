@@ -20,6 +20,7 @@ from typing import Tuple
 
 from ._http import USER_AGENT
 from ._provider_text import loads_json
+from ._provider_text import repaired_json_text
 from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
@@ -416,7 +417,10 @@ def _decode_tool_calls(raw_tool_calls: Any) -> Tuple[ToolCall, ...]:
             raise ModelResponseError(f"tool call {index} has no call id")
         if not isinstance(name, str) or not name.strip():
             raise ModelResponseError(f"tool call {index} has no name")
-        if not isinstance(arguments, str):
+        if isinstance(arguments, str):
+            # JSON text: an escaped lone surrogate in it would reach the tool.
+            arguments = repaired_json_text(arguments)
+        else:
             try:
                 arguments = json.dumps(
                     arguments,

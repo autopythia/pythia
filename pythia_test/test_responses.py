@@ -2906,6 +2906,24 @@ class GenericResponsesWireTests(unittest.TestCase):
             save_interaction_save(path, InteractionContext((Init(model="m"), *sample.context_items())))
             self.assertEqual(load_interaction_save(path).items[1:], sample.context_items())
 
+    def test_an_escaped_lone_surrogate_in_string_arguments_reaches_no_tool(self):
+        # The arguments' JSON text can spell one as an escape, \udc80, which
+        # the tool would get when it runs: it becomes \ufffd in that text. A
+        # pair stays, and so does the rest of the text, byte for byte.
+        sample, _ = self._sample(
+            "api",
+            _FakeSSEResponse(
+                {"type": "response.output_item.done", "output_index": 0, "item": {
+                    "type": "function_call", "name": "lookup", "call_id": "call-1",
+                    "arguments": '{"query": "\\udc80 \\ud83d\\ude00 \\\\udc80",  "n": 1}'}},
+                _completed_event(),
+            ),
+            tools=(self.TOOL,),
+        )
+        [call] = (item for item in sample.items if isinstance(item, ToolCall))
+        self.assertEqual(call.arguments_json, '{"query": "\\ufffd \\ud83d\\ude00 \\\\udc80",  "n": 1}')
+        self.assertEqual(json.loads(call.arguments_json), {"query": "\ufffd \U0001f600 \\udc80", "n": 1})
+
     def test_an_error_s_saved_codes_hold_no_lone_surrogate(self):
         # They are saved with the failure, which UTF-8 couldn't encode.
         header = base64.b64encode(b'{"error": {"code": "auth\\udc80"}}').decode("ascii")
