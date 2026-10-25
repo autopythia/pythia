@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from pythia.interaction import cli, demo
+from pythia.interaction import Icron, cli, demo
 from pythia.interaction import (
     Environment, Init, Instructions, Message, InteractionContext, ModelSample,
     ToolCall, ToolResult, Tools, TurnSummary, UserInteractionBoundary,
@@ -100,7 +100,7 @@ class SaveArgumentTests(_SavePathTestCase):
         self.assertTrue(cli_args.pop("auto_migrate_save"))
         self.assertFalse(cli_args.pop("headless"))
         self.assertFalse(cli_args.pop("debug_trace"))
-        self.assertFalse(cli_args.pop("enable_experimental_icron"))
+        self.assertIsNone(cli_args.pop("enable_icron"))
         self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
         self.assertEqual(cli_args.pop("save_log_reasoning"), "nil")
         self.assertIsNone(cli_args.pop("rebooted"))
@@ -231,7 +231,10 @@ class SaveEntrypointTests(_SavePathTestCase):
             with self.subTest(frontend=frontend.__name__):
                 self.reset()
                 with demo.DefaultEnvironment(cwd=self.workspace) as environment:
-                    snapshot = Tools(environment.tool_specs)
+                    specs = environment.tool_specs
+                if frontend is cli:  # the CLI adds icron's tool, on by default
+                    specs = (*specs, Icron().tool().spec)
+                snapshot = Tools(specs)
                 save_interaction_save(self.selected, InteractionContext((*_COMPLETED, snapshot)))
                 before = self.selected.read_bytes()
                 code, model, terminal, printed = self._main(frontend, ["--resume"], samples=())

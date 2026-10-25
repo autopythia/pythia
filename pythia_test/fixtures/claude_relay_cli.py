@@ -501,7 +501,8 @@ if text in ('early-callback', 'early-callback-invalid'):
         wait_for_end()
     answer = first_result[0] + '|' + tool_result(blocks[1])
 elif text == 'host-command-tools':
-    assert set(names) == {'mcp__pythia__' + name for name in ('exec_command', 'write_stdin', 'apply_patch', 'update_plan')}
+    # The CLI adds icron's tool, on by default; auto has none.
+    assert set(names) - {'mcp__pythia__icron'} == {'mcp__pythia__' + name for name in ('exec_command', 'write_stdin', 'apply_patch', 'update_plan')}
     assert option('--tools') == ''  # Claude's own built-ins are still disabled
     assert set(option('--allowedTools').split(',')) == set(names)
     # Harmless host payload: report A's cwd/UID, then wait for write_stdin.

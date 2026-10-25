@@ -78,17 +78,19 @@ elif failure == "attach":
     term_input.create_input = fail_create
 
 class Model:
-    def __init__(self, save_path, enable_default_tools):
+    def __init__(self, save_path, enable_default_tools, enable_icron):
         self.tool_done = False
         self.save_path = Path(save_path).expanduser().absolute()
         self.enable_default_tools = enable_default_tools
+        self.enable_icron = enable_icron  # on by default, with the default tools
 
     def sample(self, context, *, tools=(), sample_params=None):
         # --save names a prefix: the full log is in its private directory.
         assert load_interaction_save(full_log_path(self.save_path)).items == context.items
         assert {tool.name for tool in tools} == (
-            {"exec_command", "write_stdin", "apply_patch", "update_plan"}
-            if self.enable_default_tools else set()
+            ({"exec_command", "write_stdin", "apply_patch", "update_plan"}
+             if self.enable_default_tools else set())
+            | ({"icron"} if self.enable_icron else set())
         )
         if any(isinstance(i, ToolCall) and i.call_id == "plan-1" for i in context):
             self.tool_done = True  # a CLI that a reboot restarted: the replaced one called it
@@ -121,7 +123,7 @@ if failure in {"auth", "auth-cancel"}:
     build = cli.build_model
     def build_when_authenticated(args):
         build(args)  # Real routing/validation/loading, but no provider sampling.
-        return Model(args.save_path, args.enable_default_tools)
+        return Model(args.save_path, args.enable_default_tools, cli._icron_enabled(args))
     cli.build_model = build_when_authenticated
     if failure == "auth":
         def fake_login(path, **kwargs):
@@ -131,7 +133,8 @@ if failure in {"auth", "auth-cancel"}:
     else:
         user_tools.login = partial(login, callback_port=0)
 else:
-    cli.build_model = lambda args: Model(args.save_path, args.enable_default_tools)
+    cli.build_model = lambda args: Model(args.save_path, args.enable_default_tools,
+                                         cli._icron_enabled(args))
 raise SystemExit(cli.main())
 '''
 

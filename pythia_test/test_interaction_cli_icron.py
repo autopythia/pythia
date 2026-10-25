@@ -1,4 +1,4 @@
-"""The CLI with icron (--enable-experimental-icron): wake-ups, commands, and notices."""
+"""The CLI with icron (--enable-icron, on by default): wake-ups, commands, and notices."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
+import warnings
 
 from pythia.interaction import Environment, Icron, IcronLimits, Init, InteractionContext, Message
 from pythia.interaction import ModelSample, ModelSampleBoundary, ModelTransportError, Tool
@@ -133,6 +135,52 @@ def _exit(terminal):
     terminal.key("c-d")
 
 
+class LaunchTests(unittest.TestCase):
+    def test_icron_is_on_by_default_unless_the_default_tools_are_off(self):
+        cases = [  # (options, whether the model gets icron's tool)
+            ([], True),
+            (["--enable-icron"], True),
+            (["--enable-icron", "False"], False),
+            (["--enable-icron=False"], False),
+            # Its name while it was experimental is an alias, with no warning.
+            (["--enable-experimental-icron"], True),
+            (["--enable-experimental-icron", "False"], False),
+            (["--enable-experimental-icron=False", "--enable-icron"], True),
+            # Like exec_command, icron's exec runs the model's code: without the
+            # default tools, a session gets icron only when it asks.
+            (["--enable-default-tools", "False"], False),
+            (["--enable-default-tools", "False", "--enable-icron"], True),
+            (["--enable-default-tools", "False", "--enable-experimental-icron"], True),
+        ]
+        for options, expected in cases:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                seen = {}
+
+                async def headless(model, environment, args, **kwargs):
+                    seen["icron"] = kwargs["icron"]
+                    seen["tools"] = [spec.name for spec in environment.tool_specs]
+                    return 0
+
+                with mock.patch.object(cli, "build_model", return_value=object()), \
+                        mock.patch.object(cli, "_run_headless", headless), \
+                        warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    code = cli.main(["--headless", "--prompt", "hello", "--cwd", directory,
+                                     "--save", str(Path(directory) / "s.jsonl"), *options])
+                self.assertEqual(code, 0)
+                self.assertEqual((seen["icron"] is not None, "icron" in seen["tools"]),
+                                 (expected, expected))
+                self.assertEqual([str(item.message) for item in caught
+                                  if "icron" in str(item.message)], [])
+
+    def test_help_lists_the_option_and_not_its_alias(self):
+        text = cli._build_parser().format_help()
+        self.assertIn("--enable-icron [{False,True}]", text)
+        self.assertNotIn("--enable-experimental-icron [", text)
+        self.assertIn("--enable-experimental-icron, its name while experimental, is an alias",
+                      " ".join(text.split()))
+
+
 class DisplayContractTests(_IcronControllerCase):
     async def test_the_display_is_today_s_until_icron_is_used(self):
         probe = Tool(ToolSpec("probe", "Probe.", {"type": "object"}),
@@ -157,10 +205,10 @@ class DisplayContractTests(_IcronControllerCase):
         expected = [normal(text, plain_path) for text in _texts(plain)]
         shown = [normal(text, icron_path).replace("[tools] probe, icron", "[tools] probe")
                  for text in _texts(with_icron)
-                 if not text.startswith("[cli] icron (experimental): ")]
+                 if not text.startswith("[cli] icron: ")]
         self.assertEqual(shown, expected)
         self.assertEqual(len(_texts(with_icron)), len(_texts(plain)) + 1)
-        self.assertIn("[cli] icron (experimental): main can schedule work and run Python in "
+        self.assertIn("[cli] icron: main can schedule work and run Python in "
                       "this process, unsandboxed, with the icron tool; /cron schedules your "
                       "messages, /crontab shows them, and /py runs your code. Jobs and Python "
                       "state live only in this process.", _texts(with_icron))
@@ -428,7 +476,7 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         code, stderr = await self._run_headless(model)
         self.assertEqual((code, len(model.calls)), (0, 3))
         self.assertIn("[cli] main yielded to icron; job ", stderr)
-        self.assertIn("[cli] icron (experimental): main can schedule work and run Python in "
+        self.assertIn("[cli] icron: main can schedule work and run Python in "
                       "this process, unsandboxed, with the icron tool. Jobs and Python state "
                       "live only in this process.", stderr)
 

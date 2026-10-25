@@ -95,8 +95,8 @@ class HeadlessCLITests(unittest.TestCase):
         )
         self.assertEqual(code, 0, stderr)
         self.assertEqual(len(model.calls), 2)
-        self.assertEqual({spec.name for spec in model.calls[0][1]},
-                         {"exec_command", "write_stdin", "apply_patch", "update_plan"})
+        self.assertEqual({spec.name for spec in model.calls[0][1]},  # icron is on by default
+                         {"exec_command", "write_stdin", "apply_patch", "update_plan", "icron"})
         saved = load_interaction_save(self.path)
         self.assertIn(Message("user", "PRIVATE_PROMPT"), saved)
         self.assertIn(Message("assistant", "PRIVATE_ANSWER"), saved)

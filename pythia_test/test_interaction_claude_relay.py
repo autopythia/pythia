@@ -953,7 +953,9 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 context = load_interaction_save(path if frontend == 'cli' else path / 'contexts/1.jsonl')
                 tools = next(item for item in context if isinstance(item, Tools))
-                self.assertEqual({tool.name for tool in tools.specs}, DEFAULT_TOOLS)
+                # The CLI adds icron's tool, on by default.
+                self.assertEqual({tool.name for tool in tools.specs},
+                                 DEFAULT_TOOLS | ({'icron'} if frontend == 'cli' else set()))
                 self.assertEqual([item.name for item in context if isinstance(item, ToolCall)], ['exec_command', 'write_stdin'])
                 results = [item for item in context if isinstance(item, ToolResult)]
                 self.assertEqual(len(results), 2)

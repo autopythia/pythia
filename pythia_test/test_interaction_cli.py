@@ -215,7 +215,7 @@ for module in (cli, demo):
             self.assertTrue(cli_args.pop("enable_default_tools"))
             self.assertFalse(cli_args.pop("headless"))
             self.assertFalse(cli_args.pop("debug_trace"))
-            self.assertFalse(cli_args.pop("enable_experimental_icron"))
+            self.assertIsNone(cli_args.pop("enable_icron"))
             self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
             self.assertEqual(cli_args.pop("save_log_reasoning"), "nil")
             self.assertIsNone(cli_args.pop("rebooted"))
@@ -393,10 +393,11 @@ for module in (cli, demo):
                                     ])
 
         self.assertEqual(result, 0)
-        environment.assert_called_once_with(
-            cwd=root,
-            enable_workspace=False,
-        )
+        environment.assert_called_once()
+        options = environment.call_args.kwargs
+        self.assertEqual((options["cwd"], options["enable_workspace"]), (root, False))
+        # icron is on by default: its tool comes after the default ones.
+        self.assertEqual([tool.spec.name for tool in options["extra_tools"]], ["icron"])
 
     def test_main_without_default_tools_does_not_construct_the_runtime(self):
         terminal_stream = SimpleNamespace(isatty=lambda: True)

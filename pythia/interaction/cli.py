@@ -337,7 +337,7 @@ class _UIState:
             max_workers=1, thread_name_prefix="interaction-context"),
         repr=False,
     )
-    # icron (--enable-experimental-icron), or None. cron_entries maps the
+    # icron (--enable-icron), or None. cron_entries maps the
     # jobs that /cron made to their entries as typed, for /crontab;
     # icron_resumes counts the turns that icron started since the user's
     # last input; icron_auth_noticed is true once the notice that due
@@ -848,7 +848,7 @@ class _UIState:
                          name="interaction-quota", daemon=True).start()
 
     def _icron_command(self, head: str, text: str) -> None:
-        """/cron, /crontab, and /py (--enable-experimental-icron): handled at
+        """/cron, /crontab, and /py (--enable-icron): handled at
         once, on the event loop, even while main is busy or needs
         authentication; never queued or saved. A command that fails leaves
         its draft in the editor."""
@@ -1676,7 +1676,7 @@ async def _write_leading_records(context, state, writer) -> None:
         await _log_records(context, state, writer, records, display=shown)
 
 
-# icron (--enable-experimental-icron): its wake-ups, its commands, and its notices.
+# icron (--enable-icron): its wake-ups, its commands, and its notices.
 
 _CRON_USAGE = ("Usage: /cron in 10m <text>, /cron at 14:30 <text>, /cron every 1h <text>, "
                "/cron cancel <job-id>|all, or /cron alone to list jobs (units: s, m, h, d).")
@@ -3062,8 +3062,8 @@ def _startup_notices(state, args, save, config=None):
         state.notice("Note: default model tools are disabled; user commands remain available."
                      if not state.headless else "Note: default model tools are disabled.")
     if state.icron is not None:
-        state.notice("icron (experimental): main can schedule work and run Python in this "
-                     "process, unsandboxed, with the icron tool"
+        state.notice("icron: main can schedule work and run Python in this process, "
+                     "unsandboxed, with the icron tool"
                      + ("." if state.headless else
                         "; /cron schedules your messages, /crontab shows them, and /py runs "
                         "your code.")
@@ -3327,19 +3327,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--enable-experimental-icron",
+        "--enable-icron",
         nargs="?",
         const=True,
-        default=False,
+        default=None,
         type=_boolean_argument,
         metavar="{False,True}",
         help=(
-            "experimental: run icron, an in-process scheduler. The model gets the icron "
-            "tool, which schedules wake-ups and runs Python in this process, unsandboxed; "
-            "/cron and /crontab schedule and show your messages, and /py runs your code. "
-            "Jobs and Python state live only in memory. Launch-only: repeat when resuming. "
-            "A bare flag means True (default: %(default)s)"
+            "run icron, an in-process scheduler. The model gets the icron tool, which "
+            "schedules wake-ups and runs Python in this process, unsandboxed; /cron and "
+            "/crontab schedule and show your messages, and /py runs your code. Jobs and "
+            "Python state live only in memory. Launch-only: repeat when resuming. A bare "
+            "flag means True; --enable-experimental-icron, its name while experimental, "
+            "is an alias (default: True, but False with --enable-default-tools False)"
         ),
+    )
+    parser.add_argument(  # --enable-icron's name while it was experimental
+        "--enable-experimental-icron", dest="enable_icron", nargs="?", const=True,
+        default=argparse.SUPPRESS, type=_boolean_argument, help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--compaction-coldstart-reboot",
@@ -3359,6 +3364,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rebooted", nargs="?", const="restart", default=None,
                         choices=("restart", "check"), help=argparse.SUPPRESS)
     return parser
+
+
+def _icron_enabled(args: argparse.Namespace) -> bool:
+    """--enable-icron, which is on by default unless the default tools are
+    off: icron's exec runs the model's code, as exec_command runs its commands,
+    so a session without those tools gets icron only when it asks."""
+    return args.enable_default_tools if args.enable_icron is None else args.enable_icron
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -3424,7 +3436,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise
             model = None
         cwd = Path(args.cwd).expanduser().resolve()
-        if args.enable_experimental_icron:
+        if _icron_enabled(args):
             icron = Icron()
         tools = () if icron is None else (icron.tool(),)
         environment_manager = (
