@@ -573,12 +573,12 @@ elif text == 'icron-yield' and not any(row['kind'] == 'result' for row in histor
     # message (doc/claude-relay-warm-yield-plan.md).
     assert 'mcp__pythia__icron' in names
     blocks = [{'type': 'tool_use', 'id': 'toolu_schedule', 'name': 'mcp__pythia__icron',
-               'input': {'action': 'schedule', 'message': 'fixture wake-up', 'after': 1}},
+               'input': {'call': "schedule('fixture wake-up', after=1)"}},
               {'type': 'tool_use', 'id': 'toolu_yield', 'name': 'mcp__pythia__icron',
-               'input': {'action': 'yield', 'note': 'waiting for the fixture wake-up'}}]
+               'input': {'call': "yield_('waiting for the fixture wake-up')"}}]
     stream_message('m-icron', blocks, {'input_tokens': 10, 'output_tokens': 2}, 'tool_use')
-    outputs = [json.loads(tool_result(block)) for block in blocks]
-    answer = pick_up(f"pid={os.getpid()} yielded={outputs[1].get('yielded')}")
+    outputs = [tool_result(block) for block in blocks]  # text: 'Scheduled job …', 'Yielded: …'
+    answer = pick_up(f"pid={os.getpid()} yielded={outputs[1].startswith('Yielded: ')}")
 elif tools and text != 'text-only' and not any(row['kind'] == 'result' for row in history):
     arguments = {} if text == 'empty-arguments' else {'value': 1}
     blocks = [{'type': 'tool_use', 'id': ident, 'name': names[0], 'input': arguments} for ident in ('toolu_a', 'toolu_b')]

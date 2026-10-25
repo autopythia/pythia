@@ -709,16 +709,26 @@ def _format_tool_call_label(name: str, call_id: str) -> str:
 
 
 def _format_icron_call(arguments: Mapping[str, object]) -> Tuple[str, Optional[str]]:
-    """An icron tool call as the Python call it stands for, and its code.
+    """An icron tool call as the Python call icron reads, and its code.
 
-    ``{"action": "schedule", "message": "Hi", "after": 600}`` reads
-    ``icron.schedule(message='Hi', after=600)``. The ``yield`` action is the
-    method ``yield_``. Values are Python literals, messages in full.
+    Every form of a call reads the same: ``{"call": "schedule('Hi', after=10*60)"}``
+    and the first version's ``{"action": "schedule", "message": "Hi", "after":
+    600}`` both read ``icron.schedule(message='Hi', after=600)``, and code
+    alone reads ``icron.exec()``. Values are Python literals, messages in
+    full. A call that icron refuses shows as written.
     """
+    from .loop.icron import call_text  # here, since the loop imports this module
+
+    read = call_text(arguments)
+    if read is not None:
+        return read[0], _normalize_tool_payload(read[1])
+    code = _normalize_tool_payload(arguments.get("code"))
+    written = arguments.get("call")
+    if isinstance(written, str):
+        written = written.strip()
+        return (written if written.startswith("icron.") else f"icron.{written}"), code
     action = arguments.get("action")
     method = ("yield_" if action == "yield" else action) if isinstance(action, str) else "?"
-    code = arguments.get("code")
-    code = _normalize_tool_payload(code)
     keywords = ", ".join(f"{key}={value!r}" for key, value in arguments.items()
                          if key not in ("action", "code"))
     return f"icron.{method}({keywords})", code

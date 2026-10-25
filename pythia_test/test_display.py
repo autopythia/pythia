@@ -629,6 +629,34 @@ class InteractionItemRendererTests(unittest.TestCase):
         self.assertEqual(render_interaction_items((ToolCall("icron", "c4", "[1]"),))[0].text,
                          "[tool-call] icron (c4)")
 
+    def test_each_form_of_an_icron_call_shows_as_the_call_icron_reads(self):
+        def shown(arguments):
+            rendered = render_interaction_items((ToolCall("icron", "c", json.dumps(arguments)),),
+                                                color=False)
+            return [item.text for item in rendered]
+        schedule = ["[tool-call] icron (c)\nicron.schedule(message='Check CI run 123.', "
+                    "after=600)"]
+        for arguments in ({"action": "schedule", "message": "Check CI run 123.", "after": 600},
+                          {"call": "schedule('Check CI run 123.', after=600)"},
+                          {"call": "icron.schedule(message='Check CI run 123.', after=10*60)"}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(shown(arguments), schedule)
+        execute = ["[tool-call] icron (c)\nicron.exec()", "print(1)"]
+        for arguments in ({"action": "exec", "code": "print(1)\n"}, {"code": "print(1)"},
+                          {"call": "exec()", "code": "print(1)"}, {"call": "exec('print(1)')"}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(shown(arguments), execute)
+        yielded = ["[tool-call] icron (c)\nicron.yield_(note='Waiting.')"]
+        for arguments in ({"action": "yield", "note": "Waiting."}, {"call": "yield('Waiting.')"},
+                          {"call": "yield(note='Waiting.')"}, {"call": "yield_('Waiting.')"}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(shown(arguments), yielded)
+        # A call that icron refuses shows as written, with its code.
+        self.assertEqual(shown({"call": "shedule('Hi.', after=600)"}),
+                         ["[tool-call] icron (c)\nicron.shedule('Hi.', after=600)"])
+        self.assertEqual(shown({"call": "jobs()", "code": "print(1)"}),
+                         ["[tool-call] icron (c)\nicron.jobs()", "print(1)"])
+
     def test_git_diff_output_color_requires_git_diff_command(self):
         diff = "\n".join(
             (

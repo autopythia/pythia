@@ -171,9 +171,8 @@ class DisplayContractTests(_IcronControllerCase):
 class WakeUpTests(_IcronControllerCase):
     async def test_a_yield_waits_for_its_wake_up_which_starts_the_next_turn(self):
         model = _Model(self.path,
-                       _calls(_icron("c1", action="schedule", message="Check the probe.",
-                                     after=600)),
-                       _calls(_icron("c2", action="yield", note="Waiting for the probe.")),
+                       _calls(_icron("c1", call="schedule('Check the probe.', after=10*60)")),
+                       _calls(_icron("c2", call="yield_('Waiting for the probe.')")),
                        _answer("The probe is done."))
         statuses = []
 
@@ -273,7 +272,7 @@ class WakeUpTests(_IcronControllerCase):
                 "        break\n"
                 "    y = await main.resume(f'The suite fails ({attempt}). Fix it.')\n"
                 "    print(y.kind, y.final_text)\n")
-        model = _Model(self.path, _calls(_icron("c1", action="exec", code=code, wait=5)),
+        model = _Model(self.path, _calls(_icron("c1", call="exec(wait=5)", code=code)),
                        _answer("Fixed 0."), _answer("Fixed 1."))
         terminal = _Terminal(_once([(lambda t, s: s == "idle" and _has(t, "finished."),
                                      _exit)]))
@@ -281,9 +280,10 @@ class WakeUpTests(_IcronControllerCase):
                          0)
         self.assertEqual(len(model.calls), 3)
         first = model.calls[1][0].items  # the same turn: the message was a steer
-        result = json.loads(first[-2].output)
-        self.assertEqual((result["state"], result["detail"]),
-                         ("running", "It sent you a message, which you get after this call."))
+        result = first[-2].output.splitlines()
+        self.assertRegex(result[0], r"^Script running with job ID [a-z0-9]{4}-1$")
+        self.assertRegex(result[1], r"^Wall time \d+\.\d seconds \(it sent you a message, "
+                                    r"which you get after this tool batch\)$")
         self.assertTrue(_users(first)[-1].endswith("The suite fails (0). Fix it."))
         self.assertIn("(your code, from exec at ", _users(first)[-1])
         second = model.calls[2][0].items  # a new turn, started by the next message
@@ -364,8 +364,8 @@ class WakeUpTests(_IcronControllerCase):
         self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"], (wrapped,),
                                          icron_tool=False), 0)
         self.assertEqual(threads, {"interaction-context_0"})
-        self.assertEqual(json.loads(model.calls[1][0].items[-1].output)["value"],
-                         "'interaction-icron'")
+        self.assertIn("Value: 'interaction-icron'",
+                      model.calls[1][0].items[-1].output.splitlines())
 
 
 class ResumeTests(_IcronControllerCase):

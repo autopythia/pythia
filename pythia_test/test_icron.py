@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 import re
 import threading
@@ -15,7 +16,7 @@ from pythia.interaction import ToolCall, ToolResult, UserInteractionBoundary
 from pythia.interaction.environment import CancelToken, cancel_scope, results_due_scope
 from pythia.interaction.loop import Icron, IcronError, IcronLimits, TurnHost, Yield, run_turn
 from pythia.interaction.loop import turn_yield
-from pythia.interaction.loop.icron import WAKE_HEADER, log_state
+from pythia.interaction.loop.icron import WAKE_HEADER, call_text, log_state
 from pythia.interaction.loop.kernel import TurnResult
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
 
@@ -299,20 +300,20 @@ class CodeTests(_IcronCase):
     def test_exec_returns_output_a_final_value_and_a_traceback(self):
         icron = self.start()
         done = icron.exec("print('hi')\nx = 41\nx + 1", by="main")
-        self.assertEqual((done.state, done.output, done.value, done.error),
-                         ("done", "hi\n", "42", None))
+        self.assertEqual((done.state, done.output, done.value, done.error, done.reason),
+                         ("done", "hi\n", "42", None, None))
         self.assertEqual(icron.exec("x = 2").value, None)  # no final expression
         awaited = icron.exec("await asyncio.sleep(0.01)\nx * 2", by="main")
         self.assertEqual(awaited.value, "82")
         failed = icron.exec("y = 1\nraise ValueError('boom')", by="main")
-        self.assertEqual(failed.state, "failed")
+        self.assertEqual((failed.state, failed.reason), ("failed", None))
         self.assertEqual(failed.error.splitlines(), [
             "Traceback (most recent call last):",
             f'  File "<icron {failed.job.job_id}>", line 2, in <module>',
             "    raise ValueError('boom')",
             "ValueError: boom"])
         bad = icron.exec("def f(:\n  pass", by="main")
-        self.assertEqual((bad.state, bad.job), ("failed", None))
+        self.assertEqual((bad.state, bad.job, bad.reason), ("failed", None, "it didn't run"))
         self.assertIn("SyntaxError", bad.error)
         self.assertEqual(icron.jobs(), ())  # runs that ended within their call aren't listed
 
@@ -322,7 +323,7 @@ class CodeTests(_IcronCase):
         self.assertEqual(icron.exec("double(x)", by="main").value, "2")
         self.assertIn("NameError", icron.exec("x", by="host").error)
         names = icron.exec("sorted(n for n in globals() if not n.startswith('__'))", by="user")
-        self.assertEqual(names.value, "['asyncio', 'icron', 'main', 'print']")
+        self.assertEqual(names.value, "['asyncio', 'help', 'icron', 'main', 'print']")
 
     def test_runs_that_interleave_each_print_to_their_own_output(self):
         icron = self.start()
@@ -339,30 +340,28 @@ class CodeTests(_IcronCase):
     def test_exec_waits_for_its_run_and_no_longer(self):
         icron = self.start()
         outlived = icron.exec("await asyncio.sleep(1)", wait=0.05, by="main")
-        self.assertEqual(outlived.state, "running")
-        self.assertIn("so it goes on as a job", outlived.detail)
+        self.assertEqual((outlived.state, outlived.reason), ("running", "the wait ran out"))
         self.assertEqual(self.job(outlived.job.job_id).state, "running")  # listed now
         cases = [
-            ("main.resume('hi')\nawait asyncio.sleep(5)", None, "It sent you a message"),
-            ("await main.handoff()", None, "It waits for the end of your turn"),
+            ("main.resume('hi')\nawait asyncio.sleep(5)",
+             "it sent you a message, which you get after this tool batch"),
+            ("await main.handoff()", "it awaits the end of your turn"),
         ]
-        for code, _scope, detail in cases:
+        for code, reason in cases:
             started = time.monotonic()
             result = icron.exec(code, wait=5, by="main")
             self.assertLess(time.monotonic() - started, 2)
-            self.assertEqual(result.state, "running")
-            self.assertTrue(result.detail.startswith(detail), result.detail)
+            self.assertEqual((result.state, result.reason), ("running", reason))
         self.assertEqual(icron.undelivered(), 1)
         with CancelToken() as token, cancel_scope(token):
             threading.Timer(0.05, token.cancel).start()
             started = time.monotonic()
             result = icron.exec("await asyncio.sleep(5)", wait=5, by="main")
         self.assertLess(time.monotonic() - started, 2)
-        self.assertEqual(result.detail, "The wait was interrupted; the code goes on as a job.")
+        self.assertEqual(result.reason, "the user interrupted the wait")
         with results_due_scope(time.monotonic() + 0.05):
             result = icron.exec("await asyncio.sleep(5)", wait=5, by="main")
-        self.assertEqual(result.detail, "The model needs this result now; the code goes on as "
-                                        "a job.")
+        self.assertEqual(result.reason, "the call reached its deadline")
         with self.assertRaisesRegex(IcronError, "wait must be at most 59 seconds"):
             icron.exec("1", wait=60, by="main")
 
@@ -370,9 +369,22 @@ class CodeTests(_IcronCase):
         icron = self.start()
         icron.exec("import time\ntime.sleep(0.4)", wait=0, by="main")
         pending = icron.exec("41 + 1", wait=0.05, by="main")
-        self.assertEqual(pending.state, "pending")
-        self.assertIn("hasn't started", pending.detail)
+        # The reason stays the one the call returned for.
+        self.assertEqual((pending.state, pending.reason), ("pending", "the wait ran out"))
         self.assertEqual(self.wait_for(pending.job.job_id, "done").state, "done")
+
+    def test_exec_says_whether_a_stop_cancelled_its_run(self):
+        icron = self.start()
+        itself = icron.exec("print('start')\nraise asyncio.CancelledError()", by="main")
+        self.assertEqual((itself.state, itself.output, itself.reason),
+                         ("cancelled", "start\n", None))  # it ended by itself
+        # The user's runs are listed from the start, so cancel() can reach one in its call.
+        threading.Timer(0.2, lambda: icron.cancel(icron.jobs()[0].job_id, by="user")).start()
+        cancelled = icron.exec("await asyncio.sleep(5)", wait=5, by="user")
+        self.assertEqual((cancelled.state, cancelled.reason), ("cancelled", None))  # no stop
+        threading.Timer(0.2, icron.stop).start()
+        stopped = icron.exec("await asyncio.sleep(5)", wait=5, by="main")
+        self.assertEqual((stopped.state, stopped.reason), ("cancelled", "a stop cancelled it"))
 
     def test_main_resume_sends_at_once_and_returns_main_s_next_handoff(self):
         icron = self.start()
@@ -442,61 +454,382 @@ class CodeTests(_IcronCase):
 
 class ToolTests(_IcronCase):
     def call(self, **arguments):
+        """A call's success and its result's lines: every result is text."""
         outcome = self.icron.tool().handler(arguments)
-        return outcome.success, json.loads(outcome.output)
+        return outcome.success, outcome.output.splitlines()
+
+    def exec_lines(self, **arguments):
+        """exec's result for code; wait, if given, goes in the call."""
+        wait = arguments.pop("wait", None)
+        return self.call(**arguments, **({} if wait is None else {"call": f"exec(wait={wait})"}))
 
     def test_each_action_is_one_api_call(self):
         self.start()
         tool = self.icron.tool()
         # The tool timeout, as the command tools': its exec waits end before it.
         self.assertEqual((tool.spec.name, tool.timeout_seconds), ("icron", 59.0))
-        self.assertEqual(tool.spec.parameters["properties"]["wait"]["maximum"], 59)
-        self.assertEqual(tool.spec.parameters["properties"]["action"]["enum"],
-                         ["schedule", "exec", "yield", "cancel", "jobs"])
-        ok, scheduled = self.call(action="schedule", message="Check CI run 123.", after=600)
+        # The input is a call in Python, and code: the keywords are the methods' own,
+        # which the description and help() list. Other fields reach the handler,
+        # which reads the first version's form too.
+        parameters = tool.spec.parameters
+        self.assertEqual(set(parameters["properties"]), {"call", "code"})
+        self.assertNotIn("required", parameters)
+        self.assertNotIn("additionalProperties", parameters)
+        ok, scheduled = self.call(call="schedule('Check CI run 123.', after=600)")
         self.assertTrue(ok)
-        self.assertEqual(set(scheduled), {"job_id", "state", "due", "in_seconds", "every",
-                                          "remaining", "now"})
-        self.assertEqual((scheduled["state"], scheduled["in_seconds"], scheduled["remaining"]),
-                         ("scheduled", 600, 1))
-        self.assertEqual(datetime.fromisoformat(scheduled["due"]).timestamp(), NOW + 600)
-        self.assertEqual(self.job(scheduled["job_id"]).origin, "main")
-        _, listed = self.call(action="jobs")
-        self.assertEqual([(job["job_id"], job["origin"], job["message"]) for job in listed["jobs"]],
-                         [(scheduled["job_id"], "main", "Check CI run 123.")])
-        self.assertEqual(self.call(action="cancel", job_id=scheduled["job_id"])[1]["cancelled"],
-                         scheduled["job_id"])
-        ok, done = self.call(action="exec", code="print('x')\n1 + 1")
-        self.assertEqual((ok, done["state"], done["output"], done["value"]), (True, "done",
-                                                                              "x\n", "2"))
-        ok, failed = self.call(action="exec", code="1 / 0")
-        self.assertEqual((ok, failed["state"]), (False, "failed"))
-        self.assertIn("ZeroDivisionError", failed["error"])
-        ok, running = self.call(action="exec", code="await asyncio.sleep(5)", wait=0.1)
-        self.assertEqual((ok, running["state"]), (True, "running"))
-        self.assertIn("job_id", running)
+        job_id = scheduled[0].split()[2]
+        self.assertEqual(scheduled, [f"Scheduled job {job_id} (yours; due {_iso(NOW + 600)}, "
+                                     "in 600 s)", f"Now: {_iso(NOW)}"])
+        self.assertEqual(self.job(job_id).origin, "main")
+        _, listed = self.call(call="jobs()")
+        self.assertEqual(listed, ["1 pending job", f"Now: {_iso(NOW)}",
+                                  f"Job {job_id} (yours; due {_iso(NOW + 600)}, in 600 s):",
+                                  "  Message:", "    Check CI run 123."])
+        self.assertEqual(self.call(call=f"cancel({job_id!r})"),
+                         (True, [f"Cancelled job {job_id} (yours)", f"Now: {_iso(NOW)}"]))
+        ok, done = self.exec_lines(code="print('x')\n1 + 1")
+        self.assertEqual((ok, done[0], done[3:]),
+                         (True, "Script completed", ["Value: 2", "Output:", "  x"]))
+        ok, failed = self.exec_lines(code="1 / 0")
+        self.assertEqual((ok, failed[0], failed[-1]),
+                         (False, "Script failed", "  ZeroDivisionError: division by zero"))
+        ok, running = self.exec_lines(code="await asyncio.sleep(5)", wait=0.1)
+        job_id = re.fullmatch(r"Script running with job ID (\S+)", running[0]).group(1)
+        self.assertTrue(ok)
         self.icron.begin_turn()
-        ok, yielded = self.call(action="yield", note="Waiting.")
-        self.assertEqual((yielded["yielded"], yielded["waits_for"]["job_id"]),
-                         (True, running["job_id"]))
+        ok, yielded = self.call(call="yield_('Waiting.')")
+        self.assertEqual((ok, yielded[0], yielded[1].split(" (")[0]),
+                         (True, "Yielded: your turn ends once this tool batch is saved",
+                          f"Job {job_id}"))
         self.assertEqual(self.icron.request(), "Waiting.")
+        ok, helped = self.call(call="help('cancel')")
+        self.assertEqual((ok, helped[0]), (True, "cancel(job_id)"))
+
+    def test_every_form_that_means_one_call_reads_as_that_call(self):
+        self.start()
+        forms = [  # (input, the call as the transcript shows it, its result's first line)
+            ({"call": "schedule('Hi.', after=600)"},
+             "icron.schedule(message='Hi.', after=600)", "Scheduled job"),
+            ({"call": "icron.schedule('Hi.', after=10*60)"},
+             "icron.schedule(message='Hi.', after=600)", "Scheduled job"),
+            ({"call": "schedule(message='Hi.', after=-(-5)*2/1+0.5)"},
+             "icron.schedule(message='Hi.', after=10.5)", "Scheduled job"),
+            ({"action": "schedule", "message": "Hi.", "after": 600},
+             "icron.schedule(message='Hi.', after=600)", "Scheduled job"),
+            ({"call": "schedule('''Line 1.\nLine 2.''', every=270)"},
+             "icron.schedule(message='Line 1.\\nLine 2.', every=270)", "Scheduled job"),
+            ({"call": "schedule(every=60, count=3)", "code": "print('poll')"},
+             "icron.schedule(every=60, count=3)", "Scheduled job"),
+            ({"code": "1 + 1"}, "icron.exec()", "Script completed"),
+            ({"call": "exec()", "code": "1 + 1"}, "icron.exec()", "Script completed"),
+            ({"call": "exec(wait=5)", "code": "1 + 1"}, "icron.exec(wait=5)", "Script completed"),
+            ({"call": "exec('1 + 1')"}, "icron.exec()", "Script completed"),
+            ({"call": "exec(code='1 + 1', wait=5)"}, "icron.exec(wait=5)", "Script completed"),
+            ({"action": "exec", "code": "1 + 1", "wait": 5}, "icron.exec(wait=5)",
+             "Script completed"),
+            ({"call": "jobs()"}, "icron.jobs()", "6 pending jobs"),
+            ({"action": "jobs"}, "icron.jobs()", "6 pending jobs"),
+            ({"call": "help()"}, "icron.help()", "icron: this session's in-process scheduler."),
+            ({"call": "icron.help('Run')"}, "icron.help(name='Run')", "Run"),
+        ]
+        for arguments, shown, first in forms:
+            with self.subTest(arguments=arguments):
+                self.assertEqual(call_text(arguments)[0], shown)
+                ok, lines = self.call(**arguments)
+                self.assertTrue(ok)
+                self.assertTrue(lines[0].startswith(first), lines)
+        for arguments in ({"call": "yield('Waiting.')"},
+                          {"call": " icron . yield(note='Waiting.') "},
+                          {"call": "yield_('Waiting.')"}, {"action": "yield", "note": "Waiting."}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(call_text(arguments), ("icron.yield_(note='Waiting.')", None))
+                self.icron.begin_turn()
+                self.assertEqual(self.call(**arguments)[1][0],
+                                 "Yielded: your turn ends once this tool batch is saved")
+                self.icron.handoff(_yield("ended"))
+        job_id = self.icron.jobs()[0].job_id
+        for arguments in ({"call": f"cancel({job_id!r})"}, {"action": "cancel", "job_id": job_id}):
+            self.assertEqual(call_text(arguments)[0], f"icron.cancel(job_id={job_id!r})")
+        self.assertTrue(self.call(call=f"cancel(job_id={job_id!r})")[1][0].startswith(
+            f"Cancelled job {job_id} "))
+
+    def test_exec_s_result_reads_like_code_mode_s(self):
+        # The wording of Codex's and pi's code mode: the run's state, the call's wall time
+        # with the reason when the code didn't run to its end, then the value, and the
+        # output and the error as blocks, indented so that no line in them reads as a label.
+        self.start()
+        wall = r"Wall time \d+\.\d seconds"
+        ok, done = self.exec_lines(code="class R:\n    def __repr__(self):\n"
+                                        "        return 'first\\n\\nthird'\n"
+                                        "print('Output:\\n\\nx')\nR()")
+        self.assertTrue(ok)
+        self.assertEqual(done[0], "Script completed")
+        self.assertRegex(done[1], f"^{wall}$")
+        self.assertEqual(datetime.fromisoformat(done[2].removeprefix("Now: ")).timestamp(), NOW)
+        self.assertEqual(done[3:], ["Value:", "  first", "", "  third",
+                                    "Output:", "  Output:", "", "  x"])
+        # A failed run's output and error are separate blocks.
+        ok, failed = self.exec_lines(code="print('before', end='')\n{}['k']")
+        self.assertFalse(ok)
+        self.assertEqual((failed[0], failed[3:7], failed[-1]),
+                         ("Script failed",
+                          ["Output:", "  before", "Error:", "  Traceback (most recent call last):"],
+                          "  KeyError: 'k'"))
+        ok, broken = self.exec_lines(code="def f(:\n    pass")
+        self.assertFalse(ok)
+        self.assertRegex(broken[1], rf"^{wall} \(it didn't run\)$")
+        self.assertEqual(broken[3], "Error:")  # nothing ran, so no Output block
+        self.assertTrue(broken[-1].startswith("  SyntaxError"), broken)
+        ok, running = self.exec_lines(code="print('start')\nawait asyncio.sleep(5)", wait=0.1)
+        self.assertTrue(ok)
+        self.assertRegex(running[0], r"^Script running with job ID [a-z0-9]{4}-\d+$")
+        self.assertRegex(running[1], rf"^{wall} \(the wait ran out\)$")
+        self.assertEqual(running[3:], ["Output so far:", "  start"])
+        self.icron.exec("import time\ntime.sleep(0.4)", wait=0, by="main")  # holds the watcher
+        ok, pending = self.exec_lines(code="41 + 1", wait=0.05)
+        self.assertTrue(ok)
+        self.assertRegex(pending[0], r"^Script pending with job ID [a-z0-9]{4}-\d+ until "
+                                     r"icron's event loop is free$")
+        self.assertRegex(pending[1], rf"^{wall} \(the wait ran out\)$")
+        self.assertEqual(pending[3:], [])  # an empty block is left out
+
+    def test_schedule_and_cancel_results_name_the_job_as_wake_ups_do(self):
+        self.start()
+        ok, once = self.call(action="schedule", message="Check CI run 123.", after=600)
+        self.assertEqual((ok, once[0]), (True, f"Scheduled job {once[0].split()[2]} (yours; due "
+                                               f"{_iso(NOW + 600)}, in 600 s)"))
+        _, counted = self.call(action="schedule", code="print('poll')", every=60, count=3)
+        _, endless = self.call(action="schedule", message="Keep going.", every=270)
+        _, last = self.call(action="schedule", message="Last call.", every=30, count=1,
+                            at=_iso(NOW + 90))
+        polls, keeps, lasts = (lines[0].split()[2] for lines in (counted, endless, last))
+        self.assertEqual([counted[0], endless[0], last[0]], [
+            f"Scheduled job {polls} (your code; due {_iso(NOW + 60)}, in 60 s, every 60 s, "
+            "3 firings left)",
+            f"Scheduled job {keeps} (yours; due {_iso(NOW + 270)}, in 270 s, every 270 s)",
+            f"Scheduled job {lasts} (yours; due {_iso(NOW + 90)}, in 90 s, every 30 s, "
+            "1 firing left)"])
+        self.assertEqual({lines[1] for lines in (once, counted, endless, last)},
+                         {f"Now: {_iso(NOW)}"})
+        # Cancelling running code says when it stops; anything else is just cancelled.
+        _, running = self.exec_lines(code="await asyncio.sleep(5)", wait=0.05)
+        code = re.match(r"Script (?:running|pending) with job ID (\S+)", running[0]).group(1)
+        self.assertTrue(_until(lambda: self.job(code).started is not None))
+        self.assertEqual(self.call(action="cancel", job_id=code)[1][0],
+                         f"Cancelled job {code} (your code, from exec): its code stops at its "
+                         "next await")
+        self.assertEqual(self.call(action="cancel", job_id=polls)[1][0],
+                         f"Cancelled job {polls} (your code)")
+
+    def test_yield_s_result_says_what_resumes_main(self):
+        icron = self.start()
+        head = "Yielded: your turn ends once this tool batch is saved"
+
+        def yielded(*cleanup):
+            icron.begin_turn()
+            ok, lines = self.call(action="yield", note="Waiting.")
+            self.assertTrue(ok)
+            self.assertEqual((lines[0], lines[-1]), (head, f"Now: {_iso(icron.clock())}"))
+            icron.handoff(_yield("ended"))
+            for job_id in cleanup:
+                icron.cancel(job_id)
+            return lines[1]
+
+        later = icron.schedule("Check CI run 123.", after=600, by="main")
+        self.assertEqual(yielded(later.job_id),
+                         f"Job {later.job_id} (yours; due {_iso(NOW + 600)}, in 600 s) resumes "
+                         "you when it fires, unless the user writes first.")
+        code = icron.exec("await asyncio.sleep(5)", wait=0.01, by="main").job
+        self.assertTrue(_until(lambda: self.job(code.job_id).started is not None))
+        self.assertEqual(yielded(code.job_id),
+                         f"Job {code.job_id} (your code, from exec; running since {_iso(NOW)}) "
+                         "resumes you when it sends you a message or ends, unless the user "
+                         "writes first.")
+        # A message that already waits for main: from a job, or from host code.
+        fired = icron.schedule("Look at the logs.", after=30, by="main")
+        self.advance(30)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        self.assertEqual(yielded(),
+                         f"A wake-up from job {fired.job_id} (yours; sent {_iso(NOW + 30)}) "
+                         "already waits for you.")
+        icron.take_wakes()
+        icron.main.resume("From the host.")
+        self.assertEqual(yielded(), "A wake-up already waits for you.")
+
+    def test_jobs_lists_each_job_with_its_code_message_output_and_error_as_blocks(self):
+        icron = self.start()
+        self.assertEqual(self.call(action="jobs")[1], ["No jobs", f"Now: {_iso(NOW)}"])
+        broken = icron.schedule(code="print('fetching')\nraise KeyError('missing')", after=10,
+                                by="main")
+        self.advance(10)
+        self.wait_for(broken.job_id, "failed")
+        self.assertEqual(self.call(action="jobs")[1][0], "No pending jobs, and 1 that ended")
+        running = icron.exec("print('step 0')\nprint()\nprint('step 1')\n"
+                             "await asyncio.sleep(5)", wait=0.05, by="main").job
+        self.assertTrue(_until(lambda: "step 1" in self.job(running.job_id).output))
+        poll = icron.schedule(code="print('poll')", every=60, count=3, by="main")
+        users = icron.schedule("Stand-up in 5 minutes.\n  Bring notes.", after=1800, by="user")
+        _, listed = self.call(action="jobs")
+        self.assertEqual(listed, [
+            "3 pending jobs, and 1 that ended", f"Now: {_iso(NOW + 10)}",
+            f"Job {running.job_id} (your code, from exec; running since {_iso(NOW + 10)}):",
+            "  Code:", "    print('step 0')", "    print()", "    print('step 1')",
+            "    await asyncio.sleep(5)",
+            "  Output so far:", "    step 0", "", "    step 1",
+            f"Job {poll.job_id} (your code; due {_iso(NOW + 70)}, in 60 s, every 60 s, "
+            "3 firings left):",
+            "  Code:", "    print('poll')",
+            f"Job {users.job_id} (the user's, from /cron; due {_iso(NOW + 1810)}, in 1800 s):",
+            "  Message:", "    Stand-up in 5 minutes.", "      Bring notes.",
+            f"Job {broken.job_id} (your code; failed at {_iso(NOW + 10)}):",
+            "  Code:", "    print('fetching')", "    raise KeyError('missing')",
+            "  Output:", "    fetching",
+            "  Error:", "    Traceback (most recent call last):",
+            f'      File "<icron {broken.job_id}>", line 2, in <module>',
+            "        raise KeyError('missing')", "    KeyError: 'missing'"])
+
+    def test_jobs_shows_the_start_of_long_code_and_the_end_of_long_output(self):
+        icron = self.start()
+        long = icron.exec("print('o' * 5000)\nawait asyncio.sleep(5)  # " + "c" * 3000,
+                          wait=0.05, by="main").job
+        self.assertTrue(_until(lambda: self.job(long.job_id).output))
+        _, listed = self.call(action="jobs")
+        # The clipping notices stay inside their blocks.
+        self.assertEqual(listed[2:], [
+            f"Job {long.job_id} (your code, from exec; running since {_iso(NOW)}):",
+            "  Code:", "    print('o' * 5000)",
+            "    await asyncio.sleep(5)  # " + "c" * 1956 + "… [1044 more characters]",
+            "  Output so far:", "    [1001 earlier characters omitted]", "    " + "o" * 3999])
 
     def test_inputs_that_are_not_a_call_fail(self):
         handler = self.icron.tool().handler
-        cases = [({"action": "nope"}, "icron: action must be one of schedule, exec, yield, "
-                                      "cancel, jobs."),
-                 ({}, "icron: action must be one of"),
-                 ({"action": "schedule", "message": "x", "after": 5, "by": "user"},
-                  "icron.schedule(): by is for host code only."),
-                 ({"action": "exec", "code": ["print(1)"]}, "icron.exec(): code must be a string."),
-                 ({"action": "yield"}, "icron.yield_(): missing a required argument: 'note'"),
-                 ({"action": "jobs", "limit": 3},
-                  "icron.jobs(): got an unexpected keyword argument 'limit'"),
-                 ({"action": "cancel", "job_id": 7}, "icron.cancel(): job_id must be a string.")]
+        # Each refusal says what to give instead; nothing in a call is evaluated.
+        cases = [
+            ({}, "icron: give call, one method call such as jobs(), or code to run now."),
+            ({"call": "jobs()", "action": "jobs"}, "icron: give call or action, not both."),
+            ({"call": "exec(code='print(2)')", "code": "print(1)"},
+             "icron.exec(): give the code in the code field only."),
+            ({"call": "exec('print(2)')", "code": "print(1)"},
+             "icron.exec(): give the code in the code field only."),
+            ({"call": "jobs()", "code": "print(1)"},
+             "icron.jobs(): it takes no code; leave the code field out."),
+            ({"call": "exec(wait=30)"}, "icron.exec(): give the code to run in the code field."),
+            ({"call": "shedule('Hi.', after=600)"},
+             "icron: there is no method shedule(); did you mean schedule()?"),
+            ({"call": "launch()"}, "icron: there is no method launch()."),
+            ({"call": "schedule('Hi.', after=delay)"},
+             "icron.schedule(): after must be a literal, such as 600 or 'text'."),
+            ({"call": "schedule(open('x').read())"},
+             "icron.schedule(): message must be a literal, such as 600 or 'text'."),
+            ({"call": "cancel('a'); jobs()"},
+             "icron: call must be one method call, such as jobs(); invalid syntax."),
+            ({"call": "jobs"}, "icron: call must be one method call, such as jobs()."),
+            ({"call": "main.resume('x')"}, "icron: call must be one method call, such as jobs()."),
+            ({"call": "schedule(**options)"},
+             "icron.schedule(): give each argument by itself, not **mapping."),
+            ({"call": "schedule(*options)"},
+             "icron.schedule(): give each argument by itself, not *sequence."),
+            ({"call": "jobs()", "wait": 3},
+             "icron: unexpected field 'wait'; give call, and code for exec() or schedule()."),
+            ({"call": 5}, "icron: call must be text, one method call such as jobs()."),
+            ({"call": "yield_()"}, "icron.yield_(): missing a required argument: 'note'"),
+            ({"call": "jobs(limit=3)"}, "icron.jobs(): got an unexpected keyword argument 'limit'"),
+            ({"call": "jobs(by='user')"}, "icron.jobs(): by is for host code only."),
+            ({"code": 5}, "icron.exec(): code must be a string."),
+            ({"call": "help('nothing')"}, "icron.help(): there is no name 'nothing'. help() lists "
+                                          "them."),
+            ({"call": "help('shedule')"}, "icron.help(): there is no name 'shedule'; did you mean "
+                                          "'schedule'? help() lists them."),
+            # The first version's form.
+            ({"action": "nope"}, "icron: action must be one of schedule, exec, yield, cancel, "
+                                 "jobs."),
+            ({"action": "schedule", "message": "x", "after": 5, "by": "user"},
+             "icron.schedule(): by is for host code only."),
+            ({"action": "exec", "code": ["print(1)"]}, "icron.exec(): code must be a string."),
+            ({"action": "yield"}, "icron.yield_(): missing a required argument: 'note'"),
+            ({"action": "jobs", "limit": 3},
+             "icron.jobs(): got an unexpected keyword argument 'limit'"),
+            ({"action": "cancel", "job_id": 7}, "icron.cancel(): job_id must be a string.")]
         for arguments, text in cases:
             with self.subTest(arguments=arguments), self.assertRaises(IcronError) as caught:
                 handler(arguments)
-            self.assertTrue(str(caught.exception).startswith(text), str(caught.exception))
+            self.assertEqual(str(caught.exception), text)
+        self.assertEqual(self.icron.jobs(), ())  # nothing ran, and nothing was scheduled
+
+    def test_a_call_too_deep_to_read_is_refused(self):
+        handler = self.icron.tool().handler
+        for call in ("schedule('x', after=" + "+".join(["1"] * 5000) + ")",
+                     "schedule('x', after=" + "(" * 300 + "1" + ")" * 300 + ")",
+                     "jobs(\0)"):
+            with self.subTest(call=call[:40]), self.assertRaises(IcronError) as caught:
+                handler({"call": call})
+            self.assertTrue(str(caught.exception).startswith(
+                "icron: call must be one method call, such as jobs()"), str(caught.exception))
+
+    def test_the_description_has_a_line_for_each_method_made_from_its_signature(self):
+        description = self.icron.tool().spec.description
+        self.assertEqual([line.split(": ", 1)[0] for line in description.splitlines()
+                          if line.startswith("- ")], [
+            "- exec(wait=10)",
+            "- schedule(message=None, *, after=None, at=None, every=None, count=None)",
+            "- yield_(note)", "- cancel(job_id)", "- jobs()", "- help(name=None)"])
+        self.assertIn("(at most 59)", description)
+        self.assertIn('  {"code": "import os\\nprint(os.getloadavg())"}', description)
+        # The bounds are the instance's.
+        narrow = Icron(limits=IcronLimits(max_wait=20))
+        self.assertIn("(at most 20)", narrow.tool().spec.description)
+        self.assertIn("exec's wait up to 20 seconds", narrow.help())
+
+    def test_help_shows_an_overview_and_each_name_in_full(self):
+        overview = self.icron.help()
+        self.assertTrue(overview.startswith("icron: this session's in-process scheduler."))
+        lines = overview.splitlines()
+        for title in ("Methods:", "In code:", "Messages:", "Limits:", "Results:"):
+            self.assertIn(title, lines)
+        for signature in ("exec(wait=10)", "yield_(note)", "help(name=None)"):
+            self.assertIn(f"  {signature}", lines)
+        self.assertIn("16 pending jobs and 16 undelivered messages each", overview)
+        for name in ("exec", "schedule", "yield_", "cancel", "jobs", "help", "icron", "main",
+                     "main.resume", "Job", "Run"):
+            with self.subTest(name=name):
+                text = self.icron.help(name)
+                self.assertEqual(text.splitlines()[1][:2], "  ")
+                if name in ("exec", "schedule", "yield_", "cancel", "help"):
+                    # Each keyword of the method has its sentence, so a new one needs one.
+                    method = getattr(Icron, name)
+                    for parameter in inspect.signature(method).parameters:
+                        if parameter not in ("self", "by"):
+                            self.assertIn(f"\n  {parameter}: ", text)
+        self.assertEqual(self.icron.help("schedule").splitlines()[0],
+                         "schedule(message=None, *, after=None, at=None, every=None, count=None)")
+        for alias, name in (("yield", "yield_"), (" icron.schedule() ", "schedule"),
+                            ("main.handoff", "main"), ("current", "icron")):
+            self.assertEqual(self.icron.help(alias), self.icron.help(name))
+        # A method's result, for example, is the formatter's own.
+        self.assertIn("Result, for example:\n  Cancelled job k3f9-3 (your code, from exec): its "
+                      "code stops at its next await\n", self.icron.help("cancel"))
+        with self.assertRaisesRegex(IcronError, r"^icron\.help\(\): name must be text"):
+            self.icron.help(5)
+
+    def test_code_s_help_prints_the_same_reference_or_python_s_help(self):
+        self.start()
+        for code, name in (("help('cancel')", "cancel"), ("help(main.resume)", "main.resume"),
+                           ("help(icron.schedule)", "schedule"), ("help(icron)", "icron"),
+                           ("help(icron.current)", "Run"), ("help()", None)):
+            with self.subTest(code=code):
+                ok, lines = self.exec_lines(code=code)
+                self.assertEqual((ok, lines[3]), (True, "Output:"))
+                self.assertEqual(lines[4:], [f"  {line}" if line else ""
+                                             for line in self.icron.help(name).splitlines()])
+        ok, lines = self.exec_lines(code="help(asyncio.sleep)")
+        self.assertTrue(any("Python Library Documentation: function sleep" in line
+                            for line in lines), lines)
+        ok, lines = self.exec_lines(code="help('no.such.thing')")
+        self.assertEqual((ok, lines[4]), (True, "  No Python documentation found for "
+                                                "'no.such.thing'; help() shows icron's reference."))
+        ok, lines = self.exec_lines(code="import inspect\n[inspect.getdoc(f) for f in "
+                                         "(icron.schedule, icron.cancel, icron.jobs)]")
+        self.assertNotIn("None", lines[3])
 
     def test_main_sees_its_jobs_and_the_user_s_and_cancels_only_its_own(self):
         icron = self.icron
@@ -504,7 +837,8 @@ class ToolTests(_IcronCase):
         icron.schedule("h", after=60)
         mine = icron.schedule("m", after=30, by="main")
         _, listed = self.call(action="jobs")
-        self.assertEqual([job["job_id"] for job in listed["jobs"]], [mine.job_id, users.job_id])
+        self.assertEqual([line.split()[1] for line in listed if line.startswith("Job ")],
+                         [mine.job_id, users.job_id])
         with self.assertRaisesRegex(IcronError, "is the user's; you can cancel only your own"):
             self.call(action="cancel", job_id=users.job_id)
         self.assertEqual(len(icron.jobs()), 3)
@@ -619,9 +953,20 @@ class LogTests(unittest.TestCase):
                                                   ToolResult("b", "{}"))))
         self.assertFalse(Icron.yield_recorded_in((*user, ToolCall("yield", "c", "{}"),
                                                   ToolResult("c", "ok"))))
+        # Any form that the tool reads as a yield: the call, its shorthands, the first version's.
+        for arguments in ({"call": "yield_('x')"}, {"call": "yield('x')"},
+                          {"call": "icron.yield_(note='x')"}, {"action": "yield", "note": "x"}):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(Icron.yield_recorded_in((*user, _call("a", **arguments),
+                                                         ToolResult("a", "Yielded: …"))))
+        for arguments in ({"call": "jobs()"}, {"call": "yield_()"}, {"call": "yeild('x')"},
+                          {"code": "yield_('x')"}):
+            with self.subTest(arguments=arguments):
+                self.assertFalse(Icron.yield_recorded_in((*user, _call("a", **arguments),
+                                                          ToolResult("a", "…"))))
 
     def test_log_state_names_what_a_restart_lost(self):
-        def scheduled(due, every=None):
+        def scheduled(due, every=None):  # a result as saved before October 25: JSON
             return (_call("s", action="schedule", message="x", after=5),
                     ToolResult("s", json.dumps({"job_id": "k-1", "due": _iso(due),
                                                 "every": every})))
@@ -633,6 +978,33 @@ class LogTests(unittest.TestCase):
                                     ToolResult("e", "{}")), now=NOW), "jobs")
         self.assertEqual(log_state((_call("y", action="yield", note="x"),
                                     ToolResult("y", "{}")), now=NOW), "yielded")
+
+    def test_log_state_reads_the_schedule_results_that_main_gets(self):
+        icron = Icron(clock=lambda: NOW)
+        self.addCleanup(icron.close, 1.0)
+
+        def scheduled(**arguments):
+            arguments = {"action": "schedule", "message": "x", **arguments}
+            return (_call("s", **arguments),
+                    ToolResult("s", icron.tool().handler(arguments).output))
+        once, repeat, counted = scheduled(after=60), scheduled(every=60), \
+            scheduled(every=60, count=2)
+        self.assertTrue(once[1].output.startswith("Scheduled job "), once[1].output)
+        self.assertEqual(log_state(once, now=NOW + 59), "jobs")
+        self.assertIsNone(log_state(once, now=NOW + 61))
+        self.assertEqual(log_state(repeat, now=NOW + 3600), "jobs")
+        self.assertEqual(log_state(counted, now=NOW + 90), "jobs")  # its second firing is due
+        self.assertIsNone(log_state((once[0], ToolResult("s", "Scheduled job k-1 (yours; due "
+                                                              "soon, in 60 s)")), now=NOW))
+        # New-form calls: code alone ran code, and so did exec().
+        new = (_call("s", call="schedule('x', after=60)"), once[1])
+        self.assertEqual(log_state(new, now=NOW + 59), "jobs")
+        self.assertIsNone(log_state(new, now=NOW + 61))
+        for arguments in ({"code": "1"}, {"call": "exec()", "code": "1"}):
+            self.assertEqual(log_state((_call("e", **arguments),
+                                        ToolResult("e", "Script completed")), now=NOW), "jobs")
+        self.assertIsNone(log_state((_call("j", call="jobs()"), ToolResult("j", "No jobs")),
+                                    now=NOW))
 
 
 class _Host(TurnHost):
@@ -657,8 +1029,8 @@ class KernelTests(_IcronCase):
         icron = self.start()
         icron.schedule("Check CI run 123.", after=600, by="main")
         context = InteractionContext((Init(model="scripted"), Message("user", "task")))
-        model = _Model(ModelSample((_call("y", action="yield", note="Waiting for CI."),
-                                    _call("j", action="jobs"))),
+        model = _Model(ModelSample((_call("y", call="yield_('Waiting for CI.')"),
+                                    _call("j", call="jobs()"))),
                        ModelSample((Message("assistant", "never"),)))
         icron.begin_turn()
         result = run_turn(context, model, Environment((icron.tool(),)),
