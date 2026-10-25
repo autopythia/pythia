@@ -11,7 +11,7 @@ import unittest
 
 
 INSTALLER = Path(__file__).resolve().parents[1] / "install.py"
-COMMANDS = {"ipythia": "cli", "autopythia": "auto"}
+COMMANDS = {"ipythia": "cli", "autopythia": "auto", "apply_patch": "apply_patch"}
 HAS_SAFE_PATH = sys.version_info >= (3, 11)  # python3 -P
 
 
@@ -87,7 +87,7 @@ class InstallerTests(unittest.TestCase):
             else:
                 self.assertEqual([orig_argv[1], *orig_argv[3:]], ["-c", *args])
 
-    def test_both_commands_and_checkout_switch(self):
+    def test_each_command_and_checkout_switch(self):
         result = self.install("-e")
         for command in COMMANDS:
             self.assertIn(str(self.bin / command), result.stdout)
@@ -119,19 +119,57 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse((bin_dir / "autopythia").is_symlink())
         self.assert_launchers(bin_dir, "checkout one")
 
-    def test_preflight_checks_both_modules_and_destinations(self):
-        auto = self.checkout / "pythia" / "interaction" / "auto.py"
-        content = auto.read_text()
-        auto.unlink()
-        self.install("-e", success=False)
-        self.assertFalse(self.link.exists())
-        self.assertFalse(self.bin.exists())
-        auto.write_text(content)
+    def test_preflight_checks_every_module_and_destination(self):
+        for module in COMMANDS.values():
+            with self.subTest(module=module):
+                entry = self.checkout / "pythia" / "interaction" / f"{module}.py"
+                content = entry.read_text()
+                entry.unlink()
+                self.install("-e", success=False)
+                self.assertFalse(self.link.exists())
+                self.assertFalse(self.bin.exists())
+                entry.write_text(content)
         (self.bin / "autopythia").mkdir(parents=True)
         (self.bin / "ipythia").write_text("unchanged")
         self.install("-e", success=False)
         self.assertFalse(self.link.exists())
         self.assertEqual((self.bin / "ipythia").read_text(), "unchanged")
+
+    def test_a_foreign_apply_patch_is_left_in_place_and_reported(self):
+        # Another tool may install a command of that name, so only a wrapper
+        # that this installer wrote is replaced there.
+        target = self.root / "other target"
+        target.write_text("other target must not change")
+        cases = {
+            "file": lambda path: path.write_text("#!/bin/sh\necho other\n"),
+            "symlink": lambda path: path.symlink_to(target),
+            "directory": lambda path: path.mkdir(),
+        }
+        for kind, make in cases.items():
+            with self.subTest(kind=kind):
+                bin_dir = self.root / f"prefix {kind}" / "bin"
+                bin_dir.mkdir(parents=True)
+                foreign = bin_dir / "apply_patch"
+                make(foreign)
+                result = self.install("-e", "--prefix", str(bin_dir.parent))
+                self.assertIn(f"Left in place       = {foreign} (not written by install.py; "
+                              "remove it and re-run to install pythia's)", result.stdout)
+                self.assertNotIn(f"Installed           = {foreign}", result.stdout)
+                if kind == "file":
+                    self.assertEqual(foreign.read_text(), "#!/bin/sh\necho other\n")
+                self.assertEqual(foreign.is_symlink(), kind == "symlink")
+                self.assertEqual(foreign.is_dir(), kind == "directory")
+                self.assertEqual(target.read_text(), "other target must not change")
+                for command in ("ipythia", "autopythia"):
+                    self.assertIn(f"Installed           = {bin_dir / command}", result.stdout)
+        # Its own wrapper, even edited, is rewritten.
+        self.install("-e")
+        wrapper = self.bin / "apply_patch"
+        written = wrapper.read_text()
+        wrapper.write_text(written + "echo edited\n")
+        result = self.install("-e")
+        self.assertIn(f"Installed           = {wrapper}", result.stdout)
+        self.assertEqual(wrapper.read_text(), written)
 
     def test_requires_editable_and_preserves_non_symlink_checkout_path(self):
         self.install(success=False)

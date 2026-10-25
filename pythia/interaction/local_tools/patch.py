@@ -670,6 +670,14 @@ def _apply_patch_text(
     *,
     enable_workspace: bool,
 ) -> str:
+    """Apply ``patch_text``, all files or none, and return one line per file
+    operation (``A``, ``M``, ``D``, ``R old -> new``).
+
+    Relative paths start at ``workspace_root``; with ``enable_workspace``,
+    every path must stay inside it. The tool passes its root and workspace
+    policy; the apply_patch command (``pythia.interaction.apply_patch``) its
+    working directory, with no workspace limit.
+    """
     operations = _parse_patch(patch_text)
     resolved = _resolve_operations(
         workspace_root,
