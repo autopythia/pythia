@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from collections.abc import Iterable
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Callable
 from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Set
 from typing import Tuple
 
+from ._provider_text import QUOTED_VALUE_CHARS
+from ._provider_text import quoted
 from .compaction import _compaction_summary_text
 from .compaction import is_coldstart_pointer
 from .items import CompactionMetadata
@@ -138,12 +142,24 @@ class InteractionItemRenderer:
 
     color: bool = True
     show_generic_arguments: bool = False
+    # The session's working directory, or None: an exec_command call shows a
+    # workdir that names another one (_exec_command_extras).
+    cwd: Optional[str] = None
+    # Whether the user approves a model call of the tool of this name before it
+    # runs (the CLI's --require-tool-approval), or None: no call waits. Such a
+    # call shows what it would do in full: write_stdin's input uncut, and
+    # update_plan's plan.
+    awaits_approval: Optional[Callable[[str], bool]] = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.color, bool):
             raise TypeError("color must be a bool")
         if not isinstance(self.show_generic_arguments, bool):
             raise TypeError("show_generic_arguments must be a bool")
+        if self.cwd is not None and not isinstance(self.cwd, str):
+            raise TypeError("cwd must be a str or None")
+        if self.awaits_approval is not None and not callable(self.awaits_approval):
+            raise TypeError("awaits_approval must be callable or None")
 
     def render_items(
         self,
@@ -287,8 +303,23 @@ class InteractionItemRenderer:
             call, code = _format_icron_call(parsed)
             return (f"{label}\n{call}",) if code is None else (f"{label}\n{call}", code)
 
+        # A model call that awaits the user's approval shows what it would do in
+        # full (awaits_approval).
+        whole = (not user and self.awaits_approval is not None
+                 and bool(self.awaits_approval(item.name)))
+
+        if item.name == "write_stdin":
+            summary = _format_write_stdin_summary(payload, whole=whole)
+            if summary is not None:
+                return (f"{label}\n{summary}",)
+
         command = _extract_shell_command(item.name, payload)
         if command is not None:
+            if item.name == "exec_command":
+                extras = _exec_command_extras(payload, self.cwd)
+                if extras:
+                    # On the call's line, so that its block stays the command alone.
+                    return (f"{label} {' '.join(extras)}\n{command}",)
             return (f"{label}\n{command}",)
 
         code_payload = _extract_code_payload(
@@ -302,6 +333,11 @@ class InteractionItemRenderer:
             return (label, code_payload)
 
         if item.name == "update_plan":
+            if whole and isinstance(parsed, Mapping):
+                # The plan it proposes; its result shows it again, as updated.
+                plan = _render_update_plan_lines(parsed, heading="Proposed plan")
+                if plan:
+                    return ("\n".join((label, *plan)),)
             return (label,)
 
         if self.show_generic_arguments or user:
@@ -640,7 +676,7 @@ def _extract_shell_command(
     if name not in _SHELL_TOOL_NAMES:
         return None
     if name == "write_stdin":
-        return _format_write_stdin_summary(payload)
+        return None  # its input, not a command (_format_write_stdin_summary)
     command = payload.get("cmd")
     if command is None:
         command = payload.get("command")
@@ -649,14 +685,47 @@ def _extract_shell_command(
 
 def _format_write_stdin_summary(
     payload: Mapping[str, object],
+    *, whole: bool = False,
 ) -> Optional[str]:
+    """Its session, and its input as a Python literal, so that Enter (a
+    newline) and control keys show: cut as ``quoted`` cuts, with its size,
+    unless ``whole``."""
     parts = []
     if "session_id" in payload:
         parts.append(f"session_id={payload['session_id']}")
     if "chars" in payload:
         chars = str(payload.get("chars") or "")
-        parts.append(f"chars={len(chars.encode('utf-8'))} bytes")
+        shown = repr(chars)
+        if not whole and len(shown) > QUOTED_VALUE_CHARS:
+            shown = f"{quoted(chars)} ({len(chars.encode('utf-8'))} bytes)"
+        parts.append(f"chars={shown}")
     return " ".join(parts) if parts else None
+
+
+def _exec_command_extras(
+    arguments: Mapping[str, object],
+    cwd: Optional[str],
+) -> List[str]:
+    """exec_command's arguments that change where or how its command runs,
+    when they aren't the defaults: a workdir that names a directory other than
+    the session's (``cwd``; none shows while that is unknown), and a login
+    other than true."""
+    extras = []
+    workdir = arguments.get("workdir")
+    if cwd is not None and workdir not in (None, "") and not (
+            isinstance(workdir, str) and _names_directory(workdir, cwd)):
+        extras.append(f"workdir={workdir!r}")
+    login = arguments.get("login", True)
+    if login is not True:
+        extras.append(f"login={login!r}")
+    return extras
+
+
+def _names_directory(workdir: str, cwd: str) -> bool:
+    """Whether ``workdir`` names ``cwd``, read as exec_command reads it (after
+    ``~``, from ``cwd``) but lexically: no symlink is followed."""
+    path = os.path.join(cwd, os.path.expanduser(workdir))
+    return os.path.normpath(path) == os.path.normpath(cwd)
 
 
 def _extract_code_payload(
@@ -745,12 +814,13 @@ def _format_tool_result_label(
 
 def _render_update_plan_lines(
     payload: Mapping[str, object],
+    *, heading: str = "Updated plan",
 ) -> Tuple[str, ...]:
     raw_plan = payload.get("plan")
     if not isinstance(raw_plan, list):
         return ()
 
-    lines = ["[plan] Updated plan"]
+    lines = [f"[plan] {heading}"]
     explanation = payload.get("explanation")
     if isinstance(explanation, str):
         normalized_explanation = explanation.strip()

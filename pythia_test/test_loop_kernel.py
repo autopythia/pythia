@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from pythia.interaction import Environment, Init, InteractionContext, Message
+from pythia.interaction import InteractionItemRenderer
 from pythia.interaction import ModelSample, Tool, ToolCall, ToolOutcome, ToolResult, ToolSpec
 from pythia.interaction.claude_relay._cli_protocol import NativeStreamInterrupted, NativeToolInputRewritten
 from pythia.interaction.claude_relay._mcp import MCPError, NativeToolRejected
@@ -675,6 +676,21 @@ class ToolApprovalTests(unittest.TestCase):
         self.assertEqual(host.approvals, ["a"])
         self.assertEqual(_results(context), [("a", "denied", False)])
         self.assertNotIn(("trace", "tool_call"), host.traced)
+
+    def test_samples_show_as_the_hosts_renderer_renders_them(self):
+        shown = []
+
+        class Host(_Host):
+            renderer = InteractionItemRenderer(awaits_approval=lambda name: True)
+
+            def show(self, items):
+                shown.extend(item.text for item in items)
+
+        host, context = Host(), _context()
+        plan = ToolCall("update_plan", "a", '{"plan":[{"step":"Pick","status":"pending"}]}')
+        run_turn(context, _Model(host, _calls(plan), _answer("done")),
+                 _environment(host), _config(), host)
+        self.assertIn("[tool-call] update_plan (a)\n[plan] Proposed plan\n[plan] [ ] Pick", shown)
 
     def test_a_host_approval_runs_the_tool_normally(self):
         host, context = _Host(), _context()

@@ -67,6 +67,7 @@ from .compaction import run_compaction
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
+from .display import InteractionItemRenderer
 from .display import message_summary
 from .display import render_interaction_items
 from .environment import Environment
@@ -173,6 +174,10 @@ _TOOL_APPROVAL_HEADLESS_ERROR = (
     "--require-tool-approval requires the interactive CLI; "
     "headless has no /yes or /no input."
 )
+# --require-tool-approval=exec: approval for every model tool call but those of
+# these tools, which act only on the conversation (update_plan records a plan).
+_APPROVAL_EXEC = "exec"
+_APPROVAL_EXEMPT_IN_EXEC = frozenset(("update_plan",))
 
 
 @dataclass(frozen=True, eq=False)
@@ -368,8 +373,10 @@ class _UIState:
     login_cancel: threading.Event = field(default_factory=threading.Event)
     transient: queue.Queue[tuple[str, str]] = field(default_factory=lambda: queue.Queue(maxsize=8))
     active_user_call: Optional[str] = None
-    require_tool_approval: bool = False
+    require_tool_approval: Union[bool, str] = False  # False, True, or _APPROVAL_EXEC
     pending_tool_approval: Optional[_ToolApproval] = None
+    # How the model's items show (_cli_renderer).
+    renderer: InteractionItemRenderer = field(default_factory=InteractionItemRenderer, repr=False)
     trace: Optional[DebugTrace] = None
     active_model: object = field(default=None, repr=False)
     # True while a model turn runs that started with nothing queued: plain text
@@ -2312,12 +2319,43 @@ def _reboot_exec(state: dict) -> int:
             return 1
 
 
+def _requires_approval(mode: Union[bool, str], name: str) -> bool:
+    """Whether --require-tool-approval's ``mode`` has the user approve a model
+    call of the tool ``name`` before it runs: every call (True), every one but
+    those of _APPROVAL_EXEMPT_IN_EXEC (exec), or none (False)."""
+    if mode == _APPROVAL_EXEC:
+        return name not in _APPROVAL_EXEMPT_IN_EXEC
+    return mode is True
+
+
+def _tool_approval_argument(value: str) -> Union[bool, str]:
+    """--require-tool-approval's value: True or False, as _boolean_argument
+    reads them, or exec (_APPROVAL_EXEC)."""
+    if isinstance(value, str) and value.casefold() == _APPROVAL_EXEC:
+        return _APPROVAL_EXEC
+    try:
+        return _boolean_argument(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError("expected True, False, or exec") from None
+
+
+def _cli_renderer(args, approval: Union[bool, str] = False) -> InteractionItemRenderer:
+    """How the CLI shows the model's tool calls: exec_command's workdir when
+    it isn't --cwd, and a call that awaits approval in full."""
+    return InteractionItemRenderer(
+        cwd=str(Path(getattr(args, "cwd", ".")).expanduser().resolve()),
+        awaits_approval=functools.partial(_requires_approval, approval),
+    )
+
+
 def _begin_tool_approval(state: _UIState, request: _ToolApproval) -> None:
-    """Publish an approval request and its slash-command affordance."""
+    """Publish an approval request and its slash-command affordance. The call
+    ID tells a batch's calls of one tool apart."""
+    call = request.call
     state.pending_tool_approval = request
-    state.set_phase(f"approval: {request.call.name}")
+    state.set_phase(f"approval: {call.name}")
     state.notice(
-        f"Approve tool call {request.call.name!r}? /yes or /no [reason]."
+        f"Approve tool call {call.name!r} ({call.call_id})? /yes or /no [reason]."
     )
 
 
@@ -2411,9 +2449,13 @@ class _CliHost(TurnHost):
     def tool_phase(self, call) -> None:
         self.phase(f"tool: {call.name}")
 
+    @property
+    def renderer(self) -> InteractionItemRenderer:
+        return self._state.renderer
+
     def tool_approval(self, call) -> Optional[ToolResult]:
         """Ask the terminal for /yes or /no before one model tool call."""
-        if not self._state.require_tool_approval:
+        if not _requires_approval(self._state.require_tool_approval, call.name):
             return None
         request = _ToolApproval(call)
         self._post(_begin_tool_approval, self._state, request)
@@ -2755,7 +2797,7 @@ async def _drive_interaction_body(
         if state.rebooted is None:
             # A restarted CLI's terminal shows them already, from the process
             # it replaced.
-            state.displays.extend(render_interaction_items(context.items))
+            state.displays.extend(state.renderer.render_items(context.items))
         if incomplete_line is not None:
             state.notice(incomplete_line.warning(save.log_name))
         state.notice(
@@ -3246,6 +3288,7 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
     state = _UIState(
         headless=True,
         require_tool_approval=getattr(args, "require_tool_approval", False),
+        renderer=_cli_renderer(args),
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
@@ -3311,6 +3354,7 @@ async def _run(
         editor=Editor(prompt, len(prompt)) if rebooted is None else rebooted.draft,
         auth_required=model is None,
         require_tool_approval=getattr(args, "require_tool_approval", False),
+        renderer=_cli_renderer(args, getattr(args, "require_tool_approval", False)),
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
@@ -3326,10 +3370,12 @@ async def _run(
     _startup_notices(state, args, save, config)
     if rebooted is not None:
         _carry_over(state, config, rebooted)
-    if getattr(args, "require_tool_approval", False):
+    approval = getattr(args, "require_tool_approval", False)
+    if approval:
+        exempt = ", ".join(sorted(_APPROVAL_EXEMPT_IN_EXEC))
         state.notice(
-            "Tool-call approval is enabled; answer /yes or /no [reason] "
-            "for each tool call."
+            "Tool-call approval is enabled; answer /yes or /no [reason] for each tool call"
+            + ("." if approval is True else f" but {exempt}'s (exec).")
         )
     worker = None
     frame = 0
@@ -3472,11 +3518,12 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=True,
         default=False,
-        type=_boolean_argument,
-        metavar="{False,True}",
+        type=_tool_approval_argument,
+        metavar="{False,True,exec}",
         help=(
             "require /yes or /no [reason] approval for every model tool call before "
-            "execution; not available with --headless and launch-only "
+            "execution; exec: for every one but update_plan's, which only records the "
+            "plan; not available with --headless and launch-only "
             "(default: %(default)s)"
         ),
     )

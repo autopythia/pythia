@@ -58,6 +58,7 @@ from ..compaction import compaction_log
 from ..compaction import create_default_compactor
 from ..compaction import run_compaction
 from ..compaction import uses_host_auto_compaction
+from ..display import InteractionItemRenderer
 from ..display import render_interaction_items
 from ..environment import CancelToken
 from ..environment import cancel_scope
@@ -235,6 +236,10 @@ class TurnHost:
 
     def show(self, items) -> None:
         """Show display items."""
+
+    # How show()'s items render the model's samples: a host may show more of
+    # their tool calls (InteractionItemRenderer's cwd and awaits_approval).
+    renderer: InteractionItemRenderer = InteractionItemRenderer()
 
     def phase(self, phase: str) -> None:
         """Report the context's phase, such as "sampling"."""
@@ -521,7 +526,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             recovery = []
         host.after_sample(model, sample)
         host.append(context, sample.context_items())
-        host.show(sample.display_items())
+        host.show(sample.display_items(host.renderer))
         if sample.stop_reason == "compaction":
             # A paused provider compaction has no final text; sample again.
             continue
@@ -617,7 +622,7 @@ def record_sample_failure(context, exc: ModelError, host: TurnHost) -> None:
     if not contribution:
         return
     host.append(context, (*contribution, ModelSampleBoundary()))
-    host.show(render_interaction_items(contribution))
+    host.show(host.renderer.render_items(contribution))
     calls = tuple(item for item in exc.completed_items if isinstance(item, ToolCall))
     if calls:
         results = tuple(ToolResult(call.call_id, NOT_EXECUTED_OUTPUT, success=False)

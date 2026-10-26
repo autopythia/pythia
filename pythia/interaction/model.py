@@ -37,6 +37,7 @@ from ._transport_retry import DEFAULT_MAX_TRANSIENT_RETRIES
 
 if TYPE_CHECKING:
     from .display import DisplayItem
+    from .display import InteractionItemRenderer
     from .environment import ToolSpec
     from .model_catalog import ModelBinding
 
@@ -555,12 +556,16 @@ class ModelSample:
             recovery=self.recovery,
         )
 
-    def display_items(self) -> Tuple["DisplayItem", ...]:
-        from .display import render_interaction_items
+    def display_items(
+        self, renderer: Optional["InteractionItemRenderer"] = None,
+    ) -> Tuple["DisplayItem", ...]:
+        """Its items and metadata, as ``renderer`` renders them (by default, as
+        render_interaction_items does)."""
+        from .display import InteractionItemRenderer
 
-        return render_interaction_items(
-            (*self.items, self._metadata()),
-        )
+        if renderer is None:
+            renderer = InteractionItemRenderer()
+        return renderer.render_items((*self.items, self._metadata()))
 
     @property
     def assistant_messages(self) -> Tuple[Message, ...]:

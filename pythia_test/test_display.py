@@ -25,6 +25,7 @@ from pythia.interaction import TokenUsage
 from pythia.interaction import SampleMetadata
 from pythia.interaction import UserInteraction
 from pythia.interaction import UserInteractionBoundary
+from pythia.interaction import UserToolCall
 from pythia.interaction import render_interaction_items
 from pythia.interaction.compaction import _LEGACY_SUMMARY_PREFIX
 
@@ -394,7 +395,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 ),
                 DisplayItem(
                     "[tool-call] write_stdin (stdin-1)\n"
-                    "session_id=7 chars=2 bytes"
+                    "session_id=7 chars='x\\n'"
                 ),
                 DisplayItem("[tool-call] lookup (lookup-1)"),
             ),
@@ -730,6 +731,87 @@ class InteractionItemRendererTests(unittest.TestCase):
             ),
         )
         self.assertFalse(cat_result[0].is_diff)
+
+
+
+class ToolCallArgumentDisplayTests(unittest.TestCase):
+    """What a model tool call's display shows of its arguments: write_stdin's
+    input, exec_command's workdir and login when not the defaults, and, while
+    the call awaits approval, write_stdin's input uncut and update_plan's plan."""
+
+    def shown(self, name, arguments, *, user=False, **options):
+        call = ToolCall(name, "c1", json.dumps(arguments))
+        item = UserToolCall(call) if user else call
+        return InteractionItemRenderer(**options).render_items((item,))[0].text
+
+    def test_write_stdin_shows_its_input_as_a_python_literal(self):
+        for chars, shown in (("y\n", r"'y\n'"), ("\x03", r"'\x03'"), ("", "''")):
+            with self.subTest(chars=chars):
+                self.assertEqual(
+                    self.shown("write_stdin", {"session_id": 3, "chars": chars}),
+                    f"[tool-call] write_stdin (c1)\nsession_id=3 chars={shown}",
+                )
+
+    def test_long_input_is_cut_with_its_size_unless_it_awaits_approval(self):
+        chars = "print('hello')\n" * 10
+        cut = self.shown("write_stdin", {"session_id": 3, "chars": chars}).split("\n")[1]
+        self.assertTrue(cut.startswith(r"""session_id=3 chars="print('hello')\nprint("""), cut)
+        self.assertTrue(cut.endswith("... (150 bytes)"), cut)
+        self.assertLess(len(cut), 120)
+        self.assertEqual(
+            self.shown("write_stdin", {"session_id": 3, "chars": chars},
+                       awaits_approval=lambda name: True),
+            f"[tool-call] write_stdin (c1)\nsession_id=3 chars={chars!r}",
+        )
+
+    def test_exec_command_shows_a_workdir_or_login_that_isnt_the_default(self):
+        cwd = "/home/me/project"
+        for arguments, label in (
+            ({"workdir": "/srv"}, " workdir='/srv'"),
+            ({"workdir": "sub", "login": False}, " workdir='sub' login=False"),
+            ({"workdir": "..", "login": True}, " workdir='..'"),
+            ({"workdir": cwd + "/", "login": True}, ""),
+            ({"workdir": "."}, ""),
+            ({"workdir": "sub/.."}, ""),
+            ({"workdir": ""}, ""),
+            ({}, ""),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    self.shown("exec_command", {"cmd": "ls", **arguments}, cwd=cwd),
+                    f"[tool-call] exec_command (c1){label}\nls",
+                )
+        # Without the session's directory, no workdir shows; a login still does.
+        self.assertEqual(
+            self.shown("exec_command", {"cmd": "ls", "workdir": "/srv", "login": False}),
+            "[tool-call] exec_command (c1) login=False\nls",
+        )
+
+    def test_update_plan_shows_its_plan_while_it_awaits_approval(self):
+        plan = {"explanation": "Next.", "plan": [{"step": "Pick", "status": "pending"}]}
+        self.assertEqual(self.shown("update_plan", plan), "[tool-call] update_plan (c1)")
+        self.assertEqual(
+            self.shown("update_plan", plan, awaits_approval=lambda name: name == "update_plan"),
+            "[tool-call] update_plan (c1)\n[plan] Proposed plan\n[plan] note: Next.\n"
+            "[plan] [ ] Pick",
+        )
+        self.assertEqual(
+            self.shown("update_plan", plan, awaits_approval=lambda name: name != "update_plan"),
+            "[tool-call] update_plan (c1)",
+        )
+
+    def test_a_users_own_call_never_awaits_approval(self):
+        self.assertEqual(
+            self.shown("update_plan", {"plan": [{"step": "Pick", "status": "pending"}]},
+                       user=True, awaits_approval=lambda name: True),
+            "[user-tool-call] update_plan (c1)",
+        )
+
+    def test_options_are_checked(self):
+        with self.assertRaises(TypeError):
+            InteractionItemRenderer(cwd=1)
+        with self.assertRaises(TypeError):
+            InteractionItemRenderer(awaits_approval=True)
 
 
 if __name__ == "__main__":

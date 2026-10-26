@@ -381,6 +381,14 @@ for module in (cli, demo):
                         cli._build_parser().parse_args([f"--require-tool-approval={value}"])
                 self.assertEqual(raised.exception.code, 2)
 
+    def test_tool_approval_exec_spellings(self):
+        for argv in (["--require-tool-approval=exec"], ["--require-tool-approval", "exec"],
+                     ["--require-tool-approval=EXEC"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(
+                    cli._build_parser().parse_args(argv).require_tool_approval, "exec",
+                )
+
     def test_non_tty_fails_before_model_environment_or_session_effects(self):
         with mock.patch.object(cli.sys, "stdin", io.StringIO()):
             with mock.patch.object(cli, "build_model") as model:
@@ -973,10 +981,79 @@ class CLIControllerTests(_ControllerTestCase):
             [ToolResult("one", "Tool call not approved: not safe", success=False),
              ToolResult("two", "ran")],
         )
-        self.assertIn("[cli] Approve tool call 'record'? /yes or /no [reason].",
+        self.assertIn("[cli] Approve tool call 'record' (one)? /yes or /no [reason].",
                       [item.text for item in terminal.items])
         self.assertTrue(any("approve with /yes or /no" in status
                             for _editor, status, _prompt in terminal.frames))
+
+    async def test_exec_approval_runs_update_plan_without_asking(self):
+        executed = []
+
+        def tool(name):
+            def run(arguments, *, timeout_seconds=None):
+                executed.append(name)
+                return ToolOutcome("ran")
+            return run
+
+        environment = Environment((
+            Tool(ToolSpec("update_plan", "", {}), tool("update_plan")),
+            Tool(ToolSpec("record", "", {}), tool("record")),
+        ))
+        calls = (ToolCall("update_plan", "plan", '{"plan":[]}'), ToolCall("record", "one", "{}"))
+        model = _Model(self.path, ModelSample(items=calls), _answer("done"))
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if step == 0 and status.startswith("approval:"):
+                terminal.submit("/y")
+                step = 1
+            elif step == 1 and status == "idle" and any(
+                    item.text == "[assistant] done" for item in terminal.items):
+                terminal.key("c-d")
+                step = 2
+
+        terminal = _Terminal(frame)
+        self.assertEqual(await self._run(
+            model, terminal, ["--prompt", "tools", "--require-tool-approval=exec"], environment,
+        ), 0)
+        self.assertEqual(step, 2)
+        self.assertEqual(executed, ["update_plan", "record"])
+        prompts = [item.text for item in terminal.items
+                   if item.text.startswith("[cli] Approve tool call")]
+        self.assertEqual(prompts, ["[cli] Approve tool call 'record' (one)? /yes or /no [reason]."])
+        self.assertIn("[cli] Tool-call approval is enabled; answer /yes or /no [reason] for each "
+                      "tool call but update_plan's (exec).", [item.text for item in terminal.items])
+
+    async def test_approval_shows_the_plan_before_update_plan_runs(self):
+        environment = Environment((Tool(
+            ToolSpec("update_plan", "", {}),
+            lambda arguments, *, timeout_seconds=None: ToolOutcome("Plan updated"),
+        ),))
+        call = ToolCall("update_plan", "plan",
+                        json.dumps({"plan": [{"step": "Pick", "status": "pending"}]}))
+        model = _Model(self.path, ModelSample(items=(call,)), _answer("done"))
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            if step == 0 and status.startswith("approval:"):
+                terminal.submit("/y")
+                step = 1
+            elif step == 1 and status == "idle" and any(
+                    item.text == "[assistant] done" for item in terminal.items):
+                terminal.key("c-d")
+                step = 2
+
+        terminal = _Terminal(frame)
+        self.assertEqual(await self._run(
+            model, terminal, ["--prompt", "plan", "--require-tool-approval"], environment,
+        ), 0)
+        texts = [item.text for item in terminal.items]
+        # Shown on the call, then again on its result (as updated).
+        self.assertIn("[tool-call] update_plan (plan)\n[plan] Proposed plan\n[plan] [ ] Pick", texts)
+        self.assertIn("[tool-ret]  update_plan (plan) [ok]\n[plan] Updated plan\n[plan] [ ] Pick",
+                      texts)
 
     async def test_stop_while_awaiting_approval_does_not_execute_the_call(self):
         def record(arguments, *, timeout_seconds=None):
