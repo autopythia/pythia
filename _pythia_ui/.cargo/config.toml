@@ -1,0 +1,24 @@
+# Build for Apple Silicon macOS from any host (this Linux machine or a Mac)
+# without Xcode or Apple's SDK: rust-lld links against the symbol-list stubs in
+# stub-sdk/ (see README.md). From research-gui (_glomery/.cargo/config.toml).
+
+[build]
+target = "aarch64-apple-darwin"
+
+[target.aarch64-apple-darwin]
+# Ships in rustup toolchains under lib/rustlib/<host>/bin; rustc adds that
+# directory to PATH when linking, so it needn't be on yours.
+linker = "rust-lld"
+# Every Apple Silicon Mac, rustc's default for the target. The checkout's own
+# config (../.cargo/config.toml) asks for target-cpu=native; cargo appends this
+# after it, and the last -C target-cpu wins.
+rustflags = ["-C", "target-cpu=apple-m1"]
+
+[env]
+# rustc hands SDKROOT to the linker as -syslibroot. Values already set in the
+# environment take precedence, e.g. SDKROOT="$(xcrun --show-sdk-path)" to
+# cross-check the stubs against the real SDK on a Mac.
+SDKROOT = { value = "stub-sdk", relative = true }
+# The oldest macOS this runs on: capture picks its path at run time
+# (src/macos/capture.rs).
+MACOSX_DEPLOYMENT_TARGET = "11.0"

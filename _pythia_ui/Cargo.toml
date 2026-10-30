@@ -1,0 +1,31 @@
+[package]
+name = "pythia_ui"
+version = "0.1.0"
+edition = "2021"
+# C string literals and offset_of!; clippy checks newer APIs against it.
+rust-version = "1.77"
+authors = ["Peter Jin", "autopythia"]
+license = "Apache-2.0"
+description = "Screen info and screenshots for pythia's ui tool, on macOS (Apple Silicon)"
+
+# None on purpose, as in research-gui: the Objective-C runtime, CoreGraphics,
+# ImageIO and ScreenCaptureKit bindings are hand-written (src/macos/), and so
+# are JSON (src/json.rs) and base64 (src/base64.rs). The build target is set in
+# .cargo/config.toml.
+[dependencies]
+
+[lib]
+# cdylib: the plugin, which pythia loads with ctypes; rlib: for the program.
+crate-type = ["cdylib", "rlib"]
+# The docs hold JSON and C, not Rust examples.
+doctest = false
+
+[[bin]]
+name = "pythia-ui"
+path = "src/main.rs"
+
+# The default panic strategy, unwind, is required: the plugin turns a panic
+# into an error reply (src/lib.rs checks), where abort would end pythia.
+
+# Its own workspace, apart from any Cargo.toml above it.
+[workspace]

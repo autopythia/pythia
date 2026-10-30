@@ -1,0 +1,13 @@
+--- !tapi-tbd
+# Hand-written: the ImageIO functions src/macos/png.rs declares (names only;
+# the framework ships with macOS). See README.md, "Stub SDK".
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO'
+current-version: 1
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _CGImageDestinationAddImage,
+                       _CGImageDestinationCreateWithData,
+                       _CGImageDestinationFinalize ]
+...

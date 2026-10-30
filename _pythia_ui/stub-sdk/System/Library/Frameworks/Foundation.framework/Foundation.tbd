@@ -1,0 +1,8 @@
+--- !tapi-tbd
+# No symbols: src/macos/objc.rs looks classes up by name at run time (NSArray),
+# so linking only records the load command that makes dyld load Foundation.
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation'
+current-version: 1770
+...

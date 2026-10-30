@@ -1,0 +1,13 @@
+--- !tapi-tbd
+# Hand-written: the libobjc functions src/macos/objc.rs declares (names only;
+# the library itself ships with macOS). See README.md, "Stub SDK".
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libobjc.A.dylib'
+current-version: 228
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _objc_autoreleasePoolPop, _objc_autoreleasePoolPush,
+                       _objc_getClass, _objc_msgSend, _objc_release,
+                       _objc_retain, _sel_registerName ]
+...

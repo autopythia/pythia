@@ -1,0 +1,12 @@
+--- !tapi-tbd
+# Hand-written: the CoreFoundation functions src/macos/cf.rs declares (names
+# only; the framework ships with macOS). See README.md, "Stub SDK".
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation'
+current-version: 1770
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _CFDataCreateMutable, _CFDataGetBytePtr, _CFDataGetLength,
+                       _CFRelease, _CFRetain, _CFStringCreateWithCString ]
+...

@@ -1,0 +1,19 @@
+--- !tapi-tbd
+# Hand-written: the CoreGraphics functions src/macos/cg.rs declares (names
+# only; the framework ships with macOS). CGDisplayCreateImage isn't here: it's
+# looked up at run time (src/macos/capture.rs). See README.md, "Stub SDK".
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics'
+current-version: 1463
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _CGDisplayBounds, _CGDisplayCopyDisplayMode,
+                       _CGDisplayIsBuiltin, _CGDisplayModeGetPixelHeight,
+                       _CGDisplayModeGetPixelWidth, _CGDisplayModeRelease,
+                       _CGGetActiveDisplayList, _CGImageGetHeight,
+                       _CGImageGetWidth, _CGMainDisplayID,
+                       _CGPreflightPostEventAccess,
+                       _CGPreflightScreenCaptureAccess,
+                       _CGRequestScreenCaptureAccess ]
+...
