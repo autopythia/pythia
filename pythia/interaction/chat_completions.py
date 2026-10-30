@@ -24,6 +24,13 @@ from ._provider_text import repaired_json_text
 from ._request_gate import RequestCall
 from ._request_gate import RequestGate
 from ._request_gate import cancellable_urlopen
+from ._token_trace import NOTICES as _TRACE_NOTICES
+from ._token_trace import TraceChain
+from ._token_trace import decode as _decode_token_trace
+from ._token_trace import extends_latest_sample as _extends_latest_sample
+from ._token_trace import frame_of as _trace_frame_of
+from ._token_trace import level_of as _trace_level
+from ._token_trace import request_fields as _trace_request_fields
 from ._transport_retry import body_error_codes
 from ._transport_retry import quota_error_code
 from ._transport_retry import retry_after_seconds
@@ -654,6 +661,14 @@ class ChatCompletionsModel:
         self._retry_sleep = retry_sleep
         self._gate = RequestGate(provider="chat-completions", label="Chat Completions",
                                  model=endpoint.model)
+        # Token traces: the tokens before the next sample, for its gap and to
+        # send back; the notices already shown, once each; whether this
+        # session sends the previous tokens back (until a server ignores or
+        # refuses them); and the last traced request's frame (frame_of).
+        self._trace_chain = TraceChain()
+        self._trace_noticed = set()
+        self._trace_sends = True
+        self._trace_frame = None
 
     def retire(self) -> None:
         """Cancel the request in flight, if any, from any thread; the model stays usable."""
@@ -683,6 +698,9 @@ class ChatCompletionsModel:
             payload["tools"] = encoded_tools
             payload["parallel_tool_calls"] = False
         _apply_sample_params(payload, _with_sample_param_defaults(self.binding, sample_params))
+        # The token trace's vLLM fields, which extensions can't set (TOKEN_TRACE_FIELDS).
+        payload.update(_trace_request_fields(
+            None if sample_params is None else sample_params.token_trace))
         _apply_extra_sample_params(payload, self.binding, sample_params)
         return payload
 
@@ -707,15 +725,15 @@ class ChatCompletionsModel:
         if sample_params is not None and not isinstance(sample_params, SampleParams):
             raise TypeError("sample_params must be SampleParams or None")
         payload = self._build_request_payload(context, tools, sample_params)
-        try:
-            request_data = json.dumps(
-                payload,
-                ensure_ascii=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            raise ModelConfigurationError(
-                "Chat Completions request is not JSON-serializable"
-            ) from exc
+        level = None if sample_params is None else sample_params.token_trace
+        before, sent, frame, problems = (None, None), None, None, []
+        if _trace_level(level):
+            before = self._trace_chain.before(context)
+            frame = _trace_frame_of(payload)
+            sent = self._previous_tokens(context, payload, frame)
+            if sent is not None:
+                payload["prompt_token_ids"], payload["token_ids"] = sent[0].tolist(), sent[1].tolist()
+        request_data = _request_data(payload)
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -753,6 +771,15 @@ class ChatCompletionsModel:
                     status = exc.code
                     response_headers = exc.headers
                     exc.close()
+                    if _refuses_tokens(sent, status, detail):
+                        # The server refused the previous tokens: send the
+                        # request again without them, and no more after it.
+                        sent, self._trace_sends = None, False
+                        problems.append("refused_ids")
+                        recovery.append("token_ids_refused")
+                        del payload["prompt_token_ids"], payload["token_ids"]
+                        request_data = _request_data(payload)
+                        continue
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
                         and (status == 429 or not _is_context_window_error(detail))
@@ -779,6 +806,15 @@ class ChatCompletionsModel:
                     raise ModelResponseError("HTTP response body must be bytes")
                 if isinstance(status, int) and not 200 <= status < 300:
                     detail = bytes(raw).decode("utf-8", errors="replace")[:_MAX_ERROR_DETAIL_CHARS]
+                    if _refuses_tokens(sent, status, detail):
+                        sent, self._trace_sends = None, False
+                        problems.append("refused_ids")
+                        recovery.append("token_ids_refused")
+                        del payload["prompt_token_ids"], payload["token_ids"]
+                        request_data = _request_data(payload)
+                        _close_response(response)
+                        response = None
+                        continue
                     if (
                         status in _RETRYABLE_HTTP_STATUSES
                         and (status == 429 or not _is_context_window_error(detail))
@@ -817,6 +853,9 @@ class ChatCompletionsModel:
                     raise
                 except (TypeError, ValueError) as exc:
                     raise ModelResponseError(str(exc)) from exc
+                if _trace_level(level):
+                    sample = self._traced(sample, decoded, level, before, sent, problems)
+                    self._trace_frame = frame
                 return replace(
                     sample,
                     request_attempts=attempts,
@@ -876,6 +915,66 @@ class ChatCompletionsModel:
                 ) from exc
             finally:
                 _close_response(response)
+
+    def _previous_tokens(self, context: InteractionContext, payload: Mapping,
+                         frame: str) -> Optional[Tuple[Any, Any]]:
+        """The latest sample's prompt and sample, to send back with a request
+        that extends it, or None.
+
+        It extends it when the model and the rest of the request (tools,
+        extensions; ``frame_of``) are as they were for the last traced
+        request, if this model sent one, and when its messages start with
+        the messages through that sample's assistant message and go on. A
+        save's first sample, a compaction, or a change of instructions,
+        tools or options start a new chain instead. After a resume the frame
+        is unknown, and a patched server checks what it can (decision 8 of
+        doc/chat-completions-token-trace-plan.md).
+        """
+        if not self._trace_sends:
+            return None
+        previous = self._trace_chain.previous(context)
+        if previous is None:
+            return None
+        prompt, sample, model = previous
+        if model is not None and payload.get("model") not in (None, model):
+            return None
+        if self._trace_frame is not None and frame != self._trace_frame:
+            return None
+        if not _extends_latest_sample(context, payload["messages"], _encode_context_messages):
+            return None
+        return prompt, sample
+
+    def _traced(self, sample: ModelSample, payload: Mapping, level: str,
+                before: Tuple[Any, Any], sent: Optional[Tuple[Any, Any]],
+                problems: List[str]) -> ModelSample:
+        """The sample with its token trace, and a notice for each part that the
+        response lacked, the first time it lacks it."""
+        decoded = _decode_token_trace(payload, level, sample.usage, *before, sent=sent)
+        self._trace_chain.after(decoded)
+        if "ignored_ids" in decoded.problems:
+            self._trace_sends = False
+        notices = []
+        for problem in (*problems, *decoded.problems):
+            if problem not in self._trace_noticed:
+                self._trace_noticed.add(problem)
+                notices.append(_TRACE_NOTICES[problem])
+        return replace(sample, tokens=decoded.record, notices=tuple(notices))
+
+
+def _request_data(payload: Mapping) -> bytes:
+    try:
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ModelConfigurationError(
+            "Chat Completions request is not JSON-serializable"
+        ) from exc
+
+
+def _refuses_tokens(sent: Optional[Tuple[Any, Any]], status: int, detail: str) -> bool:
+    """Whether a failure refused the previous tokens that a request sent back:
+    an HTTP 400 that names their fields."""
+    return sent is not None and status == 400 and (
+        "prompt_token_ids" in detail or "token_ids" in detail)
 
 
 __all__ = [

@@ -30,6 +30,7 @@ from .model_catalog import CompactionDefaults
 from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
+from .model_catalog import TOKEN_TRACE_LEVELS
 from .model_catalog import validate_rate_limit_retries
 from .model_catalog import binding_from_namespace, freeze_extra_sample_params, thaw_json
 from .save import PUBLIC_LOG_REASONING
@@ -45,6 +46,7 @@ CONFIG_KEYS = (
     "timeouts_request_seconds",
     "endpoint_prompt_caching",
     "endpoint_rate_limit_retries",
+    "endpoint_token_trace",
     "enable_auto_compaction",
     "auto_compaction_context_tokens",
     "max_context_tokens",
@@ -96,6 +98,7 @@ _NO_RATE_LIMIT_RETRIES = (
     "endpoint_rate_limit_retries does not apply to Claude Relay, whose native CLI "
     "retries its own rate limits."
 )
+_NO_TOKEN_TRACE = "endpoint_token_trace applies only to the Chat Completions API."
 _SAVE_LOG_REASONING_VALUES = " or ".join(PUBLIC_LOG_REASONING)
 
 
@@ -141,6 +144,12 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
             raise ConfigError(
                 f"{key} requires a nonnegative integer, {RATE_LIMIT_RETRIES_UNBOUNDED}, or null."
             ) from None
+    if key == "endpoint_token_trace":
+        # None means the route has none: only Chat Completions traces tokens.
+        if value is not None and (not isinstance(value, str) or value not in TOKEN_TRACE_LEVELS):
+            raise ConfigError(f"endpoint_token_trace requires {', '.join(TOKEN_TRACE_LEVELS)}, "
+                              "or null.")
+        return value
     if key == "compaction_mode":
         # A compaction sequence, kept in its normal form. None is the route's
         # default, resolved when a config is bound.
@@ -187,8 +196,9 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     decimals such as ``90.5``. ``compaction_mode`` takes a compaction
     sequence, such as ``coldstart,pi:2``, or null; ``save_log_reasoning``
     takes ``nil`` or ``assistant``, as they are; ``endpoint_prompt_caching``
-    takes ``5m``, ``1h`` or ``none``, and ``endpoint_rate_limit_retries``
-    ``unbounded`` too.
+    takes ``5m``, ``1h`` or ``none``, ``endpoint_rate_limit_retries``
+    ``unbounded`` too, and ``endpoint_token_trace`` a level
+    (``TOKEN_TRACE_LEVELS``).
     """
     key = _require_key(key)
     if key in _LAUNCH_ONLY_KEYS:
@@ -202,6 +212,9 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
         return validate_config_value(key, literal)
     if key == "endpoint_prompt_caching":
         # none is a value here (no cache_control); null restores the default.
+        return validate_config_value(key, None if literal in ("null", "None") else literal)
+    if key == "endpoint_token_trace":
+        # none is a value here too; null restores the catalog's, else none.
         return validate_config_value(key, None if literal in ("null", "None") else literal)
     if (key == "endpoint_rate_limit_retries" and literal not in ("null", "None")
             and _INTEGER_LITERAL_RE.fullmatch(literal) is None):
@@ -428,6 +441,13 @@ class InteractionConfigSnapshot:
     ``None`` on Claude Relay, where it does not apply, and in an unbound
     config, where the turn loop takes ``DEFAULT_RATE_LIMIT_RETRIES``.
 
+    ``endpoint_token_trace`` is projected into sample params as each
+    request's token-trace level (``TOKEN_TRACE_LEVELS``): how much of its
+    tokens a vLLM server returns, which the sample's metadata keeps. Only the
+    turn loop's own samples ask; compaction's requests never do. Bound
+    configs resolve it on Chat Completions only; ``None`` elsewhere, where it
+    does not apply. ``none`` is projected as None, which asks for none too.
+
     ``compaction_coldstart_reboot`` has the CLI restart itself on the current
     code after each coldstart compaction, as ``/reboot`` does. Only the CLI
     reboots; other hosts leave it False.
@@ -445,6 +465,7 @@ class InteractionConfigSnapshot:
     timeouts_request_seconds: Optional[float] = None
     endpoint_prompt_caching: Optional[str] = None
     endpoint_rate_limit_retries: Optional[Union[int, str]] = None
+    endpoint_token_trace: Optional[str] = None
     enable_auto_compaction: bool = True
     auto_compaction_context_tokens: Optional[int] = None
     max_context_tokens: Optional[int] = None
@@ -478,6 +499,7 @@ class InteractionConfigSnapshot:
             max_output_tokens=self.max_output_tokens,
             request_timeout_seconds=self.timeouts_request_seconds,
             prompt_caching=self.endpoint_prompt_caching,
+            token_trace=None if self.endpoint_token_trace == "none" else self.endpoint_token_trace,
             enable_auto_compaction=self.enable_auto_compaction,
             auto_compaction_context_tokens=self.auto_compaction_context_tokens,
         )
@@ -532,6 +554,8 @@ class InteractionConfig:
         prompt_caching_applies: bool = True,
         endpoint_rate_limit_retries_fallback: Optional[Union[int, str]] = None,
         rate_limit_retries_applies: bool = True,
+        endpoint_token_trace_fallback: Optional[str] = None,
+        token_trace_applies: bool = True,
         compaction_route: Optional[CompactionRoute] = None,
         coldstart_unavailable: Optional[str] = None,
         compaction_mode_fallback: Optional[str] = None,
@@ -556,6 +580,8 @@ class InteractionConfig:
             raise TypeError("prompt_caching_applies must be a bool")
         if not isinstance(rate_limit_retries_applies, bool):
             raise TypeError("rate_limit_retries_applies must be a bool")
+        if not isinstance(token_trace_applies, bool):
+            raise TypeError("token_trace_applies must be a bool")
         if compaction_route is not None and not isinstance(compaction_route, CompactionRoute):
             raise TypeError("compaction_route must be CompactionRoute or None")
         if coldstart_unavailable is not None and (
@@ -578,6 +604,7 @@ class InteractionConfig:
                 ("timeouts_request_seconds", timeouts_request_seconds_fallback),
                 ("endpoint_prompt_caching", endpoint_prompt_caching_fallback),
                 ("endpoint_rate_limit_retries", endpoint_rate_limit_retries_fallback),
+                ("endpoint_token_trace", endpoint_token_trace_fallback),
                 ("auto_compaction_context_tokens", auto_compaction_context_tokens_fallback),
                 ("max_context_tokens", max_context_tokens_fallback),
                 ("compaction_mode", mode_default),
@@ -589,6 +616,7 @@ class InteractionConfig:
         self._request_timeout_applies = request_timeout_applies
         self._prompt_caching_applies = prompt_caching_applies
         self._rate_limit_retries_applies = rate_limit_retries_applies
+        self._token_trace_applies = token_trace_applies
         self._min_auto_compaction_context_tokens = validate_config_value(
             "auto_compaction_context_tokens", min_auto_compaction_context_tokens,
         )
@@ -674,6 +702,8 @@ class InteractionConfig:
             raise ConfigError(_NO_PROMPT_CACHING)
         if not self._rate_limit_retries_applies and snapshot.endpoint_rate_limit_retries is not None:
             raise ConfigError(_NO_RATE_LIMIT_RETRIES)
+        if not self._token_trace_applies and snapshot.endpoint_token_trace is not None:
+            raise ConfigError(_NO_TOKEN_TRACE)
         threshold = snapshot.auto_compaction_context_tokens
         minimum = self._min_auto_compaction_context_tokens
         if threshold is not None and minimum is not None and threshold < minimum:
@@ -742,6 +772,12 @@ class InteractionConfig:
             retries = binding.endpoint.rate_limit_retries
             if retries is None:
                 retries = DEFAULT_RATE_LIMIT_RETRIES
+        # Likewise, on Chat Completions only.
+        trace_applies = binding.api == "chat-completions"
+        catalog_trace = None if spec is None else spec.endpoint.token_trace
+        trace = getattr(args, "endpoint_token_trace", None)
+        if trace is None and trace_applies:
+            trace = binding.endpoint.token_trace or "none"
         return cls(
             InteractionConfigSnapshot(
                 enable_workspace=args.enable_workspace,
@@ -750,6 +786,7 @@ class InteractionConfig:
                 timeouts_request_seconds=request_timeout_seconds,
                 endpoint_prompt_caching=caching,
                 endpoint_rate_limit_retries=retries,
+                endpoint_token_trace=trace,
                 enable_auto_compaction=args.enable_auto_compaction,
                 auto_compaction_context_tokens=getattr(args, "auto_compaction_context_tokens", None),
                 max_context_tokens=getattr(args, "max_context_tokens", None),
@@ -776,6 +813,8 @@ class InteractionConfig:
                 (DEFAULT_RATE_LIMIT_RETRIES if catalog_retries is None else catalog_retries)
                 if retries_apply else None),
             rate_limit_retries_applies=retries_apply,
+            endpoint_token_trace_fallback=(catalog_trace or "none") if trace_applies else None,
+            token_trace_applies=trace_applies,
             auto_compaction_context_tokens_fallback=(
                 None if limits is None else limits.auto_compaction_context_tokens
             ),

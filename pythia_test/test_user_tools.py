@@ -127,6 +127,7 @@ class UserToolValueTests(unittest.TestCase):
             "timeouts_request_seconds = None",
             "endpoint_prompt_caching = None",
             "endpoint_rate_limit_retries = None",
+            "endpoint_token_trace = None",
             "enable_auto_compaction = True",
             "auto_compaction_context_tokens = None",
             "max_context_tokens = None",
@@ -565,6 +566,7 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "timeouts_request_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
             "endpoint_prompt_caching": None,  # Messages only
             "endpoint_rate_limit_retries": 7,
+            "endpoint_token_trace": None,  # Chat Completions only
             "enable_auto_compaction": True,
             "auto_compaction_context_tokens": None,
             "max_context_tokens": None,

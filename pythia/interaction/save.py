@@ -8,6 +8,7 @@ import tempfile
 import threading
 from contextlib import suppress
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from typing import BinaryIO
@@ -46,6 +47,8 @@ from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
 from .items import _validate_elapsed_seconds
+from .tokens import token_record_from_dict
+from .tokens import token_record_to_dict
 from .usage import TokenUsage
 from ._provider_text import json_text_escaped
 from ._tool_spec import ToolSpec
@@ -195,6 +198,9 @@ def interaction_item_to_dict(item: InteractionItem) -> Dict[str, Any]:
             encoded["request_attempts"] = item.request_attempts
         if item.recovery:
             encoded["recovery"] = list(item.recovery)
+        if isinstance(item, SampleMetadata) and item.tokens is not None:
+            # Last: the arrays are long, and the public log drops them.
+            encoded["tokens"] = token_record_to_dict(item.tokens)
     elif isinstance(item, ModelFailure):
         for field_name in (
             "category",
@@ -595,6 +601,14 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
         recovery = mapping.get("recovery", [])
         if not isinstance(recovery, list):
             raise SaveError(f"{item_type}.recovery must be a list")
+        tokens = mapping.get("tokens")
+        if tokens is not None:
+            if not isinstance(tokens, Mapping):
+                raise SaveError(f"{item_type}.tokens must be an object")
+            try:
+                tokens = token_record_from_dict(tokens)
+            except (TypeError, ValueError) as exc:
+                raise SaveError(f"{item_type}.tokens.{exc}") from exc
         return SampleMetadata(
             usage=TokenUsage(
                 input_tokens=_require_nonnegative_int(
@@ -638,6 +652,7 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
                 _require_string(value, f"{item_type}.recovery[{index}]")
                 for index, value in enumerate(recovery)
             ),
+            tokens=tokens,
         )
     if item_type == "model_failure":
         recovery = mapping.get("recovery", [])
@@ -1161,7 +1176,7 @@ def resume_interaction_save_lines(path: SavePath) -> ResumedSaveLines:
 
 
 # Public logs: a full log line for line, with its reasoning left out, or shown
-# by its summaries.
+# by its summaries, and without the samples' token traces.
 
 # A public log has this line in place of each reasoning item of its full log
 # that it doesn't show, so that line N of the public log stands for line N of
@@ -1222,11 +1237,23 @@ def _record_line(record: Mapping[str, Any]) -> bytes:
     return (json_text_escaped(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
 
 
+def _traced(record: object) -> bool:
+    """Whether a record is a sample's metadata with a token trace, which a
+    public log leaves out: its arrays are long, and its sampled IDs decode to
+    the reasoning that the public log may leave out too."""
+    return (isinstance(record, dict) and record.get("type") == "sample_metadata"
+            and "tokens" in record)
+
+
+def _untraced(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in record.items() if key != "tokens"}
+
+
 def _public_line(line: bytes, reasoning: str = "nil", thinking: bool = False) -> bytes:
     """A full log's line, without its newline, as its public log has it."""
-    # Only a line that names one of the two types can change: skip parsing
-    # the others.
-    if b'"reasoning"' in line or b'"context_prefix"' in line:
+    # Only a line that names one of the two types, or a token trace, can
+    # change: skip parsing the others.
+    if b'"reasoning"' in line or b'"context_prefix"' in line or b'"tokens"' in line:
         try:
             value = json.loads(line)
         except ValueError:
@@ -1235,6 +1262,8 @@ def _public_line(line: bytes, reasoning: str = "nil", thinking: bool = False) ->
             if value.get("type") == "reasoning":
                 shown = _shown_record(value, reasoning, thinking)
                 return NIL_LINE if shown is None else _record_line(shown)
+            if _traced(value):
+                return _record_line(_untraced(value))
             items = value.get("prefix_items")
             if value.get("type") == "context_prefix" and isinstance(items, list):
                 kept, changed = [], False
@@ -1244,6 +1273,9 @@ def _public_line(line: bytes, reasoning: str = "nil", thinking: bool = False) ->
                         shown = _shown_record(nested, reasoning, thinking)
                         if shown is not None:
                             kept.append(shown)
+                    elif _traced(nested):
+                        changed = True
+                        kept.append(_untraced(nested))
                     else:
                         kept.append(nested)
                 if changed:
@@ -1268,9 +1300,10 @@ def public_log_lines(data: bytes, reasoning: str = "nil", *,
 
     A reasoning item's line shows it as ``reasoning`` and ``thinking`` say
     (see :func:`public_log_line`), and a ``context_prefix`` shows the
-    reasoning among its items so, leaving out those it wouldn't show. Every
-    other line is kept byte for byte, blank or not, and each ends with a
-    newline.
+    reasoning among its items so, leaving out those it wouldn't show. A
+    sample's metadata leaves out its token trace, ``tokens``, also among a
+    ``context_prefix``'s items. Every other line is kept byte for byte, blank
+    or not, and each ends with a newline.
     """
     _require_public_log_reasoning(reasoning)
     return [_public_line(piece, reasoning, thinking) for piece in _full_log_lines(data)]
@@ -1286,15 +1319,20 @@ def public_log_line(item: InteractionItem, reasoning: str = "nil", *,
     none. ``thinking`` also shows the whole text, ``content``, of an item
     that is text alone; the CLI sets it for Claude Relay's own thinking,
     which is text alone, as Chat Completions' full reasoning is once saved.
-    Encrypted content and signatures never show.
+    Encrypted content and signatures never show, nor does a sample's token
+    trace (``SampleMetadata.tokens``).
     """
     _require_public_log_reasoning(reasoning)
     if isinstance(item, Reasoning):
         message = _reasoning_message(item, reasoning, thinking)
         return NIL_LINE if message is None else _encode_items((message,))
+    if isinstance(item, SampleMetadata) and item.tokens is not None:
+        return _encode_items((replace(item, tokens=None),))
     line = _encode_items((item,))
     if isinstance(item, ContextPrefix) and any(
-            isinstance(nested, Reasoning) for nested in item.prefix_items):
+            isinstance(nested, Reasoning)
+            or isinstance(nested, SampleMetadata) and nested.tokens is not None
+            for nested in item.prefix_items):
         return _public_line(line[:-1], reasoning, thinking)
     return line
 

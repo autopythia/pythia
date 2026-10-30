@@ -25,9 +25,11 @@ from .items import Reasoning
 from .items import ToolCall
 from .items import SampleMetadata
 from .items import _validate_elapsed_seconds
+from .tokens import TokenRecord
 from .usage import TokenUsage
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
+from .model_catalog import TOKEN_TRACE_LEVELS
 from .model_catalog import freeze_extra_sample_params
 from .model_catalog import thaw_json
 from .model_catalog import validate_temperature
@@ -282,6 +284,13 @@ class SampleParams:
     ``None`` uses the endpoint's. The CLI projects ``/config
     endpoint_prompt_caching``. Other adapters ignore it.
 
+    ``token_trace`` is the Chat Completions token-trace level of this call
+    (``TOKEN_TRACE_LEVELS``): how much of its tokens a vLLM server returns,
+    which the sample keeps (``ModelSample.tokens``); ``None`` and ``none`` ask
+    for none. The CLI projects ``/config endpoint_token_trace``. Only the turn
+    loop's own samples ask: ``run_compaction`` drops it. Other adapters
+    ignore it.
+
     ``extra`` holds request-body extensions for this call. A mapping replaces
     the binding's ``extra_sample_params`` (``{}`` sends none); ``None``
     inherits them.
@@ -306,6 +315,7 @@ class SampleParams:
     stop: Tuple[str, ...] = ()
     seed: Optional[int] = None
     prompt_caching: Optional[str] = None
+    token_trace: Optional[str] = None
     extra: Optional[Mapping] = None
     # Host/provider context-management control, never a sampling wire field.
     enable_auto_compaction: Optional[bool] = None
@@ -344,6 +354,8 @@ class SampleParams:
             raise TypeError("seed must be an integer or None")
         if self.prompt_caching is not None and self.prompt_caching not in PROMPT_CACHING_VALUES:
             raise ValueError("prompt_caching must be 5m, 1h, none, or None")
+        if self.token_trace is not None and self.token_trace not in TOKEN_TRACE_LEVELS:
+            raise ValueError(f"token_trace must be {', '.join(TOKEN_TRACE_LEVELS)}, or None")
         if self.extra is not None:
             object.__setattr__(self, "extra", freeze_extra_sample_params(self.extra))
         if self.enable_auto_compaction is not None and not isinstance(
@@ -459,6 +471,15 @@ class ModelSample:
     it (the native client gives up on its first MCP call after a fixed time);
     the turn loop gives it to each call (``results_due_scope``). It is a
     scheduling hint: not saved, and not part of equality.
+
+    ``tokens`` is the sample's token trace, which its ``SampleMetadata``
+    keeps (``pythia.interaction.tokens``): a Chat Completions model sets it
+    when its catalog entry asks for one.
+
+    ``notices`` are lines for the user about this sample, which the turn loop
+    shows after it (``TurnHost.notice``), such as a token trace's missing
+    parts. Like ``results_due``, they are not saved, and not part of
+    equality.
     """
 
     items: Tuple[InteractionItem, ...]
@@ -471,6 +492,8 @@ class ModelSample:
     request_attempts: int = 1
     recovery: Tuple[str, ...] = ()
     results_due: Optional[float] = field(default=None, repr=False, compare=False)
+    tokens: Optional[TokenRecord] = field(default=None, repr=False)
+    notices: Tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
         items = tuple(self.items)
@@ -518,6 +541,13 @@ class ModelSample:
                     or not math.isfinite(due)):
                 raise ValueError("results_due must be a finite monotonic time or None")
             object.__setattr__(self, "results_due", float(due))
+        if self.tokens is not None and not isinstance(self.tokens, TokenRecord):
+            raise TypeError("tokens must be TokenRecord or None")
+        notices = tuple(self.notices)
+        for index, text in enumerate(notices):
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"notices[{index}] must be a non-empty string")
+        object.__setattr__(self, "notices", notices)
         for field_name in (
             "provider_session_id",
             "provider_turn_id",
@@ -554,6 +584,7 @@ class ModelSample:
             elapsed_seconds=self.elapsed_seconds,
             request_attempts=self.request_attempts,
             recovery=self.recovery,
+            tokens=self.tokens,
         )
 
     def display_items(

@@ -13,6 +13,7 @@ from typing import Union
 from .usage import TokenUsage
 from ._tool_spec import ToolSpec
 from ._tool_spec import _copy_schema
+from .tokens import TokenRecord
 
 
 _COMPACTION_PROTOCOL_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
@@ -307,6 +308,9 @@ class SampleMetadata:
     time; ``None`` means it was not measured (including in legacy logs).
     ``request_attempts`` and ``recovery`` record bounded transport/auth recovery
     without retaining credentials or provider response bodies.
+    ``tokens`` is the sample's token trace (``pythia.interaction.tokens``),
+    when its model's catalog entry asks for one: its token IDs and log
+    probs, which no request includes and the public log leaves out.
     It is *not* a cumulative end-of-turn aggregate; see ``TurnSummary``.
     """
 
@@ -317,6 +321,7 @@ class SampleMetadata:
     elapsed_seconds: Optional[float] = None
     request_attempts: int = 1
     recovery: Tuple[str, ...] = ()
+    tokens: Optional[TokenRecord] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.usage, TokenUsage):
@@ -336,6 +341,8 @@ class SampleMetadata:
             if "\r" in value or "\n" in value:
                 raise ValueError(f"recovery[{index}] must not contain newlines")
         object.__setattr__(self, "recovery", recovery)
+        if self.tokens is not None and not isinstance(self.tokens, TokenRecord):
+            raise TypeError("tokens must be TokenRecord or None")
         for field_name in (
             "provider_session_id",
             "provider_turn_id",

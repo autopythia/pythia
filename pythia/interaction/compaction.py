@@ -2075,6 +2075,11 @@ def run_compaction(
     sequence, including the last one. When every attempt fails, the last
     failure is raised. The result's ``recovery`` lists each failed attempt.
 
+    ``sample_params`` lose their ``token_trace``: compaction's requests never
+    ask for a token trace, as their responses are no samples of the
+    conversation, and at ``prefix_log_probs`` a server without the fork's
+    patch 0057 would prefill their whole prompt without its cache.
+
     However the sequence ends, the model is then retired (``retire_model``),
     for the turn loop and the CLI's ``/compact`` alike.
     """
@@ -2082,6 +2087,8 @@ def run_compaction(
         raise ValueError(f"reason must be one of {COMPACTION_REASONS}")
     if not isinstance(settings, CompactionSettings):
         raise TypeError("settings must be CompactionSettings")
+    if isinstance(sample_params, SampleParams) and sample_params.token_trace is not None:
+        sample_params = replace(sample_params, token_trace=None)
     try:
         factory = create_default_compactor if factory is None else factory
         stopping = stop_requested if stop_requested is not None else (lambda: False)

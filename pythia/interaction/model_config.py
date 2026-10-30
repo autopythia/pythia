@@ -30,6 +30,7 @@ from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
+from .model_catalog import TOKEN_TRACE_LEVELS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
 from .model_catalog_config import load_model_catalog
@@ -68,6 +69,8 @@ CLAUDE_RELAY_FIELDS = (
 MESSAGES_FIELDS = ("endpoint_prompt_caching",)
 # Likewise; auto gives them to its HTTP roles, all but Claude Relay.
 HTTP_FIELDS = ("endpoint_rate_limit_retries",)
+# Likewise; auto gives them to its Chat Completions roles.
+CHAT_COMPLETIONS_FIELDS = ("endpoint_token_trace",)
 
 
 def _rate_limit_retries_argument(text: str):
@@ -273,6 +276,8 @@ def render_model_catalog(catalog):
                    else f", prompt_caching={spec.endpoint.prompt_caching}")
         if spec.endpoint.rate_limit_retries is not None:
             caching += f", rate_limit_retries={spec.endpoint.rate_limit_retries}"
+        if spec.endpoint.token_trace is not None:
+            caching += f", token_trace={spec.endpoint.token_trace}"
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
                      f"url={spec.endpoint.url}, auth={spec.endpoint.auth}{caching}, "
                      f"source={origin}{settings}")
@@ -360,6 +365,15 @@ def add_endpoint_arguments(parser, *, auto=False):
                  "later")
               + f" (default: the model catalog's endpoint.rate_limit_retries, else "
                 f"{DEFAULT_RATE_LIMIT_RETRIES})"))
+    parser.add_argument(
+        "--endpoint-token-trace", choices=TOKEN_TRACE_LEVELS, default=argparse.SUPPRESS,
+        help=("Chat Completions token traces from a vLLM server, saved with each sample: "
+              "token_ids, the prompt's and the sample's token IDs, sending the previous ones "
+              "back so that the server reads the model's own tokens; sample_log_probs, the "
+              "sampled tokens' log probs too; prefix_log_probs, the prompt's too (without the "
+              "fork's patch 0057 the server then prefills every prompt whole); or none"
+              + ("" if auto else "; the CLI's /config endpoint_token_trace changes it later")
+              + " (default: the model catalog's endpoint.token_trace, else none)"))
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")

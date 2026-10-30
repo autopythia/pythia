@@ -35,9 +35,12 @@ def _debug_entry(binding):
             # None means the built-in default (5m on Messages). Added without
             # a version change.
             "prompt_caching": binding.endpoint.prompt_caching,
-            # None means the built-in default (5 retries). Added without a
-            # version change, likewise.
+            # None means the built-in default (DEFAULT_RATE_LIMIT_RETRIES).
+            # Added without a version change, likewise.
             "rate_limit_retries": binding.endpoint.rate_limit_retries,
+            # None means none, as for every API but Chat Completions. Added
+            # without a version change, likewise.
+            "token_trace": binding.endpoint.token_trace,
         },
         "limits": {
             name: getattr(binding.limits, name)

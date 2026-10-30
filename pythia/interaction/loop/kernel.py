@@ -420,7 +420,8 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
         sample_params = config.sample_params()
     # The loop's own samples: an HTTP adapter retries no transient failure
     # itself, since the loop retries it (_auto_retry), visibly. Compaction
-    # gets the turn's params, and keeps the adapters' retries.
+    # gets the turn's params, and keeps the adapters' retries; it drops their
+    # token_trace (run_compaction), so only the loop's own samples ask for one.
     own_params = sample_params
     if isinstance(sample_params, SampleParams) and sample_params.transient_retries is None:
         own_params = replace(sample_params, transient_retries=0)
@@ -527,6 +528,8 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
         host.after_sample(model, sample)
         host.append(context, sample.context_items())
         host.show(sample.display_items(host.renderer))
+        for text in sample.notices:  # the model's notes about this sample
+            host.notice(text)
         if sample.stop_reason == "compaction":
             # A paused provider compaction has no final text; sample again.
             continue

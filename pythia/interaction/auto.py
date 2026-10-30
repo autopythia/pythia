@@ -54,7 +54,8 @@ from .items import Init, Instructions, Message, ToolResult, Tools, UserInteracti
 from .items import UserToolResult
 from .media import AttachmentError, join_user_messages, parse_user_prompt, require_media_api
 from .model_config import build_model
-from .model_config import CLAUDE_RELAY_FIELDS, HTTP_FIELDS, MESSAGES_FIELDS, relay_endpoint
+from .model_config import CHAT_COMPLETIONS_FIELDS, CLAUDE_RELAY_FIELDS, HTTP_FIELDS
+from .model_config import MESSAGES_FIELDS, relay_endpoint
 from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
@@ -521,6 +522,7 @@ class _Session:
         self._relay_options = dict(getattr(settings, "relay_options", {}))
         self._messages_options = dict(getattr(settings, "messages_options", {}))
         self._http_options = dict(getattr(settings, "http_options", {}))
+        self._chat_completions_options = dict(getattr(settings, "chat_completions_options", {}))
         self._models = {}
         self._model_lock = threading.Lock()
         self.sources = dict(getattr(settings, "sources", {}))
@@ -540,6 +542,13 @@ class _Session:
             # Relay roles ignore it.
             self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, rate_limit_retries=retries))
                                  if b.api != "claude-relay" else b)
+                             for i, b in self.bindings.items()}
+        trace = self._chat_completions_options.get("endpoint_token_trace")
+        if trace is not None:
+            # Launch-only too: every Chat Completions role's endpoint takes it,
+            # and the other roles ignore it.
+            self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, token_trace=trace))
+                                 if b.api == "chat-completions" else b)
                              for i, b in self.bindings.items()}
         self.names = {i: self.settings[i]["name"] for i in self.roles}
         self._model_factory, self._environment_factory = model_factory, environment_factory
@@ -2082,6 +2091,9 @@ def main(argv=None):
                                      if getattr(args, name, None) is not None}
         settings.http_options = {name: getattr(args, name) for name in HTTP_FIELDS
                                  if getattr(args, name, None) is not None}
+        settings.chat_completions_options = {name: getattr(args, name)
+                                             for name in CHAT_COMPLETIONS_FIELDS
+                                             if getattr(args, name, None) is not None}
         if args.print_config:
             for index in roles:
                 binding = namespace(settings[index], catalog).model_binding

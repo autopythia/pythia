@@ -180,6 +180,9 @@ from .timeouts import DEFAULT_LOGIN_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .timeouts import DEFAULT_TOOL_TIMEOUT_SECONDS
 from .timeouts import MAX_TIMEOUT_SECONDS
+from .tokens import LogProbs
+from .tokens import TokenIds
+from .tokens import TokenRecord
 from .user import UserInteraction
 
 __all__ = [
@@ -324,7 +327,10 @@ __all__ = [
     "ResumedInteractionSave",
     "SaveError",
     "TextPart",
+    "TokenIds",
+    "TokenRecord",
     "TokenUsage",
+    "LogProbs",
     "TOOL_RESULT_MAX_CHARS",
     "Tool",
     "ToolCall",

@@ -40,6 +40,8 @@ from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
 from .items import is_interaction_item
+from .tokens import TokenRecord
+from .usage import TokenUsage
 
 
 _SHELL_TOOL_NAMES = frozenset(
@@ -510,13 +512,29 @@ def _render_sample_metadata(item: SampleMetadata) -> Tuple[str, ...]:
     recovery = (
         "" if not item.recovery else f" recovery={_recovery_text(item.recovery)}"
     )
+    tokens = "" if item.tokens is None else _token_trace_text(item.tokens, usage)
     return (
         "[sample] "
         f"input={usage.input_tokens} "
         f"output={usage.output_tokens} "
         f"total={usage.total_tokens} "
-        f"cached={usage.cached_input_tokens}{elapsed}{attempts}{recovery}",
+        f"cached={usage.cached_input_tokens}{tokens}{elapsed}{attempts}{recovery}",
     )
+
+
+def _token_trace_text(tokens: TokenRecord, usage: TokenUsage) -> str:
+    """A sample's token trace, as its ``[sample]`` line shows it: the prompt's
+    tokens that the record saves and the sample's (- for a part that the
+    server didn't send), then the offset when it isn't the cache hit (after
+    a preemption), and the gap when there is one."""
+    prefix = "-" if tokens.prefix_token_ids is None else len(tokens.prefix_token_ids)
+    sample = "-" if tokens.sample_token_ids is None else len(tokens.sample_token_ids)
+    text = f" tokens={prefix}/{sample}"
+    if tokens.prefix_offset is not None and tokens.prefix_offset != usage.cached_input_tokens:
+        text += f" offset={tokens.prefix_offset}"
+    if tokens.prefix_gap_token_ids is not None:
+        text += f" gap={len(tokens.prefix_gap_token_ids)}"
+    return text
 
 
 def _render_compaction_metadata(

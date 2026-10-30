@@ -513,6 +513,7 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
         self.assertEqual(_debug_entry(catalog.bind("messages", "cached"))["endpoint"], {
             "api": "messages", "url": "http://127.0.0.1:9/v1/messages", "model": "fixture",
             "auth": "none", "prompt_caching": "1h", "rate_limit_retries": None,
+            "token_trace": None,
         })
 
     def test_catalog_prompt_caching_is_checked(self):

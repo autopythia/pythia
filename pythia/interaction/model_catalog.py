@@ -66,8 +66,21 @@ _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
 _CHAT_COMPLETIONS_RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
     "n", "tool_choice", "functions", "function_call",
 ))
+# endpoint.token_trace, Chat Completions only: how much of each sample's
+# tokens a vLLM server returns, and the save keeps (pythia.interaction.tokens).
+# Each level adds to the one before: token_ids, the prompt's and the sample's
+# token IDs, and sends the previous ones back while they chain;
+# sample_log_probs, the sampled tokens' log probs; prefix_log_probs, the
+# prompt's. Unset, it is none.
+TOKEN_TRACE_LEVELS = ("none", "token_ids", "sample_log_probs", "prefix_log_probs")
+# The request fields that the levels own, vLLM's, which an extension can't set.
+TOKEN_TRACE_FIELDS = frozenset((
+    "return_token_ids", "logprobs", "top_logprobs", "return_tokens_as_token_ids",
+    "prompt_logprobs", "skip_reading_prefix_cache", "prompt_token_ids", "token_ids",
+))
 _PROFILE_RESERVED_EXTRA_SAMPLE_PARAMS = MappingProxyType({
-    "chat-completions": _RESERVED_EXTRA_SAMPLE_PARAMS | _CHAT_COMPLETIONS_RESERVED_EXTRA_SAMPLE_PARAMS,
+    "chat-completions": (_RESERVED_EXTRA_SAMPLE_PARAMS | _CHAT_COMPLETIONS_RESERVED_EXTRA_SAMPLE_PARAMS
+                         | TOKEN_TRACE_FIELDS),
     "messages": _RESERVED_EXTRA_SAMPLE_PARAMS | {"system", "cache_control"},
     "responses": _RESERVED_EXTRA_SAMPLE_PARAMS | _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS,
     "codex": _RESERVED_EXTRA_SAMPLE_PARAMS | _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS,
@@ -102,6 +115,14 @@ def validate_rate_limit_retries(value, name="endpoint.rate_limit_retries"):
         return value
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a nonnegative integer or {RATE_LIMIT_RETRIES_UNBOUNDED}")
+    return value
+
+
+def validate_token_trace(value, name="endpoint.token_trace"):
+    """A token-trace level: one of ``TOKEN_TRACE_LEVELS``."""
+    if not isinstance(value, str) or value not in TOKEN_TRACE_LEVELS:
+        raise ValueError(f"{name} must be {', '.join(TOKEN_TRACE_LEVELS[:-1])}, "
+                         f"or {TOKEN_TRACE_LEVELS[-1]}")
     return value
 
 
@@ -228,6 +249,12 @@ def freeze_extra_sample_params(value, profile=None):
         raise ValueError("extra_sample_params must be an object.")
     reserved = (_RESERVED_EXTRA_SAMPLE_PARAMS if profile is None
                 else _PROFILE_RESERVED_EXTRA_SAMPLE_PARAMS[_normalize_profile(profile)])
+    if profile is not None and _normalize_profile(profile) == "chat-completions":
+        traced = sorted(key for key in value if isinstance(key, str)
+                        and key.lower() in TOKEN_TRACE_FIELDS)
+        if traced:
+            raise ValueError(f"Extra sample param {traced[0]} belongs to endpoint.token_trace; "
+                             "set that instead.")
     if any(not isinstance(key, str) or not key or key.lower() in reserved
            or any(ord(char) < 32 for char in key) for key in value):
         raise ValueError("Invalid or adapter-owned extra sample param.")
@@ -285,6 +312,8 @@ class EndpointSpec:
     # A count or RATE_LIMIT_RETRIES_UNBOUNDED; None is DEFAULT_RATE_LIMIT_RETRIES.
     # Not part of the connection identity.
     rate_limit_retries: Optional[Union[int, str]] = None
+    # TOKEN_TRACE_LEVELS; None is none. Not part of the connection identity.
+    token_trace: Optional[str] = None
 
     def __post_init__(self):
         object.__setattr__(self, "api", _normalize_profile(self.api))
@@ -316,6 +345,10 @@ class EndpointSpec:
             validate_rate_limit_retries(self.rate_limit_retries)
             if self.api == "claude-relay":
                 raise ValueError("endpoint.rate_limit_retries does not apply to Claude Relay")
+        if self.token_trace is not None:
+            validate_token_trace(self.token_trace)
+            if self.api != "chat-completions":
+                raise ValueError("endpoint.token_trace requires the Chat Completions API")
 
     @property
     def environment_variable(self):
@@ -919,7 +952,8 @@ class ModelCatalog:
 
     def bind(self, api=None, name=None, *, extra_sample_params=None,
              endpoint_url=None, endpoint_model=None, endpoint_auth=None,
-             endpoint_prompt_caching=None, endpoint_rate_limit_retries=None):
+             endpoint_prompt_caching=None, endpoint_rate_limit_retries=None,
+             endpoint_token_trace=None):
         if name is not None:
             if not isinstance(name, str):
                 raise TypeError("model name must be a string or None")
@@ -955,6 +989,11 @@ class ModelCatalog:
                                  "--endpoint-api claude-relay")
             changes["rate_limit_retries"] = validate_rate_limit_retries(
                 endpoint_rate_limit_retries, "--endpoint-rate-limit-retries")
+        if endpoint_token_trace is not None:
+            if endpoint.api != "chat-completions":
+                raise ValueError("--endpoint-token-trace requires --endpoint-api chat-completions")
+            changes["token_trace"] = validate_token_trace(
+                endpoint_token_trace, "--endpoint-token-trace")
         endpoint = replace(endpoint, **changes)
         binding = ModelBinding(
             name, endpoint, spec,
@@ -996,6 +1035,7 @@ def binding_from_namespace(args, catalog=None):
         endpoint_auth=auth,
         endpoint_prompt_caching=getattr(args, "endpoint_prompt_caching", None),
         endpoint_rate_limit_retries=getattr(args, "endpoint_rate_limit_retries", None),
+        endpoint_token_trace=getattr(args, "endpoint_token_trace", None),
         extra_sample_params=getattr(args, "extra_sample_params", None),
     )
     if inferred_supplied and binding.api == "codex" and (

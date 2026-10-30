@@ -20,6 +20,8 @@ from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
 from .model_catalog import ResponsesDefaults
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS, SampleParamDefaults
+from .model_catalog import TOKEN_TRACE_LEVELS
+from .model_catalog import TOKEN_TRACE_FIELDS
 from .model_catalog import sample_params_route_error
 from .model_catalog import _normalize_profile, parse_json_value
 
@@ -190,6 +192,12 @@ def _entry(section, values, base):
                                       f"{RATE_LIMIT_RETRIES_UNBOUNDED}, or null")
                 retries = int(retries)
             endpoint["rate_limit_retries"] = retries
+        elif key == "endpoint.token_trace":
+            # null restores the default, none.
+            trace = _text(value)
+            if trace is not None and trace not in TOKEN_TRACE_LEVELS:
+                raise _FieldError(f"{key} must be {', '.join(TOKEN_TRACE_LEVELS)}, or null")
+            endpoint["token_trace"] = trace
         elif key == "aliases":
             fields[key] = parse_json_value(value)
             if not isinstance(fields[key], list):
@@ -253,6 +261,15 @@ def _entry(section, values, base):
         raise _FieldError("endpoint.prompt_caching requires endpoint.api messages")
     if endpoint.get("rate_limit_retries") is not None and endpoint.get("api") == "claude-relay":
         raise _FieldError("endpoint.rate_limit_retries does not apply to endpoint.api claude-relay")
+    if endpoint.get("token_trace") is not None and endpoint.get("api") != "chat-completions":
+        raise _FieldError("endpoint.token_trace requires endpoint.api chat-completions")
+    if endpoint.get("api") == "chat-completions":
+        # The levels own these vLLM fields; name the field that sets them.
+        traced = sorted(name for name in params if isinstance(name, str)
+                        and name.lower() in TOKEN_TRACE_FIELDS)
+        if traced:
+            raise _FieldError(f"{_EXTRA_SAMPLE_PARAMS_PREFIX}{traced[0]}: {traced[0]} belongs "
+                              "to endpoint.token_trace; set that instead")
     endpoint = EndpointSpec(**endpoint)
     if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
         raise ValueError("Catalog Codex login requires the official Codex endpoint.")
