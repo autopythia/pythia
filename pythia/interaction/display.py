@@ -305,9 +305,9 @@ class InteractionItemRenderer:
             call, code = _format_icron_call(parsed)
             return (f"{label}\n{call}",) if code is None else (f"{label}\n{call}", code)
 
-        if item.name == "media" and not user and isinstance(parsed, Mapping):
+        if item.name in ("media", "ui") and not user and isinstance(parsed, Mapping):
             # The call it stands for, as icron's show.
-            return (f"{label}\n{_format_media_call(parsed)}",)
+            return (f"{label}\n{_format_method_call(item.name, parsed)}",)
 
         # A model call that awaits the user's approval shows what it would do in
         # full (awaits_approval).
@@ -825,11 +825,15 @@ def _format_icron_call(arguments: Mapping[str, object]) -> Tuple[str, Optional[s
     return f"icron.{method}({keywords})", code
 
 
-def _format_media_call(arguments: Mapping[str, object]) -> str:
-    """A media tool call as the Python call the tool reads, such as
-    ``media.attach('build/shot.png', text='Is it green?')``, refs and text in
+def _format_method_call(tool: str, arguments: Mapping[str, object]) -> str:
+    """A media or ui tool call as the Python call the tool reads, such as
+    ``media.attach('build/shot.png', text='Is it green?')``, its arguments in
     full. A call that the tool refuses shows as written."""
-    from .media_tool import call_text  # here, since media_tool imports this module
+    # Here, since the tools' modules import this one.
+    if tool == "media":
+        from .media_tool import call_text
+    else:
+        from .ui_tool import call_text
 
     read = call_text(arguments)
     if read is not None:
@@ -837,9 +841,9 @@ def _format_media_call(arguments: Mapping[str, object]) -> str:
     written = arguments.get("call")
     if isinstance(written, str):
         written = written.strip()
-        return written if written.startswith("media.") else f"media.{written}"
+        return written if written.startswith(f"{tool}.") else f"{tool}.{written}"
     keywords = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
-    return f"media({keywords})"
+    return f"{tool}({keywords})"
 
 
 def _format_tool_result_label(

@@ -171,6 +171,107 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(f"Installed           = {wrapper}", result.stdout)
         self.assertEqual(wrapper.read_text(), written)
 
+    # The UI plugin (--enable-experimental-ui-plugin): built with cargo on a Mac,
+    # which these tests stand in for (install_on_mac, use_cargo).
+
+    def install_on_mac(self, *args, success=True):
+        """Run the installer as on macOS, where sys.platform reads darwin."""
+        code = ("import runpy, sys; sys.platform = 'darwin'; sys.argv = sys.argv[1:]; "
+                "runpy.run_path(sys.argv[0], run_name='__main__')")
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(INSTALLER), *args], cwd=self.checkout,
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode == 0, success, result.stderr)
+        return result
+
+    def use_cargo(self, exit_code=0):
+        """Put a fake cargo first on PATH: it logs where it ran and its arguments,
+        and, exiting 0, writes the library where a build would."""
+        cargo_dir = self.root / "cargo bin"
+        cargo_dir.mkdir(exist_ok=True)
+        self.cargo_log = self.root / "cargo.log"
+        built = "target/aarch64-apple-darwin/release"
+        build = (f'mkdir -p {built} && printf "built in %s" "$PWD" > {built}/libpythia_ui.dylib\n'
+                 if exit_code == 0 else "")
+        cargo = cargo_dir / "cargo"
+        cargo.write_text(f'#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > '
+                         f'{shlex.quote(str(self.cargo_log))}\n{build}exit {exit_code}\n')
+        cargo.chmod(0o755)
+        self.env["PATH"] = f"{cargo_dir}{os.pathsep}{self.env['PATH']}"
+
+    def make_crate(self):
+        crate = self.checkout / "_pythia_ui"
+        crate.mkdir()
+        (crate / "Cargo.toml").write_text('[package]\nname = "pythia_ui"\n')
+        return crate
+
+    def installed_plugin(self, content="old plugin"):
+        plugin = self.home / ".pythia" / "plugin" / "libpythia_ui.dylib"
+        plugin.parent.mkdir(parents=True)
+        plugin.write_text(content)
+        return plugin
+
+    def test_the_ui_plugin_is_built_and_installed_by_renaming(self):
+        crate = self.make_crate()
+        self.use_cargo()
+        plugin = self.installed_plugin()
+        with open(plugin) as loaded:  # as a running ipythia holds the old one
+            result = self.install_on_mac("-e", "--enable-experimental-ui-plugin")
+            self.assertEqual(loaded.read(), "old plugin")
+        self.assertEqual(self.cargo_log.read_text().splitlines(),
+                         [str(crate), "build", "--offline", "--release", "--lib"])
+        self.assertEqual(plugin.read_text(), f"built in {crate}")
+        self.assertEqual(plugin.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(sorted(path.name for path in plugin.parent.iterdir()),
+                         ["libpythia_ui.dylib"])
+        self.assertIn(f"Installed           = {plugin} (UI plugin; running sessions keep the "
+                      "one they loaded until they restart)", result.stdout)
+        self.assertEqual(self.link.resolve(), self.checkout)
+        self.assert_launchers(self.bin, "checkout one")
+
+    def test_a_ui_plugin_that_cant_be_built_changes_nothing(self):
+        plugin = self.installed_plugin()
+        result = self.install_on_mac("-e", "--enable-experimental-ui-plugin", success=False)
+        self.assertIn("_pythia_ui/Cargo.toml not found", result.stderr)
+        self.make_crate()
+        path = self.env["PATH"]
+        self.env["PATH"] = str(self.root / "no cargo here")
+        result = self.install_on_mac("-e", "--enable-experimental-ui-plugin", success=False)
+        self.assertIn("--enable-experimental-ui-plugin: cargo is not on PATH; the plugin needs "
+                      "a rustup toolchain", result.stderr)
+        self.env["PATH"] = path
+        self.use_cargo(exit_code=101)
+        result = self.install_on_mac("-e", "--enable-experimental-ui-plugin", success=False)
+        self.assertIn("--enable-experimental-ui-plugin: building the UI plugin failed (cargo "
+                      "exited 101). Nothing was installed.", result.stderr)
+        self.assertFalse(self.link.exists())
+        self.assertFalse(self.bin.exists())
+        self.assertEqual(plugin.read_text(), "old plugin")
+
+    @unittest.skipIf(sys.platform == "darwin", "the UI plugin builds on macOS")
+    def test_the_ui_plugin_option_is_refused_off_macos(self):
+        self.make_crate()
+        self.use_cargo()
+        result = self.install("-e", "--enable-experimental-ui-plugin", success=False)
+        self.assertIn(f"--enable-experimental-ui-plugin: the UI plugin is for macOS on Apple "
+                      f"Silicon, and this is {sys.platform}", result.stderr)
+        self.assertFalse(self.cargo_log.exists())
+        self.assertFalse(self.link.exists())
+        self.assertFalse((self.home / ".pythia" / "plugin").exists())
+
+    def test_without_the_option_the_plugin_directory_is_left_alone(self):
+        self.make_crate()
+        self.use_cargo()
+        self.install_on_mac("-e")
+        self.assertFalse((self.home / ".pythia" / "plugin").exists())
+        plugin = self.installed_plugin()
+        before = plugin.stat()
+        self.install_on_mac("-e")
+        self.assertEqual(plugin.read_text(), "old plugin")
+        self.assertEqual(plugin.stat().st_ino, before.st_ino)
+        self.assertFalse(self.cargo_log.exists())
+
     def test_requires_editable_and_preserves_non_symlink_checkout_path(self):
         self.install(success=False)
         self.assertFalse(self.link.exists())

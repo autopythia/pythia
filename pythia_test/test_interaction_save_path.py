@@ -102,6 +102,7 @@ class SaveArgumentTests(_SavePathTestCase):
         self.assertFalse(cli_args.pop("require_tool_approval"))
         self.assertFalse(cli_args.pop("debug_trace"))
         self.assertIsNone(cli_args.pop("enable_icron"))
+        self.assertFalse(cli_args.pop("enable_experimental_ui_plugin"))
         self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
         self.assertEqual(cli_args.pop("save_log_reasoning"), "nil")
         self.assertIsNone(cli_args.pop("rebooted"))

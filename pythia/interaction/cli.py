@@ -94,6 +94,7 @@ from .media import parse_user_prompt
 from .media import require_media_api
 from .media import split_leading_references
 from .media_tool import MediaTool
+from .media_tool import Outbox
 from .loop import Interrupt
 from .loop import Icron
 from .loop import IcronError
@@ -139,6 +140,9 @@ from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
 from .user_tools import parse_user_tool
 from .user_tools import run_config
+from .ui_tool import UiPlugin
+from .ui_tool import UiTool
+from .ui_tool import load_ui_plugin
 
 
 FRAME_INTERVAL = 1 / 128
@@ -416,10 +420,12 @@ class _UIState:
     cron_entries: dict = field(default_factory=dict)
     icron_resumes: int = 0
     icron_auth_noticed: bool = False
-    # The experimental media tool (--enable-experimental-media), or None: the
-    # messages it queues reach the running turn at its interrupt points
-    # (_CliHost.interrupt).
+    # The experimental media tool (--enable-experimental-media) and ui tool
+    # (--enable-experimental-ui-plugin), or None: the messages that they queue
+    # in their shared outbox (outbox) reach the running turn at its interrupt
+    # points (_CliHost.interrupt).
     media: Optional[MediaTool] = field(default=None, repr=False)
+    ui: Optional[UiTool] = field(default=None, repr=False)
     # A requested reboot (/reboot, compaction_coldstart_reboot), or None; set
     # on the event loop thread, and read by the context thread at a turn's
     # interrupt point. rebooted is what this process carries over from the
@@ -450,6 +456,13 @@ class _UIState:
     # The config snapshot of the turn running, or the last one (_turn): the
     # one its automatic retries followed, which a failure's notice names.
     turn_config: Optional[object] = None
+
+    @property
+    def outbox(self) -> Optional[Outbox]:
+        """The outbox that the media and ui tools share, or None without
+        them."""
+        tool = self.media if self.media is not None else self.ui
+        return None if tool is None else tool.outbox
 
     def set_phase(self, phase: str) -> None:
         self.phase, self.phase_started = phase, time.monotonic()
@@ -2421,8 +2434,8 @@ class _CliHost(TurnHost):
         commands that flushed the steers) are logged first, steers or not;
         a /steer's record shows there, as it takes effect, and the turn loop
         shows the steers' [user] messages after it (a steer showed only its
-        queue item when it was accepted, _steer_item). The media tool's queued
-        messages come before the steers (MediaTool.take).
+        queue item when it was accepted, _steer_item). The messages that the
+        media and ui tools queued come before the steers (Outbox.take).
         """
         if not self._steering or self._state.closing:
             return super().interrupt()
@@ -2434,11 +2447,11 @@ class _CliHost(TurnHost):
             self.append(self._context, tuple(item for record in records for item in record))
             if shown:
                 self.show(shown)
-        # The model's own attachments, queued by this turn's tool calls (or by
-        # a turn that ended before an interrupt point took them), then what
-        # the user typed meanwhile.
-        media = () if self._state.media is None else self._state.media.take()
-        messages = (*media, *taken.messages)
+        # The model's own attachments and screenshots, queued by this turn's
+        # tool calls (or by a turn that ended before an interrupt point took
+        # them), then what the user typed meanwhile.
+        outbox = self._state.outbox
+        messages = (*(() if outbox is None else outbox.take()), *taken.messages)
         if not messages:
             return Interrupt.CONTINUE
         return Steer(messages)
@@ -2776,12 +2789,13 @@ async def _drive_interaction(model, environment, state, args, save, config):
                 _safe_notice(state, f"icron: dropped {len(dropped)} pending "
                                     f"job{'s' if len(dropped) != 1 else ''}; jobs and Python "
                                     "state live only in this process.")
-        if state.media is not None:
+        outbox = state.outbox
+        if outbox is not None:
             # A message that no turn took: its turn ended before an interrupt
             # point, or the stop came first.
-            dropped = len(state.media.take())
+            dropped = len(outbox.take())
             if dropped:
-                _safe_notice(state, f"media: dropped {dropped} queued "
+                _safe_notice(state, f"{' and '.join(outbox.writers)}: dropped {dropped} queued "
                                     f"message{'s' if dropped != 1 else ''} of the model's "
                                     "attachments, which no turn took; they live only in this "
                                     "process.")
@@ -2847,14 +2861,14 @@ async def _drive_interaction_body(
         initial.append(tools_snapshot)
         context = InteractionContext(initial)
     state.context_revision = functools.partial(len, context)
+    if state.outbox is not None:
+        # The outbox counts what the next request would carry, for its cap.
+        state.outbox.bind(context_items=context.model_items)
     if state.media is not None:
         # When it runs, the media tool reads the tools' workspace policy, as
-        # the turn set it (_apply_workspace), and what the next request would
-        # carry, for its cap.
-        state.media.bind(
-            enable_workspace=lambda: getattr(environment, "enable_workspace",
-                                             args.enable_workspace),
-            context_items=context.model_items)
+        # the turn set it (_apply_workspace).
+        state.media.bind(enable_workspace=lambda: getattr(environment, "enable_workspace",
+                                                          args.enable_workspace))
     # The public log's warnings, such as a drift that resuming found, become
     # notices; the log never fails a save.
     writer.on_warning = functools.partial(_post, asyncio.get_running_loop(), _safe_notice, state)
@@ -3279,6 +3293,8 @@ def _startup_notices(state, args, save, config=None):
                         "; /cron schedules your messages, /crontab shows them, and /py runs "
                         "your code.")
                      + " Jobs and Python state live only in this process.")
+    if state.ui is not None:
+        state.notice(state.ui.notice())
     dropped = None if config is None else config.coldstart_dropped
     if dropped is not None:
         state.notice(
@@ -3306,7 +3322,7 @@ def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted)
 
 
 async def _run_headless(model, environment, args, path, *, trace=None, icron=None,
-                        media=None, rebooted=None):
+                        media=None, ui=None, rebooted=None):
     """One explicit task, quiet context display, and orderly effect draining."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
@@ -3322,6 +3338,7 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         trace=trace,
         icron=icron,
         media=media,
+        ui=ui,
         rebooted=rebooted,
     )
     _startup_notices(state, args, save, config)
@@ -3376,6 +3393,7 @@ async def _run(
     trace: Optional[DebugTrace] = None,
     icron: Optional[Icron] = None,
     media: Optional[MediaTool] = None,
+    ui: Optional[UiTool] = None,
     rebooted: Optional[_Rebooted] = None,
 ) -> int:
     save = _prepared_save(path, args)
@@ -3390,6 +3408,7 @@ async def _run(
         trace=trace,
         icron=icron,
         media=media,
+        ui=ui,
         rebooted=rebooted,
     )
     state.notice(
@@ -3591,6 +3610,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS, type=_boolean_argument, help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--enable-experimental-ui-plugin",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_boolean_argument,
+        metavar="{False,True}",
+        help=(
+            "experimental, macOS on Apple Silicon: load the UI plugin, "
+            "~/.pythia/plugin/libpythia_ui.dylib, which `python3 install.py -e "
+            "--enable-experimental-ui-plugin` builds and installs, and give the model the ui "
+            "tool. Its screenshot() attaches an image of a display to the model's context, as "
+            "the media tool attaches images; a screenshot shows whatever the display shows, "
+            "and goes to the model provider. It needs the default tools and an API that takes "
+            "images, and the launch stops if the plugin can't be used. Launch-only: repeat "
+            "when resuming. A bare flag means True (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--compaction-coldstart-reboot",
         nargs="?",
         const=True,
@@ -3617,13 +3654,24 @@ def _icron_enabled(args: argparse.Namespace) -> bool:
     return args.enable_default_tools if args.enable_icron is None else args.enable_icron
 
 
-def _media_tool(args: argparse.Namespace, cwd: Path) -> Optional[MediaTool]:
+def _media_tool(args: argparse.Namespace, cwd: Path,
+                outbox: Optional[Outbox] = None) -> Optional[MediaTool]:
     """The experimental media tool, which comes with --enable-experimental-media
-    when the default tools are on and the API takes images (MEDIA_APIS)."""
+    when the default tools are on and the API takes images (MEDIA_APIS). It
+    queues in ``outbox``, which the ui tool shares, or in one of its own."""
     if not (args.enable_experimental_media and args.enable_default_tools
             and args.model_api in MEDIA_APIS):
         return None
-    return MediaTool(cwd=cwd, api=args.model_api)
+    return MediaTool(cwd=cwd, api=args.model_api, outbox=outbox)
+
+
+def _ui_plugin(args: argparse.Namespace) -> Optional[UiPlugin]:
+    """The UI plugin, loaded, with --enable-experimental-ui-plugin. Asked
+    for, it stops the launch with the reason when it can't be used
+    (UiPluginError)."""
+    if not args.enable_experimental_ui_plugin:
+        return None
+    return load_ui_plugin(api=args.model_api, default_tools=args.enable_default_tools)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -3646,6 +3694,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # prompt and the instructions already.
             args.resume, args.prompt, args.prompt_file, args.instructions = True, None, None, None
         args = prepare_namespace(args, catalog)
+        # Before the save: a plugin that was asked for and can't be used ends
+        # the launch here. A reboot's start check loads it too, so that one
+        # that went missing keeps the running session.
+        ui_plugin = _ui_plugin(args)
         if args.rebooted == "check":
             if not args.headless:
                 importlib.import_module("pythia.term_input")  # the terminal imports it late
@@ -3693,9 +3745,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cwd = Path(args.cwd).expanduser().resolve()
         if _icron_enabled(args):
             icron = Icron()
-        media = _media_tool(args, cwd)
+        # The media and ui tools queue in one outbox, under one image cap.
+        outbox = Outbox(api=args.model_api)
+        media = _media_tool(args, cwd, outbox)
+        ui = None if ui_plugin is None else UiTool(ui_plugin, outbox=outbox)
         tools = (*(() if icron is None else (icron.tool(),)),
-                 *(() if media is None else (media.tool(),)))
+                 *(() if media is None else (media.tool(),)),
+                 *(() if ui is None else (ui.tool(),)))
         environment_manager = (
             DefaultEnvironment(cwd=cwd, enable_workspace=args.enable_workspace,
                                **({"extra_tools": tools} if tools else {}))
@@ -3705,12 +3761,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.headless:
                 return asyncio.run(_run_headless(
                     model, environment, args, path=save, trace=trace, icron=icron,
-                    media=media, rebooted=rebooted,
+                    media=media, ui=ui, rebooted=rebooted,
                 ))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(
                 model, environment, terminal, args, path=save, trace=trace, icron=icron,
-                media=media, rebooted=rebooted,
+                media=media, ui=ui, rebooted=rebooted,
             ))
     except _Rebooting as rebooting:
         reboot_state = rebooting.state  # the session has shut down: restart once it's closed

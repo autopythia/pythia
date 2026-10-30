@@ -5,11 +5,12 @@ The tool, ``media``, takes one method call, as icron's tool does:
 :meth:`MediaTool.attach` resolves its refs as the user's leading ``@``
 references are resolved (:func:`media.resolve_content`), with the tool's own
 limits, and queues one user message: a header that names the refs, the parts
-in order, then the text. The host takes the queue (:meth:`MediaTool.take`) at
-the turn's next interrupt point, where it takes the user's steers, so the
-model sees the images in its next sample, once its tool batch is done. Chat
-Completions takes images only in user messages; a user message works the same
-way with every API that takes images (``MEDIA_APIS``).
+in order, then the text. It queues in an outbox (:class:`Outbox`), which the
+ui tool's screenshots share (ui_tool.py). The host takes the queue
+(:meth:`Outbox.take`) at the turn's next interrupt point, where it takes the
+user's steers, so the model sees the images in its next sample, once its tool
+batch is done. Chat Completions takes images only in user messages; a user
+message works the same way with every API that takes images (``MEDIA_APIS``).
 
 Only ``attach`` is implemented (doc/interaction-media-tool-plan.md also plans
 ``images()``, ``help()`` and calls sent from icron). Nothing is saved until the
@@ -18,14 +19,10 @@ host appends the message: one that no turn took when the process ends is lost.
 
 from __future__ import annotations
 
-import ast
 import base64
-from collections.abc import Mapping
 from dataclasses import dataclass
-import inspect
 import mimetypes
 from pathlib import Path
-import re
 import threading
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse
@@ -44,6 +41,9 @@ from .media import ContentLimits
 from .media import _sniff_image_media_type
 from .media import join_user_messages
 from .media import resolve_content
+from .method_call import MethodCall
+from .method_call import MethodCallError
+from .method_call import MethodCallReader
 from .timeouts import DEFAULT_TOOL_TIMEOUT_SECONDS
 
 
@@ -98,67 +98,153 @@ class Attached:
 _DEFAULT_CAP = object()
 
 
-class MediaTool:
-    """The media tool and its outbox.
+class OutboxError(ValueError):
+    """A message that the outbox refuses, past the image cap; the text is the
+    calling tool's result."""
 
-    ``attach`` resolves its refs at once, so that a bad ref fails its call,
-    and queues one user message; the host takes the queue (``take``) at the
-    turn's next interrupt point. The host binds what the handler reads live
-    (``bind``): the tools' workspace policy, and the items that the next
-    request would carry, for the cap. The handler and ``take`` run on the
+
+class Outbox:
+    """What the model's own tools queue for its context: the media tool's
+    attachments, and the ui tool's screenshots.
+
+    The host takes the queue (``take``) at the turn's next interrupt point,
+    where it takes the user's steers, and appends it before them. ``put``
+    keeps the API's image cap (``IMAGE_CAPS``) for the next request, which
+    carries the context's images, as the host binds them (``bind``), the
+    queued ones, and the new message's. The writers and ``take`` run on the
     context thread; a lock guards the queue all the same.
     """
 
-    def __init__(self, *, cwd: Union[str, Path], api: Optional[str],
-                 limits: ContentLimits = MEDIA_TOOL_LIMITS, cap=_DEFAULT_CAP) -> None:
-        if not isinstance(limits, ContentLimits):
-            raise TypeError("limits must be ContentLimits.")
+    def __init__(self, *, api: Optional[str], cap=_DEFAULT_CAP) -> None:
         cap = IMAGE_CAPS.get(api) if cap is _DEFAULT_CAP else cap
         if cap is not None and not isinstance(cap, ImageCap):
             raise TypeError("cap must be an ImageCap or None.")
-        self._cwd = Path(cwd).expanduser().resolve()
-        self._api, self._limits, self._cap = api, limits, cap
+        self.api, self.cap = api, cap
+        # The tools that write here, by name, for the host's notices.
+        self.writers: Tuple[str, ...] = ()
         self._lock = threading.Lock()
-        self._outbox: List[Message] = []
-        self._enable_workspace: Callable[[], bool] = lambda: True
+        self._queue: List[Message] = []
         self._context_items: Callable[[], Iterable[InteractionItem]] = tuple
-        self._tool: Optional[Tool] = None
 
-    def bind(self, *, enable_workspace: Optional[Callable[[], bool]] = None,
-             context_items: Optional[Callable[[], Iterable[InteractionItem]]] = None) -> None:
-        """Set what the handler reads when it runs: the workspace policy now
-        (true keeps local refs inside cwd), and the context's items as the
+    def add_writer(self, name: str) -> None:
+        """Note a tool that writes here."""
+        if name not in self.writers:
+            self.writers += (name,)
+
+    def bind(self, *, context_items: Callable[[], Iterable[InteractionItem]]) -> None:
+        """Set what ``put`` counts toward the cap: the context's items as the
         next request would carry them, before the queued messages
         (``InteractionContext.model_items``)."""
-        if enable_workspace is not None:
-            if not callable(enable_workspace):
-                raise TypeError("enable_workspace must be callable.")
-            self._enable_workspace = enable_workspace
-        if context_items is not None:
-            if not callable(context_items):
-                raise TypeError("context_items must be callable.")
-            self._context_items = context_items
+        if not callable(context_items):
+            raise TypeError("context_items must be callable.")
+        self._context_items = context_items
 
-    def tool(self) -> Tool:
-        """The model's media tool: each call is one call of this API."""
-        if self._tool is None:
-            spec = ToolSpec(TOOL_NAME, _description(self._limits, self._api, self._cap),
-                            _PARAMETERS)
-            self._tool = Tool(spec, self._handle, timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS)
-        return self._tool
+    def put(self, message: Message, *, call: str) -> None:
+        """Queue ``message``, unless its images would take the next request
+        past the cap: then raise OutboxError, whose text starts with ``call``,
+        and queue nothing."""
+        images = [part for part in message.parts if isinstance(part, MediaPart)]
+        with self._lock:
+            if images and self.cap is not None:
+                self._check_cap_locked(call, images)
+            self._queue.append(message)
 
     def take(self) -> Tuple[Message, ...]:
         """Take every queued message, oldest first. The host calls it at the
         turn's interrupt points and appends what it returns, before the
         user's steers."""
         with self._lock:
-            taken, self._outbox = tuple(self._outbox), []
+            taken, self._queue = tuple(self._queue), []
         return taken
 
     def queued(self) -> int:
         """How many messages wait for delivery."""
         with self._lock:
-            return len(self._outbox)
+            return len(self._queue)
+
+    def _check_cap_locked(self, call: str, images: Sequence[MediaPart]) -> None:
+        cap, api = self.cap, self.api
+        present = [part for item in self._context_items() if isinstance(item, Message)
+                   for part in item.parts if isinstance(part, MediaPart)]
+        present += [part for message in self._queue for part in message.parts
+                    if isinstance(part, MediaPart)]
+        count = len(present) + len(images)
+        if count > cap.max_images:
+            raise OutboxError(
+                f"{call}: the next request would carry {count} images, over this session's "
+                f"cap of {cap.max_images} for {api}; the context and the queue hold "
+                f"{len(present)} already, the user's included. Nothing was queued.")
+        inline = sum(len(part.source_uri) for part in (*present, *images)
+                     if part.source_uri.startswith("data:"))
+        if inline > cap.max_inline_bytes:
+            held, most = _format_byte_count(inline), _format_byte_count(cap.max_inline_bytes)
+            raise OutboxError(
+                f"{call}: the next request's images would hold {held} of inline data, over "
+                f"this session's cap of {most} for {api}. Nothing was queued.")
+
+
+class MediaTool:
+    """The media tool, which queues in an outbox (``Outbox``).
+
+    ``attach`` resolves its refs at once, so that a bad ref fails its call,
+    and queues one user message; the host takes the outbox's queue at the
+    turn's next interrupt point. The host binds what the handler reads live
+    (``bind``): the tools' workspace policy, and the items that the next
+    request would carry, for the outbox's cap. The handler runs on the
+    context thread.
+    """
+
+    def __init__(self, *, cwd: Union[str, Path], api: Optional[str],
+                 limits: ContentLimits = MEDIA_TOOL_LIMITS, cap=_DEFAULT_CAP,
+                 outbox: Optional[Outbox] = None) -> None:
+        """``outbox``, shared with the ui tool, brings its own cap; without
+        one, the tool has an outbox of its own, for ``api``, with ``cap`` (by
+        default the API's, ``IMAGE_CAPS``)."""
+        if not isinstance(limits, ContentLimits):
+            raise TypeError("limits must be ContentLimits.")
+        if outbox is None:
+            outbox = Outbox(api=api, cap=cap)
+        elif not isinstance(outbox, Outbox):
+            raise TypeError("outbox must be an Outbox or None.")
+        elif cap is not _DEFAULT_CAP:
+            raise TypeError("give cap or outbox, not both: an outbox has its own cap.")
+        elif outbox.api != api:
+            raise ValueError(f"the outbox is for {outbox.api}, not {api}.")
+        self._cwd = Path(cwd).expanduser().resolve()
+        self._limits = limits
+        self.outbox = outbox
+        outbox.add_writer(TOOL_NAME)
+        self._enable_workspace: Callable[[], bool] = lambda: True
+        self._tool: Optional[Tool] = None
+
+    def bind(self, *, enable_workspace: Optional[Callable[[], bool]] = None,
+             context_items: Optional[Callable[[], Iterable[InteractionItem]]] = None) -> None:
+        """Set what the handler reads when it runs: the workspace policy now
+        (true keeps local refs inside cwd), and the context's items as the
+        next request would carry them, for the outbox's cap
+        (``Outbox.bind``)."""
+        if enable_workspace is not None:
+            if not callable(enable_workspace):
+                raise TypeError("enable_workspace must be callable.")
+            self._enable_workspace = enable_workspace
+        if context_items is not None:
+            self.outbox.bind(context_items=context_items)
+
+    def tool(self) -> Tool:
+        """The model's media tool: each call is one call of this API."""
+        if self._tool is None:
+            spec = ToolSpec(TOOL_NAME, _description(self._limits, self.outbox.api,
+                                                    self.outbox.cap), _PARAMETERS)
+            self._tool = Tool(spec, self._handle, timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS)
+        return self._tool
+
+    def take(self) -> Tuple[Message, ...]:
+        """Take every message in the outbox, oldest first (``Outbox.take``)."""
+        return self.outbox.take()
+
+    def queued(self) -> int:
+        """How many messages wait in the outbox."""
+        return self.outbox.queued()
 
     def attach(self, *refs: str, text: Optional[str] = None) -> Attached:
         """Resolve ``refs`` now and queue one user message with them and
@@ -186,10 +272,10 @@ class MediaTool:
         message = join_user_messages(Message("user", (part,))
                                      for part in (header, *parts, *tail))
         images = tuple(part for part in parts if isinstance(part, MediaPart))
-        with self._lock:
-            if images and self._cap is not None:
-                self._check_cap_locked(call, images)
-            self._outbox.append(message)
+        try:
+            self.outbox.put(message, call=call)
+        except OutboxError as exc:
+            raise MediaToolError(str(exc)) from None
         return Attached(message, tuple(_describe_non_text_source(part.source_uri)
                                        for part in images),
                         tuple(ref for part, ref in zip(parts, refs)
@@ -201,30 +287,11 @@ class MediaTool:
         del timeout_seconds
         try:
             call = _read_call(arguments)
-            attached = self.attach(*call.refs, text=call.text)
-        except MediaToolError as exc:
+            attached = self.attach(*call.arguments.get("refs", ()),
+                                   text=call.arguments.get("text"))
+        except (MethodCallError, MediaToolError) as exc:
             return ToolOutcome(str(exc), success=False)
         return ToolOutcome(_attached_text(attached))
-
-    def _check_cap_locked(self, call: str, images: Sequence[MediaPart]) -> None:
-        cap, api = self._cap, self._api
-        present = [part for item in self._context_items() if isinstance(item, Message)
-                   for part in item.parts if isinstance(part, MediaPart)]
-        present += [part for message in self._outbox for part in message.parts
-                    if isinstance(part, MediaPart)]
-        count = len(present) + len(images)
-        if count > cap.max_images:
-            raise MediaToolError(
-                f"{call}: the next request would carry {count} images, over this session's "
-                f"cap of {cap.max_images} for {api}; the context and the queue hold "
-                f"{len(present)} already, the user's included. Nothing was queued.")
-        inline = sum(len(part.source_uri) for part in (*present, *images)
-                     if part.source_uri.startswith("data:"))
-        if inline > cap.max_inline_bytes:
-            held, most = _format_byte_count(inline), _format_byte_count(cap.max_inline_bytes)
-            raise MediaToolError(
-                f"{call}: the next request's images would hold {held} of inline data, over "
-                f"this session's cap of {most} for {api}. Nothing was queued.")
 
 
 def _checked_part(part, ref: str, call: str):
@@ -265,83 +332,20 @@ def _attached_text(attached: Attached) -> str:
 
 
 # The tool's input: one method call in Python, as icron's tool takes,
-# {"call": "attach('build/shot.png', text='Is the header green now?')"}. Also
-# read: a "media." prefix, as transcripts show calls. Nothing in a call is
-# evaluated: its values are literals.
-
-_METHODS = ("attach",)
-_NO_CALL = ("media: give call, one method call such as "
-            "attach('build/shot.png', text='Is the header green now?').")
-
-
-@dataclass(frozen=True)
-class _Call:
-    """A tool input as the tool reads it."""
-
-    refs: Tuple[object, ...]
-    text: object = None
-
-    def text_form(self) -> str:
-        """The call in canonical form: media.attach('a.png', text='Hi.')."""
-        arguments = [repr(ref) for ref in self.refs]
-        if self.text is not None:
-            arguments.append(f"text={self.text!r}")
-        return f"media.attach({', '.join(arguments)})"
+# {"call": "attach('build/shot.png', text='Is the header green now?')"}
+# (method_call.py).
+_READER = MethodCallReader(
+    TOOL_NAME, {"attach": MediaTool.attach},
+    example="attach('build/shot.png', text='Is the header green now?')",
+    short_example="attach('build/shot.png')",
+    listing="the tool has one, attach(*refs, text=None)",
+    positional="ref", literal="'build/shot.png'")
 
 
-def _read_call(arguments) -> _Call:
-    """The call that a tool input stands for; a MediaToolError says what to
+def _read_call(arguments) -> MethodCall:
+    """The call that a tool input stands for; a MethodCallError says what to
     give instead."""
-    if not isinstance(arguments, Mapping):
-        raise MediaToolError(_NO_CALL)
-    fields = dict(arguments)
-    source = fields.pop("call", None)
-    if fields:
-        raise MediaToolError(f"media: unexpected field {sorted(fields)[0]!r}; give call only.")
-    if source is None:
-        raise MediaToolError(_NO_CALL)
-    if not isinstance(source, str):
-        raise MediaToolError("media: call must be text, one method call such as "
-                             "attach('build/shot.png').")
-    source = re.sub(r"^media\s*\.\s*", "", source.strip())
-    try:
-        node = ast.parse(source, mode="eval").body
-    except SyntaxError as exc:
-        raise MediaToolError("media: call must be one method call, such as "
-                             f"attach('build/shot.png'); {exc.msg}.") from None
-    except (ValueError, RecursionError, MemoryError):  # a null character; deep nesting
-        node = None
-    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
-        raise MediaToolError("media: call must be one method call, such as "
-                             "attach('build/shot.png').")
-    name = node.func.id
-    if name not in _METHODS:
-        raise MediaToolError(f"media: there is no method {name}(); the tool has one, "
-                             "attach(*refs, text=None).")
-    call = f"media.{name}()"
-    args = []
-    for index, value in enumerate(node.args, 1):
-        if isinstance(value, ast.Starred):
-            raise MediaToolError(f"{call}: give each ref by itself, not *sequence.")
-        args.append(_literal(value, call, f"ref {index}"))
-    keywords = {}
-    for keyword in node.keywords:
-        if keyword.arg is None:
-            raise MediaToolError(f"{call}: give each argument by itself, not **mapping.")
-        keywords[keyword.arg] = _literal(keyword.value, call, keyword.arg)
-    try:
-        bound = inspect.signature(MediaTool.attach).bind(None, *args, **keywords)
-    except TypeError as exc:
-        raise MediaToolError(f"{call}: {exc}") from None
-    return _Call(tuple(bound.arguments.get("refs", ())), bound.arguments.get("text"))
-
-
-def _literal(node: ast.expr, call: str, what: str):
-    try:
-        return ast.literal_eval(node)
-    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-        raise MediaToolError(f"{call}: {what} must be a literal, such as "
-                             "'build/shot.png'.") from None
+    return _READER.read(arguments)
 
 
 def call_text(arguments) -> Optional[str]:
@@ -349,8 +353,8 @@ def call_text(arguments) -> Optional[str]:
     canonical form, such as media.attach('build/shot.png', text='Hi.'). None
     if the tool would refuse to read it."""
     try:
-        return _read_call(arguments).text_form()
-    except MediaToolError:
+        return _READER.read(arguments).text
+    except MethodCallError:
         return None
 
 
@@ -389,5 +393,5 @@ _PARAMETERS = {
 
 __all__ = [
     "Attached", "IMAGE_CAPS", "ImageCap", "MEDIA_HEADER", "MEDIA_TOOL_LIMITS", "MediaTool",
-    "MediaToolError", "TOOL_NAME", "call_text",
+    "MediaToolError", "Outbox", "OutboxError", "TOOL_NAME", "call_text",
 ]
