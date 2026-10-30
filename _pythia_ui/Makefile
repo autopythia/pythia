@@ -14,7 +14,7 @@ OUT := target/$(TARGET)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 HOST_LIB := target/$(HOST)/release/libpythia_ui.$(if $(findstring apple-darwin,$(HOST)),dylib,so)
 
-.PHONY: all build dev debug rel release test check plugin-check tbd inspect clean
+.PHONY: all build dev debug rel release test check msrv plugin-check tbd inspect clean
 
 all: build
 
@@ -29,12 +29,22 @@ rel release:
 test:
 	$(CARGO) test --target $(HOST)
 
+# rustfmt; clippy for macOS and for this machine; and every macOS binary,
+# the unit tests too, linked against the stubs.
 check:
 	$(CARGO) fmt --check
 	$(CARGO) clippy --all-targets -- -D warnings
 ifneq ($(HOST),$(TARGET))
 	$(CARGO) clippy --all-targets --target $(HOST) -- -D warnings
 endif
+	$(CARGO) build --all-targets
+
+# check and test with the oldest Rust that Cargo.toml's rust-version names,
+# which must be installed:
+#   rustup toolchain install 1.78.0 --target aarch64-apple-darwin
+MSRV := $(shell sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+msrv:
+	RUSTUP_TOOLCHAIN=$(MSRV) $(MAKE) check test
 
 # Loads this machine's build of the plugin with ctypes, as pythia will
 # (tools/plugin_check.py). On a Mac, SCREENSHOT=shot.png saves one too.
@@ -42,11 +52,12 @@ plugin-check:
 	$(CARGO) build --release --lib --target $(HOST)
 	$(PYTHON) tools/plugin_check.py $(if $(SCREENSHOT),--screenshot $(SCREENSHOT)) $(HOST_LIB)
 
-# Rewrites stub-sdk/usr/lib/libSystem.tbd to list what the program, the
-# plugin and the unit tests import. Run it when a link fails with "undefined
-# symbol" (new std usage, or another Rust version). Every link here allows
-# unresolved symbols; RUSTFLAGS replaces the configs' flags, so it repeats the
-# CPU from .cargo/config.toml.
+# Adds to stub-sdk/usr/lib/libSystem.tbd what the program, the plugin and the
+# unit tests import, and keeps what it lists: another Rust version's std
+# imports other functions. Run it, with the Rust whose link failed, when a
+# link fails with "undefined symbol". Every link here allows unresolved
+# symbols; RUSTFLAGS replaces the configs' flags, so it repeats the CPU from
+# .cargo/config.toml.
 TBD_OUT := target/tbd/$(TARGET)
 TBD_FLAGS := -C target-cpu=apple-m1 -C link-arg=-undefined -C link-arg=dynamic_lookup
 TBD_CARGO := RUSTFLAGS="$(TBD_FLAGS)" $(CARGO)

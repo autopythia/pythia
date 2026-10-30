@@ -187,20 +187,26 @@ fn write_string(text: &str, out: &mut Vec<u8>) {
   let bytes = text.as_bytes();
   let mut start = 0;
   for (index, &byte) in bytes.iter().enumerate() {
+    // Declared out here: before Rust 1.79, an array made in the match arm is
+    // a temporary that's dropped at the arm's end (E0716).
+    let unicode;
     let escape: &[u8] = match byte {
       b'"' => b"\\\"",
       b'\\' => b"\\\\",
       b'\n' => b"\\n",
       b'\r' => b"\\r",
       b'\t' => b"\\t",
-      0x00..=0x1F => &[
-        b'\\',
-        b'u',
-        b'0',
-        b'0',
-        HEX[usize::from(byte >> 4)],
-        HEX[usize::from(byte & 0xF)],
-      ],
+      0x00..=0x1F => {
+        unicode = [
+          b'\\',
+          b'u',
+          b'0',
+          b'0',
+          HEX[usize::from(byte >> 4)],
+          HEX[usize::from(byte & 0xF)],
+        ];
+        &unicode
+      }
       _ => continue,
     };
     out.extend_from_slice(&bytes[start..index]);

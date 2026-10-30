@@ -2,8 +2,9 @@
 name = "pythia_ui"
 version = "0.1.0"
 edition = "2021"
-# C string literals and offset_of!; clippy checks newer APIs against it.
-rust-version = "1.77"
+# The oldest Rust that `make msrv` checks; clippy checks newer std APIs
+# against it.
+rust-version = "1.78.0"
 authors = ["Peter Jin", "autopythia"]
 license = "Apache-2.0"
 description = "Screen info and screenshots for pythia's ui tool, on macOS (Apple Silicon)"

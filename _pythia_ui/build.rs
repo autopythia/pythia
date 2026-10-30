@@ -1,8 +1,12 @@
 //! Sets the plugin's install name (LC_ID_DYLIB) to @rpath/libpythia_ui.dylib,
-//! rather than the linker's default, the absolute path it was built at.
+//! rather than the linker's default, the absolute path it was built at; and
+//! relinks when a stub in stub-sdk/ changes.
 
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
+  // The stubs are link inputs that cargo doesn't know of: when one changes,
+  // this reruns, and the binaries are linked again.
+  println!("cargo:rerun-if-changed=stub-sdk");
   if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
     // As ld64 options: .cargo/config.toml links with rust-lld itself, which
     // takes them as given (a linker driver such as cc would need -Wl,).
