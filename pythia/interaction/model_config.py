@@ -640,8 +640,10 @@ def build_parser(description: str, *, allow_prompt_file: bool = False,
         help=(
             "experimental: expand leading @path-or-uri tokens in user "
             "prompts; images become media message content and local "
-            ".txt/.md files are pasted as text; launch-only "
-            "(default: %(default)s)"
+            ".txt/.md files are pasted as text. In the CLI, with the "
+            "default tools, the model also gets a media tool that "
+            "attaches images to its own context in the same way; "
+            "launch-only (default: %(default)s)"
         ),
     )
     parser.add_argument(

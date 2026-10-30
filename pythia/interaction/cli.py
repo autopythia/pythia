@@ -89,9 +89,11 @@ from .items import UserInteractionBoundary
 from .items import UserToolCall
 from .items import UserToolResult
 from .media import AttachmentError
+from .media import MEDIA_APIS
 from .media import parse_user_prompt
 from .media import require_media_api
 from .media import split_leading_references
+from .media_tool import MediaTool
 from .loop import Interrupt
 from .loop import Icron
 from .loop import IcronError
@@ -414,6 +416,10 @@ class _UIState:
     cron_entries: dict = field(default_factory=dict)
     icron_resumes: int = 0
     icron_auth_noticed: bool = False
+    # The experimental media tool (--enable-experimental-media), or None: the
+    # messages it queues reach the running turn at its interrupt points
+    # (_CliHost.interrupt).
+    media: Optional[MediaTool] = field(default=None, repr=False)
     # A requested reboot (/reboot, compaction_coldstart_reboot), or None; set
     # on the event loop thread, and read by the context thread at a turn's
     # interrupt point. rebooted is what this process carries over from the
@@ -2415,7 +2421,8 @@ class _CliHost(TurnHost):
         commands that flushed the steers) are logged first, steers or not;
         a /steer's record shows there, as it takes effect, and the turn loop
         shows the steers' [user] messages after it (a steer showed only its
-        queue item when it was accepted, _steer_item).
+        queue item when it was accepted, _steer_item). The media tool's queued
+        messages come before the steers (MediaTool.take).
         """
         if not self._steering or self._state.closing:
             return super().interrupt()
@@ -2427,9 +2434,14 @@ class _CliHost(TurnHost):
             self.append(self._context, tuple(item for record in records for item in record))
             if shown:
                 self.show(shown)
-        if not taken.messages:
+        # The model's own attachments, queued by this turn's tool calls (or by
+        # a turn that ended before an interrupt point took them), then what
+        # the user typed meanwhile.
+        media = () if self._state.media is None else self._state.media.take()
+        messages = (*media, *taken.messages)
+        if not messages:
             return Interrupt.CONTINUE
-        return Steer(taken.messages)
+        return Steer(messages)
 
     def append(self, context, items) -> None:
         context.extend(items)
@@ -2764,6 +2776,15 @@ async def _drive_interaction(model, environment, state, args, save, config):
                 _safe_notice(state, f"icron: dropped {len(dropped)} pending "
                                     f"job{'s' if len(dropped) != 1 else ''}; jobs and Python "
                                     "state live only in this process.")
+        if state.media is not None:
+            # A message that no turn took: its turn ended before an interrupt
+            # point, or the stop came first.
+            dropped = len(state.media.take())
+            if dropped:
+                _safe_notice(state, f"media: dropped {dropped} queued "
+                                    f"message{'s' if dropped != 1 else ''} of the model's "
+                                    "attachments, which no turn took; they live only in this "
+                                    "process.")
         if callable(getattr(state.active_model, "close", None)):
             await _on_context_thread(state, close_model, state.active_model)
 
@@ -2826,6 +2847,14 @@ async def _drive_interaction_body(
         initial.append(tools_snapshot)
         context = InteractionContext(initial)
     state.context_revision = functools.partial(len, context)
+    if state.media is not None:
+        # When it runs, the media tool reads the tools' workspace policy, as
+        # the turn set it (_apply_workspace), and what the next request would
+        # carry, for its cap.
+        state.media.bind(
+            enable_workspace=lambda: getattr(environment, "enable_workspace",
+                                             args.enable_workspace),
+            context_items=context.model_items)
     # The public log's warnings, such as a drift that resuming found, become
     # notices; the log never fails a save.
     writer.on_warning = functools.partial(_post, asyncio.get_running_loop(), _safe_notice, state)
@@ -3277,7 +3306,7 @@ def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted)
 
 
 async def _run_headless(model, environment, args, path, *, trace=None, icron=None,
-                        rebooted=None):
+                        media=None, rebooted=None):
     """One explicit task, quiet context display, and orderly effect draining."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
@@ -3292,6 +3321,7 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
+        media=media,
         rebooted=rebooted,
     )
     _startup_notices(state, args, save, config)
@@ -3345,6 +3375,7 @@ async def _run(
     *,
     trace: Optional[DebugTrace] = None,
     icron: Optional[Icron] = None,
+    media: Optional[MediaTool] = None,
     rebooted: Optional[_Rebooted] = None,
 ) -> int:
     save = _prepared_save(path, args)
@@ -3358,6 +3389,7 @@ async def _run(
         bound_account_id=getattr(getattr(model, "endpoint", None), "account_id", None),
         trace=trace,
         icron=icron,
+        media=media,
         rebooted=rebooted,
     )
     state.notice(
@@ -3585,6 +3617,15 @@ def _icron_enabled(args: argparse.Namespace) -> bool:
     return args.enable_default_tools if args.enable_icron is None else args.enable_icron
 
 
+def _media_tool(args: argparse.Namespace, cwd: Path) -> Optional[MediaTool]:
+    """The experimental media tool, which comes with --enable-experimental-media
+    when the default tools are on and the API takes images (MEDIA_APIS)."""
+    if not (args.enable_experimental_media and args.enable_default_tools
+            and args.model_api in MEDIA_APIS):
+        return None
+    return MediaTool(cwd=cwd, api=args.model_api)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     global _reboot_argv
     args = _build_parser().parse_args(argv)
@@ -3652,7 +3693,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cwd = Path(args.cwd).expanduser().resolve()
         if _icron_enabled(args):
             icron = Icron()
-        tools = () if icron is None else (icron.tool(),)
+        media = _media_tool(args, cwd)
+        tools = (*(() if icron is None else (icron.tool(),)),
+                 *(() if media is None else (media.tool(),)))
         environment_manager = (
             DefaultEnvironment(cwd=cwd, enable_workspace=args.enable_workspace,
                                **({"extra_tools": tools} if tools else {}))
@@ -3662,12 +3705,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.headless:
                 return asyncio.run(_run_headless(
                     model, environment, args, path=save, trace=trace, icron=icron,
-                    rebooted=rebooted,
+                    media=media, rebooted=rebooted,
                 ))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(
                 model, environment, terminal, args, path=save, trace=trace, icron=icron,
-                rebooted=rebooted,
+                media=media, rebooted=rebooted,
             ))
     except _Rebooting as rebooting:
         reboot_state = rebooting.state  # the session has shut down: restart once it's closed

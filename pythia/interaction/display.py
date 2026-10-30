@@ -305,6 +305,10 @@ class InteractionItemRenderer:
             call, code = _format_icron_call(parsed)
             return (f"{label}\n{call}",) if code is None else (f"{label}\n{call}", code)
 
+        if item.name == "media" and not user and isinstance(parsed, Mapping):
+            # The call it stands for, as icron's show.
+            return (f"{label}\n{_format_media_call(parsed)}",)
+
         # A model call that awaits the user's approval shows what it would do in
         # full (awaits_approval).
         whole = (not user and self.awaits_approval is not None
@@ -819,6 +823,23 @@ def _format_icron_call(arguments: Mapping[str, object]) -> Tuple[str, Optional[s
     keywords = ", ".join(f"{key}={value!r}" for key, value in arguments.items()
                          if key not in ("action", "code"))
     return f"icron.{method}({keywords})", code
+
+
+def _format_media_call(arguments: Mapping[str, object]) -> str:
+    """A media tool call as the Python call the tool reads, such as
+    ``media.attach('build/shot.png', text='Is it green?')``, refs and text in
+    full. A call that the tool refuses shows as written."""
+    from .media_tool import call_text  # here, since media_tool imports this module
+
+    read = call_text(arguments)
+    if read is not None:
+        return read
+    written = arguments.get("call")
+    if isinstance(written, str):
+        written = written.strip()
+        return written if written.startswith("media.") else f"media.{written}"
+    keywords = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
+    return f"media({keywords})"
 
 
 def _format_tool_result_label(
