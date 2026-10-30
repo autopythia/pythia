@@ -489,21 +489,22 @@ class SharedHelperTests(unittest.TestCase):
 
     def test_images_need_an_api_that_sends_them(self):
         image = self.parse("@p.png look")
-        for api in ("codex", "responses", "chat-completions"):
+        for api in ("codex", "responses", "chat-completions", "messages"):
             require_media_api(image, api)
-        for api in ("messages", "claude-relay", None):
+        for api in ("claude-relay", None):
             with self.subTest(api=api), self.assertRaisesRegex(AttachmentError, "media prompts"):
                 require_media_api(image, api)
-        require_media_api(self.parse("@a.txt go"), "messages")  # a text paste: any API
+        require_media_api(self.parse("@a.txt go"), "claude-relay")  # a text paste: any API
         with self.assertRaises(AttachmentError) as raised:
-            require_media_api(image, "messages", subject="#1 (main) uses messages, which")
-        self.assertEqual(str(raised.exception), "#1 (main) uses messages, which does not "
-                         "support media prompts; use codex, responses, or chat-completions")
+            require_media_api(image, "claude-relay", subject="#1 (main) uses claude-relay, which")
+        self.assertEqual(str(raised.exception), "#1 (main) uses claude-relay, which does not "
+                         "support media prompts; use codex, responses, chat-completions, or "
+                         "messages")
         # The CLI keeps its wording.
         args = SimpleNamespace(enable_experimental_media=True, enable_workspace=True,
-                               model_api="messages")
+                               model_api="claude-relay")
         with self.assertRaisesRegex(AttachmentError,
-                                    "^--endpoint-api messages does not support media prompts"):
+                                    "^--endpoint-api claude-relay does not support media prompts"):
             cli._query_message("@p.png look", args, self.cwd)
 
     def test_join_user_messages_joins_text_as_one_prompt_does(self):
@@ -686,10 +687,23 @@ class EncoderTests(unittest.TestCase):
             [{"role": "user", "content": "hi"}],
         )
 
-    def test_messages_rejects_media(self):
-        context = InteractionContext((Message(role="user", content=(MediaPart("x"),)),))
-        with self.assertRaisesRegex(ModelConfigurationError, "not supported"):
-            _encode_context(context.model_items())
+    def test_messages_sends_images_as_image_blocks(self):
+        context = InteractionContext((Message(role="user", content=(
+            MediaPart("data:image/png;base64,iVBORw0KGgo="),
+            TextPart("between"),
+            MediaPart("https://example.com/a.webp"),
+        )),))
+        _system, messages = _encode_context(context.model_items())
+        self.assertEqual(messages, [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "iVBORw0KGgo="}},
+            {"type": "text", "text": "between"},
+            {"type": "image", "source": {"type": "url", "url": "https://example.com/a.webp"}},
+        ]}])
+        for uri in ("data:image/png,raw", "data:;base64,AAAA", "data:image/png;base64,"):
+            with self.subTest(uri=uri), self.assertRaisesRegex(ModelConfigurationError, "data URI"):
+                _encode_context(InteractionContext((
+                    Message(role="user", content=(MediaPart(uri),)),)).model_items())
 
     def test_content_item_to_responses(self):
         self.assertEqual(
@@ -797,7 +811,7 @@ class HeadlessMediaTests(unittest.TestCase):
         self.assertIn("cannot read attachment", stderr)
         self.assertEqual(self._saved_user(), [])
 
-    def test_messages_api_rejected_before_sampling(self):
+    def test_messages_api_accepts_media(self):
         code, model, stderr = self.run_main(
             [
                 "--enable-experimental-media",
@@ -812,9 +826,13 @@ class HeadlessMediaTests(unittest.TestCase):
             ],
             _answer("ok"),
         )
-        self.assertEqual(code, 1)
-        self.assertEqual(model.calls, [])
-        self.assertIn("does not support media", stderr)
+        self.assertEqual(code, 0, stderr)
+        (sent_user,) = [
+            item
+            for item in model.calls[0][0].items
+            if isinstance(item, Message) and item.role == "user"
+        ]
+        self.assertTrue(sent_user.has_media)
 
     def test_responses_api_accepts_media(self):
         code, model, stderr = self.run_main(
@@ -873,13 +891,13 @@ class HeadlessMediaTests(unittest.TestCase):
             records,
         )
 
-    def test_messages_api_still_rejects_text_mixed_with_images(self):
+    def test_claude_relay_still_rejects_text_mixed_with_images(self):
         (self.root / "a.txt").write_text("alpha\n", encoding="utf-8")
         code, model, stderr = self.run_main(
             [
                 "--enable-experimental-media",
                 "--endpoint-api",
-                "messages",
+                "claude-relay",
                 "--model",
                 "claude-test",
                 "--max-output-tokens",

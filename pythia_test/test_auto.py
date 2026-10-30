@@ -1823,13 +1823,14 @@ class RuntimeTests(unittest.TestCase):
     def test_images_need_main_s_api_but_text_pastes_work_with_any(self):
         self.media_files()
         session = self.session({}, worker_board=False, enable_experimental_media=True,
-                               settings_overrides={"model_api": "messages",
+                               settings_overrides={"model_api": "claude-relay",
                                                    "model": "claude-test",
                                                    "max_output_tokens": 100})
         with self.assertRaises(AttachmentError) as raised:
             session.submit("@shot.png look")
-        self.assertEqual(str(raised.exception), "#1 (main) uses messages, which does not "
-                         "support media prompts; use codex, responses, or chat-completions")
+        self.assertEqual(str(raised.exception), "#1 (main) uses claude-relay, which does not "
+                         "support media prompts; use codex, responses, chat-completions, or "
+                         "messages")
         self.assertEqual(session._tasks, [])
         self.assertEqual(session.read_submission("@notes.md go"),
                          Message("user", "Notes body.\n\ngo"))

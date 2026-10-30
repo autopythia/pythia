@@ -36,12 +36,14 @@ from .items import Init
 from .items import Instructions
 from .items import Tools
 from .items import InteractionItem
+from .items import MediaPart
 from .items import Message
 from .items import ModelFailure
 from .items import ModelSampleBoundary
 from .items import OpaqueCompaction
 from .items import Reasoning
 from .items import ToolCall
+from .items import TextPart
 from .items import ToolResult
 from .items import SampleMetadata
 from .items import TurnSummary
@@ -386,11 +388,6 @@ def _encode_context(
             continue
 
         if isinstance(item, Message):
-            if not isinstance(item.content, str):
-                raise ModelConfigurationError(
-                    "media message content is not supported with the "
-                    "Messages API yet"
-                )
             if item.role in {"system", "developer"}:
                 if conversation_started:
                     raise ModelConfigurationError(
@@ -404,12 +401,8 @@ def _encode_context(
                     f"unsupported message role at item {index}: {item.role!r}"
                 )
             conversation_started = True
-            pending = _append_block(
-                messages,
-                pending,
-                item.role,
-                {"type": "text", "text": item.content},
-            )
+            for block in _message_blocks(item):
+                pending = _append_block(messages, pending, item.role, block)
             continue
 
         if isinstance(item, Reasoning):
@@ -478,6 +471,39 @@ def _encode_context(
     if not messages:
         raise ModelConfigurationError("cannot sample an empty model context")
     return system, messages
+
+
+def _message_blocks(message: Message) -> List[Dict[str, Any]]:
+    """A conversation message's content blocks, in order: its text, or its
+    parts, each image (user-only) as an ``image`` block (_image_source)."""
+    if isinstance(message.content, str):
+        return [{"type": "text", "text": message.content}]
+    blocks: List[Dict[str, Any]] = []
+    for part in message.content:
+        if isinstance(part, TextPart):
+            blocks.append({"type": "text", "text": part.text})
+        elif isinstance(part, MediaPart):
+            blocks.append({"type": "image", "source": _image_source(part.source_uri)})
+        else:
+            raise ModelConfigurationError(
+                f"unsupported message content part: {type(part).__name__}"
+            )
+    return blocks
+
+
+def _image_source(uri: str) -> Dict[str, str]:
+    """An image's Messages source: a base64 ``data:`` URI's media type and
+    data, or else the URL itself (an ``http(s)`` image, which Anthropic
+    fetches)."""
+    if not uri.startswith("data:"):
+        return {"type": "url", "url": uri}
+    header, comma, data = uri.partition(",")
+    media_type, _, encoding = header[len("data:"):].partition(";")
+    if not comma or not media_type or encoding != "base64" or not data:
+        raise ModelConfigurationError(
+            "an image data URI must be data:<media type>;base64,<data>"
+        )
+    return {"type": "base64", "media_type": media_type, "data": data}
 
 
 def _accepts_cache_control(block: Mapping[str, Any]) -> bool:

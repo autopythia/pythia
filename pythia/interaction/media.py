@@ -61,7 +61,7 @@ DEFAULT_TEXT_SUFFIXES = frozenset({".md", ".txt"})
 
 # The model APIs whose requests can carry images (``MediaPart``); text pastes
 # work with every API.
-MEDIA_APIS = frozenset({"codex", "responses", "chat-completions"})
+MEDIA_APIS = frozenset({"codex", "responses", "chat-completions", "messages"})
 # Joins neighbouring text: pasted files and the trailing typed text.
 TEXT_PASTE_SEPARATOR = "\n\n"
 
@@ -95,6 +95,18 @@ def _sniff_image_media_type(data: bytes) -> Optional[str]:
     return None
 
 
+# TODO: the file name decides the type. Only when mimetypes gives the name no
+# image type are the first bytes matched against the PNG, JPEG, GIF and WebP
+# signatures; nothing is decoded, and a name's type is never checked against
+# the content. So any image/* type passes, though Anthropic and OpenAI take
+# only those four (an SVG, BMP, TIFF, ICO or HEIC file is sent, and the
+# provider rejects it). Which names count as images also depends on the
+# machine: mimetypes reads the system's tables too (such as /etc/mime.types,
+# which can add camera raw formats and many others). Text named .png is sent
+# as image/png, and a PNG named .jpg as image/jpeg. A rejected image stays in
+# the session and is sent again with every request. Remote URLs
+# (_resolve_remote) are checked by name only. Possible fix: always match the
+# signatures, and accept only those four types.
 def _image_media_type(name: str, data: bytes) -> Optional[str]:
     guessed, _ = mimetypes.guess_type(name)
     if guessed is not None and guessed.startswith("image/"):
@@ -412,7 +424,7 @@ def require_media_api(message: Message, api: Optional[str], *,
     if message.has_media and api not in MEDIA_APIS:
         raise AttachmentError(
             f"{subject or api} does not support media prompts; "
-            "use codex, responses, or chat-completions"
+            "use codex, responses, chat-completions, or messages"
         )
 
 
