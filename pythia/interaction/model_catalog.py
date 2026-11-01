@@ -708,6 +708,19 @@ _GPT6_1_SOL = replace(
         "Pythia auto-compaction/max-context policy override"
     ),
 )
+# GPT-6.1 Terra came out after the newest Codex catalog here
+# (codex-latest-20261022), so it takes GPT-6.1 Sol's capacities and request
+# policy until an upstream entry says otherwise. OpenAI's model list has it,
+# and the ChatGPT Codex route answered a request for it on 2026-11-01.
+_GPT6_1_TERRA = replace(
+    _GPT6_1_SOL, name="codex-gpt-6.1-terra",
+    endpoint=replace(_GPT6_1_SOL.endpoint, model="gpt-6.1-terra"),
+    source=(
+        "OpenAI model list and a ChatGPT Codex request, 2026-11-01; not yet in "
+        "codex-rs/models-manager/models.json, so GPT-6.1 Sol's capacities; "
+        "Pythia auto-compaction/max-context policy override"
+    ),
+)
 _SPARK = ModelSpec(
     name="muse-spark-1.3",
     endpoint=replace(_META, model="muse-spark-1.3-contributor"),
@@ -756,6 +769,17 @@ _SONNET = ModelSpec(
     ),
     extra_sample_params={"thinking": {"type": "adaptive", "display": "summarized"}},
 )
+# Haiku 5.5 matches Sonnet 5.5's capacities, adaptive thinking and effort
+# levels (Anthropic's Models API, 2026-11-01), so it shares Sonnet's limits
+# and request policy.
+_HAIKU = replace(
+    _SONNET, name="claude-haiku-5.5",
+    endpoint=replace(_SONNET.endpoint, model="claude-haiku-5-5"),
+    source=(
+        "https://platform.claude.com/docs/en/models/haiku-5-5/overview; "
+        "https://platform.claude.com/docs/en/build-with-claude/effort"
+    ),
+)
 
 
 def _with_effort(base: ModelSpec, name: str, effort: str) -> ModelSpec:
@@ -797,6 +821,9 @@ _MODEL_SPECS = (
     _GPT6_1_SOL,
     _with_effort(_GPT6_1_SOL, "codex-gpt-6.1-sol-medium", "medium"),
     _with_effort(_GPT6_1_SOL, "codex-gpt-6.1-sol-max", "max"),
+    _GPT6_1_TERRA,
+    _with_effort(_GPT6_1_TERRA, "codex-gpt-6.1-terra-medium", "medium"),
+    _with_effort(_GPT6_1_TERRA, "codex-gpt-6.1-terra-max", "max"),
     _SPARK,
     _with_effort(_SPARK, "muse-spark-1.3-xhigh", "xhigh"),
     _FABLE,
@@ -815,6 +842,12 @@ _MODEL_SPECS = (
     _with_messages_effort(
         _SONNET,
         "claude-sonnet-5.5-max",
+        "max",
+    ),
+    _HAIKU,
+    _with_messages_effort(
+        _HAIKU,
+        "claude-haiku-5.5-max",
         "max",
     ),
 )

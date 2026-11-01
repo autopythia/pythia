@@ -62,6 +62,11 @@ _CODEX_PRESETS = (
     ("codex-gpt-6.1-sol", "gpt-6.1-sol", {"summary": "auto"}, "low", "chatgpt"),
     ("codex-gpt-6.1-sol-medium", "gpt-6.1-sol", {"effort": "medium", "summary": "auto"}, "low", "chatgpt"),
     ("codex-gpt-6.1-sol-max", "gpt-6.1-sol", {"effort": "max", "summary": "auto"}, "low", "chatgpt"),
+    ("codex-gpt-6.1-terra", "gpt-6.1-terra", {"summary": "auto"}, "low", "chatgpt"),
+    ("codex-gpt-6.1-terra-medium", "gpt-6.1-terra", {"effort": "medium", "summary": "auto"}, "low",
+     "chatgpt"),
+    ("codex-gpt-6.1-terra-max", "gpt-6.1-terra", {"effort": "max", "summary": "auto"}, "low",
+     "chatgpt"),
     ("muse-spark-1.3", "muse-spark-1.3-contributor", {}, None, "meta"),
     ("muse-spark-1.3-xhigh", "muse-spark-1.3-contributor", {"effort": "xhigh"}, None, "meta"),
 )
@@ -152,10 +157,11 @@ class ModelCatalogTests(unittest.TestCase):
             "output_config": {"effort": "max"},
         })
 
-        self.assertEqual(len(list_model_specs()), 23)
+        self.assertEqual(len(list_model_specs()), 28)
         for base_name, preset_name in (("codex-gpt-5.6-sol", "codex-gpt-5.6-sol-medium"),
                                        ("codex-gpt-6-astra", "codex-gpt-6-astra-max"),
                                        ("codex-gpt-6.1-sol", "codex-gpt-6.1-sol-max"),
+                                       ("codex-gpt-6.1-terra", "codex-gpt-6.1-terra-medium"),
                                        ("muse-spark-1.3", "muse-spark-1.3-xhigh")):
             base = get_model_spec("codex", base_name)
             preset = get_model_spec("codex", preset_name)
@@ -198,8 +204,10 @@ class ModelCatalogTests(unittest.TestCase):
         context = InteractionContext((Message("user", "Hello."),))
         specs = list_model_specs("messages")
         self.assertTrue(specs)
-        # Opus and Sonnet (base and -max presets) also request summarized thinking.
-        summarized = {"claude-opus-5-5", "claude-sonnet-5-5"}
+        # Opus, Sonnet and Haiku (base and -max presets) also request summarized thinking.
+        summarized = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
+        haiku = [spec.name for spec in specs if spec.endpoint.model == "claude-haiku-5-5"]
+        self.assertEqual(haiku, ["claude-haiku-5.5", "claude-haiku-5.5-max"])
         for spec in specs:
             with self.subTest(name=spec.name):
                 payload = MessagesModel(messages_endpoint(
@@ -224,11 +232,12 @@ class ModelCatalogTests(unittest.TestCase):
         # Bare wire model IDs are not catalog selectors.
         for name in (None, "", "unknown", "CODEX-GPT-6-ASTRA", "codex-gpt-6-astra-low",
                      "codex-gpt-5.6-sol-high", "muse-spark-1.3-max",
-                     "gpt-5.6-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"):
+                     "gpt-5.6-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol",
+                     "gpt-6.1-terra"):
             with self.subTest(name=name):
                 self.assertIsNone(get_model_spec("codex", name))
         for name in ("claude-fable-5.2", "claude-fable-5-1-20260901",
-                     "claude-fable-5-1-high", "codex-gpt-6-astra"):
+                     "claude-fable-5-1-high", "codex-gpt-6-astra", "claude-haiku-5-5"):
             self.assertIsNone(get_model_spec("messages", name))
         self.assertIsNone(get_model_spec("codex", "claude-fable-5.1"))
 
@@ -304,7 +313,7 @@ class ModelCatalogTests(unittest.TestCase):
                            "urllib.request.urlopen"):
                 stack.enter_context(mock.patch(target, side_effect=AssertionError("unexpected effect")))
             module_spec.loader.exec_module(module)
-            self.assertEqual(len(module.list_model_specs()), 23)
+            self.assertEqual(len(module.list_model_specs()), 28)
             self.assertEqual(
                 module.get_model_spec("codex", "muse-spark-1.3").endpoint.auth,
                 "env:META_API_KEY",
