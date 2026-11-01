@@ -55,6 +55,8 @@ CONFIG_KEYS = (
     "compaction_pi_max_output_tokens",
     "compaction_coldstart_reboot",
     "save_log_reasoning",
+    "tool_approval_auto_seconds",
+    "tool_approval_ui_countdown_seconds",
     "extra_sample_params",
 )
 # Keys renamed in October 2026, from their old names. The old names keep
@@ -99,11 +101,56 @@ _NO_RATE_LIMIT_RETRIES = (
     "retries its own rate limits."
 )
 _NO_TOKEN_TRACE = "endpoint_token_trace applies only to the Chat Completions API."
+# Tool approval's timers, in the CLI (cli._CliHost.tool_approval), in whole
+# seconds: how long a call waits for an answer before it's approved on its own
+# (none by default), and how long an approved ui call then waits before it
+# runs.
+MIN_TOOL_APPROVAL_AUTO_SECONDS = 30
+MAX_TOOL_APPROVAL_AUTO_SECONDS = 59
+DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS = 5
+MIN_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS = 1
+MAX_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS = 10
+# Each timer's range, by key.
+_TOOL_APPROVAL_SECONDS = {
+    "tool_approval_auto_seconds": (MIN_TOOL_APPROVAL_AUTO_SECONDS,
+                                   MAX_TOOL_APPROVAL_AUTO_SECONDS),
+    "tool_approval_ui_countdown_seconds": (MIN_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS,
+                                           MAX_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS),
+}
+_NO_TOOL_APPROVAL_AUTO = (
+    "tool_approval_auto_seconds applies only with --require-tool-approval."
+)
+_NO_TOOL_APPROVAL_UI_COUNTDOWN = (
+    "tool_approval_ui_countdown_seconds applies only with --enable-experimental-ui-plugin "
+    "and --require-tool-approval."
+)
 _SAVE_LOG_REASONING_VALUES = " or ".join(PUBLIC_LOG_REASONING)
 
 
 class ConfigError(ValueError):
     pass
+
+
+def tool_approval_auto_applies(args) -> bool:
+    """Whether a frontend's namespace can approve a tool call that gets no
+    answer on its own (tool_approval_auto_seconds): the CLI's, with
+    --require-tool-approval True or exec. Other frontends have no such
+    option."""
+    return bool(getattr(args, "require_tool_approval", False))
+
+
+def tool_approval_ui_countdown_applies(args) -> bool:
+    """Whether a frontend's namespace counts down after a ui tool call's
+    approval (tool_approval_ui_countdown_seconds): the CLI's, with
+    --enable-experimental-ui-plugin and --require-tool-approval True or exec,
+    which never exempts the ui tool. Other frontends have neither option."""
+    return bool(getattr(args, "enable_experimental_ui_plugin", False)
+                and getattr(args, "require_tool_approval", False))
+
+
+def _tool_approval_values(key: str) -> str:
+    low, high = _TOOL_APPROVAL_SECONDS[key]
+    return f"{key} requires a whole number of seconds from {low} to {high}, or null."
 
 
 def _launch_only_error(key: str) -> ConfigError:
@@ -149,6 +196,14 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
         if value is not None and (not isinstance(value, str) or value not in TOKEN_TRACE_LEVELS):
             raise ConfigError(f"endpoint_token_trace requires {', '.join(TOKEN_TRACE_LEVELS)}, "
                               "or null.")
+        return value
+    if key in _TOOL_APPROVAL_SECONDS:
+        # Whole seconds; None for no timer, and where the key doesn't apply.
+        if value is None:
+            return None
+        low, high = _TOOL_APPROVAL_SECONDS[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ConfigError(_tool_approval_values(key))
         return value
     if key == "compaction_mode":
         # A compaction sequence, kept in its normal form. None is the route's
@@ -198,7 +253,10 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     takes ``nil`` or ``assistant``, as they are; ``endpoint_prompt_caching``
     takes ``5m``, ``1h`` or ``none``, ``endpoint_rate_limit_retries``
     ``unbounded`` too, and ``endpoint_token_trace`` a level
-    (``TOKEN_TRACE_LEVELS``).
+    (``TOKEN_TRACE_LEVELS``). The tool-approval timers
+    (``tool_approval_auto_seconds``, ``tool_approval_ui_countdown_seconds``)
+    refuse anything but a whole number or null with their own message, which
+    gives the range.
     """
     key = _require_key(key)
     if key in _LAUNCH_ONLY_KEYS:
@@ -220,6 +278,10 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
             and _INTEGER_LITERAL_RE.fullmatch(literal) is None):
         # unbounded; any other text gets the key's own message, which names it.
         return validate_config_value(key, literal)
+    if (key in _TOOL_APPROVAL_SECONDS and literal not in ("null", "None")
+            and _INTEGER_LITERAL_RE.fullmatch(literal) is None):
+        # Such as 2.5, true or 5s.
+        raise ConfigError(_tool_approval_values(key))
     aliases = {
         "null": None,
         "None": None,
@@ -457,6 +519,23 @@ class InteractionConfigSnapshot:
     "nil"}`` line; ``assistant``, as an assistant message with the item's
     summary, when it has one (``save.public_log_line``). Only the CLI has a
     save log; other hosts ignore it.
+
+    Tool approval's timers, in the CLI (``cli._CliHost.tool_approval``),
+    which reads them at each approval prompt rather than once per turn:
+
+    - ``tool_approval_auto_seconds`` is how many seconds a tool call that
+      awaits the user's approval waits for an answer before it's approved on
+      its own, as /yes would approve it; /hold stops the timer for one call.
+      ``None``, the default, is no timer.
+    - ``tool_approval_ui_countdown_seconds`` is how many seconds an approved
+      ui tool call then waits before it runs, so that the user can bring
+      another window to the front; meanwhile /yes runs it at once and /no
+      withdraws the approval. Bound configs resolve it, by default 5
+      (``DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS``).
+
+    Each applies only with the CLI's options for it
+    (``tool_approval_auto_applies``, ``tool_approval_ui_countdown_applies``),
+    and is ``None`` elsewhere, and in other hosts.
     """
 
     enable_workspace: bool = True
@@ -474,6 +553,8 @@ class InteractionConfigSnapshot:
     compaction_pi_max_output_tokens: Optional[int] = None
     compaction_coldstart_reboot: bool = False
     save_log_reasoning: str = "nil"
+    tool_approval_auto_seconds: Optional[int] = None
+    tool_approval_ui_countdown_seconds: Optional[int] = None
     extra_sample_params: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -534,7 +615,11 @@ class InteractionConfig:
     lose coldstart, and a change that asks for coldstart is refused.
     ``coldstart_dropped`` records a launch value that lost it, as the value
     before and after, unless that value was the default, the catalog's or the
-    built-in one, which loses it silently.
+    built-in one, which loses it silently. The tool-approval timers apply
+    only with ``tool_approval_auto_seconds_applies=True`` and
+    ``tool_approval_ui_countdown_seconds_applies=True``, which only the CLI's
+    namespaces set (``tool_approval_auto_applies``,
+    ``tool_approval_ui_countdown_applies``).
     """
 
     def __init__(
@@ -561,6 +646,9 @@ class InteractionConfig:
         compaction_mode_fallback: Optional[str] = None,
         compaction_pi_keep_recent_tokens_fallback: Optional[int] = None,
         compaction_pi_max_output_tokens_fallback: Optional[int] = None,
+        tool_approval_auto_seconds_applies: bool = False,
+        tool_approval_ui_countdown_seconds_fallback: Optional[int] = None,
+        tool_approval_ui_countdown_seconds_applies: bool = False,
     ) -> None:
         if not isinstance(snapshot, InteractionConfigSnapshot):
             raise TypeError("snapshot must be InteractionConfigSnapshot")
@@ -582,6 +670,10 @@ class InteractionConfig:
             raise TypeError("rate_limit_retries_applies must be a bool")
         if not isinstance(token_trace_applies, bool):
             raise TypeError("token_trace_applies must be a bool")
+        if not isinstance(tool_approval_auto_seconds_applies, bool):
+            raise TypeError("tool_approval_auto_seconds_applies must be a bool")
+        if not isinstance(tool_approval_ui_countdown_seconds_applies, bool):
+            raise TypeError("tool_approval_ui_countdown_seconds_applies must be a bool")
         if compaction_route is not None and not isinstance(compaction_route, CompactionRoute):
             raise TypeError("compaction_route must be CompactionRoute or None")
         if coldstart_unavailable is not None and (
@@ -610,6 +702,8 @@ class InteractionConfig:
                 ("compaction_mode", mode_default),
                 ("compaction_pi_keep_recent_tokens", compaction_pi_keep_recent_tokens_fallback),
                 ("compaction_pi_max_output_tokens", compaction_pi_max_output_tokens_fallback),
+                ("tool_approval_ui_countdown_seconds",
+                 tool_approval_ui_countdown_seconds_fallback),
             )
         }
         self._require_max_output_tokens = require_max_output_tokens
@@ -617,6 +711,9 @@ class InteractionConfig:
         self._prompt_caching_applies = prompt_caching_applies
         self._rate_limit_retries_applies = rate_limit_retries_applies
         self._token_trace_applies = token_trace_applies
+        self._tool_approval_auto_seconds_applies = tool_approval_auto_seconds_applies
+        self._tool_approval_ui_countdown_seconds_applies = (
+            tool_approval_ui_countdown_seconds_applies)
         self._min_auto_compaction_context_tokens = validate_config_value(
             "auto_compaction_context_tokens", min_auto_compaction_context_tokens,
         )
@@ -704,6 +801,12 @@ class InteractionConfig:
             raise ConfigError(_NO_RATE_LIMIT_RETRIES)
         if not self._token_trace_applies and snapshot.endpoint_token_trace is not None:
             raise ConfigError(_NO_TOKEN_TRACE)
+        if (not self._tool_approval_auto_seconds_applies
+                and snapshot.tool_approval_auto_seconds is not None):
+            raise ConfigError(_NO_TOOL_APPROVAL_AUTO)
+        if (not self._tool_approval_ui_countdown_seconds_applies
+                and snapshot.tool_approval_ui_countdown_seconds is not None):
+            raise ConfigError(_NO_TOOL_APPROVAL_UI_COUNTDOWN)
         threshold = snapshot.auto_compaction_context_tokens
         minimum = self._min_auto_compaction_context_tokens
         if threshold is not None and minimum is not None and threshold < minimum:
@@ -778,6 +881,15 @@ class InteractionConfig:
         trace = getattr(args, "endpoint_token_trace", None)
         if trace is None and trace_applies:
             trace = binding.endpoint.token_trace or "none"
+        # Tool approval's timers, in the CLI only: auto-approval, none by
+        # default, with tool approval; the countdown after a ui call's
+        # approval, 5 seconds by default, with the UI plugin too.
+        auto_applies = tool_approval_auto_applies(args)
+        auto = getattr(args, "tool_approval_auto_seconds", None)
+        countdown_applies = tool_approval_ui_countdown_applies(args)
+        countdown = getattr(args, "tool_approval_ui_countdown_seconds", None)
+        if countdown is None and countdown_applies:
+            countdown = DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS
         return cls(
             InteractionConfigSnapshot(
                 enable_workspace=args.enable_workspace,
@@ -800,6 +912,8 @@ class InteractionConfig:
                 # A CLI option: other frontends' namespaces have none.
                 compaction_coldstart_reboot=getattr(args, "compaction_coldstart_reboot", False),
                 save_log_reasoning=getattr(args, "save_log_reasoning", "nil"),
+                tool_approval_auto_seconds=auto,
+                tool_approval_ui_countdown_seconds=countdown,
                 extra_sample_params=binding.extra_sample_params,
             ),
             on_enable_workspace=on_enable_workspace,
@@ -832,6 +946,10 @@ class InteractionConfig:
             compaction_mode_fallback=binding.compaction.mode,
             compaction_pi_keep_recent_tokens_fallback=binding.compaction.pi_keep_recent_tokens,
             compaction_pi_max_output_tokens_fallback=binding.compaction.pi_max_output_tokens,
+            tool_approval_auto_seconds_applies=auto_applies,
+            tool_approval_ui_countdown_seconds_fallback=(
+                DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS if countdown_applies else None),
+            tool_approval_ui_countdown_seconds_applies=countdown_applies,
         )
 
     @classmethod
@@ -1011,11 +1129,18 @@ __all__ = [
     "CompactionRoute",
     "ConfigError",
     "ConfigValue",
+    "DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS",
     "InteractionConfig",
     "InteractionConfigSnapshot",
+    "MAX_TOOL_APPROVAL_AUTO_SECONDS",
+    "MAX_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS",
+    "MIN_TOOL_APPROVAL_AUTO_SECONDS",
+    "MIN_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS",
     "RENAMED_CONFIG_KEYS",
     "parse_config_literal",
     "resolve_compaction_mode",
     "resolve_request_timeout_seconds",
+    "tool_approval_auto_applies",
+    "tool_approval_ui_countdown_applies",
     "validate_config_value",
 ]

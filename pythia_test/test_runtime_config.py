@@ -55,6 +55,8 @@ class InteractionConfigTests(unittest.TestCase):
                 "compaction_pi_max_output_tokens = None",
                 "compaction_coldstart_reboot = False",
                 "save_log_reasoning = 'nil'",
+                "tool_approval_auto_seconds = None",
+                "tool_approval_ui_countdown_seconds = None",
                 "extra_sample_params = {}",
             )),
         )
@@ -75,6 +77,8 @@ class InteractionConfigTests(unittest.TestCase):
             "compaction_pi_max_output_tokens": None,
             "compaction_coldstart_reboot": False,
             "save_log_reasoning": "nil",
+            "tool_approval_auto_seconds": None,
+            "tool_approval_ui_countdown_seconds": None,
             "extra_sample_params": {},
         }
         self.assertEqual(json.loads(rendered_json), {**defaults, "__init__": defaults})
@@ -115,6 +119,8 @@ class InteractionConfigTests(unittest.TestCase):
                 "compaction_pi_max_output_tokens = None",
                 "compaction_coldstart_reboot = False",
                 "save_log_reasoning = 'nil'",
+                "tool_approval_auto_seconds = None",
+                "tool_approval_ui_countdown_seconds = None",
                 "extra_sample_params = {}",
             )),
         )
@@ -157,6 +163,8 @@ class InteractionConfigTests(unittest.TestCase):
             "compaction_pi_max_output_tokens": 4096,
             "compaction_coldstart_reboot": True,
             "save_log_reasoning": "assistant",
+            "tool_approval_auto_seconds": None,
+            "tool_approval_ui_countdown_seconds": None,
             "extra_sample_params": {},
         })
         self.assertEqual(

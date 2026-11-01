@@ -25,6 +25,7 @@ from datetime import time as day_time
 from datetime import timedelta
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -129,8 +130,16 @@ from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
 from ._model_binding_debug import save_debug_model_bindings
 from .runtime_config import ConfigError
+from .runtime_config import DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS
 from .runtime_config import InteractionConfig
+from .runtime_config import MAX_TOOL_APPROVAL_AUTO_SECONDS
+from .runtime_config import MAX_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS
+from .runtime_config import MIN_TOOL_APPROVAL_AUTO_SECONDS
+from .runtime_config import MIN_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS
 from .runtime_config import RENAMED_CONFIG_KEYS
+from .runtime_config import parse_config_literal
+from .runtime_config import tool_approval_auto_applies
+from .runtime_config import tool_approval_ui_countdown_applies
 from .save import interaction_item_from_dict
 from .save import interaction_item_to_dict
 from .save import InteractionSaveWriter
@@ -140,6 +149,7 @@ from .user_tools import UserToolIntent
 from .user_tools import create_user_environment
 from .user_tools import parse_user_tool
 from .user_tools import run_config
+from .ui_tool import TOOL_NAME as UI_TOOL_NAME
 from .ui_tool import UiPlugin
 from .ui_tool import UiTool
 from .ui_tool import load_ui_plugin
@@ -163,9 +173,14 @@ REBOOT_SKIPPED_OUTPUT = "Not executed: the user rebooted the CLI before this cal
 _STEER_LABEL = "user (steer)"
 _APPROVAL_YES = frozenset(("/yes", "/y"))
 _APPROVAL_NO = frozenset(("/no", "/n"))
+# /hold stops a call's auto-approval timer (tool_approval_auto_seconds).
+_APPROVAL_HOLD = "/hold"
 _TOOL_NOT_APPROVED_OUTPUT = "Tool call not approved."
 _TOOL_APPROVAL_REFUSAL = (
     "Only /yes or /no is accepted while a tool call awaits approval."
+)
+_TOOL_APPROVAL_TIMER_REFUSAL = (
+    "Only /yes, /no or /hold is accepted while a tool call awaits approval."
 )
 _TOOL_APPROVAL_STOPPED_OUTPUT = (
     "Not executed: the stop arrived before the tool call was approved."
@@ -175,6 +190,28 @@ _TOOL_APPROVAL_STEER_OUTPUT = (
 )
 _TOOL_APPROVAL_REBOOT_OUTPUT = (
     "Not executed: a reboot was requested before the tool call was approved."
+)
+# The countdown after a ui call's approval (tool_approval_ui_countdown_seconds),
+# which is modal too, and ends without the call as approval does.
+_TOOL_COUNTDOWN_REFUSAL = (
+    "Only /yes or /no is accepted while an approved tool call counts down."
+)
+_TOOL_COUNTDOWN_STOPPED_OUTPUT = (
+    "Not executed: the stop arrived during the countdown after the tool call's approval."
+)
+_TOOL_COUNTDOWN_STEER_OUTPUT = (
+    "Not executed: a steer arrived during the countdown after the tool call's approval."
+)
+_TOOL_COUNTDOWN_REBOOT_OUTPUT = (
+    "Not executed: a reboot was requested during the countdown after the tool call's "
+    "approval."
+)
+_TOOL_APPROVAL_AUTO_LAUNCH_ERROR = (
+    "--tool-approval-auto-seconds applies only with --require-tool-approval."
+)
+_TOOL_APPROVAL_UI_COUNTDOWN_LAUNCH_ERROR = (
+    "--tool-approval-ui-countdown-seconds applies only with "
+    "--enable-experimental-ui-plugin and --require-tool-approval."
 )
 _TOOL_APPROVAL_HEADLESS_ERROR = (
     "--require-tool-approval requires the interactive CLI; "
@@ -314,33 +351,152 @@ def _plain_message(text: str) -> Message:
     return Message("user", text)
 
 
+# The clock of tool approval's timers (_ToolApproval); tests replace it.
+_approval_clock = time.monotonic
+
+
 class _ToolApproval:
-    """One tool call awaiting its interactive approval decision."""
+    """One tool call awaiting its interactive approval decision, with tool
+    approval's two timers, in seconds (_CliHost._approval_timers):
 
-    def __init__(self, call: ToolCall) -> None:
+    - ``auto``: a call that gets no answer is approved when it ends, as /yes
+      would approve it (``auto_approve``). /hold stops it (``hold``), and so
+      does an answer.
+    - ``countdown``: an approved call then waits before it runs. It runs
+      when the countdown ends, or at a second /yes, and /no withdraws the
+      approval.
+
+    The event loop thread answers (``answer``, ``hold``); the context thread
+    waits (``wait``), approves at the timer's end, and reads where the call
+    stands (``stage``). The timers read ``_approval_clock``.
+    """
+
+    def __init__(self, call: ToolCall, auto: Optional[int] = None,
+                 countdown: Optional[int] = None) -> None:
         self.call = call
-        self._event = threading.Event()
-        self._approved: Optional[bool] = None
-        self._reason: Optional[str] = None
+        self.auto = auto
+        self.countdown = countdown
+        self._changed = threading.Event()  # an answer since the last wait
         self._lock = threading.Lock()
+        self._approved: Optional[bool] = None
+        self._automatic = False  # approved by the timer, not by /yes
+        self._reason: Optional[str] = None
+        # When the call is approved without an answer: the prompt's time plus
+        # auto, until an answer or /hold.
+        self._auto_deadline: Optional[float] = (
+            None if auto is None else _approval_clock() + auto)
+        # When the countdown ends, once an approval started it.
+        self._deadline: Optional[float] = None
 
-    def answer(self, approved: bool, reason: Optional[str] = None) -> bool:
-        """Record the first decision; False when the call was already decided."""
+    def answer(self, approved: bool, reason: Optional[str] = None) -> Optional[str]:
+        """Record an answer, and say what it did: "approved", "denied",
+        "counting" (/yes started the countdown), "now" (/yes during the
+        countdown: the call runs now) or "withdrawn" (/no during it); None
+        when the call was already decided."""
         with self._lock:
-            if self._event.is_set():
-                return False
+            stage = self._stage_locked()
+            if stage in ("approved", "denied"):
+                return None
             self._approved = approved
             self._reason = None if approved or not reason else reason
-            self._event.set()
-            return True
+            self._auto_deadline = None
+            if stage == "counting":
+                done = "now" if approved else "withdrawn"
+                if approved:
+                    self._deadline = _approval_clock()  # the countdown ends now
+                else:
+                    self._automatic = False
+            elif approved and self.countdown is not None:
+                self._deadline = _approval_clock() + self.countdown
+                done = "counting"
+            else:
+                done = "approved" if approved else "denied"
+        self._changed.set()
+        return done
+
+    def auto_approve(self) -> Optional[str]:
+        """Once the auto-approval timer has ended, approve the call as /yes
+        would, and say what that did: "approved", or "counting" for a call
+        that counts down. None while the timer runs, and without one: no
+        timer, an answer, or /hold."""
+        with self._lock:
+            now = _approval_clock()
+            if (self._approved is not None or self._auto_deadline is None
+                    or now < self._auto_deadline):
+                return None
+            self._approved, self._automatic, self._auto_deadline = True, True, None
+            if self.countdown is None:
+                done = "approved"
+            else:
+                self._deadline = now + self.countdown
+                done = "counting"
+        self._changed.set()
+        return done
+
+    def hold(self) -> Optional[str]:
+        """/hold: stop the auto-approval timer, so that the call waits for an
+        answer. Say what that did: "held"; "untimed" when no timer runs (none,
+        or held already); "counting" during the countdown, which can't be
+        held; None when the call was decided."""
+        with self._lock:
+            stage = self._stage_locked()
+            if stage == "counting":
+                return "counting"
+            if stage != "awaiting":
+                return None
+            if self._auto_deadline is None:
+                return "untimed"
+            self._auto_deadline = None
+        self._changed.set()
+        return "held"
+
+    def _stage_locked(self) -> str:
+        if self._approved is None:
+            return "awaiting"
+        if not self._approved:
+            return "denied"
+        if self._deadline is not None and _approval_clock() < self._deadline:
+            return "counting"
+        return "approved"
+
+    def stage(self) -> str:
+        """Where the call stands: "awaiting" an answer, "counting" down after
+        its approval, "approved" (it runs), or "denied"."""
+        with self._lock:
+            return self._stage_locked()
+
+    def seconds_left(self) -> Optional[int]:
+        """The countdown's whole seconds left, rounded up, from the approval
+        until the call runs (0 once it ended); None without a countdown under
+        way."""
+        with self._lock:
+            if self._approved is not True or self._deadline is None:
+                return None
+            return max(0, math.ceil(self._deadline - _approval_clock()))
+
+    def auto_seconds_left(self) -> Optional[int]:
+        """The auto-approval timer's whole seconds left, rounded up (0 once it
+        ended); None while no timer runs."""
+        with self._lock:
+            if self._approved is not None or self._auto_deadline is None:
+                return None
+            return max(0, math.ceil(self._auto_deadline - _approval_clock()))
+
+    @property
+    def automatic(self) -> bool:
+        """Whether the timer approved the call, rather than /yes."""
+        with self._lock:
+            return self._approved is True and self._automatic
 
     @property
     def answered(self) -> bool:
-        return self._event.is_set()
+        with self._lock:
+            return self._approved is not None
 
     @property
     def approved(self) -> bool:
-        """The recorded decision; read only after ``answered``."""
+        """The recorded decision, which a countdown keeps; read only after
+        ``answered``."""
         with self._lock:
             return self._approved is True
 
@@ -351,7 +507,24 @@ class _ToolApproval:
             return self._reason
 
     def wait(self, timeout: Optional[float] = None) -> bool:
-        return self._event.wait(timeout)
+        """Wait up to ``timeout`` seconds, and no later than the running
+        timer's end, for an answer since the last wait; True if one came."""
+        with self._lock:
+            end = (self._auto_deadline if self._approved is None
+                   else self._deadline if self._approved else None)
+            if end is not None and timeout is not None:
+                timeout = max(0.0, min(timeout, end - _approval_clock()))
+        if not self._changed.wait(timeout):
+            return False
+        self._changed.clear()
+        return True
+
+
+def _already_decided(approval: _ToolApproval) -> str:
+    """The answer to /yes, /no or /hold for a call that was decided."""
+    if approval.automatic:
+        return f"Tool call {approval.call.name!r} was already approved automatically."
+    return "This tool call already has an approval decision."
 
 
 def _reads_no_files(text: str) -> bool:
@@ -583,29 +756,62 @@ class _UIState:
                 self.notice("A submission is still pending. Draft preserved.")
                 return
             approval = self.pending_tool_approval
+            if approval is not None and head == _APPROVAL_HOLD:
+                self.editor = Editor()
+                name = approval.call.name
+                done = approval.hold() if text.strip() == head else "usage"
+                if done == "usage":
+                    self.notice("Usage: /hold (no arguments).")
+                elif done == "held":
+                    self.set_phase(f"approval: {name}")
+                    self.notice(f"Tool call {name!r} held: it waits for /yes or /no.")
+                elif done == "counting":
+                    self.notice("The countdown can't be held; /yes runs the call now, /no "
+                                "[reason] withdraws it.")
+                elif done == "untimed":
+                    self.notice("This tool call has no auto-approval to hold.")
+                else:
+                    self.notice(_already_decided(approval))
+                return
             if approval is not None and head in (*_APPROVAL_YES, *_APPROVAL_NO):
-                error = None
+                error = done = None
                 reason = text.lstrip()[len(head):].strip() if head in _APPROVAL_NO else None
                 if "\n" in text or "\r" in text or (
                         head in _APPROVAL_YES and text.strip() != head):
                     error = ("Usage: /yes (no arguments) or /no [reason] "
                              "(single line).")
-                elif not approval.answer(head in _APPROVAL_YES, reason):
-                    error = "This tool call already has an approval decision."
+                else:
+                    done = approval.answer(head in _APPROVAL_YES, reason)
+                    if done is None:
+                        error = _already_decided(approval)
                 if error is not None:
                     self.notice(error)
                     self.editor = Editor()
                     return
                 self.editor = Editor()
-                self.notice(
-                    f"Tool call {approval.call.name!r} "
-                    + ("approved." if approval.approved else "not approved.")
-                )
+                name = approval.call.name
+                if done == "counting":
+                    self.set_phase(f"countdown: {name}")
+                    self.notice(f"Tool call {name!r} approved; it runs in "
+                                f"{approval.countdown}s. /yes runs it now, /no [reason] "
+                                "withdraws it.")
+                elif done == "now":
+                    self.notice(f"Tool call {name!r} runs now.")
+                else:  # approved, denied, or withdrawn during the countdown
+                    self.notice(f"Tool call {name!r} "
+                                + ("approved." if done == "approved" else "not approved."))
                 return
             if approval is not None and text.strip():
-                # Approval is modal: no steering, commands, or queued queries
-                # until this call is answered. /exit and Ctrl-C remain global.
-                self.notice(f"{_TOOL_APPROVAL_REFUSAL} Draft preserved.")
+                # Approval is modal, and so is the countdown after it: no
+                # steering, commands, or queued queries until this call is
+                # answered and runs. /exit and Ctrl-C remain global.
+                if approval.auto_seconds_left() is not None:
+                    refusal = _TOOL_APPROVAL_TIMER_REFUSAL
+                elif approval.seconds_left() is not None:
+                    refusal = _TOOL_COUNTDOWN_REFUSAL
+                else:
+                    refusal = _TOOL_APPROVAL_REFUSAL
+                self.notice(f"{refusal} Draft preserved.")
                 return
             intent = text
             steer = command_urgency(head, "/steer")
@@ -896,7 +1102,8 @@ class _UIState:
 
         A read answers with a notice. A change applies at once, so a running
         turn, which keeps the config it started with (_turn), sees it from
-        its next turn on. It shows with its result, and its record is logged
+        its next turn on, but tool approval's timers from its next approval
+        prompt. It shows with its result, and its record is logged
         at the next safe point (_RecordEntry), before what's queued after it.
         Usage errors are notices, which never quote the argument.
         """
@@ -2358,6 +2565,21 @@ def _tool_approval_argument(value: str) -> Union[bool, str]:
         raise argparse.ArgumentTypeError("expected True, False, or exec") from None
 
 
+def _approval_seconds_argument(key: str, low: int, high: int):
+    """The type of a tool-approval timer's option: a whole number of seconds,
+    from ``low`` to ``high``, as /config ``key`` reads it, but not null."""
+    def seconds(value: str) -> int:
+        try:
+            parsed = parse_config_literal(key, value)
+        except ConfigError:
+            parsed = None
+        if parsed is None:
+            raise argparse.ArgumentTypeError(
+                f"expected a whole number of seconds from {low} to {high}")
+        return parsed
+    return seconds
+
+
 def _cli_renderer(args, approval: Union[bool, str] = False) -> InteractionItemRenderer:
     """How the CLI shows the model's tool calls: exec_command's workdir when
     it isn't --cwd, and a call that awaits approval in full."""
@@ -2367,15 +2589,44 @@ def _cli_renderer(args, approval: Union[bool, str] = False) -> InteractionItemRe
     )
 
 
+def _call_arguments(call: ToolCall) -> object:
+    """A tool call's arguments as they decode, or None if they don't."""
+    try:
+        return json.loads(call.arguments_json)
+    except ValueError:
+        return None
+
+
 def _begin_tool_approval(state: _UIState, request: _ToolApproval) -> None:
     """Publish an approval request and its slash-command affordance. The call
-    ID tells a batch's calls of one tool apart."""
+    ID tells a batch's calls of one tool apart. The prompt names the timers
+    that apply: auto-approval, which has a phase of its own, and a ui call's
+    countdown."""
     call = request.call
     state.pending_tool_approval = request
-    state.set_phase(f"approval: {call.name}")
-    state.notice(
-        f"Approve tool call {call.name!r} ({call.call_id})? /yes or /no [reason]."
-    )
+    state.set_phase(f"{'approval' if request.auto is None else 'auto-approval'}: {call.name}")
+    text = f"Approve tool call {call.name!r} ({call.call_id})? /yes or /no [reason]."
+    if request.auto is not None:
+        text += (f" Without an answer, it's approved in {request.auto}s; /hold keeps it "
+                 "waiting.")
+    if request.countdown is not None:
+        text += (f" After {'/yes' if request.auto is None else 'approval'}, it waits "
+                 f"{request.countdown}s before it runs, so that you can bring another window "
+                 "to the front.")
+    state.notice(text)
+
+
+def _auto_approved(state: _UIState, request: _ToolApproval) -> None:
+    """On the event loop: say that the timer approved ``request``'s call, and
+    show the countdown of a call that counts down."""
+    name = request.call.name
+    text = f"Tool call {name!r} approved automatically: no answer in {request.auto}s."
+    if request.countdown is not None:
+        text += (f" It runs in {request.countdown}s; /yes runs it now, /no [reason] "
+                 "withdraws it.")
+        if state.pending_tool_approval is request:
+            state.set_phase(f"countdown: {name}")
+    state.notice(text)
 
 
 def _end_tool_approval(state: _UIState, request: _ToolApproval) -> None:
@@ -2479,29 +2730,46 @@ class _CliHost(TurnHost):
         return self._state.renderer
 
     def tool_approval(self, call) -> Optional[ToolResult]:
-        """Ask the terminal for /yes or /no before one model tool call."""
+        """Ask the terminal for /yes or /no before one model tool call, with
+        the timers that apply (_approval_timers). A call that gets no answer
+        is approved when the auto-approval timer ends, unless /hold stopped
+        it. A call that counts down then waits before it runs; meanwhile /yes
+        runs it at once, and /no withdraws the approval. A stop, a reboot or
+        a steer ends each wait, and the call doesn't run."""
         if not _requires_approval(self._state.require_tool_approval, call.name):
             return None
-        request = _ToolApproval(call)
+        request = _ToolApproval(call, *self._approval_timers(call))
         self._post(_begin_tool_approval, self._state, request)
         try:
             while True:
-                answered = request.wait(0.1)
+                request.wait(0.1)
+                stage = request.stage()
+                # After the approval: the countdown runs, or it has just ended.
+                counted = (stage == "counting"
+                           or (stage == "approved" and request.countdown is not None))
                 if self._state.closing or self._state.stop_level is not None:
                     return ToolResult(
-                        call.call_id, _TOOL_APPROVAL_STOPPED_OUTPUT, success=False,
+                        call.call_id, _TOOL_COUNTDOWN_STOPPED_OUTPUT if counted
+                        else _TOOL_APPROVAL_STOPPED_OUTPUT, success=False,
                     )
                 if self.reboot_requested():
                     return ToolResult(
-                        call.call_id, _TOOL_APPROVAL_REBOOT_OUTPUT, success=False,
+                        call.call_id, _TOOL_COUNTDOWN_REBOOT_OUTPUT if counted
+                        else _TOOL_APPROVAL_REBOOT_OUTPUT, success=False,
                     )
                 if self.should_steer():
                     return ToolResult(
-                        call.call_id, _TOOL_APPROVAL_STEER_OUTPUT, success=False,
+                        call.call_id, _TOOL_COUNTDOWN_STEER_OUTPUT if counted
+                        else _TOOL_APPROVAL_STEER_OUTPUT, success=False,
                     )
-                if answered:
-                    if request.approved:
-                        return None
+                # After the checks above: a stop, a reboot or a steer that came
+                # by the timer's end wins over it.
+                if request.auto_approve() is not None:
+                    self._post(_auto_approved, self._state, request)
+                    stage = request.stage()
+                if stage == "approved":
+                    return None
+                if stage == "denied":
                     return ToolResult(
                         call.call_id,
                         _not_approved_output(request.denial_reason),
@@ -2509,6 +2777,28 @@ class _CliHost(TurnHost):
                     )
         finally:
             self._post(_end_tool_approval, self._state, request)
+
+    def _approval_timers(self, call) -> Tuple[Optional[int], Optional[int]]:
+        """``call``'s timers, in seconds, or None where one doesn't apply: how
+        long it waits for an answer before it's approved on its own
+        (tool_approval_auto_seconds), and how long it then waits before it
+        runs (tool_approval_ui_countdown_seconds), for a call of the ui tool
+        that the tool would run (UiTool.counts_down).
+
+        Both come from the live config, as it is at the prompt, not from the
+        turn's: a /config change applies at the next prompt, even within a
+        turn, so that turning auto-approval off takes effect at once. A host
+        without the session's config (in tests) takes the turn's.
+        """
+        config = self._state.config
+        snapshot = self._config if config is None else config.snapshot()
+        auto = getattr(snapshot, "tool_approval_auto_seconds", None)
+        countdown = getattr(snapshot, "tool_approval_ui_countdown_seconds", None)
+        ui = self._state.ui
+        if countdown is not None and (ui is None or call.name != UI_TOOL_NAME
+                                      or not ui.counts_down(_call_arguments(call))):
+            countdown = None
+        return auto, countdown
 
     def should_stop(self) -> bool:
         # A stop at IMMEDIATE or above: start no new sample or tool call.
@@ -2609,7 +2899,8 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
 
     The turn runs on the config as it is when it starts: a /config change
     during the turn applies from the next one. That includes the tools'
-    workspace policy (enable_workspace), set here.
+    workspace policy (enable_workspace), set here. Tool approval's timers are
+    the exception: each approval prompt reads them (_CliHost._approval_timers).
     """
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.
@@ -3424,10 +3715,13 @@ async def _run(
     approval = getattr(args, "require_tool_approval", False)
     if approval:
         exempt = ", ".join(sorted(_APPROVAL_EXEMPT_IN_EXEC))
-        state.notice(
-            "Tool-call approval is enabled; answer /yes or /no [reason] for each tool call"
-            + ("." if approval is True else f" but {exempt}'s (exec).")
-        )
+        text = ("Tool-call approval is enabled; answer /yes or /no [reason] for each tool call"
+                + ("." if approval is True else f" but {exempt}'s (exec)."))
+        auto = config.get("tool_approval_auto_seconds")
+        if auto is not None:
+            text += (f" Without an answer, a call is approved after {auto}s "
+                     "(tool_approval_auto_seconds); /hold keeps one waiting.")
+        state.notice(text)
     worker = None
     frame = 0
     with terminal:
@@ -3454,8 +3748,17 @@ async def _run(
                 busy = state.phase not in {"idle", "failed", "auth needed"}
                 status = (state.phase if state.stop_level is None
                           else _CLOSING_STATUS[state.stop_level])
+                # A tool call awaiting approval, or counting down after it.
+                approval = state.pending_tool_approval if state.stop_level is None else None
+                stage = None if approval is None else approval.stage()
+                auto_left = None if approval is None else approval.auto_seconds_left()
+                left = auto_left
+                if left is None and approval is not None:
+                    left = approval.seconds_left()
                 if busy:
-                    status += f" {int(time.monotonic() - state.phase_started)}s"
+                    # A timer shows the seconds left; other phases, those spent.
+                    status += (f" {left}s" if left is not None
+                               else f" {int(time.monotonic() - state.phase_started)}s")
                 progress = state.retry_progress
                 if (progress is not None and state.stop_level is None
                         and state.phase in {"retrying", "sampling"}):
@@ -3471,9 +3774,12 @@ async def _run(
                 queued = _queued_input(state) - steers
                 if queued > 0:
                     status += f" | queued={queued}"
-                if (state.pending_tool_approval is not None
-                        and state.stop_level is None):
+                if auto_left is not None:
+                    status += " | /yes or /no; /hold keeps it waiting"
+                elif stage == "awaiting":
                     status += " | approve with /yes or /no"
+                elif stage == "counting":
+                    status += " | /yes runs it now, /no withdraws it"
                 if state.quota is not None:
                     status += " | quota"
                 if state.icron is not None and state.stop_level is None:
@@ -3576,6 +3882,38 @@ def _build_parser() -> argparse.ArgumentParser:
             "execution; exec: for every one but update_plan's, which only records the "
             "plan; not available with --headless and launch-only "
             "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--tool-approval-auto-seconds",
+        type=_approval_seconds_argument("tool_approval_auto_seconds",
+                                        MIN_TOOL_APPROVAL_AUTO_SECONDS,
+                                        MAX_TOOL_APPROVAL_AUTO_SECONDS),
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "with --require-tool-approval: approve a tool call that gets no /yes or /no "
+            f"within SECONDS, a whole number from {MIN_TOOL_APPROVAL_AUTO_SECONDS} to "
+            f"{MAX_TOOL_APPROVAL_AUTO_SECONDS}, as if /yes had come; /hold keeps one call "
+            "waiting for an answer. Tunable with /config tool_approval_auto_seconds, where "
+            "null turns it off, from the next approval prompt (default: none)"
+        ),
+    )
+    parser.add_argument(
+        "--tool-approval-ui-countdown-seconds",
+        type=_approval_seconds_argument("tool_approval_ui_countdown_seconds",
+                                        MIN_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS,
+                                        MAX_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS),
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "with --require-tool-approval and --enable-experimental-ui-plugin: after its "
+            "approval, a ui tool call waits SECONDS, a whole number from "
+            f"{MIN_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS} to "
+            f"{MAX_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS}, before it runs, so that you can bring "
+            "another window to the front; meanwhile /yes runs it at once, and /no withdraws "
+            "the approval. Tunable with /config tool_approval_ui_countdown_seconds, from the "
+            f"next approval prompt (default: {DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS})"
         ),
     )
     parser.add_argument(
@@ -3694,9 +4032,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # prompt and the instructions already.
             args.resume, args.prompt, args.prompt_file, args.instructions = True, None, None, None
         args = prepare_namespace(args, catalog)
-        # Before the save: a plugin that was asked for and can't be used ends
-        # the launch here. A reboot's start check loads it too, so that one
-        # that went missing keeps the running session.
+        # Before the save: a tool-approval timer without what it applies to,
+        # or a plugin that was asked for and can't be used, ends the launch
+        # here. A reboot's start check loads the plugin too, so that one that
+        # went missing keeps the running session.
+        if args.tool_approval_auto_seconds is not None and not tool_approval_auto_applies(args):
+            raise ValueError(_TOOL_APPROVAL_AUTO_LAUNCH_ERROR)
+        if (args.tool_approval_ui_countdown_seconds is not None
+                and not tool_approval_ui_countdown_applies(args)):
+            raise ValueError(_TOOL_APPROVAL_UI_COUNTDOWN_LAUNCH_ERROR)
         ui_plugin = _ui_plugin(args)
         if args.rebooted == "check":
             if not args.headless:

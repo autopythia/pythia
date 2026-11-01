@@ -10,6 +10,11 @@ CLI loads at launch with --enable-experimental-ui-plugin (:func:`load_ui_plugin`
 message right before its next sample, once its tool batch is done, within the
 same image cap.
 
+With --require-tool-approval, an approved call waits before it runs, so that
+the user can bring another window to the front (the CLI's
+tool_approval_ui_countdown_seconds, for the calls that :meth:`UiTool.counts_down`
+names).
+
 Only ``screenshot`` is implemented; moving the cursor, clicking and typing
 come later (doc/interaction-ui-tool-plan.md).
 """
@@ -36,6 +41,7 @@ from .media import MEDIA_APIS
 from .media_tool import MEDIA_TOOL_LIMITS
 from .media_tool import Outbox
 from .media_tool import OutboxError
+from .method_call import MethodCall
 from .method_call import MethodCallError
 from .method_call import MethodCallReader
 from .plugin import Plugin
@@ -177,16 +183,23 @@ class UiTool:
                      "for it, and fails.")
         return text
 
+    def counts_down(self, arguments) -> bool:
+        """Whether a call of the tool, with these arguments, waits out the
+        CLI's countdown after its approval before it runs
+        (tool_approval_ui_countdown_seconds): a call that the tool would run,
+        as far as it can tell before the plugin is asked. A call that it
+        refuses fails at once."""
+        try:
+            self._read(arguments)
+        except (MethodCallError, UiToolError):
+            return False
+        return True
+
     def screenshot(self, display: Optional[int] = None, cursor: bool = True) -> Shot:
         """Take a screenshot of ``display`` (by default the main one) and
         queue it. Raises UiToolError, and then queues nothing."""
         call = "ui.screenshot()"
-        if display is not None and (type(display) is not int or not 0 <= display < 2 ** 32):
-            raise UiToolError(f"{call}: display must be a display ID, such as "
-                              f"{_first_display(self._plugin.info)}, or None for the main "
-                              f"display, not {display!r}.")
-        if type(cursor) is not bool:
-            raise UiToolError(f"{call}: cursor must be True or False, not {cursor!r}.")
+        _check_screenshot(self._plugin.info, display, cursor)
         request = {"op": "screenshot"}
         if display is not None:
             request["display"] = display
@@ -215,16 +228,41 @@ class UiTool:
 
     # The tool's handler, on the context thread.
 
+    def _read(self, arguments) -> MethodCall:
+        """The call that a tool input stands for, its arguments checked as far
+        as they can be before the plugin is asked; a MethodCallError or a
+        UiToolError says why the tool refuses it."""
+        call = _READER.read(arguments)
+        if call.method not in self._plugin.methods:
+            raise UiToolError(f"ui: this UI plugin has no {call.method}().")
+        _CHECKS[call.method](self._plugin.info, **call.arguments)
+        return call
+
     def _handle(self, arguments, *, timeout_seconds=None) -> ToolOutcome:
         del timeout_seconds  # the plugin keeps its own deadline, of 10 seconds
         try:
-            call = _READER.read(arguments)
-            if call.method not in self._plugin.methods:
-                raise UiToolError(f"ui: this UI plugin has no {call.method}().")
+            call = self._read(arguments)
             shot = self.screenshot(**call.arguments)
         except (MethodCallError, UiToolError) as exc:
             return ToolOutcome(str(exc), success=False)
         return ToolOutcome(_shot_text(shot, cursor=call.arguments.get("cursor", True)))
+
+
+def _check_screenshot(info: Mapping[str, object], display: Optional[int] = None,
+                      cursor: bool = True) -> None:
+    """screenshot()'s arguments, checked before the plugin is asked; a
+    UiToolError says what's wrong."""
+    call = "ui.screenshot()"
+    if display is not None and (type(display) is not int or not 0 <= display < 2 ** 32):
+        raise UiToolError(f"{call}: display must be a display ID, such as "
+                          f"{_first_display(info)}, or None for the main display, not "
+                          f"{display!r}.")
+    if type(cursor) is not bool:
+        raise UiToolError(f"{call}: cursor must be True or False, not {cursor!r}.")
+
+
+# Each method's check of its arguments, by name (METHODS).
+_CHECKS = {"screenshot": _check_screenshot}
 
 
 def _read_shot(reply: Mapping[str, object], call: str) -> Shot:

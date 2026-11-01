@@ -219,6 +219,8 @@ for module in (cli, demo):
             self.assertFalse(cli_args.pop("debug_trace"))
             self.assertIsNone(cli_args.pop("enable_icron"))
             self.assertFalse(cli_args.pop("enable_experimental_ui_plugin"))
+            self.assertIsNone(cli_args.pop("tool_approval_auto_seconds"))
+            self.assertIsNone(cli_args.pop("tool_approval_ui_countdown_seconds"))
             self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
             self.assertEqual(cli_args.pop("save_log_reasoning"), "nil")
             self.assertIsNone(cli_args.pop("rebooted"))

@@ -1,6 +1,8 @@
-"""The experimental ui tool (ui_tool.py): the UI plugin, loaded at launch, and
-screenshot(), through the media tool's outbox. The plugin is a fake library of
-ctypes callbacks (test_plugin.FakeLibrary) that answers as the crate does."""
+"""The experimental ui tool (ui_tool.py): the UI plugin, loaded at launch,
+screenshot(), through the media tool's outbox, and the countdown after a call's
+approval (tool_approval_ui_countdown_seconds; test_tool_approval.py has the
+auto-approval that can come before it). The plugin is a fake library of ctypes
+callbacks (test_plugin.FakeLibrary) that answers as the crate does."""
 
 from __future__ import annotations
 
@@ -12,15 +14,19 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+import time
 import unittest
 from unittest import mock
 
-from pythia.interaction import Environment, Message, ModelSample, ToolCall
-from pythia.interaction import UserInteractionBoundary, cli, load_interaction_save
+from pythia.interaction import Environment, Message, ModelSample, ToolCall, ToolResult
+from pythia.interaction import UserInteractionBoundary, cli, demo, load_interaction_save
 from pythia.interaction import plugin, ui_tool
 from pythia.interaction.display import render_interaction_items
-from pythia.interaction.loop import Interrupt, Steer
+from pythia.interaction.loop import Interrupt, Steer, Urgency
 from pythia.interaction.media_tool import MEDIA_HEADER, ImageCap, MediaTool, Outbox
+from pythia.interaction.runtime_config import ConfigError, InteractionConfig
+from pythia.interaction.runtime_config import InteractionConfigSnapshot, parse_config_literal
+from pythia.interaction.runtime_config import validate_config_value
 from pythia.interaction.ui_tool import UI_HEADER, UiPluginError, UiTool, call_text
 from pythia.interaction.ui_tool import load_ui_plugin
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
@@ -78,10 +84,12 @@ class _FakeUi:
         self.info = _info() if info is None else info
         self.shots = list(shots)
         self.requests = []
+        self.times = []  # when each request came (time.monotonic())
         self.library = FakeLibrary(json_answer(self._answer), abi=abi)
 
     def _answer(self, request):
         self.requests.append({key: value for key, value in request.items() if key != "id"})
+        self.times.append(time.monotonic())
         if request["op"] == "info":
             return self.info
         return self.shots.pop(0) if self.shots else _shot()
@@ -475,6 +483,376 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[cli] ui: dropped 1 queued message of the model's attachments, which no "
                       "turn took; they live only in this process.", texts)
         self.assertEqual(self.ui.outbox.queued(), 0)
+
+
+# The countdown after a ui call's approval (--tool-approval-ui-countdown-seconds).
+
+_SCREENSHOT = ToolCall("ui", "u1", json.dumps({"call": "screenshot()"}))
+_COUNTDOWN = "tool_approval_ui_countdown_seconds"
+_COUNTDOWN_OPTION = "--tool-approval-ui-countdown-seconds"
+_COUNTDOWN_VALUES = ("tool_approval_ui_countdown_seconds requires a whole number of seconds "
+                     "from 1 to 10, or null.")
+_COUNTDOWN_APPLIES = ("tool_approval_ui_countdown_seconds applies only with "
+                      "--enable-experimental-ui-plugin and --require-tool-approval.")
+_SHOT_RESULT = ToolResult("u1", "Queued a screenshot of display 1 (image/png 1×1 px, 69 B), in "
+                          "a user message that arrives right before your next sample, once "
+                          "this tool batch is done.")
+
+
+class CountdownSettingTests(_CliCase):
+    def config(self, *argv):
+        return InteractionConfig.from_namespace(cli._build_parser().parse_args(list(argv)))
+
+    def test_the_key_takes_whole_seconds_from_1_to_10_or_null(self):
+        for value in (1, 5, 10, None):
+            self.assertEqual(validate_config_value(_COUNTDOWN, value), value)
+        for value in (0, 11, -1, True, 2.5, "5"):
+            with self.subTest(value=value), self.assertRaises(ConfigError) as caught:
+                validate_config_value(_COUNTDOWN, value)
+            self.assertEqual(str(caught.exception), _COUNTDOWN_VALUES)
+        self.assertEqual(parse_config_literal(_COUNTDOWN, " 3 "), 3)
+        for text in ("null", "None"):
+            self.assertIsNone(parse_config_literal(_COUNTDOWN, text))
+        for text in ("0", "11", "2.5", "true", "5s", ""):
+            with self.subTest(text=text), self.assertRaises(ConfigError) as caught:
+                parse_config_literal(_COUNTDOWN, text)
+            self.assertEqual(str(caught.exception), _COUNTDOWN_VALUES)
+
+    def test_it_applies_only_with_the_ui_plugin_and_tool_approval(self):
+        for argv in ((_OPTION, "--require-tool-approval"),
+                     (_OPTION, "--require-tool-approval", "exec")):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.config(*argv).get(_COUNTDOWN), 5)
+        for argv in ((), (_OPTION,), ("--require-tool-approval",),
+                     (_OPTION, "--require-tool-approval", "False")):
+            with self.subTest(argv=argv):
+                config = self.config(*argv)
+                self.assertIsNone(config.get(_COUNTDOWN))
+                with self.assertRaises(ConfigError) as caught:
+                    config.set(_COUNTDOWN, 3)
+                self.assertEqual(str(caught.exception), _COUNTDOWN_APPLIES)
+                self.assertIsNone(config.set(_COUNTDOWN, None))
+        # Other frontends never count down.
+        self.assertIsNone(InteractionConfig.from_namespace(demo._build_parser().parse_args([]))
+                          .get(_COUNTDOWN))
+        self.assertIsNone(InteractionConfig().get(_COUNTDOWN))
+        with self.assertRaises(ConfigError):
+            InteractionConfig(InteractionConfigSnapshot(tool_approval_ui_countdown_seconds=3))
+
+    def test_the_launch_value_and_changes(self):
+        config = self.config(_OPTION, "--require-tool-approval", _COUNTDOWN_OPTION, "3")
+        self.assertEqual(config.get(_COUNTDOWN), 3)
+        self.assertEqual(config.set(_COUNTDOWN, 7), 7)
+        self.assertEqual(config.set(_COUNTDOWN, None), 5)  # null: the default
+        self.assertEqual(config.reset(_COUNTDOWN).tool_approval_ui_countdown_seconds, 3)
+        self.assertEqual(config.render(_COUNTDOWN, json_output=False),
+                         "tool_approval_ui_countdown_seconds = 3")
+
+    def test_the_option_takes_whole_seconds_and_needs_the_ui_tools_approval(self):
+        parse = cli._build_parser().parse_args
+        self.assertIsNone(parse([]).tool_approval_ui_countdown_seconds)
+        self.assertEqual(parse([_COUNTDOWN_OPTION, "10"]).tool_approval_ui_countdown_seconds, 10)
+        for value in ("0", "11", "2.5", "null", "x"):
+            stderr = io.StringIO()
+            with self.subTest(value=value), redirect_stderr(stderr), \
+                    self.assertRaises(SystemExit):
+                parse([_COUNTDOWN_OPTION, value])
+            self.assertIn("argument --tool-approval-ui-countdown-seconds: expected a whole "
+                          "number of seconds from 1 to 10", stderr.getvalue())
+        for argv, fake in (((), None), ((_OPTION,), _FakeUi())):
+            with self.subTest(argv=argv):
+                code, stderr, model = self.main("--endpoint-api", "messages", *argv,
+                                                _COUNTDOWN_OPTION, "3", fake=fake)
+                self.assertEqual(code, 1)
+                self.assertIn("interaction CLI failed: --tool-approval-ui-countdown-seconds "
+                              "applies only with --enable-experimental-ui-plugin and "
+                              "--require-tool-approval.", stderr)
+                self.assertEqual(model.calls, [])
+                self.assertFalse((self.root / "session._private").exists())
+        self.assertEqual(fake.requests, [])  # refused before the plugin loads
+
+
+class CountsDownTests(_Case):
+    def test_only_a_call_that_the_tool_would_run_counts_down(self):
+        tool = self.tool()
+        for call in ("screenshot()", "ui.screenshot(5, cursor=False)"):
+            with self.subTest(call=call):
+                self.assertTrue(tool.counts_down({"call": call}))
+        for arguments in ({"call": "click(10, 20)"}, {"call": "screenshot('main')"},
+                          {"call": "screenshot(cursor='yes')"}, {"call": "screenshot"},
+                          {"call": 3}, {}, {"call": "screenshot()", "code": "x"}, ["x"]):
+            with self.subTest(arguments=arguments):
+                self.assertFalse(tool.counts_down(arguments))
+        self.assertEqual(self.tool().tool().handler({"call": "screenshot('main')"}).output,
+                         "ui.screenshot(): display must be a display ID, such as 1, or None for "
+                         "the main display, not 'main'.")
+
+
+class ApprovalTests(unittest.TestCase):
+    def test_the_answers_to_an_approval_with_a_countdown(self):
+        request = cli._ToolApproval(_SCREENSHOT, countdown=10)
+        self.assertEqual((request.stage(), request.seconds_left()), ("awaiting", None))
+        self.assertEqual(request.answer(True), "counting")
+        self.assertEqual((request.stage(), request.seconds_left()), ("counting", 10))
+        self.assertTrue(request.approved)
+        self.assertEqual(request.answer(True), "now")
+        self.assertEqual((request.stage(), request.seconds_left()), ("approved", 0))
+        self.assertIsNone(request.answer(False, "too late"))
+        self.assertIsNone(request.denial_reason)
+
+        withdrawn = cli._ToolApproval(_SCREENSHOT, countdown=10)
+        withdrawn.answer(True)
+        self.assertEqual(withdrawn.answer(False, "not now"), "withdrawn")
+        self.assertEqual((withdrawn.stage(), withdrawn.denial_reason, withdrawn.seconds_left()),
+                         ("denied", "not now", None))
+        self.assertIsNone(withdrawn.answer(True))
+
+        plain = cli._ToolApproval(_SCREENSHOT)
+        self.assertEqual(plain.answer(True), "approved")
+        self.assertEqual((plain.stage(), plain.seconds_left()), ("approved", None))
+        self.assertIsNone(plain.answer(True))
+        denied = cli._ToolApproval(_SCREENSHOT, countdown=10)
+        self.assertEqual(denied.answer(False), "denied")
+        self.assertEqual(denied.seconds_left(), None)
+
+    def test_other_input_waits_during_the_countdown(self):
+        state = cli._UIState(ready=True, turn_active=True, require_tool_approval=True)
+        state.pending_tool_approval = request = cli._ToolApproval(_SCREENSHOT, countdown=10)
+        state.editor = cli.Editor("/yes", 4)
+        state.handle_key("c-m", "\r")
+        self.assertEqual(state.phase, "countdown: ui")
+        for text in ("/config.json", "later work"):
+            state.editor = cli.Editor(text, len(text))
+            state.handle_key("c-m", "\r")
+            self.assertEqual(state.editor.text, text)
+        self.assertEqual(len(state.pending), 0)
+        self.assertEqual(request.stage(), "counting")
+        state.editor = cli.Editor("/yes now", 8)
+        state.handle_key("c-m", "\r")
+        self.assertEqual(request.stage(), "counting")
+        texts = [item.text for item in state.displays]
+        self.assertEqual(texts, [
+            "[cli] Tool call 'ui' approved; it runs in 10s. /yes runs it now, /no [reason] "
+            "withdraws it.",
+            "[cli] Only /yes or /no is accepted while an approved tool call counts down. Draft "
+            "preserved.",
+            "[cli] Only /yes or /no is accepted while an approved tool call counts down. Draft "
+            "preserved.",
+            "[cli] Usage: /yes (no arguments) or /no [reason] (single line).",
+        ])
+
+
+class CountdownTests(unittest.IsolatedAsyncioTestCase):
+    """The countdown in the CLI, with the fake plugin and the fake terminal.
+    A countdown that runs to its end is the 1-second minimum; the others end
+    early."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = self.root / "interaction.jsonl"
+        dylib = self.root / "libpythia_ui.dylib"
+        dylib.write_bytes(b"a library")
+        self.fake = _FakeUi()
+        with self.fake.patches(dylib):
+            self.ui = UiTool(load_ui_plugin(api="messages", default_tools=True),
+                             outbox=Outbox(api="messages"))
+
+    async def run_cli(self, frame, *argv, outcomes=None):
+        """Run the CLI with tool approval and the ui tool; the model calls
+        screenshot(), then answers. The exit code, and the terminal."""
+        if outcomes is None:
+            outcomes = (ModelSample(items=(_SCREENSHOT,)), _answer("A screen."))
+        model = _Model(self.path, *outcomes)
+        terminal = _Terminal(frame)
+        args = cli._build_parser().parse_args(
+            ["--prompt", "Look.", "--require-tool-approval", _OPTION, *argv])
+        code = await asyncio.wait_for(cli._run(
+            model, Environment((self.ui.tool(),)), terminal, args, self.path, ui=self.ui),
+            timeout=8)
+        return code, terminal
+
+    def results(self):
+        return [item for item in load_interaction_save(self.path).items
+                if isinstance(item, ToolResult)]
+
+    @staticmethod
+    def texts(terminal):
+        return [item.text for item in terminal.items]
+
+    async def test_an_approved_screenshot_waits_out_the_countdown(self):
+        approved, counting = [], []
+
+        def frame(terminal, editor, status):
+            if status.startswith("approval: ui") and not approved:
+                terminal.submit("/yes")
+                approved.append(time.monotonic())
+            elif status.startswith("countdown: ui"):
+                counting.append((status, len(self.fake.asked())))
+            elif status == "idle" and "[assistant] A screen." in self.texts(terminal):
+                terminal.key("c-d")
+
+        code, terminal = await self.run_cli(frame, _COUNTDOWN_OPTION, "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.asked(), [{"op": "screenshot"}])
+        self.assertGreaterEqual(self.fake.times[-1] - approved[0], 1.0)
+        # It counts the seconds left down, and asks for nothing until it ends.
+        self.assertEqual(counting[0], ("countdown: ui 1s | /yes runs it now, /no withdraws it", 0))
+        self.assertEqual({asked for status, asked in counting if " 1s " in status}, {0})
+        self.assertEqual(self.results(), [_SHOT_RESULT])
+        texts = self.texts(terminal)
+        self.assertIn("[cli] Approve tool call 'ui' (u1)? /yes or /no [reason]. After /yes, it "
+                      "waits 1s before it runs, so that you can bring another window to the "
+                      "front.", texts)
+        self.assertIn("[cli] Tool call 'ui' approved; it runs in 1s. /yes runs it now, /no "
+                      "[reason] withdraws it.", texts)
+
+    async def test_yes_during_the_countdown_runs_the_call_at_once(self):
+        approved = []
+
+        def frame(terminal, editor, status):
+            if status.startswith("approval: ui") and not approved:
+                terminal.submit("/yes")
+                approved.append(time.monotonic())
+            elif status.startswith("countdown: ui") and len(approved) == 1:
+                terminal.submit("/y")
+                approved.append(time.monotonic())
+            elif status == "idle" and "[assistant] A screen." in self.texts(terminal):
+                terminal.key("c-d")
+
+        code, terminal = await self.run_cli(frame, _COUNTDOWN_OPTION, "10")
+        self.assertEqual(code, 0)
+        self.assertLess(self.fake.times[-1] - approved[0], 5)
+        self.assertEqual(self.results(), [_SHOT_RESULT])
+        self.assertIn("[cli] Tool call 'ui' runs now.", self.texts(terminal))
+
+    async def test_no_during_the_countdown_withdraws_the_approval(self):
+        steps = []
+
+        def frame(terminal, editor, status):
+            if status.startswith("approval: ui") and not steps:
+                terminal.submit("/yes")
+                steps.append("yes")
+            elif status.startswith("countdown: ui") and steps == ["yes"]:
+                terminal.submit("/no not now")
+                steps.append("no")
+            elif status == "idle" and "[assistant] A screen." in self.texts(terminal):
+                terminal.key("c-d")
+
+        code, terminal = await self.run_cli(frame)  # the default, 5 seconds
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.asked(), [])
+        self.assertEqual(self.results(),
+                         [ToolResult("u1", "Tool call not approved: not now", success=False)])
+        texts = self.texts(terminal)
+        self.assertIn("[cli] Tool call 'ui' approved; it runs in 5s. /yes runs it now, /no "
+                      "[reason] withdraws it.", texts)
+        self.assertIn("[cli] Tool call 'ui' not approved.", texts)
+
+    async def test_a_stop_during_the_countdown_keeps_the_call_from_running(self):
+        steps = []
+
+        def frame(terminal, editor, status):
+            if status.startswith("approval: ui") and not steps:
+                terminal.submit("/yes")
+                steps.append("yes")
+            elif status.startswith("countdown: ui") and steps == ["yes"]:
+                terminal.key("c-c")
+                steps.append("stop")
+
+        code, terminal = await self.run_cli(frame, _COUNTDOWN_OPTION, "10",
+                                            outcomes=(ModelSample(items=(_SCREENSHOT,)),))
+        self.assertEqual(code, 0)
+        self.assertEqual(steps, ["yes", "stop"])
+        self.assertEqual(self.fake.asked(), [])
+        self.assertEqual(self.results(), [
+            ToolResult("u1", cli._TOOL_COUNTDOWN_STOPPED_OUTPUT, success=False)])
+
+    # The host's side, with the turn's config.
+
+    def host(self, state, countdown=10):
+        return cli._CliHost(state, mock.Mock(), asyncio.get_running_loop(), steering=True,
+                            config=InteractionConfigSnapshot(
+                                tool_approval_ui_countdown_seconds=countdown))
+
+    async def approval(self, host, state, call=_SCREENSHOT):
+        """Start host.tool_approval(call) on a thread; its task, once the
+        approval is published. A cleanup ends a wait that the test left, as a
+        stop does: a thread that waits for an answer keeps the process from
+        exiting."""
+        task = asyncio.create_task(asyncio.to_thread(host.tool_approval, call))
+        self.addAsyncCleanup(self._end_approval, state, task)
+        for _ in range(200):
+            if state.pending_tool_approval is not None:
+                return task
+            await asyncio.sleep(0.01)
+        raise AssertionError("the approval was not published")
+
+    @staticmethod
+    async def _end_approval(state, task):
+        state.closing = True
+        await asyncio.wait((task,), timeout=2)
+
+    async def test_a_reboot_or_a_steer_during_the_countdown_keeps_the_call_from_running(self):
+        state = cli._UIState(require_tool_approval=True, ui=self.ui)
+        with mock.patch.object(cli, "_reboot_argv", ["/bin/true"]):
+            task = await self.approval(self.host(state), state)
+            self.assertEqual(state.pending_tool_approval.answer(True), "counting")
+            state.reboot = cli._Reboot("/reboot")
+            result = await asyncio.wait_for(task, 2)
+        self.assertEqual(result, ToolResult("u1", cli._TOOL_COUNTDOWN_REBOOT_OUTPUT,
+                                            success=False))
+        self.assertIsNone(state.pending_tool_approval)
+
+        state = cli._UIState(require_tool_approval=True, ui=self.ui, turn_active=True)
+        task = await self.approval(self.host(state), state)
+        self.assertEqual(state.pending_tool_approval.answer(True), "counting")
+        state.pending.append(cli._Submission("Hurry.", Message("user", "Hurry.")))
+        state.preemption.flush(Urgency.IMMEDIATE)
+        result = await asyncio.wait_for(task, 2)
+        self.assertEqual(result, ToolResult("u1", cli._TOOL_COUNTDOWN_STEER_OUTPUT,
+                                            success=False))
+        self.assertEqual(self.fake.asked(), [])
+
+    async def test_which_calls_count_down(self):
+        # In exec mode too, which never exempts the ui tool.
+        state = cli._UIState(require_tool_approval=cli._APPROVAL_EXEC, ui=self.ui)
+        task = await self.approval(self.host(state), state)
+        request = state.pending_tool_approval
+        self.assertEqual(request.countdown, 10)
+        self.assertIn("[cli] Approve tool call 'ui' (u1)? /yes or /no [reason]. After /yes, it "
+                      "waits 10s before it runs, so that you can bring another window to the "
+                      "front.", [item.text for item in state.displays])
+        # /no before it: no countdown.
+        self.assertEqual(request.answer(False), "denied")
+        self.assertEqual(await asyncio.wait_for(task, 2),
+                         ToolResult("u1", "Tool call not approved.", success=False))
+        # A call that the tool refuses: it runs, and fails, at once after /yes.
+        for call in ("click(10, 20)", "screenshot('main')"):
+            with self.subTest(call=call):
+                state = cli._UIState(require_tool_approval=True, ui=self.ui)
+                task = await self.approval(self.host(state), state,
+                                           ToolCall("ui", "u2", json.dumps({"call": call})))
+                self.assertIsNone(state.pending_tool_approval.countdown)
+                self.assertEqual(state.pending_tool_approval.answer(True), "approved")
+                self.assertIsNone(await asyncio.wait_for(task, 2))
+        # Without approval, nothing waits.
+        state = cli._UIState(require_tool_approval=False, ui=self.ui)
+        self.assertIsNone(await asyncio.to_thread(self.host(state).tool_approval, _SCREENSHOT))
+        self.assertIsNone(state.pending_tool_approval)
+        # Other tools' calls, malformed input, and a turn or a session without
+        # the setting or the tool.
+        host = self.host(cli._UIState(require_tool_approval=True, ui=self.ui))
+        self.assertEqual(host._approval_timers(_SCREENSHOT)[1], 10)
+        for call in (ToolCall("exec_command", "e1", json.dumps({"cmd": "ls"})),
+                     ToolCall("ui", "u3", "not JSON")):
+            self.assertIsNone(host._approval_timers(call)[1])
+        loop = asyncio.get_running_loop()
+        for host in (cli._CliHost(cli._UIState(ui=self.ui), mock.Mock(), loop),
+                     self.host(cli._UIState(ui=self.ui), countdown=None),
+                     self.host(cli._UIState())):
+            self.assertIsNone(host._approval_timers(_SCREENSHOT)[1])
 
 
 if __name__ == "__main__":

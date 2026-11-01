@@ -136,6 +136,8 @@ class UserToolValueTests(unittest.TestCase):
             "compaction_pi_max_output_tokens = None",
             "compaction_coldstart_reboot = False",
             "save_log_reasoning = 'nil'",
+            "tool_approval_auto_seconds = None",
+            "tool_approval_ui_countdown_seconds = None",
             "extra_sample_params = {}",
         )))
         json_dump = execute("/config.json")
@@ -575,6 +577,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
             "compaction_pi_max_output_tokens": None,
             "compaction_coldstart_reboot": False,
             "save_log_reasoning": "nil",
+            "tool_approval_auto_seconds": None,
+            "tool_approval_ui_countdown_seconds": None,
             "extra_sample_params": {},
         }
         self.assertEqual(
