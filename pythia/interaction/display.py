@@ -228,7 +228,7 @@ class InteractionItemRenderer:
                 label = "compaction"
                 blocks = _render_compaction_metadata(item)
             elif isinstance(item, ModelFailure):
-                label = "model failure"
+                label = "model"
                 blocks = _render_model_failure(item)
             elif isinstance(item, TurnSummary):
                 label = "turn"
@@ -514,7 +514,7 @@ def _render_sample_metadata(item: SampleMetadata) -> Tuple[str, ...]:
         "" if item.request_attempts == 1 else f" attempts={item.request_attempts}"
     )
     recovery = (
-        "" if not item.recovery else f" recovery={_recovery_text(item.recovery)}"
+        "" if not item.recovery else f" recovery={_runs_text(item.recovery)}"
     )
     tokens = "" if item.tokens is None else _token_trace_text(item.tokens, usage)
     return (
@@ -558,21 +558,22 @@ def _render_compaction_metadata(
     if item.request_attempts != 1:
         fields.append(f"attempts={item.request_attempts}")
     if item.recovery:
-        fields.append(f"recovery={_recovery_text(item.recovery)}")
+        fields.append(f"recovery={_runs_text(item.recovery)}")
     return (" ".join(fields),)
 
 
-# A shown recovery list has one entry per run of equal labels, with the run's
+# A shown list of labels has one entry per run of equal labels, with the run's
 # length in parentheses past 1, such as rate_limit_retry(36). Past this many
 # runs, it shows the first and the last, with the number of labels between
 # them: http_503_retry(2),…(33),connection_retry.
-_MAX_RECOVERY_RUNS = 4
+_MAX_SHOWN_RUNS = 4
 
 
-def _recovery_text(labels: Tuple[str, ...]) -> str:
-    """A ``recovery`` list as a line shows it, bounded: an automatic retry
-    adds a label each time, without limit when unbounded. Saves keep the
-    whole list."""
+def _runs_text(labels: Tuple[str, ...]) -> str:
+    """A list of labels as a line shows it, bounded: a ``recovery`` list, to
+    which an automatic retry adds a label each time, without limit when
+    unbounded, or a model failure's ``event_types``, such as the last 64
+    events of a Claude Relay stream. Saves keep the whole list."""
     runs: List[List] = []
     for label in labels:
         if runs and runs[-1][0] == label:
@@ -580,14 +581,14 @@ def _recovery_text(labels: Tuple[str, ...]) -> str:
         else:
             runs.append([label, 1])
     shown = [label if count == 1 else f"{label}({count})" for label, count in runs]
-    if len(runs) > _MAX_RECOVERY_RUNS:
+    if len(runs) > _MAX_SHOWN_RUNS:
         between = sum(count for _label, count in runs[1:-1])
         shown = [shown[0], f"…({between})", shown[-1]]
     return ",".join(shown)
 
 
 def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
-    fields = [f"[model failure] {item.message}", f"kind={item.category}"]
+    fields = [f"[model] {item.message}", f"kind={item.category}"]
     for name, value in (
         ("provider", item.provider),
         ("model", item.model),
@@ -613,9 +614,9 @@ def _render_model_failure(item: ModelFailure) -> Tuple[str, ...]:
         if value is not None:
             fields.append(f"{name}={value}")
     if item.recovery:
-        fields.append(f"recovery={_recovery_text(item.recovery)}")
+        fields.append(f"recovery={_runs_text(item.recovery)}")
     if item.event_types:
-        fields.append(f"event_types={','.join(item.event_types)}")
+        fields.append(f"event_types={_runs_text(item.event_types)}")
     return (" ".join(fields),)
 
 

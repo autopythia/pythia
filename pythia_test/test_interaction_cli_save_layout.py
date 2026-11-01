@@ -17,7 +17,8 @@ from unittest import mock
 
 from pythia.interaction import (
     CompactionMetadata, ContextPrefix, Environment, Init, InteractionContext, Message,
-    ModelSample, ModelSampleBoundary, Reasoning, SaveError, Tool, ToolCall, ToolOutcome,
+    ModelFailure, ModelSample, ModelSampleBoundary, ModelTransportError, Reasoning, SaveError,
+    Tool, ToolCall, ToolOutcome,
     ToolResult, ToolSpec, Tools, TokenUsage, TurnSummary, UserInteractionBoundary,
     UserToolCall, UserToolResult, cli, interaction_item_to_dict, load_interaction_save,
     save_interaction_save,
@@ -31,6 +32,7 @@ from pythia.interaction.compaction import COLDSTART_POINTER_PREFIX
 from pythia.interaction.compaction import ColdstartCompactor
 from pythia.interaction.compaction import CompactionLogError
 from pythia.interaction.compaction import is_coldstart_pointer
+from pythia.interaction.save import ERROR_LINE
 from pythia.interaction.save import PublicLogError
 from pythia.interaction.save import PublicLogWriter
 from pythia.interaction.save import interaction_item_from_dict
@@ -50,6 +52,12 @@ _HISTORY = (Init("session"), Tools(), Message("user", "question"), UserInteracti
             _REASONING, Message("assistant", "answer"), ModelSampleBoundary(),
             TurnSummary(sample_count=1))
 _NIL = b'{"type": "nil"}\n'
+# A model failure, whose diagnostics stay in the full log.
+_DETAIL = "DIAGNOSTIC-DETAIL"
+_FAILURE = ModelFailure("transport", f"{_DETAIL} connection reset", provider="chat-completions",
+                        request_id=f"{_DETAIL}-request", event_types=("response.created:1",))
+# _HISTORY with a failed sample before its reasoning, on its fifth line.
+_FAILED = (*_HISTORY[:4], _FAILURE, ModelSampleBoundary(), *_HISTORY[4:])
 _EXEC = ToolSpec("exec_command", "Run a command.", {"type": "object"})
 _DEBUG_FILES = ("context.jsonl.model-binding.json", "trace.events.jsonl", "trace.req.jsonl",
                 "trace.res.jsonl")
@@ -177,6 +185,29 @@ class PublicLogTests(_FilesTestCase):
         self.assertIsInstance(caught.exception.__cause__, PublicLogError)
         self.assertIn("at line 5", str(caught.exception))
         self.assertIn("PREFIX._private/context.jsonl", str(caught.exception))
+
+    def test_a_model_failure_is_an_error_line_with_no_other_field(self):
+        full = _encoded(_FAILED)
+        for reasoning in ("nil", "assistant"):
+            with self.subTest(reasoning=reasoning):
+                public = public_log_lines(full, reasoning)
+                self.assertEqual(public, [public_log_line(item, reasoning) for item in _FAILED])
+                self.assertEqual((len(public), public[4]), (len(_FAILED), ERROR_LINE))
+                self.assertEqual(json.loads(public[4]), {"type": "error"})
+                self.assertNotIn(_DETAIL.encode(), b"".join(public))
+        self.assertIn(_DETAIL.encode(), full.splitlines()[4])  # the full log keeps it whole
+
+    def test_a_public_log_with_an_error_line_does_not_load_as_a_save(self):
+        # In assistant mode, reasoning with a summary leaves no nil line.
+        self.path.write_bytes(b"".join(public_log_lines(_encoded(_FAILED), "assistant")))
+        with self.assertRaises(SaveError) as caught:
+            load_interaction_save(self.path)
+        self.assertIsInstance(caught.exception.__cause__, PublicLogError)
+        self.assertIn("at line 5", str(caught.exception))
+        self.assertIn('"error" stands for a model failure that a public log leaves out, so '
+                      "this is not a full log", str(caught.exception))
+        with self.assertRaisesRegex(SaveError, r"unknown interaction item type: \[1\]"):
+            interaction_item_from_dict({"type": [1]})  # not a name: still unknown
 
     def test_the_writer_writes_the_log_anew_then_appends(self):
         self.path.write_bytes(b"an older save\n")
@@ -448,6 +479,27 @@ class PublicLogTests(_FilesTestCase):
         writer.sync(full, len(items))
         self.assertTrue(writer.drifted)
         self.assertIn("differs from the full log from line 5 on", writer.take_warnings()[0])
+
+    def test_resuming_accepts_a_failure_line_whole_as_public_logs_had_it(self):
+        # Until November 2026, a public log had a model failure's line whole.
+        full = _encoded(_FAILED)
+        new = public_log_lines(full)
+        old = [*new[:4], full.splitlines(keepends=True)[4], *new[5:]]
+        self.path.write_bytes(b"".join(old))
+        writer = PublicLogWriter(self.path)
+        writer.sync(full, len(_FAILED))
+        self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
+        self.assertEqual(self.path.read_bytes(), b"".join(old))
+        writer.save(InteractionContext((*_FAILED, _FAILURE)))  # lines from then on are new
+        self.assertEqual(self.path.read_bytes(), b"".join(old) + ERROR_LINE)
+        # A cut-off line is completed in the form it started in.
+        for form in (old, new):
+            with self.subTest(whole=form is old):
+                self.path.write_bytes(b"".join(form[:4]) + form[4][:12])
+                writer = PublicLogWriter(self.path)
+                writer.sync(full, len(_FAILED))
+                self.assertEqual(self.path.read_bytes(), b"".join(form))
+                self.assertEqual((writer.take_warnings(), writer.drifted), ((), False))
 
 
 class MigrationTests(_FilesTestCase):
@@ -869,8 +921,8 @@ class ColdstartTests(_FilesTestCase):
             self.assertTrue(is_coldstart_pointer(pointer))
             self.assertIn("saved in `s.jsonl` (relative to your tools' working directory), "
                           "lines 1\u20138; later lines continue from here.", pointer.content)
-            self.assertIn('"context_prefix" (an earlier compaction) or "nil" (an item left out '
-                          'of this log).', pointer.content)
+            self.assertIn('"context_prefix" (an earlier compaction), "nil" (an item left out '
+                          'of this log) or "error" (a failed model request).', pointer.content)
             self.assertIn("A summary template is in `s.summary.md`; it covers no lines yet. "
                           "Ignore the contents of `s._private/`; they are private.",
                           pointer.content)
@@ -886,6 +938,7 @@ class ColdstartTests(_FilesTestCase):
         text = result.items[0].prefix_items[-1].content
         self.assertIn('"tool_result" ("output") or "context_prefix" (an earlier compaction).', text)
         self.assertNotIn('"nil"', text)
+        self.assertNotIn('"error"', text)  # its full log has the failures whole
         self.assertNotIn("_private", text)
 
 
@@ -914,6 +967,19 @@ class CLISaveLayoutTests(_ControllerTestCase):
         self.assertIn(f"[cli] Save log: {self.path}", notices)
         self.assertIn(f"[cli] Private: {self.private}/, with the full log, which has the "
                       "reasoning that the save log leaves out, and debug files.", notices)
+
+    async def test_a_model_failure_shows_whole_and_is_an_error_line_in_the_save_log(self):
+        model = _Model(self.path, ModelTransportError("connection reset", failure=_FAILURE))
+        terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "failed" else None)
+        self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"]), 1)
+        full, public = self.full.read_bytes(), self.path.read_bytes()
+        self.assertEqual(public, b"".join(public_log_lines(full)))
+        line = load_interaction_save(self.full).items.index(_FAILURE)
+        self.assertEqual(public.splitlines(keepends=True)[line], ERROR_LINE)
+        self.assertNotIn(_DETAIL.encode(), public)
+        [shown] = [item.text for item in terminal.items if item.label == "model"]
+        self.assertTrue(shown.startswith(f"[model] {_DETAIL} connection reset kind=transport "
+                                         "provider=chat-completions "), shown)
 
     async def test_an_edited_public_log_is_kept_and_resuming_reads_the_full_log(self):
         self.assertEqual(await self._run(_Model(self.path, _answer("first")),
@@ -1009,7 +1075,8 @@ class CLISaveLayoutTests(_ControllerTestCase):
         pointer = checkpoint.prefix_items[-1]
         self.assertTrue(is_coldstart_pointer(pointer))
         self.assertIn(f"saved in `{self.path}`, lines 1\u2013{lines};", pointer.content)
-        self.assertIn('or "nil" (an item left out of this log).', pointer.content)
+        self.assertIn('"nil" (an item left out of this log) or "error" (a failed model '
+                      'request).', pointer.content)
         self.assertIn(f"Ignore the contents of `{self.private}/`; they are private.",
                       pointer.content)
         self.assertTrue(self.path.with_suffix(".summary.md").is_file())

@@ -20,7 +20,7 @@ from pythia.interaction import Init, InteractionContext, Message, ModelFailure, 
 from pythia.interaction import SampleMetadata, TokenUsage, ToolCall, ToolResult, Tools, TurnSummary
 from pythia.interaction import UserInteractionBoundary, UserToolCall, UserToolResult, cli
 from pythia.interaction import load_interaction_save
-from pythia_test.interaction_helpers import patch_compaction, seed_cli_save
+from pythia_test.interaction_helpers import full_log, patch_compaction, seed_cli_save
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_reboot import (
     _Compactor, _exit, _has, _idle_with, _notices, _rebootable, _steps, _users)
@@ -106,7 +106,7 @@ class _Case(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(items[-1], CompactionMetadata)
         self.assertEqual(context.items[:len(seeded)], seeded)
         self.assertEqual(context.model_items()[-1], Message("user", _POINTER))
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual(_users(saved), ["old request"])
         self.assertIsInstance(saved.items[-1], TurnSummary)
 

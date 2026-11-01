@@ -23,7 +23,7 @@ from pythia.interaction import (
 from pythia.interaction.codex_auth import CodexAuthUnavailable
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_pty import _SCRIPT
-from pythia_test.interaction_helpers import patch_saves, remove_cli_save, seed_cli_save
+from pythia_test.interaction_helpers import full_log, patch_saves, remove_cli_save, seed_cli_save
 
 
 class NoInput:
@@ -151,7 +151,7 @@ class HeadlessCLITests(unittest.TestCase):
         self.assertIn("ModelResponseError: stream failed", stderr)
         self.assertNotIn("Use /retry", stderr)
         self.assertFalse(marker.exists())
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertIn(failure, saved)
         self.assertFalse(saved.pending_tool_calls())
         self.assertFalse(saved[-1].success)

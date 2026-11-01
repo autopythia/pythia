@@ -12,7 +12,7 @@ from pythia.interaction import ToolCall, ToolResult, Tools, TurnSummary, UserInt
 from pythia.interaction import cli, load_interaction_save, save_interaction_save, user_tools
 from pythia.interaction._cli_editor import Editor
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
-from pythia_test.interaction_helpers import seed_cli_save
+from pythia_test.interaction_helpers import full_log, seed_cli_save
 
 
 def _submit(state, text):
@@ -163,7 +163,7 @@ class ContinueControllerTests(_ControllerTestCase):
         login.assert_not_called()
         self.assertEqual(len(replacement.calls), 1)
         self.assertEqual(replacement.calls[0][0].items, replacement.checkpoints[0])
-        self.assertEqual(_users(load_interaction_save(self.path)), ["hello"])
+        self.assertEqual(_users(load_interaction_save(full_log(self.path))), ["hello"])
 
     async def test_a_literal_prompt_continue_is_user_text(self):
         model = _Model(self.path, _answer("ok"))

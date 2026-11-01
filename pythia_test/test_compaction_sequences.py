@@ -41,6 +41,7 @@ from pythia.interaction.loop.tail import turn_tail
 from pythia.interaction.messages import _messages_http_failure
 from pythia.interaction.runtime_config import parse_config_literal, resolve_compaction_mode
 from pythia.interaction.save import interaction_item_from_dict
+from pythia_test.interaction_helpers import full_log
 
 
 EXEC = ToolSpec("exec_command", "Run a command.", {"type": "object"})
@@ -958,7 +959,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(cli._run(model, environment, terminal, args, self.path),
                                timeout=4)
         self.assertTrue(terminal.exited)
-        return [item.text for item in terminal.items], load_interaction_save(self.path)
+        return [item.text for item in terminal.items], load_interaction_save(full_log(self.path))
 
     def user_results(self, saved):
         return [item.result for item in saved if isinstance(item, UserToolResult)]

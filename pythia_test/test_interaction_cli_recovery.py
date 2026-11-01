@@ -136,7 +136,7 @@ class CLIRecoveryTests(_ControllerTestCase):
             1,
         )
 
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual(
             saved.items[-3:],
             (
@@ -149,7 +149,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         self.assertFalse(any(isinstance(i, TurnSummary) for i in saved))
         displayed = tuple(item.text for item in terminal.items)
         self.assertIn("[assistant] partial but complete item", displayed)
-        self.assertTrue(any(text.startswith("[model failure]") for text in displayed))
+        self.assertTrue(any(text.startswith("[model]") for text in displayed))
 
     async def test_unauthorized_failure_blocks_more_model_queries_until_login(self):
         failure = ModelFailure(
@@ -223,7 +223,7 @@ class CLIRecoveryTests(_ControllerTestCase):
         )
 
         self.assertEqual(executed, [])
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual(saved.pending_tool_calls(), ())
         result = next(
             item for item in reversed(saved.items)

@@ -1430,12 +1430,12 @@ _COLDSTART_LOG_FORMAT = (
     '("output") or "context_prefix" (an earlier compaction).'
 )
 # The same for a public log (save.PublicLogWriter), which has a "nil" line for
-# each item it leaves out.
+# each item it leaves out, and an "error" line for each model failure.
 _PUBLIC_LOG_FORMAT = (
     'Each line is a JSON item with a "type", such as "message" ("role", '
     '"content"), "tool_call" ("name", "arguments_json"), "tool_result" '
-    '("output"), "context_prefix" (an earlier compaction) or "nil" (an item '
-    'left out of this log).'
+    '("output"), "context_prefix" (an earlier compaction), "nil" (an item '
+    'left out of this log) or "error" (a failed model request).'
 )
 # The summary file: the save's path with this suffix in place of ``.jsonl``,
 # as for the debug trace files. Its first line says what it covers, such as

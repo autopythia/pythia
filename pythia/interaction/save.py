@@ -63,7 +63,12 @@ class SaveError(ValueError):
 
 
 class PublicLogError(SaveError):
-    """A ``{"type": "nil"}`` line: the file is a public log, not a full log."""
+    """A ``{"type": "nil"}`` or ``{"type": "error"}`` line: the file is a public
+    log, not a full log."""
+
+
+# The types that only a public log has, and what each stands for.
+_PUBLIC_LOG_TYPES = {"nil": "an item", "error": "a model failure"}
 
 
 _ITEM_TYPES = {
@@ -370,10 +375,11 @@ def interaction_item_from_dict(value: Any) -> InteractionItem:
     """Decode a dictionary produced by ``interaction_item_to_dict``."""
     mapping = _require_mapping(value)
     item_type = mapping.get("type")
-    if item_type == "nil":
+    if isinstance(item_type, str) and item_type in _PUBLIC_LOG_TYPES:
         raise PublicLogError(
-            '"nil" stands for an item that a public log leaves out, so this is not '
-            "a full log (a CLI save keeps its full log in PREFIX._private/context.jsonl)"
+            f'"{item_type}" stands for {_PUBLIC_LOG_TYPES[item_type]} that a public log '
+            "leaves out, so this is not a full log (a CLI save keeps its full log in "
+            "PREFIX._private/context.jsonl)"
         )
     if not isinstance(item_type, str) or item_type not in _ITEM_TYPE_NAMES:
         raise SaveError(f"unknown interaction item type: {item_type!r}")
@@ -1176,12 +1182,17 @@ def resume_interaction_save_lines(path: SavePath) -> ResumedSaveLines:
 
 
 # Public logs: a full log line for line, with its reasoning left out, or shown
-# by its summaries, and without the samples' token traces.
+# by its summaries, without the samples' token traces, and with an error line
+# in place of each model failure.
 
 # A public log has this line in place of each reasoning item of its full log
 # that it doesn't show, so that line N of the public log stands for line N of
 # the full log.
 NIL_LINE = b'{"type": "nil"}\n'
+# And this line in place of each model failure (ModelFailure), whose
+# diagnostics stay in the full log. Until November 2026, a public log had the
+# full log's line, which comparisons still accept (_shown_forms).
+ERROR_LINE = b'{"type": "error"}\n'
 # How a public log shows reasoning (the CLI's save_log_reasoning): "nil",
 # never, with a NIL_LINE for each reasoning item; "assistant", as an assistant
 # message with the item's summary, and a NIL_LINE for an item without one.
@@ -1251,14 +1262,17 @@ def _untraced(record: Dict[str, Any]) -> Dict[str, Any]:
 
 def _public_line(line: bytes, reasoning: str = "nil", thinking: bool = False) -> bytes:
     """A full log's line, without its newline, as its public log has it."""
-    # Only a line that names one of the two types, or a token trace, can
+    # Only a line that names one of these types, or a token trace, can
     # change: skip parsing the others.
-    if b'"reasoning"' in line or b'"context_prefix"' in line or b'"tokens"' in line:
+    if (b'"reasoning"' in line or b'"context_prefix"' in line or b'"tokens"' in line
+            or b'"model_failure"' in line):
         try:
             value = json.loads(line)
         except ValueError:
             value = None
         if isinstance(value, dict):
+            if value.get("type") == "model_failure":
+                return ERROR_LINE
             if value.get("type") == "reasoning":
                 shown = _shown_record(value, reasoning, thinking)
                 return NIL_LINE if shown is None else _record_line(shown)
@@ -1302,8 +1316,9 @@ def public_log_lines(data: bytes, reasoning: str = "nil", *,
     (see :func:`public_log_line`), and a ``context_prefix`` shows the
     reasoning among its items so, leaving out those it wouldn't show. A
     sample's metadata leaves out its token trace, ``tokens``, also among a
-    ``context_prefix``'s items. Every other line is kept byte for byte, blank
-    or not, and each ends with a newline.
+    ``context_prefix``'s items, and a model failure's line is an
+    ``ERROR_LINE``. Every other line is kept byte for byte, blank or not, and
+    each ends with a newline.
     """
     _require_public_log_reasoning(reasoning)
     return [_public_line(piece, reasoning, thinking) for piece in _full_log_lines(data)]
@@ -1320,9 +1335,12 @@ def public_log_line(item: InteractionItem, reasoning: str = "nil", *,
     that is text alone; the CLI sets it for Claude Relay's own thinking,
     which is text alone, as Chat Completions' full reasoning is once saved.
     Encrypted content and signatures never show, nor does a sample's token
-    trace (``SampleMetadata.tokens``).
+    trace (``SampleMetadata.tokens``). A model failure (``ModelFailure``) is an
+    ``ERROR_LINE``, ``{"type": "error"}``: its diagnostics stay in the full log.
     """
     _require_public_log_reasoning(reasoning)
+    if isinstance(item, ModelFailure):
+        return ERROR_LINE
     if isinstance(item, Reasoning):
         message = _reasoning_message(item, reasoning, thinking)
         return NIL_LINE if message is None else _encode_items((message,))
@@ -1352,12 +1370,16 @@ def _same_line(line: bytes, expected: bytes) -> bool:
 
 
 def _shown_forms(piece: bytes, reasoning: str, thinking: bool) -> Iterator[bytes]:
-    """A full log's line, ``piece``, in the given form, then in the others."""
+    """A full log's line, ``piece``, in the given form, then in the others;
+    for a model failure, also the line itself, as public logs had it until
+    November 2026."""
     given = (reasoning, thinking and reasoning != "nil")
     yield _public_line(piece, *given)
     for form in _PUBLIC_LOG_FORMS:
         if form != given:
             yield _public_line(piece, *form)
+    if _public_line(piece) == ERROR_LINE:
+        yield piece + b"\n"
 
 
 def _shows(line: bytes, piece: bytes, reasoning: str, thinking: bool) -> bool:
@@ -1622,6 +1644,7 @@ class PublicLogWriter:
 
 
 __all__ = [
+    "ERROR_LINE",
     "IncompleteSaveLine",
     "InteractionSaveWriter",
     "NIL_LINE",

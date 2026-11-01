@@ -200,7 +200,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         notice = "[cli] Sampling again in 2 s (1/3)."
         self.assertIn(notice, shown)
         self.assertNotIn(HINT, shown)
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         failures = [item for item in saved if isinstance(item, ModelFailure)]
         self.assertEqual([failure.error_code for failure in failures], ["native_tool_name_rejected"])
         self.assertEqual([item.recovery for item in saved if isinstance(item, SampleMetadata)],
@@ -222,7 +222,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         self.assertLess(shown.index("[cli] NativeToolRejected: Native CLI rejected a call to probe: "
                                     "no such tool; its callable name is mcp__pythia__probe"),
                         shown.index(exhausted))
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual(sum(isinstance(item, ModelFailure) for item in saved), 3)
         self.assertEqual([i.call.name for i in saved if isinstance(i, UserToolCall)], ["retry"])
 
@@ -260,7 +260,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         self.assertEqual(shown.count(error), 2)
         self.assertEqual(shown.index(error) + 1,
                          shown.index("[cli] Sampling failed 3 times. Use /retry to try again."))
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual([item.category for item in saved if isinstance(item, ModelFailure)],
                          ["rate_limit"] * 4)
 
@@ -274,9 +274,9 @@ class AutomaticRetryTests(_ControllerTestCase):
                 "--endpoint-rate-limit-retries", "unbounded",
             ]), 0)
         error = "[cli] ModelRateLimitError: Chat Completions HTTP 429: slow down"
-        shown = [("failure" if text.startswith("[model failure]") else text)
+        shown = [("failure" if text.startswith("[model]") else text)
                  for text in (item.text for item in terminal.items)
-                 if text.startswith(("[model failure]", "[cli] Sampling")) or text == error]
+                 if text.startswith(("[model]", "[cli] Sampling")) or text == error]
         self.assertEqual(shown, [
             "failure", "[cli] Sampling again in 0 s (1/∞).",
             "failure", "[cli] Sampling again in 0 s (2/∞).",
@@ -295,9 +295,9 @@ class AutomaticRetryTests(_ControllerTestCase):
                 "--endpoint-rate-limit-retries", "4",
             ]), 1)
         error = "[cli] ModelRateLimitError: Chat Completions HTTP 429: slow down"
-        shown = [("failure" if text.startswith("[model failure]") else text)
+        shown = [("failure" if text.startswith("[model]") else text)
                  for text in (item.text for item in terminal.items)
-                 if text.startswith(("[model failure]", "[cli] Sampling")) or text == error]
+                 if text.startswith(("[model]", "[cli] Sampling")) or text == error]
         self.assertEqual(shown, [
             "failure", "[cli] Sampling again in 0 s (1/5).",
             "failure", "[cli] Sampling again in 0 s (2/5).",
@@ -331,7 +331,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         # Its record showed when it was typed, and is logged where the turn ended.
         record = next(n for n, text in enumerate(shown) if text.startswith("[user-tool-call] cancel"))
         self.assertLess(record, shown.index(cancel_hint))
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         names = [type(item).__name__ for item in saved]
         self.assertLess(names.index("ModelFailure"), names.index("UserToolCall"))
         [result] = [item for item in saved if isinstance(item, UserToolResult)]
@@ -368,7 +368,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         self.assertTrue(cancelled_during.endswith(" (1/8)"), cancelled_during)
         shown = [item.text for item in terminal.items]
         self.assertEqual(shown.count("[cli] Automatic retry cancelled. Use /retry to try again."), 1)
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual(sum(isinstance(item, ModelFailure) for item in saved), 2)
 
     async def test_a_provider_s_long_retry_after_is_not_followed_yet(self):
@@ -404,14 +404,14 @@ class AutomaticRetryTests(_ControllerTestCase):
             ]), 0)
         self.assertEqual(len(opener.calls), 2)
         shown = [item.text for item in terminal.items]
-        [failure] = [text for text in shown if text.startswith("[model failure]")]
+        [failure] = [text for text in shown if text.startswith("[model]")]
         self.assertTrue(failure.startswith(
-            "[model failure] Chat Completions HTTP 503: request failed kind=http_error"), failure)
+            "[model] Chat Completions HTTP 503: request failed kind=http_error"), failure)
         self.assertNotIn("attempts=", failure)  # one request: shown past 1 only
         self.assertIn("[cli] Sampling again in 0 s (1/3).", shown)
         [sample] = [text for text in shown if text.startswith("[sample]")]
         self.assertTrue(sample.endswith(" recovery=http_503_retry"), sample)
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         self.assertEqual([item.recovery for item in saved if isinstance(item, SampleMetadata)],
                          [("http_503_retry",)])
 
@@ -588,7 +588,7 @@ class RetryControllerTests(_ControllerTestCase):
         model = _Model(self.path)
         self.assertEqual(await self._run(model, terminal, ["--resume"]), 0)
         self.assertEqual(model.calls, [])
-        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(full_log(self.path).read_bytes(), before)
         self.assertTrue(any("No retryable" in i.text for i in terminal.items))
         model = _Model(self.path, _answer())
         self.assertEqual(await self._run(model, _Terminal(retry_then_quit()), ["--prompt", "/retry"]), 0)
@@ -845,7 +845,7 @@ class OverflowRecoveryTests(_ControllerTestCase):
                          replace(model.calls[0][2], transient_retries=None))
         self.assertEqual(len(model.calls), 2)
         self.assertEqual(model.calls[1][0].model_items(), (Message("user", "summary"),))
-        saved = load_interaction_save(self.path)
+        saved = load_interaction_save(full_log(self.path))
         # The failure is recorded before the compaction that recovers it.
         failure_index = saved.items.index(OVERFLOW)
         self.assertIsInstance(saved.items[failure_index + 1], ModelSampleBoundary)
@@ -877,7 +877,8 @@ class OverflowRecoveryTests(_ControllerTestCase):
         texts = [item.text for item in terminal.items]
         self.assertIn("[cli] ModelContextWindowError: prompt is too long", texts)
         self.assertIn(HINT, texts)
-        self.assertFalse(any(isinstance(item, ContextPrefix) for item in load_interaction_save(self.path)))
+        saved = load_interaction_save(full_log(self.path))
+        self.assertFalse(any(isinstance(item, ContextPrefix) for item in saved))
 
     async def test_failed_recovery_compaction_fails_the_turn_with_retry(self):
         message = (

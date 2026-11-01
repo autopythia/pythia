@@ -6,9 +6,10 @@ save as ``--save review``, which has these files:
 - ``PREFIX.jsonl``, the public log (the save log): the full log line for
   line, with each reasoning item shown as ``save_log_reasoning`` says while
   its line is written: a ``{"type": "nil"}`` line, or an assistant message
-  with its summary (``save.PublicLogWriter``). It is informational: editing
-  it out-of-band at most causes a warning. Resuming and compaction never
-  read it; coldstart's pointer names it.
+  with its summary (``save.PublicLogWriter``). Each model failure is a
+  ``{"type": "error"}`` line, whose diagnostics stay in the full log. It is
+  informational: editing it out-of-band at most causes a warning. Resuming
+  and compaction never read it; coldstart's pointer names it.
 - ``PREFIX.summary.md``, coldstart compaction's summary, as before.
 - ``PREFIX._private/``, the private directory (mode 0700): ``context.jsonl``,
   the full log, which is all that resuming reads; ``--debug-trace``'s

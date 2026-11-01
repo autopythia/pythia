@@ -156,7 +156,7 @@ class InteractionItemRendererTests(unittest.TestCase):
                 "[reasoning] second",
                 "[reasoning] fallback",
                 "[reasoning] ...",
-                "[model failure] Responses stream closed before "
+                "[model] Responses stream closed before "
                 "response.completed kind=stream_closed provider=codex "
                 "model=model auth_source=codex_file attempts=2 "
                 "request_id=request-1 events=3 completed_items=1 "
@@ -171,7 +171,7 @@ class InteractionItemRendererTests(unittest.TestCase):
         self.assertEqual(tuple(item.label for item in rendered), (
             "system", "developer", "user", "assistant",
             "reasoning", "reasoning", "reasoning", "reasoning",
-            "model failure", "sample", "compaction", "context prefix",
+            "model", "sample", "compaction", "context prefix",
         ))
 
     def test_recovery_lists_show_runs_bounded_and_attempts_past_one(self):
@@ -201,6 +201,31 @@ class InteractionItemRendererTests(unittest.TestCase):
                 self.assertTrue(failure.endswith(f" recovery={shown}"), failure)
                 # One request: a failure line shows its attempts past 1, as the others do.
                 self.assertNotIn("attempts=", failure)
+
+    def test_a_failure_shows_its_event_types_as_runs_bounded(self):
+        # Claude Relay keeps a stream's last 64 events, most of them alike;
+        # Responses counts each type. Either shows as a recovery list does.
+        # Saves keep the whole list.
+        delta = "stream_event/content_block_delta/input_json_delta"
+        cases = (
+            (("response.created:1", "response.output_item.done:1"),
+             "response.created:1,response.output_item.done:1"),
+            (("system/init", "assistant", "assistant"), "system/init,assistant(2)"),
+            ((*(delta,) * 60, "stream_event/content_block_stop", "stream_event/message_delta",
+              "assistant", "stream_event/message_stop"),
+             f"{delta}(60),…(3),stream_event/message_stop"),
+        )
+        for event_types, shown in cases:
+            with self.subTest(shown=shown):
+                failure = ModelFailure("ModelResponseError", "Native CLI stream ended early",
+                                       provider="claude-relay", event_count=101,
+                                       event_types=event_types)
+                (item,) = render_interaction_items((failure,))
+                self.assertEqual(item.label, "model")
+                self.assertTrue(item.text.startswith(
+                    "[model] Native CLI stream ended early kind=ModelResponseError "
+                    "provider=claude-relay events=101 "), item.text)
+                self.assertTrue(item.text.endswith(f" event_types={shown}"), item.text)
 
     def test_signed_thinking_without_text_renders_redacted_placeholder(self):
         # Messages counterpart of encrypted-only Responses reasoning: the

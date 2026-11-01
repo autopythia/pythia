@@ -39,7 +39,8 @@ def full_log(path):
     """The full log of a save: a CLI save's PREFIX._private/context.jsonl once it exists, else ``path``.
 
     The CLI's --save names a prefix (pythia.interaction._cli_save), whose
-    PREFIX.jsonl leaves reasoning out; the demo's --save is the full log.
+    PREFIX.jsonl leaves reasoning and model failures out, so it may not load
+    as a save; the demo's --save is the full log.
     """
     candidate = full_log_path(path)
     return candidate if candidate.exists() else Path(path)
