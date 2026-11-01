@@ -556,6 +556,30 @@ class ResponsesDefaults:
                 _require_identifier(value, name)
 
 
+# What a catalog's [display] section sets: how the frontends show each kind
+# of item; each is the runtime setting "display_" + its name.
+DISPLAY_FIELDS = ("assistant",)
+# display.assistant: markdown styles an assistant message's headings, bold
+# text and tables (_markdown_display); plain shows it as written.
+DISPLAY_ASSISTANT_VALUES = ("markdown", "plain")
+DEFAULT_DISPLAY_ASSISTANT = "markdown"
+
+
+@dataclass(frozen=True)
+class DisplayDefaults:
+    """A catalog's [display] settings; ``None`` leaves the built-in default.
+
+    Launch options and ``/config`` apply over them. They concern the
+    frontends' display only, never a model or its requests.
+    """
+
+    assistant: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.assistant is not None and self.assistant not in DISPLAY_ASSISTANT_VALUES:
+            raise ValueError(f"assistant must be {' or '.join(DISPLAY_ASSISTANT_VALUES)}")
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """A named policy and its single authoritative endpoint."""
@@ -890,13 +914,15 @@ class ModelCatalog:
     auto_models maps auto role names to their default catalog selectors (the
     user catalog's optional [auto] section); other frontends ignore it.
     compaction holds the [compaction] section's settings, which every model
-    bound through the catalog takes under its own (``bind``).
+    bound through the catalog takes under its own (``bind``). display holds
+    the [display] section's, which the frontends read at launch.
     """
 
     specs: Tuple[ModelSpec, ...] = ()
     origins: Mapping = field(default_factory=dict, repr=False)
     auto_models: Mapping = field(default_factory=dict)
     compaction: CompactionDefaults = field(default_factory=CompactionDefaults)
+    display: DisplayDefaults = field(default_factory=DisplayDefaults)
     _index: Mapping = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -913,6 +939,8 @@ class ModelCatalog:
             raise TypeError("catalog auto_models must map role names to model names")
         if not isinstance(self.compaction, CompactionDefaults):
             raise TypeError("catalog compaction must be CompactionDefaults")
+        if not isinstance(self.display, DisplayDefaults):
+            raise TypeError("catalog display must be DisplayDefaults")
         if (self.compaction.mode is not None
                 and "provider" in _compaction_grammar().compaction_methods(self.compaction.mode)):
             raise ValueError(f"[compaction] mode: {SECTION_PROVIDER_ERROR}")
@@ -1077,6 +1105,10 @@ __all__ = [
     "OPENAI_RESPONSES_API_URL",
     "COMPACTION_DEFAULT_FIELDS",
     "CompactionDefaults",
+    "DEFAULT_DISPLAY_ASSISTANT",
+    "DISPLAY_ASSISTANT_VALUES",
+    "DISPLAY_FIELDS",
+    "DisplayDefaults",
     "ModelLimits",
     "ModelCatalog",
     "ModelBinding",

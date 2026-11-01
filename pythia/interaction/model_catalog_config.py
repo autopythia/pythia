@@ -14,6 +14,7 @@ from .model_catalog import BUILTIN_MODEL_CATALOG
 from .model_catalog import COMPACTION_DEFAULT_FIELDS, CompactionDefaults
 from .model_catalog import SECTION_PROVIDER_ERROR, compaction_route_error
 from .model_catalog import ModelCatalog, ModelLimits, ModelSpec, ModelTimeouts
+from .model_catalog import DISPLAY_ASSISTANT_VALUES, DISPLAY_FIELDS, DisplayDefaults
 from .model_catalog import EndpointSpec
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
@@ -322,7 +323,8 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             version = LATEST_MODEL_CATALOG_VERSION
             assumed_version = True
         sections = [section for section in parser.sections() if section != "catalog"]
-        sections = [section for section in sections if section not in ("auto", "compaction")]
+        sections = [section for section in sections
+                    if section not in ("auto", "compaction", "display")]
         if len(sections) > MAX_CATALOG_MODELS or any(not section.startswith("model.") for section in sections):
             raise ValueError()
     except (configparser.Error, ValueError):
@@ -371,7 +373,8 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             # No values from extra sample params/credentials should appear in errors.
             raise ValueError(f"Invalid model catalog entry {section!r} in {source}") from None
     try:
-        catalog = ModelCatalog(tuple(specs.values()), origins, compaction=base.compaction)
+        catalog = ModelCatalog(tuple(specs.values()), origins, compaction=base.compaction,
+                               display=base.display)
     except ValueError:
         raise ValueError(f"Model catalog selector/alias collision in {source}") from None
     if parser.has_section("auto"):
@@ -381,6 +384,9 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
     if parser.has_section("compaction"):
         catalog = replace(catalog, compaction=_compaction_section(
             parser["compaction"], catalog.compaction, source))
+    if parser.has_section("display"):
+        catalog = replace(catalog, display=_display_section(
+            parser["display"], catalog.display, source))
     if assumed_version:
         warnings.warn(
             f"Model catalog {source!r} does not specify a version; assuming latest "
@@ -446,6 +452,25 @@ def _compaction_section(section, base, source):
         except ValueError as exc:
             raise ValueError(f"Invalid model catalog [compaction] {key} in {source}: {exc}") from None
     return CompactionDefaults(**values)
+
+
+def _display_section(section, base, source):
+    """[display]: how the frontends show each kind of item, over ``base``'s;
+    null unsets one."""
+    values = dict(vars(base))
+    for key, raw in section.items():
+        if key not in DISPLAY_FIELDS:
+            raise ValueError(f"Invalid model catalog [display] key {key!r} in {source}; "
+                             f"expected {_alternatives(DISPLAY_FIELDS)}")
+        try:
+            value = _text(raw)
+        except ValueError:
+            value = raw
+        if value is not None and value not in DISPLAY_ASSISTANT_VALUES:
+            raise ValueError(f"Invalid model catalog [display] {key} in {source}: expected "
+                             f"{_alternatives([*DISPLAY_ASSISTANT_VALUES, 'null'])}")
+        values[key] = value
+    return DisplayDefaults(**values)
 
 
 def load_model_catalog(path=None, *, enabled=True, base=BUILTIN_MODEL_CATALOG):

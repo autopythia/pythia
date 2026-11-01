@@ -18,6 +18,8 @@ from typing import Tuple
 
 from ._provider_text import QUOTED_VALUE_CHARS
 from ._provider_text import quoted
+from ._cli_editor import safe_text
+from ._markdown_display import style_markdown
 from .compaction import _compaction_summary_text
 from .compaction import is_coldstart_pointer
 from .items import CompactionMetadata
@@ -107,14 +109,19 @@ class DisplayItem:
     blocks, the Contradex diff colorscheme.
 
     ``label`` optionally identifies the renderer-owned leading ``[label]``
-    token in ``text``. It does not affect printing or equality; frontends can
-    use it to add attribution without mistaking bracket-leading payloads for
-    labels.
+    token in ``text``. It does not affect equality; frontends can use it to
+    add attribution without mistaking bracket-leading payloads for labels.
+
+    ``is_markdown`` marks an assistant message's text, which printing shows
+    with its markdown styled (``_markdown_display``): headings, bold and
+    tables, after the label. A frontend that shows it as written
+    (``display.assistant = plain``) clears it. Never with ``is_diff``.
     """
 
     text: str
     is_diff: bool = field(default=False)
     label: Optional[str] = field(default=None, compare=False, repr=False)
+    is_markdown: bool = field(default=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
@@ -127,6 +134,10 @@ class DisplayItem:
             )
         if not isinstance(self.is_diff, bool):
             raise TypeError("display item is_diff must be a bool")
+        if not isinstance(self.is_markdown, bool):
+            raise TypeError("display item is_markdown must be a bool")
+        if self.is_diff and self.is_markdown:
+            raise ValueError("a display item is a diff or markdown, not both")
         if self.label is not None:
             if not isinstance(self.label, str):
                 raise TypeError("display item label must be a string or None")
@@ -134,8 +145,40 @@ class DisplayItem:
                 raise ValueError("display item label must match its leading [label] token")
 
     def __str__(self) -> str:
-        text = _colorize_diff_text(self.text) if self.is_diff else self.text
+        return self.render()
+
+    def render(self, *, width: Optional[int] = None) -> str:
+        """The block as a terminal prints it, ``text`` decorated: the gutter,
+        and a diff's colors or a markdown item's styles. ``width`` is the
+        terminal's columns, which markdown tables fit (less the gutter's);
+        None leaves them at their natural widths.
+
+        ``text`` must already be safe (``_cli_editor.safe_text``): the escape
+        sequences added here are the only ones a terminal should act on.
+        """
+        if self.is_diff:
+            text = _colorize_diff_text(self.text)
+        elif self.is_markdown:
+            prefix = _label_prefix(self.text, self.label)
+            text = style_markdown(
+                self.text[len(prefix):], prefix=prefix,
+                width=None if width is None else max(1, width - _GUTTER_COLUMNS),
+            )
+        else:
+            text = self.text
         return _quote_wrap_display_text(text)
+
+
+def safe_display_item(item: DisplayItem) -> DisplayItem:
+    """``item`` with its text safe for a terminal (``_cli_editor.safe_text``),
+    to print: content's controls show as code points, so that only the ANSI
+    that printing adds acts on the terminal. The label and the markdown
+    marker stay, so that styling starts after the label."""
+    text = safe_text(item.text)
+    label = item.label
+    if label is not None and not text.startswith(f"[{label}]"):
+        label = None
+    return DisplayItem(text, is_diff=item.is_diff, label=label, is_markdown=item.is_markdown)
 
 
 @dataclass(frozen=True)
@@ -184,6 +227,7 @@ class InteractionItemRenderer:
             blocks: Tuple[str, ...]
             label: Optional[str] = None
             diff_block_indices: Set[int] = set()
+            markdown_block_indices: Set[int] = set()
             if isinstance(item, UserToolCall):
                 label = "user-tool-call"
                 user_call_by_id[item.call.call_id] = item.call
@@ -204,6 +248,8 @@ class InteractionItemRenderer:
             elif isinstance(item, Message):
                 label = item.role.strip() or "message"
                 blocks = _render_message(item)
+                if label == "assistant" and item.content_text.strip():
+                    markdown_block_indices.add(0)  # the text; images follow it
             elif isinstance(item, Reasoning):
                 label = "reasoning"
                 blocks = _render_reasoning(item)
@@ -259,6 +305,7 @@ class InteractionItemRenderer:
                                 self.color
                                 and block_index in diff_block_indices
                             ),
+                            is_markdown=block_index in markdown_block_indices,
                             # Extra tool-call and context-prefix blocks are
                             # literal payloads, even when their text happens
                             # to start with [a label].
@@ -939,6 +986,18 @@ def _colorize_diff_text(payload: str) -> str:
 
 def _bright_black(text: str) -> str:
     return f"{_ANSI_BRIGHT_BLACK}{text}{_ANSI_RESET}"
+
+
+# The columns that the gutter takes on each line (_quote_wrap_display_text).
+_GUTTER_COLUMNS = 4
+
+
+def _label_prefix(text: str, label: Optional[str]) -> str:
+    """The leading ``[label]`` of ``text`` and the space after it, if any."""
+    if label is None:
+        return ""
+    prefix = f"[{label}]"
+    return prefix + " " if text.startswith(prefix + " ") else prefix
 
 
 def _quote_wrap_display_text(text: str) -> str:

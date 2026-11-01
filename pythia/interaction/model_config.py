@@ -26,6 +26,8 @@ from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
 from .model_catalog import COMPACTION_DEFAULT_FIELDS
 from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
+from .model_catalog import DISPLAY_ASSISTANT_VALUES
+from .model_catalog import DISPLAY_FIELDS
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
@@ -254,6 +256,10 @@ def prepare_namespace(args, catalog=None):
     values = vars(args).copy()
     values.update(model_api=binding.api, model_binding=binding, _endpoint_prepared=True,
                   model=binding.selector if binding.selector is not None else endpoint.model)
+    if catalog is not None:
+        # The catalog's [display] value: how a config resolves display_assistant
+        # when no option sets it, and what /config's null restores.
+        values["catalog_display_assistant"] = catalog.display.assistant
     return argparse.Namespace(**values)
 
 
@@ -287,6 +293,10 @@ def render_model_catalog(catalog):
     compaction = _compaction_settings(catalog.compaction)
     if compaction:
         lines.append("[compaction] " + ", ".join(f"{name} = {value}" for name, value in compaction))
+    display = [(name, getattr(catalog.display, name)) for name in DISPLAY_FIELDS
+               if getattr(catalog.display, name) is not None]
+    if display:
+        lines.append("[display] " + ", ".join(f"{name} = {value}" for name, value in display))
     return "\n".join(lines)
 
 
@@ -644,6 +654,17 @@ def build_parser(description: str, *, allow_prompt_file: bool = False,
             "default tools, the model also gets a media tool that "
             "attaches images to its own context in the same way; "
             "launch-only (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--display-assistant",
+        choices=DISPLAY_ASSISTANT_VALUES,
+        default=None,
+        help=(
+            "how assistant messages show: markdown styles their headings, bold text and "
+            "tables with ANSI escapes, fitting tables to the terminal; plain shows them as "
+            "written. Tunable with /config display_assistant in the CLI (default: the model "
+            "catalog's [display] assistant, else markdown)"
         ),
     )
     parser.add_argument(

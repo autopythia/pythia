@@ -20,6 +20,7 @@ from contextlib import nullcontext
 from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import datetime
 from datetime import time as day_time
 from datetime import timedelta
@@ -2580,6 +2581,16 @@ def _approval_seconds_argument(key: str, low: int, high: int):
     return seconds
 
 
+def _shown_items(state: _UIState, config) -> Tuple[DisplayItem, ...]:
+    """The items to show now: as rendered, or with assistant messages as
+    written while display_assistant is plain. It is read live, so that a
+    /config change applies from the next item shown."""
+    items = tuple(state.displays)
+    if config.get("display_assistant") != "plain":
+        return items
+    return tuple(replace(item, is_markdown=False) if item.is_markdown else item for item in items)
+
+
 def _cli_renderer(args, approval: Union[bool, str] = False) -> InteractionItemRenderer:
     """How the CLI shows the model's tool calls: exec_command's workdir when
     it isn't --cwd, and a call that awaits approval in full."""
@@ -3727,7 +3738,7 @@ async def _run(
     with terminal:
         try:
             # Draw the pre-filled editor before starting startup I/O/auto-submit.
-            terminal.render(state.editor, "starting", tuple(state.displays))
+            terminal.render(state.editor, "starting", _shown_items(state, config))
             state.displays.clear()
             worker = asyncio.create_task(
                 _drive_interaction(model, environment, state, args, save, config)
@@ -3790,7 +3801,7 @@ async def _run(
                     f"{_SPINNER[(frame // 16) % len(_SPINNER)]}> "
                     if busy else ":> "
                 )
-                terminal.render(state.editor, status, tuple(state.displays), prompt)
+                terminal.render(state.editor, status, _shown_items(state, config), prompt)
                 state.displays.clear()
                 if worker.done():
                     worker.result()

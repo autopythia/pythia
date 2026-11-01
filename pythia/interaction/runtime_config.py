@@ -27,7 +27,9 @@ from .messages import resolve_messages_max_output_tokens
 from .model import SampleParams
 from .model_catalog import ModelBinding
 from .model_catalog import CompactionDefaults
+from .model_catalog import DEFAULT_DISPLAY_ASSISTANT
 from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
+from .model_catalog import DISPLAY_ASSISTANT_VALUES
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
 from .model_catalog import TOKEN_TRACE_LEVELS
@@ -55,6 +57,7 @@ CONFIG_KEYS = (
     "compaction_pi_max_output_tokens",
     "compaction_coldstart_reboot",
     "save_log_reasoning",
+    "display_assistant",
     "tool_approval_auto_seconds",
     "tool_approval_ui_countdown_seconds",
     "extra_sample_params",
@@ -176,6 +179,12 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
         if not isinstance(value, str) or value not in PUBLIC_LOG_REASONING:
             raise ConfigError(f"save_log_reasoning requires {_SAVE_LOG_REASONING_VALUES}.")
         return value
+    if key == "display_assistant":
+        # None restores the catalog's [display] assistant, else markdown.
+        if value is not None and (not isinstance(value, str)
+                                  or value not in DISPLAY_ASSISTANT_VALUES):
+            raise ConfigError("display_assistant requires markdown, plain, or null.")
+        return value
     if key == "endpoint_prompt_caching":
         # None means the route has none: only Messages caches by request.
         if value is not None and (not isinstance(value, str) or value not in PROMPT_CACHING_VALUES):
@@ -250,7 +259,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     Integers, booleans, and null for every key; seconds keys also take plain
     decimals such as ``90.5``. ``compaction_mode`` takes a compaction
     sequence, such as ``coldstart,pi:2``, or null; ``save_log_reasoning``
-    takes ``nil`` or ``assistant``, as they are; ``endpoint_prompt_caching``
+    takes ``nil`` or ``assistant``, as they are, and ``display_assistant``
+    ``markdown``, ``plain`` or null; ``endpoint_prompt_caching``
     takes ``5m``, ``1h`` or ``none``, ``endpoint_rate_limit_retries``
     ``unbounded`` too, and ``endpoint_token_trace`` a level
     (``TOKEN_TRACE_LEVELS``). The tool-approval timers
@@ -268,6 +278,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
         return validate_config_value(key, None if literal in ("null", "None") else literal)
     if key == "save_log_reasoning":
         return validate_config_value(key, literal)
+    if key == "display_assistant":
+        return validate_config_value(key, None if literal in ("null", "None") else literal)
     if key == "endpoint_prompt_caching":
         # none is a value here (no cache_control); null restores the default.
         return validate_config_value(key, None if literal in ("null", "None") else literal)
@@ -520,6 +532,13 @@ class InteractionConfigSnapshot:
     summary, when it has one (``save.public_log_line``). Only the CLI has a
     save log; other hosts ignore it.
 
+    ``display_assistant`` says how the frontends show assistant messages:
+    ``markdown``, with their headings, bold text and tables styled
+    (``_markdown_display``), or ``plain``, as written. Bound configs resolve
+    it: the launch option, else the model catalog's ``[display]`` value,
+    else ``markdown``. The CLI reads it live, for each item it shows; auto
+    and the demo, at launch.
+
     Tool approval's timers, in the CLI (``cli._CliHost.tool_approval``),
     which reads them at each approval prompt rather than once per turn:
 
@@ -553,6 +572,7 @@ class InteractionConfigSnapshot:
     compaction_pi_max_output_tokens: Optional[int] = None
     compaction_coldstart_reboot: bool = False
     save_log_reasoning: str = "nil"
+    display_assistant: Optional[str] = DEFAULT_DISPLAY_ASSISTANT
     tool_approval_auto_seconds: Optional[int] = None
     tool_approval_ui_countdown_seconds: Optional[int] = None
     extra_sample_params: Mapping = field(default_factory=dict)
@@ -615,7 +635,10 @@ class InteractionConfig:
     lose coldstart, and a change that asks for coldstart is refused.
     ``coldstart_dropped`` records a launch value that lost it, as the value
     before and after, unless that value was the default, the catalog's or the
-    built-in one, which loses it silently. The tool-approval timers apply
+    built-in one, which loses it silently. ``display_assistant``'s unset
+    value is the catalog's ``[display]`` value
+    (``display_assistant_fallback``), else ``markdown``. The tool-approval
+    timers apply
     only with ``tool_approval_auto_seconds_applies=True`` and
     ``tool_approval_ui_countdown_seconds_applies=True``, which only the CLI's
     namespaces set (``tool_approval_auto_applies``,
@@ -649,6 +672,7 @@ class InteractionConfig:
         tool_approval_auto_seconds_applies: bool = False,
         tool_approval_ui_countdown_seconds_fallback: Optional[int] = None,
         tool_approval_ui_countdown_seconds_applies: bool = False,
+        display_assistant_fallback: Optional[str] = None,
     ) -> None:
         if not isinstance(snapshot, InteractionConfigSnapshot):
             raise TypeError("snapshot must be InteractionConfigSnapshot")
@@ -704,6 +728,7 @@ class InteractionConfig:
                 ("compaction_pi_max_output_tokens", compaction_pi_max_output_tokens_fallback),
                 ("tool_approval_ui_countdown_seconds",
                  tool_approval_ui_countdown_seconds_fallback),
+                ("display_assistant", display_assistant_fallback or DEFAULT_DISPLAY_ASSISTANT),
             )
         }
         self._require_max_output_tokens = require_max_output_tokens
@@ -912,6 +937,7 @@ class InteractionConfig:
                 # A CLI option: other frontends' namespaces have none.
                 compaction_coldstart_reboot=getattr(args, "compaction_coldstart_reboot", False),
                 save_log_reasoning=getattr(args, "save_log_reasoning", "nil"),
+                display_assistant=getattr(args, "display_assistant", None),
                 tool_approval_auto_seconds=auto,
                 tool_approval_ui_countdown_seconds=countdown,
                 extra_sample_params=binding.extra_sample_params,
@@ -950,6 +976,8 @@ class InteractionConfig:
             tool_approval_ui_countdown_seconds_fallback=(
                 DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS if countdown_applies else None),
             tool_approval_ui_countdown_seconds_applies=countdown_applies,
+            # Carried from the catalog by prepare_namespace.
+            display_assistant_fallback=getattr(args, "catalog_display_assistant", None),
         )
 
     @classmethod

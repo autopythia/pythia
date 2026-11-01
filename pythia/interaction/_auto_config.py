@@ -26,6 +26,7 @@ from .model_config import _boolean_argument
 from .model_config import add_renamed_options
 from .model_config import compaction_mode_argument
 from .model_config import add_catalog_arguments, add_endpoint_arguments, prepare_namespace
+from .model_catalog import DISPLAY_ASSISTANT_VALUES
 from .model_catalog import BUILTIN_MODEL_CATALOG, freeze_extra_sample_params, thaw_json
 from .runtime_config import InteractionConfig
 from .runtime_config import RENAMED_CONFIG_KEYS
@@ -610,6 +611,12 @@ def build_parser():
               "and local .txt/.md files are pasted as text, with main's cwd and workspace "
               "setting. Launch-only; not with --enable-experimental-worker-board "
               "(default: %(default)s)"),
+    )
+    parser.add_argument(
+        "--display-assistant", choices=DISPLAY_ASSISTANT_VALUES, default=None,
+        help=("how every role's assistant messages show: markdown styles their headings, "
+              "bold text and tables with ANSI escapes; plain shows them as written. "
+              "Launch-only (default: the model catalog's [display] assistant, else markdown)"),
     )
     parser.add_argument("--instructions", default=argparse.SUPPRESS,
                         help="main's instructions; other roles keep their own")

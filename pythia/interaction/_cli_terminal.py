@@ -13,6 +13,7 @@ from ._cli_editor import cell_width
 from ._cli_editor import layout_editor
 from ._cli_editor import safe_text
 from .display import DisplayItem
+from .display import safe_display_item
 
 
 class PosixTerminal:
@@ -97,8 +98,9 @@ class PosixTerminal:
             cursor_row += 1
         parts = [self._clear()]
         for item in items:
-            # Sanitize raw content BEFORE __str__ adds trusted gutter/diff ANSI.
-            rendered = str(DisplayItem(safe_text(item.text), is_diff=item.is_diff))
+            # Sanitize raw content BEFORE rendering adds trusted gutter, diff and
+            # markdown ANSI; markdown tables fit the terminal's columns.
+            rendered = safe_display_item(item).render(width=columns)
             parts.extend((rendered.replace("\n", "\r\n"), "\r\n"))
         parts.append("\r\n".join(lines))
         parts.append("\r")

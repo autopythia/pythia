@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import signal
 import sys
 import threading
@@ -49,6 +50,7 @@ from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem, render_interaction_items  # noqa: F401 (re-exported)
 from .display import message_summary
+from .display import safe_display_item
 from .environment import Environment, Tool, ToolOutcome, ToolSpec
 from .items import Init, Instructions, Message, ToolResult, Tools, UserInteractionBoundary
 from .items import UserToolResult
@@ -59,6 +61,8 @@ from .model_config import MESSAGES_FIELDS, relay_endpoint
 from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
 from .model_catalog import BUILTIN_MODEL_CATALOG
+from .model_catalog import DEFAULT_DISPLAY_ASSISTANT
+from .model_catalog import DISPLAY_ASSISTANT_VALUES
 from .compaction import coldstart_unavailable
 from .runtime_config import InteractionConfig
 from .save import InteractionSaveWriter, SaveError, resume_interaction_save
@@ -483,9 +487,13 @@ class _Session:
                  debug_save_model_binding=False, debug_trace=False,
                  enable_experimental_worker_board=False,
                  watcher_observe_only=False, enable_default_tools=True,
-                 enable_experimental_media=False):
+                 enable_experimental_media=False, display_assistant=DEFAULT_DISPLAY_ASSISTANT):
         if type(enable_board_auth) is not bool:
             raise TypeError("enable_board_auth must be a bool.")
+        if display_assistant not in DISPLAY_ASSISTANT_VALUES:
+            raise ValueError(f"display_assistant must be {' or '.join(DISPLAY_ASSISTANT_VALUES)}.")
+        # How assistant messages show (display.assistant), for the whole run.
+        self.display_assistant = display_assistant
         if type(debug_save_model_binding) is not bool:
             raise TypeError("debug_save_model_binding must be a bool.")
         if type(debug_trace) is not bool:
@@ -1638,6 +1646,8 @@ class _Session:
 
 
 def _display_events(session, events):
+    # Assistant messages show as markdown, or as written (display.assistant).
+    markdown = getattr(session, "display_assistant", DEFAULT_DISPLAY_ASSISTANT) == "markdown"
     items = []
     for event in events:
         if event.index is None:
@@ -1653,13 +1663,17 @@ def _display_events(session, events):
                 # code that starts with brackets. This is still one item.
                 label = context
                 text = f"[{label}]\n{item.text}"
-            items.append(DisplayItem(text, is_diff=item.is_diff, label=label))
+            items.append(DisplayItem(text, is_diff=item.is_diff, label=label,
+                                     is_markdown=item.is_markdown and markdown))
     return items
 
 
 def _print_events(session):
+    # Markdown tables fit a terminal's columns; elsewhere they keep their
+    # natural widths.
+    columns = shutil.get_terminal_size().columns if sys.stdout.isatty() else None
     for item in _display_events(session, session.drain_events()):
-        print(DisplayItem(safe_text(item.text), is_diff=item.is_diff), flush=True)
+        print(safe_display_item(item).render(width=columns), flush=True)
 
 
 # The event kinds that headless runs print, on stderr.
@@ -2116,7 +2130,9 @@ def main(argv=None):
                            enable_experimental_worker_board=args.enable_experimental_worker_board,
                            watcher_observe_only=args.watcher_observe_only,
                            enable_default_tools=args.enable_default_tools,
-                           enable_experimental_media=args.enable_experimental_media)
+                           enable_experimental_media=args.enable_experimental_media,
+                           display_assistant=(args.display_assistant or catalog.display.assistant
+                                              or DEFAULT_DISPLAY_ASSISTANT))
         # The prompt's attachments, before start() creates the save: a bad @
         # reference fails here and leaves no save directory behind, which a
         # corrected command would then refuse without --resume.

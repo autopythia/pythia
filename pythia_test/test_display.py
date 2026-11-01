@@ -355,7 +355,7 @@ class InteractionItemRendererTests(unittest.TestCase):
             sample.display_items(),
             (
                 DisplayItem("[reasoning] inspect"),
-                DisplayItem("[assistant] answer"),
+                DisplayItem("[assistant] answer", is_markdown=True),
                 DisplayItem(
                     "[sample] input=20 output=5 total=25 cached=4"
                 ),

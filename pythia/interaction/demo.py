@@ -16,6 +16,7 @@ from .compaction import coldstart_unavailable
 from .context import InteractionContext
 from .default_environment import DefaultEnvironment
 from .display import DisplayItem
+from .display import safe_display_item
 from .display import render_interaction_items
 from .environment import Environment
 from .experimental_tools import create_inject_user_message_tool
@@ -40,6 +41,8 @@ from .model_config import build_parser
 from .model_config import initial_model_name
 from .model_config import resolve_save_path
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
+from .model_catalog import DEFAULT_DISPLAY_ASSISTANT
+from .model_catalog import DISPLAY_ASSISTANT_VALUES
 from .model_catalog import ModelBinding
 from ._model_binding_debug import debug_model_binding_path
 from ._model_binding_debug import save_debug_model_bindings
@@ -71,19 +74,24 @@ EXPERIMENTAL_USER_MESSAGE_PROMPT = (
 )
 
 
-def _show(item: DisplayItem) -> None:
+def _show(item: DisplayItem, *, markdown: bool = True) -> None:
     """Print a display item, its content's controls made visible first, as the
-    CLI and auto print theirs (safe_text): model and provider text must not
-    drive the terminal."""
-    print(DisplayItem(safe_text(item.text), is_diff=item.is_diff))
+    CLI and auto print theirs (safe_display_item): model and provider text
+    must not drive the terminal. Without ``markdown`` (display.assistant
+    plain), an assistant message shows as written. The item itself is
+    printed, so its markdown tables keep their natural widths."""
+    if item.is_markdown and not markdown:
+        item = DisplayItem(item.text, is_diff=item.is_diff, label=item.label)
+    print(safe_display_item(item))
 
 
 class _DemoHost(TurnHost):
     """The demo's side of the shared loop: save after each change, print items."""
 
-    def __init__(self, persist, log_path=None):
+    def __init__(self, persist, log_path=None, show=_show):
         self._persist = persist
         self._log_path = log_path
+        self._show = show
 
     def log_path(self):
         return self._log_path
@@ -94,7 +102,7 @@ class _DemoHost(TurnHost):
 
     def show(self, items):
         for item in items:
-            _show(item)
+            self._show(item)
 
 
 def _accept_old_keywords(run):
@@ -142,9 +150,13 @@ def run(
     compaction_mode: Optional[str] = None,
     compaction_pi_keep_recent_tokens: Optional[int] = None,
     compaction_pi_max_output_tokens: Optional[int] = None,
+    display_assistant: str = DEFAULT_DISPLAY_ASSISTANT,
 ) -> str:
     if not hasattr(model, "sample") or not callable(model.sample):
         raise TypeError("model must provide sample(...)")
+    if display_assistant not in DISPLAY_ASSISTANT_VALUES:
+        raise ValueError(f"display_assistant must be {' or '.join(DISPLAY_ASSISTANT_VALUES)}")
+    show = functools.partial(_show, markdown=display_assistant == "markdown")
     if not isinstance(environment, Environment):
         raise TypeError("environment must be Environment")
     if not isinstance(resume, bool):
@@ -241,7 +253,7 @@ def run(
 
         # Restore the human-visible transcript as well as the model state.
         for display_item in render_interaction_items(context.items):
-            _show(display_item)
+            show(display_item)
         if incomplete_line is not None:
             # The startup save below truncates the line.
             print(incomplete_line.warning(Path(save_path).name), file=sys.stderr)
@@ -292,15 +304,15 @@ def run(
         context.extend(result.context_items())
         _persist()
         for display_item in result.display_items(source_calls=pending_calls):
-            _show(display_item)
+            show(display_item)
     if tools_snapshot != context.latest_tools():
         context.append(tools_snapshot)
         _persist()
         for display_item in render_interaction_items((tools_snapshot,)):
-            _show(display_item)
+            show(display_item)
     elif not resumed_existing_save:
         for display_item in render_interaction_items((tools_snapshot,)):
-            _show(display_item)
+            show(display_item)
 
     if (
         not pending_calls and resumed_existing_save
@@ -317,7 +329,7 @@ def run(
         context.extend((instructions_item,))
         _persist()
         for display_item in render_interaction_items((instructions_item,)):
-            _show(display_item)
+            show(display_item)
 
     if prompt is not None:
         # For a resumed save, add the follow-up only after any pending
@@ -334,10 +346,11 @@ def run(
         context.extend(user_interaction.context_items())
         _persist()
         for display_item in user_interaction.display_items():
-            _show(display_item)
+            show(display_item)
 
     result = run_turn(context, model, environment, turn_config,
-                      _DemoHost(_persist, None if save_path is None else Path(save_path)),
+                      _DemoHost(_persist, None if save_path is None else Path(save_path),
+                                show=show),
                       sample_params=sample_params)
     return result.final_text
 
@@ -450,6 +463,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 compaction_mode=config.compaction_mode,
                 compaction_pi_keep_recent_tokens=config.compaction_pi_keep_recent_tokens,
                 compaction_pi_max_output_tokens=config.compaction_pi_max_output_tokens,
+                display_assistant=config.display_assistant,
             )
     except Exception as exc:
         print(safe_text(f"demo failed: {exc}"), file=sys.stderr)

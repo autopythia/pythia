@@ -53,6 +53,7 @@ DEMO_ARGUMENT_DEFAULTS = {
     "enable_auto_compaction": True,
     "enable_workspace": True,
     "enable_experimental_media": False,
+    "display_assistant": None,
     "auto_compaction_context_tokens": None,
     "compaction_mode": None,
     "compaction_pi_keep_recent_tokens": None,
