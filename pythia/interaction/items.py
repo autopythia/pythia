@@ -42,7 +42,8 @@ def _validate_elapsed_seconds(value: object) -> Optional[float]:
 
 
 def _fresh_prefix_id() -> str:
-    return f"session_{uuid.uuid4().hex}"
+    # A context's key: older saves have session_ in place of context_.
+    return f"context_{uuid.uuid4().hex}"
 
 
 @dataclass(frozen=True)

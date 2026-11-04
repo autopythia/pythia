@@ -1439,7 +1439,7 @@ _PUBLIC_LOG_FORMAT = (
 )
 # The summary file: the save's path with this suffix in place of ``.jsonl``,
 # as for the debug trace files. Its first line says what it covers, such as
-# "Covers lines 1–3756 of session_4a8f….", and the rest is pi's format.
+# "Covers lines 1–3756 of context_4a8f….", and the rest is pi's format.
 _SUMMARY_SUFFIX = ".summary.md"
 # Only this much of the summary is read: its first line.
 _SUMMARY_LINE_BYTES = 4_096

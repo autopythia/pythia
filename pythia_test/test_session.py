@@ -158,12 +158,12 @@ class SessionTests(unittest.TestCase):
             '{"type": "init", "prefix_id": "prefix-1", "model": "model-1"}\n',
         )
 
-    def test_init_uses_prefix_id_without_changing_generated_id_format(self):
+    def test_init_uses_prefix_id_and_generates_a_context_key(self):
         init = Init(prefix_id="prefix-test")
 
         self.assertEqual(init.prefix_id, "prefix-test")
         self.assertFalse(hasattr(init, "session_id"))
-        self.assertRegex(Init().prefix_id, r"^session_[0-9a-f]{32}$")
+        self.assertRegex(Init().prefix_id, r"^context_[0-9a-f]{32}$")
 
     def test_context_prefix_uses_prefix_items_and_canonical_codec(self):
         checkpoint = ContextPrefix(

@@ -108,6 +108,9 @@ class SaveArgumentTests(_SavePathTestCase):
         self.assertFalse(cli_args.pop("compaction_coldstart_reboot"))
         self.assertEqual(cli_args.pop("save_log_reasoning"), "nil")
         self.assertIsNone(cli_args.pop("rebooted"))
+        self.assertIsNone(cli_args.pop("registry"))
+        self.assertIsNone(cli_args.pop("context"))
+        self.assertFalse(cli_args.pop("list_roots"))
         self.assertIsNone(cli_args.pop("prompt_file"))
         self.assertEqual(cli_args, demo_args)
 

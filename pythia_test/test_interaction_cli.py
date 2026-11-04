@@ -225,6 +225,9 @@ for module in (cli, demo):
             self.assertEqual(cli_args.pop("save_log_reasoning"), "nil")
             self.assertIsNone(cli_args.pop("rebooted"))
             self.assertIsNone(cli_args.pop("prompt_file"))
+            self.assertIsNone(cli_args.pop("registry"))
+            self.assertIsNone(cli_args.pop("context"))
+            self.assertFalse(cli_args.pop("list_roots"))
             self.assertTrue(cli_args.pop("auto_migrate_save"))
             # Same option, different defaults: only the CLI resumes unless told otherwise.
             self.assertTrue(cli_args.pop("resume"))

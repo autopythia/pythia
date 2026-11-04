@@ -130,6 +130,11 @@ from .model_config import resolve_save_path
 from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
 from ._model_binding_debug import save_debug_model_bindings
+from .registry import Registry
+from .registry import RegistryError
+from .registry import registry_path
+from .registry import render_roots
+from .registry import save_prefix_of
 from .runtime_config import ConfigError
 from .runtime_config import DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS
 from .runtime_config import InteractionConfig
@@ -3198,6 +3203,9 @@ async def _drive_interaction_body(
                     await _checkpoint(context, state, writer)
                 if state.closing:
                     return
+                # Once the full log holds the key, so that no link points to
+                # a log without it.
+                await _register_root(context, state, args, save)
                 if tools_snapshot != context.latest_tools():
                     # Compare the raw log, not its compacted model projection.
                     # Runtime tools are never restored from these snapshots.
@@ -3536,6 +3544,69 @@ def _prepared_save(path, args) -> CliSave:
                             reasoning=getattr(args, "save_log_reasoning", "nil"))
 
 
+def _roots_listing(args) -> str:
+    """``--list-roots``: the registry's root contexts by short number."""
+    path = registry_path(args.registry)
+    if path is None:
+        return "The registry is off: --registry or PYTHIA_REGISTRY is none."
+    return render_roots(path, Registry(path).entries(), home=str(Path.home()))
+
+
+def _open_context(args) -> None:
+    """``--context``: resume the save of the root context it names, as ``--save`` would.
+
+    Raises ``RegistryError`` or ``ValueError``, which end the launch.
+    """
+    if args.context is None:
+        return
+    # An option that isn't given keeps its default, this very object.
+    if args.save_path is not DEFAULT_SAVE_PREFIX:
+        raise ValueError("--context names the save to resume; give it or --save, not both")
+    if not args.resume:
+        raise ValueError("--context resumes the save of a root context; --resume=False "
+                         "would replace it")
+    path = registry_path(args.registry)
+    if path is None:
+        raise ValueError("--context needs the registry, which is off (none)")
+    args.save_path = Registry(path).find(args.context).prefix
+
+
+async def _register_root(context, state, args, save) -> None:
+    """Register the save's root context in the registry, and say so in one notice."""
+    path = registry_path(getattr(args, "registry", None))
+    if path is None:
+        return
+    notice = await _on_context_thread(state, _registered, path, context, save)
+    state.notice(notice)
+
+
+def _registered(path: Path, context: InteractionContext, save: CliSave) -> str:
+    """Register ``save``'s root context in the registry at ``path``; the notice."""
+    if save.private is None:
+        return ("Root context: not registered: a save in its original format "
+                f"({NO_MIGRATION_OPTION}) isn't registered.")
+    first = context[0] if len(context) else None
+    if not isinstance(first, Init):
+        return "Root context: not registered: the save doesn't start with its Init."
+    registry = Registry(path)
+    try:
+        registration = registry.register(first.prefix_id, save.private)
+        key = registry.abbreviation(registration.key)
+    except (OSError, RegistryError) as exc:
+        return f"Root context: not registered: {exc}."
+    number = registration.number
+    if registration.status == "copy":
+        of = key if number is None else f"{number} ({key})"
+        return (f"Root context: not registered: this save is a copy of {of}, which is at "
+                f"{save_prefix_of(registration.home)}.")
+    named = f"Root context {number} ({key})"
+    if registration.status == "new":
+        return f"{named}, new in {path}/."
+    if registration.status == "moved":
+        return f"{named}, in {path}/; moved from {save_prefix_of(registration.previous)}."
+    return f"{named}, in {path}/."
+
+
 def _relay_thinking(args) -> bool:
     """Whether the save log may show this session's thinking whole (save.public_log_line).
 
@@ -3860,6 +3931,32 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--registry",
+        metavar="DIR",
+        default=None,
+        help=(
+            "the registry of root contexts, a directory of symlinks: the CLI registers its "
+            "save there by its key, context_ and 32 hex digits, and a short number, and "
+            "leaves the save where it is. none turns it off. Launch-only (default: "
+            "$PYTHIA_REGISTRY, else ~/.pythia/root)"
+        ),
+    )
+    parser.add_argument(
+        "--context",
+        metavar="ROOT",
+        default=None,
+        help=(
+            "resume the save of a root context in the registry, in place of --save: by its "
+            "short number, such as 14, or its key, context_ and at least 4 of its hex "
+            "digits, either one optionally followed by #1"
+        ),
+    )
+    parser.add_argument(
+        "--list-roots",
+        action="store_true",
+        help="list the root contexts in the registry by short number, and exit",
+    )
+    parser.add_argument(
         "--headless", nargs="?", const=True, default=False,
         type=_boolean_argument, metavar="{False,True}",
         help=("run one explicit prompt without a TUI, stdin reads, or context display; "
@@ -4034,6 +4131,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rebooted = None
     reboot_state = None
     try:
+        if args.list_roots:
+            print(_roots_listing(args))
+            return 0
+        _open_context(args)  # --context names the save, before anything reads --save
         catalog = frontend_catalog(args)
         if args.list_models:
             print(render_model_catalog(catalog))
