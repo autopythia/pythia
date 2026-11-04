@@ -237,10 +237,12 @@ def _read_document(path, what):
     return document
 
 
-def _renamed(document, names=frozenset(RENAMED_CONFIG_KEYS)):
+def _renamed(document, names=frozenset(old for old, new in RENAMED_CONFIG_KEYS.items()
+                                       if new in _KEYS)):
     """``document`` with its roles' renamed keys under their new names, and
     the old names it used, in RENAMED_CONFIG_KEYS order. Only the old
-    ``names`` are renamed.
+    ``names`` are renamed: by default, those of auto's keys (not, for one,
+    endpoint_rate_limit_retries, which was never one).
 
     A role that sets both names of a key fails.
     """

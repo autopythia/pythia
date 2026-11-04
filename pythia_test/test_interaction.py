@@ -1139,17 +1139,20 @@ class ChatCompletionsModelTests(unittest.TestCase):
                 # Eligible for the turn loop either way: nothing of a response was kept.
                 self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
                 self.assertEqual(raised.exception.failure.attempt_count, requests)
-        # A timeout and a connection error likewise; a 400 stays final.
-        for outcome, state in ((socket.timeout("slow"), RetryState.ELIGIBLE),
-                               (urllib.error.URLError(OSError("refused")), RetryState.ELIGIBLE),
-                               (_http_error(400), RetryState.NONE)):
+        # A timeout, a connection error and any other status likewise, each of
+        # its class.
+        for outcome, retry_class in ((socket.timeout("slow"), "timeout"),
+                                     (urllib.error.URLError(OSError("refused")), "transient"),
+                                     (_http_error(400), "error"), (_http_error(404), "error"),
+                                     (_http_error(401), "auth"), (_http_error(502), "transient")):
             with self.subTest(outcome=repr(outcome)):
                 model = ChatCompletionsModel(chat_endpoint(api_url="https://api.example.test"),
                                              opener=_ScriptedOpener(outcome))
                 with self.assertRaises(ModelTransportError) as raised:
                     model.sample(InteractionContext((Message("user", "hello"),)),
                                  sample_params=SampleParams(transient_retries=0))
-                self.assertIs(raised.exception.retry_state, state)
+                self.assertIs(raised.exception.retry_state, RetryState.ELIGIBLE)
+                self.assertEqual(raised.exception.retry_class, retry_class)
 
     def test_a_lone_surrogate_in_a_response_becomes_the_replacement_character(self):
         # As a server that decodes bad bytes with surrogateescape may send it

@@ -34,11 +34,13 @@ only once the steers taken there are saved, so that the restarted program,
 which continues the turn, has them. The CLI reboots for ``/reboot``, and after
 a coldstart compaction with ``compaction_coldstart_reboot`` (``compacted``).
 
-A failed sample that the model vouches for (``RetryState.ELIGIBLE``: a
-transient HTTP failure, a rate limit, a relay's rejected tool name or expired
-continuation) is sampled again under an automatic-retry policy, after a
-notice and a wait each time (``_auto_retry``). So the loop's own samples ask
-HTTP adapters for no retries of their own (``SampleParams.transient_retries``);
+A failed sample that the model vouches for (``RetryState.ELIGIBLE``: nothing
+of it ran, and the same context may be sampled again) is sampled again under
+an automatic-retry policy, after a notice and a wait each time
+(``_auto_retry``): as many times as the count of the error's class
+(``ModelError.retry_class``) allows. A final answer without text is such a
+failure too (``MissingFinalText``). So the loop's own samples ask HTTP
+adapters for no retries of their own (``SampleParams.transient_retries``);
 compaction keeps them.
 """
 
@@ -66,6 +68,7 @@ from ..environment import EnvironmentResult
 from ..environment import results_due_scope
 from ..items import InteractionItem
 from ..items import Message
+from ..items import ModelFailure
 from ..items import ModelSampleBoundary
 from ..items import ToolCall
 from ..items import ToolResult
@@ -74,13 +77,14 @@ from ..model import ModelContextWindowError
 from ..model import ModelContinuationExpired
 from ..model import ModelError
 from ..model import ModelSample
-from ..model import ModelRateLimitError
+from ..model import ModelResponseError
 from ..model import RetryState
 from ..model import SampleParams
 from ..model import park_model
 from ..model import retire_model
-from ..model_catalog import DEFAULT_RATE_LIMIT_RETRIES
-from ..model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
+from ..model_catalog import DEFAULT_ERROR_RETRIES
+from ..model_catalog import ERROR_RETRIES_UNBOUNDED
+from ..model_catalog import error_retries_field
 from .preemption import NOT_PREEMPTIBLE
 
 
@@ -95,9 +99,12 @@ RATE_LIMIT_RECOVERY = "rate_limit_retry"
 AUTO_RETRY_NOTICE = "Sampling again in {delay} s ({failed}/{attempts})."
 CONTINUATION_NOTICE = ("Model continuation expired; restarting from saved tool results "
                        "in {delay} s ({failed}/{attempts}).")
-# A rate limit's waits, in whole seconds, before its 1st, 2nd... retry; the
+# Every class's waits, in whole seconds, before its 1st, 2nd... retry; the
 # last repeats. A provider's Retry-After isn't followed yet: it is traced.
-RATE_LIMIT_DELAYS_SECONDS = (2, 2, 5, 10, 20, 30)
+AUTO_RETRY_DELAYS_SECONDS = (2, 2, 5, 10, 20, 30)
+# The failure that a final answer without text records.
+EMPTY_RESPONSE = "empty_response"
+EMPTY_RESPONSE_MESSAGE = "Model returned no final assistant text."
 # How often a retry's wait checks whether something should end it early.
 _WAIT_POLL_SECONDS = 0.25
 
@@ -120,37 +127,35 @@ class AutoRetryPolicy:
     label: Optional[str] = None
 
 
-# Every eligible failure but a rate limit: a transient HTTP failure (a
-# retryable status, a timeout, a connection error, a broken stream), and the
-# Claude relay's (a rejected tool name, an expired continuation).
-DEFAULT_AUTO_RETRY = AutoRetryPolicy("default", 3, (2,))
-# A frontend shows a failure's error when the turn ends, which a long retry,
-# such as a rate limit's, may put off for minutes, or forever when unbounded.
-# So from the attempt where the default policy gives up, each failed attempt
-# that the loop retries shows its error too (TurnHost.show_error): a bounded
-# retry's display is then the unbounded one's, cut short where its attempts
-# end. The default policy itself gives up there, so it shows the error only
-# when the turn ends, as before.
-SHOW_ERRORS_FROM_ATTEMPT = DEFAULT_AUTO_RETRY.attempts
+# A frontend shows a failure's error when the turn ends, which a long retry
+# may put off for minutes, or forever when unbounded. So from the 3rd failed
+# attempt, each failed attempt that the loop retries shows its error too
+# (TurnHost.show_error): a bounded retry's display is then the unbounded
+# one's, cut short where its attempts end, and the turn's end shows the last.
+SHOW_ERRORS_FROM_ATTEMPT = 3
 
 
 def auto_retry_policy(exc: ModelError, config) -> AutoRetryPolicy:
     """The policy of an eligible failure under ``config`` (a snapshot).
 
-    A rate limit (``ModelRateLimitError``) gets the config's
-    ``endpoint_rate_limit_retries`` (``DEFAULT_RATE_LIMIT_RETRIES`` when it
-    has none), which counts every retry, and RATE_LIMIT_DELAYS_SECONDS; any
-    other failure, the default.
+    It is named after the error's class (``ModelError.retry_class``), and
+    counts the class's retries: the config's ``endpoint_<class>_error_retries``
+    where the class has one and it is set, else ``endpoint_error_retries``,
+    else ``DEFAULT_ERROR_RETRIES``; ``unbounded`` has no limit. Every class
+    waits AUTO_RETRY_DELAYS_SECONDS. A rate limit's retries are labelled
+    RATE_LIMIT_RECOVERY; the others' by their failure (``_auto_retry``).
     """
-    if not isinstance(exc, ModelRateLimitError):
-        return DEFAULT_AUTO_RETRY
-    retries = getattr(config, "endpoint_rate_limit_retries", None)
+    retry_class = exc.retry_class
+    field = error_retries_field(retry_class)
+    retries = None if field is None else getattr(config, "endpoint_" + field, None)
     if retries is None:
-        retries = DEFAULT_RATE_LIMIT_RETRIES
-    unbounded = retries == RATE_LIMIT_RETRIES_UNBOUNDED
+        retries = getattr(config, "endpoint_error_retries", None)
+    if retries is None:
+        retries = DEFAULT_ERROR_RETRIES
     return AutoRetryPolicy(
-        "rate_limit", None if unbounded else retries + 1, RATE_LIMIT_DELAYS_SECONDS,
-        label=RATE_LIMIT_RECOVERY,
+        retry_class, None if retries == ERROR_RETRIES_UNBOUNDED else retries + 1,
+        AUTO_RETRY_DELAYS_SECONDS,
+        label=RATE_LIMIT_RECOVERY if retry_class == "rate_limit" else None,
     )
 
 
@@ -158,8 +163,13 @@ class SampleLimitExceeded(RuntimeError):
     """A turn reached its explicit per-turn sample limit."""
 
 
-class MissingFinalText(RuntimeError):
-    """A turn ended without nonblank final assistant text."""
+class MissingFinalText(ModelResponseError):
+    """A turn ended without nonblank final assistant text: an answer with
+    neither text nor tool calls. The loop samples again after it, within the
+    count of its class, ``empty_response``, then raises this, with its failure
+    (``EMPTY_RESPONSE``)."""
+
+    default_retry_class = EMPTY_RESPONSE
 
 
 class _CompactionStopped(Exception):
@@ -464,20 +474,21 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             # The central handler of failed samples, for every frontend and
             # model: each adapter raises a ModelError subclass (model.py), and
             # the Claude relay its own too (claude_relay/), unwrapped on the
-            # way here. Each failure is saved first; then a stop ends the turn,
-            # and the cases that are safe to recover sample again: a preempting
-            # steer; an error the model vouches for (RetryState.ELIGIBLE, such
-            # as a transient HTTP failure, a rate limit, an expired
-            # continuation or a rejected tool name), within its policy's
-            # attempts (_auto_retry); an overflow. The rest end the turn with
-            # /retry offered. Compaction retries its own requests
-            # (run_compaction).
-            record_sample_failure(context, exc, host)
-            if host.stop_requested():
+            # way here. Each failure is saved; then a stop ends the turn, and
+            # the cases that are safe to recover sample again: a preempting
+            # steer; an error the model vouches for (RetryState.ELIGIBLE),
+            # within the attempts of its class (_auto_retry, which saves it,
+            # without the attempt's output when it retries); an overflow. The
+            # rest end the turn with /retry offered. Compaction retries its
+            # own requests (run_compaction).
+            stopping, cancelled = host.stop_requested(), operation.cancelled
+            if stopping or cancelled or exc.retry_state is not RetryState.ELIGIBLE:
+                record_sample_failure(context, exc, host)
+            if stopping or host.stop_requested():
                 # The stop caused the failure (e.g. it retired the model), or
                 # the turn may sample no more: no retry or recovery.
                 return STOPPED
-            if operation.cancelled:
+            if cancelled:
                 # A preempting steer cancelled it: not a failure, and not
                 # counted. The steer is delivered at the interrupt point.
                 continue
@@ -515,17 +526,24 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             # sampling boundary is still distinct from a failed local effect.
             host.retryable_failure()
             raise
-        # The failed attempts before a retry do not count.
-        samples += 1
-        attempts = {}
         if not isinstance(sample, ModelSample):
             raise TypeError("Expected ModelSample.")
+        # A final answer without text (and without tool calls) is saved, but
+        # it is a failed attempt, which the loop may sample again after; it
+        # doesn't end the retries in progress (TurnHost.after_sample). The
+        # failed attempts before a retry do not count.
+        text = sample.last_assistant_text
+        empty = (not sample.tool_calls and sample.stop_reason != "compaction"
+                 and not (text and text.strip()))
+        samples += 1
+        previous, attempts = attempts, {}
         if recovery:
             # In order: the loop's retries came before this attempt's own
             # recovery (such as a Codex credential reload).
             sample = replace(sample, recovery=(*recovery, *sample.recovery))
             recovery = []
-        host.after_sample(model, sample)
+        if not empty:
+            host.after_sample(model, sample)
         host.append(context, sample.context_items())
         host.show(sample.display_items(host.renderer))
         for text in sample.notices:  # the model's notes about this sample
@@ -541,10 +559,23 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             skip_calls(context, sample.tool_calls, host)
             continue
         if not sample.tool_calls:
-            text = sample.last_assistant_text
-            if not text or not text.strip():
+            if empty:
+                exc = MissingFinalText(EMPTY_RESPONSE_MESSAGE, failure=ModelFailure(
+                    category=EMPTY_RESPONSE, message=EMPTY_RESPONSE_MESSAGE,
+                    error_code=EMPTY_RESPONSE,
+                ), retry_state=RetryState.ELIGIBLE)
+                attempts = previous
+                policy = auto_retry_policy(exc, config)
+                attempt = attempts.get(policy.name, 1)
+                label = _auto_retry(context, exc, host, policy, attempt)
+                if label is not None:
+                    # A failed attempt: it doesn't count toward max_samples.
+                    samples -= 1
+                    attempts[policy.name] = attempt + 1
+                    recovery.append(label)
+                    continue
                 host.retryable_failure()
-                raise MissingFinalText("Model returned no final assistant text.")
+                raise exc
             _save_summary(context, host, started)
             return TurnResult("ended", text)
         if not run_tool_calls(context, environment, sample.tool_calls, host,
@@ -615,11 +646,17 @@ def compact(context, model, environment, config, host, sample_params, *,
     return True
 
 
-def record_sample_failure(context, exc: ModelError, host: TurnHost) -> None:
+def record_sample_failure(context, exc: ModelError, host: TurnHost, *,
+                          keep_output: bool = True) -> None:
     """Durably close a failed sample: its completed output and failure.
 
-    Completed tool calls are closed as not executed; they never run.
+    Completed tool calls are closed as not executed; they never run. Without
+    ``keep_output``, as when the loop samples the same context again, the
+    output is dropped instead, and the failure, which counts it, is saved
+    alone.
     """
+    if not keep_output:
+        exc.completed_items = ()
     contribution = (*exc.completed_items,
                     *((exc.failure,) if exc.failure is not None else ()))
     if not contribution:
@@ -637,7 +674,9 @@ def record_sample_failure(context, exc: ModelError, host: TurnHost) -> None:
 def _auto_retry(context, exc: ModelError, host: TurnHost, policy: AutoRetryPolicy,
                 attempt: int) -> Optional[str]:
     """Settle an eligible failure (``RetryState.ELIGIBLE``) of the sample's
-    ``attempt`` under ``policy`` (1 for its first), after it is saved.
+    ``attempt`` under ``policy`` (1 for its first), and save it
+    (``record_sample_failure``): without the attempt's output, if any, when
+    the loop retries it, so that the next attempt samples the same context.
 
     The failure is RETRIED: after its notice and the wait
     (``_wait_to_auto_retry``), this returns the recovery label of the retry.
@@ -646,14 +685,17 @@ def _auto_retry(context, exc: ModelError, host: TurnHost, policy: AutoRetryPolic
     From the 3rd attempt on, its error shows before the notice
     (``TurnHost.show_error``), since a long retry puts off the turn's end,
     where it would show. Otherwise this returns None, and the turn ends with
-    /retry offered: the failure is BLOCKED when the loop's own checks fail (no
-    failure was saved, it has completed output, or the context isn't ready
-    for the model); CANCELLED when the user stopped the automatic retries
+    /retry offered: the failure is BLOCKED when the loop's own checks fail (it
+    has no failure to save, or the context isn't ready for the model);
+    CANCELLED when the user stopped the automatic retries
     (``TurnHost.retry_cancelled``), before the wait or during it; EXHAUSTED
     when the policy's attempts are used up. Each decision is traced, with a
     rate limit's Retry-After, which the wait doesn't follow yet.
     """
-    ready = exc.failure is not None and not exc.completed_items
+    # An expired continuation can't carry output (ModelContinuationExpired):
+    # one that does breaks its contract, and isn't retried.
+    ready = exc.failure is not None and not (
+        isinstance(exc, ModelContinuationExpired) and exc.completed_items)
     if ready:
         try:
             context.assert_model_ready()
@@ -669,6 +711,8 @@ def _auto_retry(context, exc: ModelError, host: TurnHost, policy: AutoRetryPolic
         settled = RetryState.EXHAUSTED
     else:
         settled = None  # retried, once the wait ends
+    # A /cancel or a stop during the wait finds the output dropped already.
+    record_sample_failure(context, exc, host, keep_output=settled is not None)
     expired = isinstance(exc, ModelContinuationExpired)
     error_code = exc.failure.error_code if exc.failure else None
     with host.trace("sample_retry", context_revision=len(context), policy=policy.name,
@@ -698,9 +742,11 @@ def _auto_retry(context, exc: ModelError, host: TurnHost, policy: AutoRetryPolic
         return CONTINUATION_RECOVERY
     if policy.label is not None:
         return policy.label
-    if exc.failure.http_status is not None:
-        # A transient HTTP status, named as an adapter's own retry names it.
-        return f"http_{exc.failure.http_status}_retry"
+    status = exc.failure.http_status
+    if status is not None and not 200 <= status < 300:
+        # A failed request's HTTP status, named as an adapter's own retry
+        # names it; not a successful one's whose body was invalid.
+        return f"http_{status}_retry"
     # The failure's own code (or category), bounded like every recovery label.
     return f"{(exc.failure.error_code or exc.failure.category)[:240]}_retry"
 

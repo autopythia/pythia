@@ -2453,19 +2453,23 @@ class CodexResponsesModelTests(unittest.TestCase):
         )
         self.assertTrue(all(response.closed for response in responses))
 
-    def test_without_retries_of_its_own_a_transient_failure_is_eligible_at_once(self):
+    def test_without_retries_of_its_own_a_failure_is_eligible_at_once_with_its_class(self):
         # As the turn loop asks for its own samples: one request, and an
-        # error the loop may sample again; a broken stream's partial output
-        # goes, as the adapter's own retry drops it. A 400 stays final.
+        # error the loop may sample again, as many times as its class's count;
+        # a broken stream's partial output goes, as the adapter's own retry
+        # drops it.
         cases = (
-            (_FakeSSEResponse(_message_event(0, "partial")), "stream_closed", RetryState.ELIGIBLE),
-            (_http_error(503), "http_error", RetryState.ELIGIBLE),
-            (socket.timeout("slow"), "request_timeout", RetryState.ELIGIBLE),
-            (urllib.error.URLError(OSError("refused")), "request_transport", RetryState.ELIGIBLE),
-            (_http_error(400), "http_error", RetryState.NONE),
+            (_FakeSSEResponse(_message_event(0, "partial")), "stream_closed", "transient"),
+            (_http_error(503), "http_error", "transient"),
+            (socket.timeout("slow"), "request_timeout", "timeout"),
+            (urllib.error.URLError(OSError("refused")), "request_transport", "transient"),
+            (_http_error(400), "http_error", "error"),
+            (_http_error(401), "authentication", "auth"),
+            (_http_error(505), "http_error", "error"),
         )
-        for outcome, category, state in cases:
-            with self.subTest(category=category, state=state):
+        state = RetryState.ELIGIBLE
+        for outcome, category, retry_class in cases:
+            with self.subTest(category=category, retry_class=retry_class):
                 opener = _ScriptedOpener(outcome)
                 sleeps = []
                 model = codex_model(
@@ -2480,6 +2484,7 @@ class CodexResponsesModelTests(unittest.TestCase):
                 self.assertEqual((len(opener.calls), sleeps), (1, []))
                 self.assertEqual(raised.exception.failure.category, category)
                 self.assertIs(raised.exception.retry_state, state)
+                self.assertEqual(raised.exception.retry_class, retry_class)
                 self.assertEqual(raised.exception.completed_items, ())
                 self.assertEqual(raised.exception.failure.recovery, ())
                 if category == "stream_closed":

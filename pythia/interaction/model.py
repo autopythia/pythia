@@ -27,6 +27,7 @@ from .items import SampleMetadata
 from .items import _validate_elapsed_seconds
 from .tokens import TokenRecord
 from .usage import TokenUsage
+from .model_catalog import ERROR_RETRY_CLASSES
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import TOKEN_TRACE_LEVELS
@@ -56,12 +57,13 @@ class RetryState(enum.Enum):
     """
 
     NONE = "none"  # no retry is claimed (the default)
-    # The adapter vouches that nothing from the attempt was published or run,
-    # so the same context may be sampled again: set by the error's class
-    # (NativeToolRejected, ModelContinuationExpired, ModelRateLimitError), by
-    # an HTTP adapter for a transient failure (a retryable HTTP status, a
-    # timeout, a connection error, a broken stream), or by the adapter once
-    # it has checked.
+    # The adapter vouches that nothing from the attempt was run, and that the
+    # same context may be sampled again without what the attempt output, if
+    # any (the turn loop drops that when it retries): set by the error's class
+    # (NativeToolRejected, ModelContinuationExpired, ModelRateLimitError), or
+    # by the adapter for any failure where that holds, once it has checked.
+    # Whether the loop does sample again is up to the count of the error's
+    # ModelError.retry_class.
     ELIGIBLE = "eligible"
     # Eligible, but the retry couldn't be set up: the adapter's teardown of
     # the attempt failed or wasn't confirmed, or the turn loop's own checks
@@ -87,7 +89,16 @@ class ModelError(RuntimeError):
     same context again by itself. A new error is ``NONE`` or ``ELIGIBLE``;
     assigning it later moves it on, as the Claude relay and the turn loop do,
     and a move that ``RetryState`` doesn't allow raises ValueError.
+
+    ``retry_class`` (one of ``ERROR_RETRY_CLASSES``) says how many times the
+    turn loop samples again after an eligible failure: the class's own count,
+    ``endpoint.<class>_error_retries``, where it has one, else
+    ``endpoint.error_retries``. Unset, it is the class's
+    ``default_retry_class``; adapters set it where they know better, also
+    after construction.
     """
+
+    default_retry_class = "error"
 
     def __init__(
         self,
@@ -95,6 +106,7 @@ class ModelError(RuntimeError):
         failure: Optional[ModelFailure] = None,
         completed_items: Sequence[InteractionItem] = (),
         retry_state: RetryState = RetryState.NONE,
+        retry_class: Optional[str] = None,
     ) -> None:
         super().__init__(*args)
         if failure is not None and not isinstance(failure, ModelFailure):
@@ -113,6 +125,19 @@ class ModelError(RuntimeError):
         self.failure = failure
         self.completed_items = items
         self._retry_state = retry_state
+        self.retry_class = retry_class
+
+    @property
+    def retry_class(self) -> str:
+        return type(self).default_retry_class if self._retry_class is None else self._retry_class
+
+    @retry_class.setter
+    def retry_class(self, value: Optional[str]) -> None:
+        if value is not None and value not in ERROR_RETRY_CLASSES:
+            raise ValueError(
+                f"retry_class must be one of {', '.join(ERROR_RETRY_CLASSES)}, or None"
+            )
+        self._retry_class = value
 
     @property
     def retry_state(self) -> RetryState:
@@ -134,7 +159,7 @@ class ModelConfigurationError(ModelError, ValueError):
 
 
 class ModelTransportError(ModelError):
-    pass
+    default_retry_class = "transient"
 
 
 class ModelCancelled(ModelTransportError):
@@ -167,7 +192,7 @@ class ModelContinuationExpired(ModelTransportError):
 
 
 class ModelAuthenticationError(ModelTransportError):
-    pass
+    default_retry_class = "auth"
 
 
 class ModelThinkingBindingError(ModelTransportError):
@@ -184,7 +209,7 @@ class ModelThinkingBindingError(ModelTransportError):
 
 
 class ModelTimeoutError(ModelTransportError):
-    pass
+    default_retry_class = "timeout"
 
 
 class ModelRateLimitError(ModelTransportError):
@@ -194,14 +219,17 @@ class ModelRateLimitError(ModelTransportError):
     ``SampleParams.transient_retries``).
 
     Nothing of the response was generated, so it is ``RetryState.ELIGIBLE``:
-    the turn loop samples again under its rate-limit policy, as many times as
-    the config's ``endpoint_rate_limit_retries`` allows (``loop.kernel``).
+    the turn loop samples again as many times as the count of its class,
+    ``rate_limit``, allows: the config's ``endpoint_rate_limit_error_retries``,
+    else ``endpoint_error_retries`` (``loop.kernel``).
     That includes a quota, such as OpenAI's ``insufficient_quota``: a top-up, a
     plan reset or another account may lift it meanwhile. Its failure says
     ``quota exceeded`` instead of ``rate limited``. ``retry_after_seconds`` is
     the last response's ``Retry-After``, uncapped, or None. The turn loop
     traces it, but doesn't wait on it yet: its waits follow its own schedule.
     """
+
+    default_retry_class = "rate_limit"
 
     def __init__(self, *args, failure=None, completed_items=(),
                  retry_state=RetryState.ELIGIBLE, retry_after_seconds=None):
@@ -217,7 +245,7 @@ class ModelRateLimitError(ModelTransportError):
 
 
 class ModelResponseError(ModelError):
-    pass
+    default_retry_class = "response"
 
 
 class ModelContextWindowError(ModelResponseError):
@@ -245,10 +273,13 @@ class ModelRefusal(ModelResponseError):
     nothing from that response is adopted. A refusal after answer text is not
     this error: the adapter returns the text with ``stop_reason`` "refusal".
     The failure's ``error_code`` is ``refusal``. The turn loop saves it like
-    any failure, and a retry samples the same context again.
+    any failure, and a retry samples the same context again: the loop's own,
+    when the adapter vouches for it (``RetryState.ELIGIBLE``), as many times
+    as the count of its class, ``refusal``, allows.
     """
 
     error_code = "refusal"
+    default_retry_class = "refusal"
 
     def __init__(self, details: object = None, *,
                  failure: Optional[ModelFailure] = None,
@@ -396,6 +427,32 @@ def _transient_retries(sample_params: Optional[SampleParams]) -> int:
     itself: the per-call value, else DEFAULT_MAX_TRANSIENT_RETRIES."""
     retries = None if sample_params is None else sample_params.transient_retries
     return DEFAULT_MAX_TRANSIENT_RETRIES if retries is None else retries
+
+
+def _invalid_response(error: ModelResponseError, *, label: str, provider: str,
+                      model: Optional[str], http_status: Optional[int], attempt_count: int,
+                      recovery: Tuple[str, ...]) -> ModelResponseError:
+    """Ready a non-streamed response's error for the turn loop: an undecodable
+    or malformed body, which gets the failure ``invalid_response`` if it has
+    none, or a refusal. Nothing of the response was kept, so the loop may
+    sample the same context again (RetryState.ELIGIBLE), within the count of
+    the error's class, ``response`` or ``refusal``. A context-window error
+    keeps its own recovery: it is returned as it is."""
+    if isinstance(error, ModelContextWindowError):
+        return error
+    if error.failure is None:
+        error.failure = ModelFailure(
+            category="invalid_response",
+            message=f"{label} response was invalid",
+            provider=provider,
+            model=model,
+            http_status=http_status if isinstance(http_status, int) else None,
+            attempt_count=attempt_count,
+            recovery=recovery,
+        )
+    if error.retry_state is RetryState.NONE:
+        error.retry_state = RetryState.ELIGIBLE
+    return error
 
 
 def _timeout_message(message: str, timeout_seconds: Optional[float]) -> str:

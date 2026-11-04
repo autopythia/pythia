@@ -25,12 +25,13 @@ from .model import Model
 from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
 from .model_catalog import COMPACTION_DEFAULT_FIELDS
-from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
+from .model_catalog import DEFAULT_ERROR_RETRIES
+from .model_catalog import ERROR_RETRIES_UNBOUNDED
+from .model_catalog import ERROR_RETRY_FIELDS
 from .model_catalog import DISPLAY_ASSISTANT_VALUES
 from .model_catalog import DISPLAY_FIELDS
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
-from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import TOKEN_TRACE_LEVELS
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
@@ -70,14 +71,18 @@ CLAUDE_RELAY_FIELDS = (
 # Likewise; auto gives them to its Messages roles only.
 MESSAGES_FIELDS = ("endpoint_prompt_caching",)
 # Likewise; auto gives them to its HTTP roles, all but Claude Relay.
-HTTP_FIELDS = ("endpoint_rate_limit_retries",)
+HTTP_FIELDS = ("endpoint_rate_limit_error_retries",)
+# Likewise; auto gives them to every role.
+ERROR_RETRY_OPTION_FIELDS = tuple("endpoint_" + name for name in ERROR_RETRY_FIELDS
+                                  if name != "rate_limit_error_retries")
 # Likewise; auto gives them to its Chat Completions roles.
 CHAT_COMPLETIONS_FIELDS = ("endpoint_token_trace",)
 
 
-def _rate_limit_retries_argument(text: str):
-    """``--endpoint-rate-limit-retries``: a nonnegative integer, or ``unbounded``."""
-    if text == RATE_LIMIT_RETRIES_UNBOUNDED:
+def _error_retries_argument(text: str):
+    """An ``--endpoint-*error-retries`` count: a nonnegative integer, or
+    ``unbounded``."""
+    if text == ERROR_RETRIES_UNBOUNDED:
         return text
     try:
         value = int(text)
@@ -85,7 +90,7 @@ def _rate_limit_retries_argument(text: str):
         value = -1
     if value < 0:
         raise argparse.ArgumentTypeError(
-            f"must be a nonnegative integer or {RATE_LIMIT_RETRIES_UNBOUNDED}")
+            f"must be a nonnegative integer or {ERROR_RETRIES_UNBOUNDED}")
     return value
 
 
@@ -183,15 +188,19 @@ def add_renamed_options(parser: argparse.ArgumentParser) -> None:
 
     Each sets its new option's destination, with a FutureWarning that names
     the new option. Each takes what its new option takes: decimal seconds for
-    --request-timeout-seconds, an integer for the others. They set no
+    --request-timeout-seconds, a count or unbounded for
+    --endpoint-rate-limit-retries, an integer for the others. They set no
     default, so the new option's default stands.
     """
     for old, new in RENAMED_CONFIG_KEYS.items():
         seconds = new.endswith("_seconds")
+        retries = new.endswith("_error_retries")
         parser.add_argument(
             _option(old), action=_RenamedOption, new_option=_option(new), dest=new,
-            type=float if seconds else int, default=argparse.SUPPRESS,
-            metavar="SECONDS" if seconds else "N", help=argparse.SUPPRESS,
+            type=float if seconds else _error_retries_argument if retries else int,
+            default=argparse.SUPPRESS,
+            metavar="SECONDS" if seconds else "N|unbounded" if retries else "N",
+            help=argparse.SUPPRESS,
         )
 
 
@@ -280,8 +289,9 @@ def render_model_catalog(catalog):
             *(f"compaction.{name}={value}" for name, value in _compaction_settings(spec.compaction))))
         caching = ("" if spec.endpoint.prompt_caching is None
                    else f", prompt_caching={spec.endpoint.prompt_caching}")
-        if spec.endpoint.rate_limit_retries is not None:
-            caching += f", rate_limit_retries={spec.endpoint.rate_limit_retries}"
+        for name in ERROR_RETRY_FIELDS:
+            if getattr(spec.endpoint, name) is not None:
+                caching += f", {name}={getattr(spec.endpoint, name)}"
         if spec.endpoint.token_trace is not None:
             caching += f", token_trace={spec.endpoint.token_trace}"
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
@@ -364,17 +374,36 @@ def add_endpoint_arguments(parser, *, auto=False):
               + ("" if auto else "; the CLI's /config endpoint_prompt_caching changes it later")
               + " (default: the model catalog's endpoint.prompt_caching, else 5m)"))
     parser.add_argument(
-        "--endpoint-rate-limit-retries", type=_rate_limit_retries_argument,
+        "--endpoint-error-retries", type=_error_retries_argument,
         default=argparse.SUPPRESS, metavar="N|unbounded",
-        help=("how many times a turn samples again after a rate limit (HTTP 429), waiting 2, "
-              "2, 5, 10, 20, then 30 seconds each time; each try is one request, as a turn's "
-              "requests get no HTTP retries of their own. 0 turns it off, and unbounded "
-              "retries until a sample succeeds or the turn is stopped (/cancel in the CLI "
-              "and auto). Not for Claude Relay"
-              + ("" if auto else "; the CLI's /config endpoint_rate_limit_retries changes it "
+        help=("how many times a turn samples again after a failed sample, by itself, "
+              "waiting 2, 2, 5, 10, 20, then 30 seconds each time; each try is one request, "
+              "as a turn's requests get no HTTP retries of their own. It counts each class "
+              "of error apart (rate limits, transient errors, timeouts, invalid and empty "
+              "responses, refusals, auth and other errors); the four options below set "
+              "their class instead. 0 turns it off, and unbounded retries until a sample "
+              "succeeds or the turn is stopped (/cancel in the CLI and auto)"
+              + ("" if auto else "; the CLI's /config endpoint_error_retries changes it "
                  "later")
-              + f" (default: the model catalog's endpoint.rate_limit_retries, else "
-                f"{DEFAULT_RATE_LIMIT_RETRIES})"))
+              + f" (default: the model catalog's endpoint.error_retries, else "
+                f"{DEFAULT_ERROR_RETRIES})"))
+    for name, what, relay in (
+            ("rate_limit", "a rate limit or an exhausted quota (HTTP 429)", False),
+            ("timeout", "a timeout", True),
+            ("refusal", "a refusal", True),
+            ("auth", "an authentication failure (HTTP 401)", True)):
+        option = f"endpoint-{name.replace('_', '-')}-error-retries"
+        parser.add_argument(
+            "--" + option, type=_error_retries_argument,
+            default=argparse.SUPPRESS, metavar="N|unbounded",
+            help=(f"how many times a turn samples again after {what}, as "
+                  "--endpoint-error-retries does"
+                  + ("" if relay else "; not for Claude Relay, whose native CLI retries "
+                     "its own")
+                  + ("" if auto else f"; the CLI's /config {option.replace('-', '_')} "
+                     "changes it later")
+                  + f" (default: the model catalog's endpoint.{name}_error_retries, else "
+                    "--endpoint-error-retries)"))
     parser.add_argument(
         "--endpoint-token-trace", choices=TOKEN_TRACE_LEVELS, default=argparse.SUPPRESS,
         help=("Chat Completions token traces from a vLLM server, saved with each sample: "

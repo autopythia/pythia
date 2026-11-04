@@ -22,6 +22,42 @@ NATIVE_TIMEOUT_TEXT = 'The operation timed out.'
 MCP_SERVER_NAME = 'pythia'
 
 
+def final(error):
+    """Mark a relay failure that no automatic retry can fix (ClaudeRelayModel
+    never vouches for it): the host's own retirement of the continuation, or a
+    startup or compatibility check, which a cold import fails the same way."""
+    error.relay_final = True
+    return error
+
+
+def coded(error, code, retry_class=None):
+    """``error``, with the code that its failure saves (its ``error_code``),
+    and its retry class (ModelError.retry_class) where not its type's."""
+    error.error_code = code
+    if retry_class is not None:
+        error.retry_class = retry_class
+    return error
+
+
+# The error types of a failed API request that the native CLI reports after
+# its own retries: an overloaded or failing API, or a rate limit, which the
+# relay refuses the rate-limit setting for (Claude Code retries those itself);
+# and an invalid or unbillable request. Claude Code writes them bare
+# (rate_limit, server_error, invalid_request, billing_error); the API's own
+# types (overloaded_error...) come in an object or a stream's error event.
+TRANSIENT_NATIVE_ERRORS = frozenset({'rate_limit', 'rate_limit_error', 'server_error',
+                                     'overloaded_error', 'api_error'})
+REQUEST_NATIVE_ERRORS = frozenset({'invalid_request', 'invalid_request_error', 'billing_error'})
+
+
+def native_error_class(code):
+    """The retry class of a failure that a native error type names: transient
+    for an overloaded or failing API or a rate limit, error for an invalid or
+    unbillable request; None for any other code."""
+    return ('transient' if code in TRANSIENT_NATIVE_ERRORS
+            else 'error' if code in REQUEST_NATIVE_ERRORS else None)
+
+
 def result_text(content):
     """The observed CLI string / single MCP text-block representations only."""
     if isinstance(content, str):

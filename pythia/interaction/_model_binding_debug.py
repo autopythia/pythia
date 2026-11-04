@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .model_catalog import (COMPACTION_DEFAULT_FIELDS, MODEL_TIMEOUT_FIELDS,
+from .model_catalog import (COMPACTION_DEFAULT_FIELDS, ERROR_RETRY_FIELDS, MODEL_TIMEOUT_FIELDS,
                             SAMPLE_PARAM_DEFAULT_FIELDS, ModelBinding, thaw_json)
 
 
@@ -35,9 +35,11 @@ def _debug_entry(binding):
             # None means the built-in default (5m on Messages). Added without
             # a version change.
             "prompt_caching": binding.endpoint.prompt_caching,
-            # None means the built-in default (DEFAULT_RATE_LIMIT_RETRIES).
-            # Added without a version change, likewise.
-            "rate_limit_retries": binding.endpoint.rate_limit_retries,
+            # The automatic retries (ERROR_RETRY_FIELDS): None is unset, where
+            # a class follows error_retries, and error_retries is
+            # DEFAULT_ERROR_RETRIES. They replaced rate_limit_retries (now
+            # rate_limit_error_retries), without a version change, likewise.
+            **{name: getattr(binding.endpoint, name) for name in ERROR_RETRY_FIELDS},
             # None means none, as for every API but Chat Completions. Added
             # without a version change, likewise.
             "token_trace": binding.endpoint.token_trace,

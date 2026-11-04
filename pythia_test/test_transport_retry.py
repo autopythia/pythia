@@ -13,6 +13,7 @@ from pythia.interaction._transport_retry import body_error_codes
 from pythia.interaction._transport_retry import quota_error_code
 from pythia.interaction._transport_retry import retry_after_seconds
 from pythia.interaction._transport_retry import retry_delay_seconds
+from pythia.interaction._transport_retry import transient_http_status
 
 
 class TransportRetryPolicyTests(unittest.TestCase):
@@ -92,6 +93,15 @@ class TransportRetryPolicyTests(unittest.TestCase):
                 self.assertIsNone(retry_after_seconds({"Retry-After": value}, cap=None,
                                                       now_seconds=now))
                 self.assertIsNone(retry_after_seconds({"Retry-After": value}, now_seconds=now))
+
+
+class TransientStatusTests(unittest.TestCase):
+    def test_every_5xx_but_501_and_505_and_four_4xx_are_transient(self):
+        transient = [408, 409, 425, 429, 500, 502, 503, 504, 507, 520, 524, 529, 599]
+        final = [200, 301, 400, 401, 403, 404, 413, 422, 451, 501, 505, 600, None, "503", True]
+        self.assertEqual([status for status in transient if transient_http_status(status)],
+                         transient)
+        self.assertEqual([status for status in final if transient_http_status(status)], [])
 
 
 class RateLimitClassificationTests(unittest.TestCase):

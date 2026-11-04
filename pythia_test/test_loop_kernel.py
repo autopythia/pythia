@@ -25,7 +25,9 @@ from pythia.interaction.loop import Urgency, command_urgency, escalated_stop
 from pythia.interaction.loop import kernel
 from pythia.interaction.model import ModelCancelled, ModelContinuationExpired, ModelContextWindowError
 from pythia.interaction.model import ModelError, ModelRateLimitError, ModelRefusal, ModelResponseError
-from pythia.interaction.model import ModelTimeoutError, ModelTransportError
+from pythia.interaction.model import ModelAuthenticationError, ModelTimeoutError
+from pythia.interaction.model import ModelTransportError
+from pythia.interaction.model_catalog import ERROR_RETRY_CLASSES
 from pythia.interaction.model import RetryState
 from pythia.interaction.model import SampleParams
 from pythia.interaction.runtime_config import InteractionConfigSnapshot
@@ -86,12 +88,11 @@ def _record_waits(test):
 
 
 def _default_delays(*seconds):
-    """The default policy's waits, for the tests of the wait itself."""
-    return mock.patch.object(kernel, 'DEFAULT_AUTO_RETRY',
-                             replace(kernel.DEFAULT_AUTO_RETRY, delays=seconds))
+    """Every class's waits, for the tests of the wait itself."""
+    return mock.patch.object(kernel, 'AUTO_RETRY_DELAYS_SECONDS', seconds)
 
 
-_EXPIRED_NOTICE = 'Model continuation expired; restarting from saved tool results in {} s ({}/3).'
+_EXPIRED_NOTICE = 'Model continuation expired; restarting from saved tool results in {} s ({}/8).'
 
 
 class _Model:
@@ -535,8 +536,10 @@ class RunTurnTests(unittest.TestCase):
             run_turn(_context(), model, _environment(host), _config(max_samples=1), host)
         host = _Host()
         model = _Model(host, _answer("   "))
+        # Without retries: EmptyAnswerTests has them.
         with self.assertRaises(MissingFinalText):
-            run_turn(_context(), model, _environment(host), _config(), host)
+            run_turn(_context(), model, _environment(host), _config(endpoint_error_retries=0),
+                     host)
         self.assertEqual(host.retryable, 1)
         self.assertEqual(model.retired, 1)
 
@@ -1190,7 +1193,7 @@ class SampleRetryTests(unittest.TestCase):
         self.assertEqual(result, TurnResult('ended', 'done'))
         self.assertEqual(self.waits, [2, 2])
         # Each notice counts the attempts failed so far, of the attempts in all.
-        self.assertEqual(host.notices, ['Sampling again in 2 s (1/3).', 'Sampling again in 2 s (2/3).'])
+        self.assertEqual(host.notices, ['Sampling again in 2 s (1/8).', 'Sampling again in 2 s (2/8).'])
         self.assertEqual([error.retry_state for error in errors], [RetryState.RETRIED] * 2)
         self.assertEqual(host.retryable, 0)
         failures = [item for item in context if isinstance(item, ModelFailure)]
@@ -1209,7 +1212,8 @@ class SampleRetryTests(unittest.TestCase):
                 errors = [make() for _ in range(3)]
                 model = _Model(host, *errors, _answer('never'))
                 with self.assertRaises(ModelError) as caught:
-                    run_turn(context, model, _environment(host), _config(), host)
+                    run_turn(context, model, _environment(host),
+                             _config(endpoint_error_retries=2), host)
                 self.assertIs(caught.exception, errors[2])
                 self.assertEqual([error.retry_state for error in errors],
                                  [RetryState.RETRIED, RetryState.RETRIED, RetryState.EXHAUSTED])
@@ -1219,14 +1223,15 @@ class SampleRetryTests(unittest.TestCase):
                 self.assertEqual(len(model.script), 1)
                 self.assertEqual(sum(isinstance(item, ModelFailure) for item in context), 3)
 
-    def test_eligible_failures_share_the_sample_s_attempts(self):
+    def test_each_class_counts_its_own_attempts(self):
+        # An expiry is transient, a rejected tool name a response's error.
         host, context = _Host(), _context()
         model = _Model(host, _expired(), _calls(_call('a')), _rejected(), _expired(), _answer('done'))
         result = run_turn(context, model, _environment(host), _config(), host)
         self.assertEqual(result.final_text, 'done')
         self.assertEqual(self.waits, [2, 2, 2])
-        self.assertEqual(host.notices, [_EXPIRED_NOTICE.format(2, 1), 'Sampling again in 2 s (1/3).',
-                                        _EXPIRED_NOTICE.format(2, 2)])
+        self.assertEqual(host.notices, [_EXPIRED_NOTICE.format(2, 1), 'Sampling again in 2 s (1/8).',
+                                        _EXPIRED_NOTICE.format(2, 1)])
         self.assertEqual([item.recovery for item in context if isinstance(item, SampleMetadata)],
                          [(kernel.CONTINUATION_RECOVERY,),
                           ('native_tool_name_rejected_retry', kernel.CONTINUATION_RECOVERY)])
@@ -1247,10 +1252,7 @@ class SampleRetryTests(unittest.TestCase):
     def test_the_loop_blocks_a_retry_it_cannot_make_safely(self):
         def no_failure(error):
             error.failure = None
-
-        def completed_output(error):
-            error.completed_items = (_call('x'),)
-        for spoil in (no_failure, completed_output, None):
+        for spoil in (no_failure, None):
             host, context = _Host(), _context()
             error = _rejected()
             if spoil is None:
@@ -1270,21 +1272,23 @@ class SampleRetryTests(unittest.TestCase):
         host = _TracingHost()
         model = _Model(host, _rejected(), _rejected(), _rejected())
         with self.assertRaises(NativeToolRejected):
-            run_turn(_context(), model, _environment(host), _config(), host)
+            run_turn(_context(), model, _environment(host), _config(endpoint_error_retries=2),
+                     host)
         retries = [tags for op, tags in host.traced if op == 'sample_retry']
+        # The policy is the error's class: a rejected tool name is a response's.
         self.assertEqual([(t['policy'], t['attempt'], t['retry_state'], t['delay_seconds'])
                           for t in retries],
-                         [('default', 1, 'retried', 2), ('default', 2, 'retried', 2),
-                          ('default', 3, 'exhausted', None)])
+                         [('response', 1, 'retried', 2), ('response', 2, 'retried', 2),
+                          ('response', 3, 'exhausted', None)])
         self.assertEqual({t['error_code'] for t in retries}, {'native_tool_name_rejected'})
         self.assertEqual({t['retry_after_seconds'] for t in retries}, {None})
 
 
 class RateLimitRetryTests(unittest.TestCase):
-    """A rate limit (ModelRateLimitError) is sampled again under its own
-    policy: the config's endpoint_rate_limit_retries, which counts every
-    retry, and the waits RATE_LIMIT_DELAYS_SECONDS (not the provider's
-    Retry-After, yet)."""
+    """A rate limit (ModelRateLimitError) is sampled again under its class's
+    policy: the config's endpoint_rate_limit_error_retries, else
+    endpoint_error_retries, which count every retry, and the waits
+    AUTO_RETRY_DELAYS_SECONDS (not the provider's Retry-After, yet)."""
 
     def setUp(self):
         self.waits = _record_waits(self)
@@ -1317,7 +1321,7 @@ class RateLimitRetryTests(unittest.TestCase):
                 model = _Model(host, *errors, _answer('never'))
                 with self.assertRaises(ModelRateLimitError) as caught:
                     run_turn(context, model, _environment(host),
-                             _config(endpoint_rate_limit_retries=retries), host)
+                             _config(endpoint_rate_limit_error_retries=retries), host)
                 self.assertIs(caught.exception, errors[-1])
                 self.assertEqual([error.retry_state for error in errors],
                                  [RetryState.RETRIED] * retries + [RetryState.EXHAUSTED])
@@ -1330,7 +1334,7 @@ class RateLimitRetryTests(unittest.TestCase):
         host, context = _Host(), _context()
         model = _Model(host, *(_rate_limited() for _ in range(10)), _answer('done'))
         result = run_turn(context, model, _environment(host),
-                          _config(endpoint_rate_limit_retries='unbounded'), host)
+                          _config(endpoint_rate_limit_error_retries='unbounded'), host)
         self.assertEqual(result.final_text, 'done')
         self.assertEqual(self.waits, [2, 2, 5, 10, 20] + [30] * 5)
         self.assertEqual(host.notices[0], 'Sampling again in 2 s (1/∞).')
@@ -1348,7 +1352,7 @@ class RateLimitRetryTests(unittest.TestCase):
         model = _Model(host, *errors, _answer('never'))
         with self.assertRaises(ModelRateLimitError) as caught:
             run_turn(context, model, _environment(host),
-                     _config(endpoint_rate_limit_retries='unbounded'), host)
+                     _config(endpoint_rate_limit_error_retries='unbounded'), host)
         self.assertIs(caught.exception, errors[2])
         self.assertEqual([error.retry_state for error in errors[:3]],
                          [RetryState.RETRIED, RetryState.RETRIED, RetryState.CANCELLED])
@@ -1364,7 +1368,7 @@ class RateLimitRetryTests(unittest.TestCase):
                 host, context = _Host(), _context()
                 error = _rate_limited(retry_after)
                 model = _Model(host, error, _answer('done'))
-                config = _config(endpoint_rate_limit_retries=retries)
+                config = _config(endpoint_rate_limit_error_retries=retries)
                 result = run_turn(context, model, _environment(host), config, host)
                 self.assertEqual(result.final_text, 'done')
                 self.assertIs(error.retry_state, RetryState.RETRIED)
@@ -1379,8 +1383,8 @@ class RateLimitRetryTests(unittest.TestCase):
         self.assertEqual(result.final_text, 'done')
         self.assertEqual(self.waits, [2, 2, 2, 2, 2])
         self.assertEqual(host.notices, [
-            'Sampling again in 2 s (1/3).', 'Sampling again in 2 s (1/8).',
-            'Sampling again in 2 s (2/3).', 'Sampling again in 2 s (2/8).',
+            'Sampling again in 2 s (1/8).', 'Sampling again in 2 s (1/8).',
+            'Sampling again in 2 s (2/8).', 'Sampling again in 2 s (2/8).',
             'Sampling again in 2 s (1/8).',
         ])
         self.assertEqual([item.recovery for item in context if isinstance(item, SampleMetadata)], [
@@ -1410,7 +1414,7 @@ class RateLimitRetryTests(unittest.TestCase):
         model = _Model(host, _rate_limited(7), _rate_limited(), _answer('never'))
         with self.assertRaises(ModelRateLimitError):
             run_turn(_context(), model, _environment(host),
-                     _config(endpoint_rate_limit_retries=1), host)
+                     _config(endpoint_rate_limit_error_retries=1), host)
         retries = [tags for op, tags in host.traced if op == 'sample_retry']
         self.assertEqual([(t['policy'], t['attempt'], t['retry_state'], t['delay_seconds'],
                            t['retry_after_seconds'], t['error_code']) for t in retries],
@@ -1439,7 +1443,7 @@ class RateLimitRetryTests(unittest.TestCase):
                 }[retries]
                 host = _ErrorHost()
                 model = _Model(host, *errors, _answer('done'))
-                config = _config(endpoint_rate_limit_retries=retries)
+                config = _config(endpoint_rate_limit_error_retries=retries)
                 if retries == 'unbounded':
                     self.assertEqual(run_turn(_context(), model, _environment(host), config,
                                               host).final_text, 'done')
@@ -1449,13 +1453,14 @@ class RateLimitRetryTests(unittest.TestCase):
                     self.assertIs(raised.exception, errors[retries])
                 self.assertEqual(host.shown, shown)
 
-    def test_the_default_policy_leaves_its_error_to_the_end_of_the_turn(self):
-        # It gives up at its 3rd attempt, where the errors would start.
+    def test_a_class_that_gives_up_at_its_3rd_attempt_leaves_its_error_to_the_end(self):
+        # Where the errors would start; every class shows them from there.
         host = _ErrorHost()
         errors = [_rejected() for _ in range(3)]
         model = _Model(host, *errors, _answer('never'))
         with self.assertRaises(NativeToolRejected) as raised:
-            run_turn(_context(), model, _environment(host), _config(), host)
+            run_turn(_context(), model, _environment(host), _config(endpoint_error_retries=2),
+                     host)
         self.assertIs(raised.exception, errors[-1])
         self.assertEqual(host.shown, ['Sampling again in 2 s (1/3).',
                                       'Sampling again in 2 s (2/3).'])
@@ -1464,13 +1469,13 @@ class RateLimitRetryTests(unittest.TestCase):
 class TransientRetryTests(unittest.TestCase):
     """A transient HTTP failure (a retryable status, a timeout, a connection
     error, a broken stream) is the loop's to retry: its own samples ask the
-    model for no retries of its own, and it samples again under the default
-    policy, as it does the Claude relay's failures."""
+    model for no retries of its own, and it samples again under the policy
+    of its class, as it does the Claude relay's failures."""
 
     def setUp(self):
         self.waits = _record_waits(self)
 
-    def test_each_kind_is_sampled_again_under_the_default_policy(self):
+    def test_each_kind_is_sampled_again_under_its_class_s_policy(self):
         # Each retry's label is the one an adapter's own retry gave it.
         cases = (
             (ModelTransportError, 'http_error', 503, 'http_503_retry'),
@@ -1487,20 +1492,21 @@ class TransientRetryTests(unittest.TestCase):
                 result = run_turn(context, model, _environment(host), _config(), host)
                 self.assertEqual(result.final_text, 'done')
                 self.assertEqual(self.waits, [2, 2])
-                self.assertEqual(host.notices, ['Sampling again in 2 s (1/3).',
-                                                'Sampling again in 2 s (2/3).'])
+                self.assertEqual(host.notices, ['Sampling again in 2 s (1/8).',
+                                                'Sampling again in 2 s (2/8).'])
                 self.assertEqual([error.retry_state for error in errors], [RetryState.RETRIED] * 2)
                 # Each failed attempt is saved, as the loop saves every failure.
                 self.assertEqual(sum(isinstance(item, ModelFailure) for item in context), 2)
                 [metadata] = [item for item in context if isinstance(item, SampleMetadata)]
                 self.assertEqual(metadata.recovery, (label, label))
 
-    def test_the_third_failure_ends_the_turn_with_retry_offered(self):
+    def test_the_last_failure_ends_the_turn_with_retry_offered(self):
         host = _Host()
         errors = [_transient() for _ in range(3)]
         model = _Model(host, *errors, _answer('never'))
         with self.assertRaises(ModelTransportError) as caught:
-            run_turn(_context(), model, _environment(host), _config(), host)
+            run_turn(_context(), model, _environment(host), _config(endpoint_error_retries=2),
+                     host)
         self.assertIs(caught.exception, errors[2])
         self.assertEqual([error.retry_state for error in errors],
                          [RetryState.RETRIED, RetryState.RETRIED, RetryState.EXHAUSTED])
@@ -1532,9 +1538,9 @@ class TransientRetryTests(unittest.TestCase):
         host = Host()
         model = _Model(host, _transient(), _rate_limited(), _rate_limited(), _answer('done'))
         run_turn(_context(), model, _environment(host),
-                 _config(endpoint_rate_limit_retries='unbounded'), host)
+                 _config(endpoint_rate_limit_error_retries='unbounded'), host)
         # (failed, attempts in all, notices so far): each right after its notice.
-        self.assertEqual(progress, [(1, 3, 1), (1, None, 2), (2, None, 3)])
+        self.assertEqual(progress, [(1, 8, 1), (1, None, 2), (2, None, 3)])
 
     def test_the_loop_s_labels_come_before_the_attempt_s_own_recovery(self):
         # In order: the loop's retries came first.
@@ -1668,6 +1674,209 @@ class RetryWaitTests(unittest.TestCase):
                     self.assertEqual(result.kind, 'stopped')
                 self.assertLess(time.monotonic() - started, 10)
                 self.assertEqual(len(model.script), 1)  # no attempt after it
+
+
+class ErrorClassTests(unittest.TestCase):
+    """Each error's class (ModelError.retry_class) picks its policy: today's
+    rate-limit one for every class, with the count of the class's own key
+    where it has one and it is set, else endpoint_error_retries, else 7."""
+
+    def setUp(self):
+        self.waits = _record_waits(self)
+
+    def test_every_class_starts_with_the_rate_limit_policy(self):
+        self.assertEqual(kernel.AUTO_RETRY_DELAYS_SECONDS, (2, 2, 5, 10, 20, 30))
+        errors = {
+            'rate_limit': _rate_limited(), 'transient': _transient(), 'timeout':
+            ModelTimeoutError('slow'), 'response': ModelResponseError('bad'),
+            'empty_response': MissingFinalText('none'), 'refusal': ModelRefusal(),
+            'auth': ModelAuthenticationError('who'), 'error': ModelError('else'),
+        }
+        self.assertEqual(tuple(errors), ERROR_RETRY_CLASSES)
+        for name, error in errors.items():
+            with self.subTest(retry_class=name):
+                self.assertEqual(error.retry_class, name)
+                policy = kernel.auto_retry_policy(error, _config())
+                self.assertEqual(policy, kernel.AutoRetryPolicy(
+                    name, 8, kernel.AUTO_RETRY_DELAYS_SECONDS,
+                    label='rate_limit_retry' if name == 'rate_limit' else None))
+        # Unbound, as from a Python caller without a config.
+        self.assertEqual(kernel.auto_retry_policy(_transient(), None).attempts, 8)
+        # Relay errors have their classes too.
+        self.assertEqual(_rejected().retry_class, 'response')
+        self.assertEqual(_expired().retry_class, 'transient')
+
+    def test_a_class_s_own_key_beats_the_general_key_and_unset_follows_it(self):
+        config = _config(endpoint_error_retries=3, endpoint_timeout_error_retries=1,
+                         endpoint_refusal_error_retries='unbounded')
+        attempts = {name: kernel.auto_retry_policy(error, config).attempts for name, error in (
+            ('timeout', ModelTimeoutError('slow')), ('refusal', ModelRefusal()),
+            ('transient', _transient()), ('auth', ModelAuthenticationError('who')),
+            ('rate_limit', _rate_limited()))}
+        self.assertEqual(attempts, {'timeout': 2, 'refusal': None, 'transient': 4, 'auth': 4,
+                                    'rate_limit': 4})
+        config = _config(endpoint_error_retries='unbounded', endpoint_auth_error_retries=0)
+        self.assertIsNone(kernel.auto_retry_policy(_transient(), config).attempts)
+        self.assertEqual(kernel.auto_retry_policy(ModelAuthenticationError('who'),
+                                                  config).attempts, 1)
+
+    def test_an_adapter_may_set_the_class(self):
+        error = ModelTransportError('HTTP 401', retry_class='auth')
+        self.assertEqual(error.retry_class, 'auth')
+        error.retry_class = None  # back to its type's
+        self.assertEqual(error.retry_class, 'transient')
+        with self.assertRaisesRegex(ValueError, 'retry_class must be one of'):
+            ModelError('x', retry_class='other')
+
+    def test_a_count_of_0_ends_the_turn_at_the_first_failure(self):
+        host = _TracingHost()
+        error = _transient()
+        model = _Model(host, error, _answer('never'))
+        with self.assertRaises(ModelTransportError):
+            run_turn(_context(), model, _environment(host), _config(endpoint_error_retries=0),
+                     host)
+        self.assertIs(error.retry_state, RetryState.EXHAUSTED)
+        self.assertEqual(host.notices, [])
+        self.assertEqual(host.retryable, 1)
+        [retry] = [tags for op, tags in host.traced if op == 'sample_retry']
+        self.assertEqual((retry['policy'], retry['attempt'], retry['retry_state']),
+                         ('transient', 1, 'exhausted'))
+        self.assertEqual(self.waits, [])
+
+
+def _partial(*items):
+    """A failed response that output ``items`` first, as a Responses stream's
+    failure carries them: eligible, its failure counting them."""
+    return ModelResponseError('failed', failure=ModelFailure(
+        'response_failed', 'Responses reported a failed response', provider='responses',
+        error_code='server_error', completed_item_count=len(items)),
+        completed_items=items, retry_state=RetryState.ELIGIBLE)
+
+
+class PartialOutputTests(unittest.TestCase):
+    """A retried attempt's partial output is dropped; a last attempt's is saved."""
+
+    def setUp(self):
+        self.waits = _record_waits(self)
+
+    def test_a_retry_samples_the_same_context_without_the_output(self):
+        host, context = _Host(), _context()
+        error = _partial(Message('assistant', 'half'), _call('x'))
+        model = _Model(host, error, _answer('done'))
+        result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, 'done')
+        self.assertIs(error.retry_state, RetryState.RETRIED)
+        self.assertEqual(error.completed_items, ())
+        self.assertNotIn(Message('assistant', 'half'), context.items)
+        self.assertFalse(any(isinstance(item, (ToolCall, ToolResult)) for item in context))
+        [failure] = [item for item in context if isinstance(item, ModelFailure)]
+        self.assertEqual(failure.completed_item_count, 2)
+        # Both attempts sampled the same context, the failure aside.
+        self.assertEqual([e for e in host.events if e[0] == 'sample'],
+                         [('sample', 2), ('sample', 4)])
+        self.assertEqual(host.calls_run, 0)
+
+    def test_the_last_attempt_keeps_its_output_and_closes_its_calls(self):
+        host, context = _Host(), _context()
+        errors = [_partial(Message('assistant', 'first'), _call('x')),
+                  _partial(Message('assistant', 'last'), _call('y'))]
+        model = _Model(host, *errors, _answer('never'))
+        with self.assertRaises(ModelResponseError) as raised:
+            run_turn(context, model, _environment(host), _config(endpoint_error_retries=1), host)
+        self.assertIs(raised.exception, errors[1])
+        self.assertIs(errors[1].retry_state, RetryState.EXHAUSTED)
+        self.assertNotIn(Message('assistant', 'first'), context.items)
+        self.assertIn(Message('assistant', 'last'), context.items)
+        [result] = [item for item in context if isinstance(item, ToolResult)]
+        self.assertEqual((result.call_id, result.output, result.success),
+                         ('y', kernel.NOT_EXECUTED_OUTPUT, False))
+        self.assertEqual(context.pending_tool_calls(), ())
+        self.assertEqual(host.calls_run, 0)
+
+
+class EmptyAnswerTests(unittest.TestCase):
+    """A final answer with neither text nor tool calls stays saved, but it is a
+    failed attempt of class empty_response: the loop samples again after it,
+    as /retry does, then raises MissingFinalText."""
+
+    def setUp(self):
+        self.waits = _record_waits(self)
+
+    def test_an_empty_answer_is_sampled_again_after_it(self):
+        host, context = _Host(), _context()
+        model = _Model(host, _answer('  '), _answer('done'))
+        # Failed attempts don't count toward max_samples.
+        result = run_turn(context, model, _environment(host), _config(max_samples=1), host)
+        self.assertEqual(result.final_text, 'done')
+        self.assertEqual(self.waits, [2])
+        self.assertEqual(host.notices, ['Sampling again in 2 s (1/8).'])
+        self.assertEqual(host.retryable, 0)
+        items = list(context.items)
+        empty = items.index(Message('assistant', '  '))
+        [failure] = [item for item in items if isinstance(item, ModelFailure)]
+        self.assertEqual((failure.category, failure.error_code, failure.message),
+                         ('empty_response', 'empty_response', kernel.EMPTY_RESPONSE_MESSAGE))
+        self.assertLess(empty, items.index(failure))
+        self.assertLess(items.index(failure), items.index(Message('assistant', 'done')))
+        metadata = [item for item in items if isinstance(item, SampleMetadata)]
+        self.assertEqual([m.recovery for m in metadata], [(), ('empty_response_retry',)])
+        # The second attempt sampled after the empty one (its message, metadata
+        # and boundary) and the failure (with its boundary).
+        self.assertEqual([e for e in host.events if e[0] == 'sample'],
+                         [('sample', 2), ('sample', 7)])
+
+    def test_the_last_empty_answer_raises_missing_final_text_with_its_failure(self):
+        host, context = _Host(), _context()
+        model = _Model(host, _answer(''), _answer(' '), _answer('never'))
+        with self.assertRaises(MissingFinalText) as raised:
+            run_turn(context, model, _environment(host), _config(endpoint_error_retries=1), host)
+        error = raised.exception
+        self.assertIsInstance(error, ModelResponseError)
+        self.assertEqual(str(error), 'Model returned no final assistant text.')
+        self.assertIs(error.retry_state, RetryState.EXHAUSTED)
+        self.assertEqual(error.failure.category, 'empty_response')
+        self.assertEqual(sum(isinstance(item, ModelFailure) for item in context), 2)
+        self.assertEqual(self.waits, [2])
+        self.assertEqual(host.retryable, 1)
+        self.assertEqual(len(model.script), 1)
+
+    def test_an_empty_answer_does_not_end_the_retries_in_progress(self):
+        # It isn't a success: a /cancel during it still stops the retries.
+        class Host(_Host):
+            successes, cancelled = 0, False
+
+            def after_sample(self, model, sample):
+                self.successes += 1
+
+            def retry_cancelled(self):
+                return self.cancelled
+        host = Host()
+
+        def empty_after_a_cancel():
+            host.cancelled = True  # /cancel while the retried attempt runs
+            return _answer('')
+        model = _Model(host, _transient(), empty_after_a_cancel, _answer('never'))
+        with self.assertRaises(MissingFinalText) as raised:
+            run_turn(_context(), model, _environment(host), _config(), host)
+        self.assertIs(raised.exception.retry_state, RetryState.CANCELLED)
+        self.assertEqual(host.successes, 0)
+        self.assertEqual(len(model.script), 1)
+
+    def test_a_steer_after_an_empty_answer_goes_in_without_a_failure(self):
+        class Host(_SteeringHost):
+            def phase(self, phase):
+                super().phase(phase)
+                if phase == 'sampling' and not self.steered:
+                    self.steered = True
+                    self.steer('go on')  # /steer! go on
+            steered = False
+        host, context = Host(), _context()
+        model = _Model(host, _answer(''), _answer('done'))
+        result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, 'done')
+        self.assertFalse(any(isinstance(item, ModelFailure) for item in context))
+        self.assertIn(Message('user', 'go on'), context.items)
+        self.assertEqual(self.waits, [])
 
 
 if __name__ == "__main__":

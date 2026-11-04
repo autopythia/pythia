@@ -119,10 +119,11 @@ class RelayTraceTests(unittest.TestCase):
                     self.assertIn(b'PRIVATE_RETRY_PAYLOAD', b''.join(payload(r) for r in events if r['type'] == 'claude_stdout'))
 
     def test_api_retry_does_not_mask_later_errors_or_leave_stale_auth_code(self):
+        # Each names its own kind, never the retry's authentication_failed.
         for text, category, code in (
                 ('api-retry-auth-error', ModelAuthenticationError, 'authentication_failed'),
-                ('api-retry-unknown', ModelResponseError, None),
-                ('api-retry-exit', ModelTransportError, None)):
+                ('api-retry-unknown', ModelResponseError, 'native_protocol'),
+                ('api-retry-exit', ModelTransportError, 'native_exit')):
             with self.subTest(text=text), self.assertRaises(category) as caught:
                 self.model.sample(InteractionContext((Message('user', text),)))
             self.assertEqual(caught.exception.failure.error_code, code)
@@ -132,7 +133,9 @@ class RelayTraceTests(unittest.TestCase):
         trace = self.traced(timeout=1)
         with self.assertRaises(ModelTimeoutError) as caught:
             self.model.sample(InteractionContext((Message('user', 'api-retry-only'),)))
-        self.assertIsNone(caught.exception.failure.error_code)
+        # A generation deadline's own code, not the retry's.
+        self.assertEqual(caught.exception.failure.error_code, 'generation_timeout')
+        self.assertEqual(caught.exception.retry_class, 'timeout')
         self.assertEqual(caught.exception.failure.last_event_type, 'system/api_retry')
         self.assertIn('budget=1s', caught.exception.failure.message)
         self.assertNotIn('PRIVATE_RETRY_PAYLOAD', caught.exception.failure.message)
@@ -224,6 +227,8 @@ class RelayTraceTests(unittest.TestCase):
                 str(fixtures.ROOT), 'pythia.interaction.' + frontend, *self.launch_options(),
                 '--headless', '--prompt', 'trace-error', '--debug-trace',
                 '--cwd', str(self.root), '--save', str(save), *opts,
+                # One failure: no automatic retries of the overloaded API.
+                '--endpoint-error-retries', '0',
             ], cwd=fixtures.ROOT, env={**os.environ, 'HOME': str(self.root)},
                 capture_output=True, text=True, timeout=15)
             with self.subTest(frontend=frontend):

@@ -28,12 +28,13 @@ from .model import SampleParams
 from .model_catalog import ModelBinding
 from .model_catalog import CompactionDefaults
 from .model_catalog import DEFAULT_DISPLAY_ASSISTANT
-from .model_catalog import DEFAULT_RATE_LIMIT_RETRIES
+from .model_catalog import DEFAULT_ERROR_RETRIES
 from .model_catalog import DISPLAY_ASSISTANT_VALUES
 from .model_catalog import PROMPT_CACHING_VALUES
-from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
+from .model_catalog import ERROR_RETRIES_UNBOUNDED
+from .model_catalog import ERROR_RETRY_FIELDS
 from .model_catalog import TOKEN_TRACE_LEVELS
-from .model_catalog import validate_rate_limit_retries
+from .model_catalog import validate_error_retries
 from .model_catalog import binding_from_namespace, freeze_extra_sample_params, thaw_json
 from .save import PUBLIC_LOG_REASONING
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -47,7 +48,11 @@ CONFIG_KEYS = (
     "max_output_tokens",
     "timeouts_request_seconds",
     "endpoint_prompt_caching",
-    "endpoint_rate_limit_retries",
+    "endpoint_error_retries",
+    "endpoint_rate_limit_error_retries",
+    "endpoint_timeout_error_retries",
+    "endpoint_refusal_error_retries",
+    "endpoint_auth_error_retries",
     "endpoint_token_trace",
     "enable_auto_compaction",
     "auto_compaction_context_tokens",
@@ -62,18 +67,27 @@ CONFIG_KEYS = (
     "tool_approval_ui_countdown_seconds",
     "extra_sample_params",
 )
+# The automatic-retry keys (endpoint_<field> for ERROR_RETRY_FIELDS): the
+# general one first, then the classes with a key of their own, which follow
+# the general one while unset.
+ERROR_RETRY_KEYS = tuple("endpoint_" + name for name in ERROR_RETRY_FIELDS)
+_ERROR_RETRY_CLASS_KEYS = frozenset(ERROR_RETRY_KEYS[1:])
 # Keys renamed in October 2026, from their old names. The old names keep
 # working, with a warning that names the new one: as /config keys, as options,
 # in auto's config files, and as demo.run keywords. Version-3 auto saves use
 # them and load silently, as version-4 saves do request_timeout_seconds, which
 # became timeouts_request_seconds (named after the model catalog's
-# timeouts.request_seconds) later in October. Python fields and
-# InteractionConfig's keyword arguments have only the new names.
+# timeouts.request_seconds) later in October. In November,
+# endpoint_rate_limit_retries became endpoint_rate_limit_error_retries, named
+# like the other error classes' retries; it was only ever a /config key and an
+# option. Python fields and InteractionConfig's keyword arguments have only
+# the new names.
 RENAMED_CONFIG_KEYS = {
     "auto_compact_tokens": "auto_compaction_context_tokens",
     "compaction_keep_recent_tokens": "compaction_pi_keep_recent_tokens",
     "compaction_max_output_tokens": "compaction_pi_max_output_tokens",
     "request_timeout_seconds": "timeouts_request_seconds",
+    "endpoint_rate_limit_retries": "endpoint_rate_limit_error_retries",
 }
 _BOOLEAN_KEYS = frozenset((
     "enable_workspace", "enable_auto_compaction", "compaction_coldstart_reboot",
@@ -100,7 +114,7 @@ _NO_REQUEST_TIMEOUT = (
 )
 _NO_PROMPT_CACHING = "endpoint_prompt_caching applies only to the Messages API."
 _NO_RATE_LIMIT_RETRIES = (
-    "endpoint_rate_limit_retries does not apply to Claude Relay, whose native CLI "
+    "endpoint_rate_limit_error_retries does not apply to Claude Relay, whose native CLI "
     "retries its own rate limits."
 )
 _NO_TOKEN_TRACE = "endpoint_token_trace applies only to the Chat Completions API."
@@ -190,15 +204,18 @@ def validate_config_value(key: str, value: object) -> ConfigValue:
         if value is not None and (not isinstance(value, str) or value not in PROMPT_CACHING_VALUES):
             raise ConfigError("endpoint_prompt_caching requires 5m, 1h, none, or null.")
         return value
-    if key == "endpoint_rate_limit_retries":
-        # None means it doesn't apply (Claude Relay), or the default.
+    if key in ERROR_RETRY_KEYS:
+        # None is unset: a class key follows endpoint_error_retries, which an
+        # unbound config leaves unset too (the turn loop then takes
+        # DEFAULT_ERROR_RETRIES). Or it doesn't apply: Claude Relay's rate
+        # limits.
         if value is None:
             return None
         try:
-            return validate_rate_limit_retries(value, key)
+            return validate_error_retries(value, key)
         except ValueError:
             raise ConfigError(
-                f"{key} requires a nonnegative integer, {RATE_LIMIT_RETRIES_UNBOUNDED}, or null."
+                f"{key} requires a nonnegative integer, {ERROR_RETRIES_UNBOUNDED}, or null."
             ) from None
     if key == "endpoint_token_trace":
         # None means the route has none: only Chat Completions traces tokens.
@@ -261,8 +278,8 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     sequence, such as ``coldstart,pi:2``, or null; ``save_log_reasoning``
     takes ``nil`` or ``assistant``, as they are, and ``display_assistant``
     ``markdown``, ``plain`` or null; ``endpoint_prompt_caching``
-    takes ``5m``, ``1h`` or ``none``, ``endpoint_rate_limit_retries``
-    ``unbounded`` too, and ``endpoint_token_trace`` a level
+    takes ``5m``, ``1h`` or ``none``, the automatic-retry keys
+    (``ERROR_RETRY_KEYS``) ``unbounded`` too, and ``endpoint_token_trace`` a level
     (``TOKEN_TRACE_LEVELS``). The tool-approval timers
     (``tool_approval_auto_seconds``, ``tool_approval_ui_countdown_seconds``)
     refuse anything but a whole number or null with their own message, which
@@ -286,7 +303,7 @@ def parse_config_literal(key: str, text: object) -> ConfigValue:
     if key == "endpoint_token_trace":
         # none is a value here too; null restores the catalog's, else none.
         return validate_config_value(key, None if literal in ("null", "None") else literal)
-    if (key == "endpoint_rate_limit_retries" and literal not in ("null", "None")
+    if (key in ERROR_RETRY_KEYS and literal not in ("null", "None")
             and _INTEGER_LITERAL_RE.fullmatch(literal) is None):
         # unbounded; any other text gets the key's own message, which names it.
         return validate_config_value(key, literal)
@@ -508,12 +525,18 @@ class InteractionConfigSnapshot:
     no ``cache_control``. Bound configs resolve it on Messages only; ``None``
     elsewhere, where it does not apply.
 
-    ``endpoint_rate_limit_retries`` is how many times the turn loop samples
-    again after a rate limit (``ModelRateLimitError``), each after a fixed
-    wait, or ``unbounded``: until a sample succeeds, or the user cancels
-    (the CLI's /cancel) or stops. Bound configs resolve it on every HTTP API;
-    ``None`` on Claude Relay, where it does not apply, and in an unbound
-    config, where the turn loop takes ``DEFAULT_RATE_LIMIT_RETRIES``.
+    ``endpoint_error_retries`` is how many times the turn loop samples again
+    after a failed sample, by itself (``loop.kernel``), each after a fixed
+    wait, or ``unbounded``: until a sample succeeds, or the user cancels (the
+    CLI's /cancel) or stops. It counts the attempts of each class of error
+    (``ModelError.retry_class``) apart. Four classes have a key of their own,
+    which takes precedence once set: ``endpoint_rate_limit_error_retries``,
+    ``endpoint_timeout_error_retries``, ``endpoint_refusal_error_retries`` and
+    ``endpoint_auth_error_retries``; ``None`` follows
+    ``endpoint_error_retries``. Bound configs resolve the general key; an
+    unbound config leaves it ``None``, and the turn loop takes
+    ``DEFAULT_ERROR_RETRIES``. ``endpoint_rate_limit_error_retries`` is
+    ``None`` on Claude Relay, where it does not apply.
 
     ``endpoint_token_trace`` is projected into sample params as each
     request's token-trace level (``TOKEN_TRACE_LEVELS``): how much of its
@@ -562,7 +585,11 @@ class InteractionConfigSnapshot:
     max_output_tokens: Optional[int] = None
     timeouts_request_seconds: Optional[float] = None
     endpoint_prompt_caching: Optional[str] = None
-    endpoint_rate_limit_retries: Optional[Union[int, str]] = None
+    endpoint_error_retries: Optional[Union[int, str]] = None
+    endpoint_rate_limit_error_retries: Optional[Union[int, str]] = None
+    endpoint_timeout_error_retries: Optional[Union[int, str]] = None
+    endpoint_refusal_error_retries: Optional[Union[int, str]] = None
+    endpoint_auth_error_retries: Optional[Union[int, str]] = None
     endpoint_token_trace: Optional[str] = None
     enable_auto_compaction: bool = True
     auto_compaction_context_tokens: Optional[int] = None
@@ -660,8 +687,8 @@ class InteractionConfig:
         request_timeout_applies: bool = True,
         endpoint_prompt_caching_fallback: Optional[str] = None,
         prompt_caching_applies: bool = True,
-        endpoint_rate_limit_retries_fallback: Optional[Union[int, str]] = None,
-        rate_limit_retries_applies: bool = True,
+        error_retries_fallbacks: Optional[Mapping[str, Union[int, str, None]]] = None,
+        rate_limit_error_retries_applies: bool = True,
         endpoint_token_trace_fallback: Optional[str] = None,
         token_trace_applies: bool = True,
         compaction_route: Optional[CompactionRoute] = None,
@@ -690,8 +717,11 @@ class InteractionConfig:
             raise TypeError("request_timeout_applies must be a bool")
         if not isinstance(prompt_caching_applies, bool):
             raise TypeError("prompt_caching_applies must be a bool")
-        if not isinstance(rate_limit_retries_applies, bool):
-            raise TypeError("rate_limit_retries_applies must be a bool")
+        if not isinstance(rate_limit_error_retries_applies, bool):
+            raise TypeError("rate_limit_error_retries_applies must be a bool")
+        error_retries_fallbacks = dict(error_retries_fallbacks or {})
+        if not set(error_retries_fallbacks) <= set(ERROR_RETRY_KEYS):
+            raise ValueError("error_retries_fallbacks takes ERROR_RETRY_KEYS only")
         if not isinstance(token_trace_applies, bool):
             raise TypeError("token_trace_applies must be a bool")
         if not isinstance(tool_approval_auto_seconds_applies, bool):
@@ -719,7 +749,7 @@ class InteractionConfig:
                 ("max_output_tokens", max_output_tokens_fallback),
                 ("timeouts_request_seconds", timeouts_request_seconds_fallback),
                 ("endpoint_prompt_caching", endpoint_prompt_caching_fallback),
-                ("endpoint_rate_limit_retries", endpoint_rate_limit_retries_fallback),
+                *error_retries_fallbacks.items(),
                 ("endpoint_token_trace", endpoint_token_trace_fallback),
                 ("auto_compaction_context_tokens", auto_compaction_context_tokens_fallback),
                 ("max_context_tokens", max_context_tokens_fallback),
@@ -734,7 +764,7 @@ class InteractionConfig:
         self._require_max_output_tokens = require_max_output_tokens
         self._request_timeout_applies = request_timeout_applies
         self._prompt_caching_applies = prompt_caching_applies
-        self._rate_limit_retries_applies = rate_limit_retries_applies
+        self._rate_limit_error_retries_applies = rate_limit_error_retries_applies
         self._token_trace_applies = token_trace_applies
         self._tool_approval_auto_seconds_applies = tool_approval_auto_seconds_applies
         self._tool_approval_ui_countdown_seconds_applies = (
@@ -822,7 +852,8 @@ class InteractionConfig:
             raise ConfigError(_NO_REQUEST_TIMEOUT)
         if not self._prompt_caching_applies and snapshot.endpoint_prompt_caching is not None:
             raise ConfigError(_NO_PROMPT_CACHING)
-        if not self._rate_limit_retries_applies and snapshot.endpoint_rate_limit_retries is not None:
+        if (not self._rate_limit_error_retries_applies
+                and snapshot.endpoint_rate_limit_error_retries is not None):
             raise ConfigError(_NO_RATE_LIMIT_RETRIES)
         if not self._token_trace_applies and snapshot.endpoint_token_trace is not None:
             raise ConfigError(_NO_TOKEN_TRACE)
@@ -893,13 +924,24 @@ class InteractionConfig:
         caching = getattr(args, "endpoint_prompt_caching", None)
         if caching is None and caching_applies:
             caching = binding.endpoint.prompt_caching or "5m"
-        retries_apply = binding.api != "claude-relay"
-        catalog_retries = None if spec is None else spec.endpoint.rate_limit_retries
-        retries = getattr(args, "endpoint_rate_limit_retries", None)
-        if retries is None and retries_apply:
-            retries = binding.endpoint.rate_limit_retries
-            if retries is None:
-                retries = DEFAULT_RATE_LIMIT_RETRIES
+        # Automatic retries likewise: each key's launch value is its option's,
+        # which the binding also carries, else the catalog's, and null
+        # restores the catalog's. Unset, the general key is
+        # DEFAULT_ERROR_RETRIES, and a class key follows the general one.
+        # Claude Relay retries its own rate limits.
+        rate_limit_applies = binding.api != "claude-relay"
+        retries, retries_fallbacks = {}, {}
+        for name in ERROR_RETRY_FIELDS:
+            key = "endpoint_" + name
+            value = getattr(args, key, None)
+            if value is None:
+                value = getattr(binding.endpoint, name)
+            fallback = None if spec is None else getattr(spec.endpoint, name)
+            if name == "error_retries" and fallback is None:
+                fallback = DEFAULT_ERROR_RETRIES
+            if name == "rate_limit_error_retries" and not rate_limit_applies:
+                value = fallback = None
+            retries[key], retries_fallbacks[key] = value, fallback
         # Likewise, on Chat Completions only.
         trace_applies = binding.api == "chat-completions"
         catalog_trace = None if spec is None else spec.endpoint.token_trace
@@ -922,7 +964,7 @@ class InteractionConfig:
                 max_output_tokens=max_output_tokens,
                 timeouts_request_seconds=request_timeout_seconds,
                 endpoint_prompt_caching=caching,
-                endpoint_rate_limit_retries=retries,
+                **retries,
                 endpoint_token_trace=trace,
                 enable_auto_compaction=args.enable_auto_compaction,
                 auto_compaction_context_tokens=getattr(args, "auto_compaction_context_tokens", None),
@@ -949,10 +991,8 @@ class InteractionConfig:
             request_timeout_applies=binding.api != "claude-relay",
             endpoint_prompt_caching_fallback=(catalog_caching or "5m") if caching_applies else None,
             prompt_caching_applies=caching_applies,
-            endpoint_rate_limit_retries_fallback=(
-                (DEFAULT_RATE_LIMIT_RETRIES if catalog_retries is None else catalog_retries)
-                if retries_apply else None),
-            rate_limit_retries_applies=retries_apply,
+            error_retries_fallbacks=retries_fallbacks,
+            rate_limit_error_retries_applies=rate_limit_applies,
             endpoint_token_trace_fallback=(catalog_trace or "none") if trace_applies else None,
             token_trace_applies=trace_applies,
             auto_compaction_context_tokens_fallback=(
@@ -1144,11 +1184,18 @@ class InteractionConfig:
                 indent=2,
             )
         lines = []
+        general = self.get("endpoint_error_retries")
         for name, value in values.items():
             seeded = initial[name]
             if seeded != value:
                 lines.append(f"# init: {name} = {seeded!r}")
-            lines.append(f"{name} = {value!r}")
+            note = ""
+            if (name in _ERROR_RETRY_CLASS_KEYS and value is None and general is not None
+                    and (name != "endpoint_rate_limit_error_retries"
+                         or self._rate_limit_error_retries_applies)):
+                # Unset, a class's retries are the general key's.
+                note = f"  # follows endpoint_error_retries ({general})"
+            lines.append(f"{name} = {value!r}{note}")
         return "\n".join(lines)
 
 
@@ -1158,6 +1205,7 @@ __all__ = [
     "ConfigError",
     "ConfigValue",
     "DEFAULT_TOOL_APPROVAL_UI_COUNTDOWN_SECONDS",
+    "ERROR_RETRY_KEYS",
     "InteractionConfig",
     "InteractionConfigSnapshot",
     "MAX_TOOL_APPROVAL_AUTO_SECONDS",

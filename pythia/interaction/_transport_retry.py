@@ -30,6 +30,18 @@ QUOTA_ERROR_CODES = frozenset(("insufficient_quota", "usage_limit_reached", "usa
 _ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
+def transient_http_status(status: object) -> bool:
+    """Whether an HTTP status may well pass if the same request is sent again:
+    408, 409, 425 and 429, and every 5xx but 501 (not implemented) and 505
+    (version not supported), Anthropic's 529 and a proxy's 52x included. An
+    adapter retries these itself for compaction and direct callers; for the
+    turn loop's own samples it raises them at once, of class ``transient``
+    (a 429, ``rate_limit``), and the loop retries them (``loop.kernel``)."""
+    return (isinstance(status, int) and not isinstance(status, bool)
+            and (status in (408, 409, 425, 429)
+                 or (500 <= status <= 599 and status not in (501, 505))))
+
+
 def _header_value(headers: Any, name: str) -> Optional[str]:
     if headers is None:
         return None
@@ -154,4 +166,5 @@ __all__ = [
     "quota_error_code",
     "retry_after_seconds",
     "retry_delay_seconds",
+    "transient_http_status",
 ]

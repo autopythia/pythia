@@ -57,6 +57,7 @@ from .items import UserToolResult
 from .media import AttachmentError, join_user_messages, parse_user_prompt, require_media_api
 from .model_config import build_model
 from .model_config import CHAT_COMPLETIONS_FIELDS, CLAUDE_RELAY_FIELDS, HTTP_FIELDS
+from .model_config import ERROR_RETRY_OPTION_FIELDS
 from .model_config import MESSAGES_FIELDS, relay_endpoint
 from .model import close_model
 from .model_config import frontend_catalog, render_model_catalog
@@ -530,6 +531,7 @@ class _Session:
         self._relay_options = dict(getattr(settings, "relay_options", {}))
         self._messages_options = dict(getattr(settings, "messages_options", {}))
         self._http_options = dict(getattr(settings, "http_options", {}))
+        self._error_retry_options = dict(getattr(settings, "error_retry_options", {}))
         self._chat_completions_options = dict(getattr(settings, "chat_completions_options", {}))
         self._models = {}
         self._model_lock = threading.Lock()
@@ -544,12 +546,19 @@ class _Session:
             # other roles ignore it.
             self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, prompt_caching=caching))
                                  if b.api == "messages" else b) for i, b in self.bindings.items()}
-        retries = self._http_options.get("endpoint_rate_limit_retries")
+        retries = self._http_options.get("endpoint_rate_limit_error_retries")
         if retries is not None:
             # Launch-only too: every HTTP role's endpoint takes it, and Claude
             # Relay roles ignore it.
-            self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, rate_limit_retries=retries))
+            self.bindings = {i: (replace(b, endpoint=replace(
+                                     b.endpoint, rate_limit_error_retries=retries))
                                  if b.api != "claude-relay" else b)
+                             for i, b in self.bindings.items()}
+        retries = {name[len("endpoint_"):]: value
+                   for name, value in self._error_retry_options.items()}
+        if retries:
+            # Launch-only too: every role's endpoint takes them.
+            self.bindings = {i: replace(b, endpoint=replace(b.endpoint, **retries))
                              for i, b in self.bindings.items()}
         trace = self._chat_completions_options.get("endpoint_token_trace")
         if trace is not None:
@@ -2105,6 +2114,9 @@ def main(argv=None):
                                      if getattr(args, name, None) is not None}
         settings.http_options = {name: getattr(args, name) for name in HTTP_FIELDS
                                  if getattr(args, name, None) is not None}
+        settings.error_retry_options = {name: getattr(args, name)
+                                        for name in ERROR_RETRY_OPTION_FIELDS
+                                        if getattr(args, name, None) is not None}
         settings.chat_completions_options = {name: getattr(args, name)
                                              for name in CHAT_COMPLETIONS_FIELDS
                                              if getattr(args, name, None) is not None}

@@ -36,6 +36,7 @@ from ._transport_retry import QUOTA_ERROR_CODES
 from ._transport_retry import quota_error_code
 from ._transport_retry import retry_after_seconds
 from ._transport_retry import retry_delay_seconds
+from ._transport_retry import transient_http_status
 from .codex_auth import CodexAuth
 from .codex_auth import CodexCredentials
 from .codex_auth import _resolve_auth_file
@@ -79,6 +80,7 @@ from .model import ModelTransportError
 from .model import RetryState
 from .model import SampleParams
 from .model import _apply_extra_sample_params
+from .model import _invalid_response
 from .model import _request_timeout_seconds
 from .model import _timed_sample
 from .model import _timeout_message
@@ -93,7 +95,6 @@ from .usage import TokenUsage
 
 X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state"
 REMOTE_COMPACTION_V2_RETAINED_USER_MESSAGE_TOKENS = 64_000
-_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 # Codes meaning the request exceeded the model's context window, whether in an
 # HTTP error body or in a ``response.failed`` or ``error`` stream event.
 _CONTEXT_WINDOW_ERROR_CODES = frozenset({"context_length_exceeded"})
@@ -101,6 +102,9 @@ _CONTEXT_WINDOW_ERROR_CODES = frozenset({"context_length_exceeded"})
 # ``response.failed`` or ``error`` stream event; the turn loop retries them as
 # it does an HTTP 429 (ModelRateLimitError).
 _RATE_LIMIT_ERROR_CODES = frozenset({"rate_limit_exceeded", *QUOTA_ERROR_CODES})
+# Codes meaning an overloaded or failing server, in a ``response.failed`` or
+# ``error`` stream event: transient, for the turn loop's retries.
+_TRANSIENT_ERROR_CODES = frozenset({"server_is_overloaded", "server_error"})
 _MAX_DIAGNOSTIC_VALUE_CHARS = 256
 _MAX_DIAGNOSTIC_EVENT_TYPES = 32
 
@@ -1133,11 +1137,38 @@ def _stream_failure(
     )
     error_type = (ModelContextWindowError if context_window
                   else ModelRateLimitError if rate_limit else ModelResponseError)
-    return error_type(
+    error = error_type(
         exception_message or message,
         failure=failure,
         completed_items=completed,
     )
+    if error_type is ModelResponseError:
+        error.retry_class = _stream_failure_class(category, trace.error_code)
+        if category not in _BROKEN_STREAM_CATEGORIES:
+            # Nothing of the response is adopted: the turn loop may sample the
+            # same context again, dropping what it output when it does. A
+            # broken stream is the executor's to vouch for (its own retries).
+            error.retry_state = RetryState.ELIGIBLE
+    return error
+
+
+# A stream that broke off; the executor retries these itself, and vouches for
+# the turn loop's retry once its own are used up (_stream_retry_label).
+_BROKEN_STREAM_CATEGORIES = frozenset({"stream_closed", "stream_transport", "stream_timeout"})
+
+
+def _stream_failure_class(category: str, code: Optional[str]) -> str:
+    """The retry class (ModelError.retry_class) of a stream that failed:
+    transient when it broke off, or when a failed response's code says the
+    server was overloaded or failing; a refusal when a content filter cut it
+    short; empty_response when it output nothing; else response."""
+    if category in _BROKEN_STREAM_CATEGORIES:
+        return "transient"
+    if category in {"response_failed", "response_error_event"} and code in _TRANSIENT_ERROR_CODES:
+        return "transient"
+    if category == "response_incomplete" and code == "content_filter":
+        return "refusal"
+    return "empty_response" if category == "empty_response" else "response"
 
 
 def _collect_sample(
@@ -1653,11 +1684,17 @@ def _http_failure(
     if rate_limit:
         return ModelRateLimitError(message, failure=failure,
                                    retry_after_seconds=retry_after_seconds(headers, cap=None))
-    # A transient status: nothing of a response was kept, so the turn loop
-    # may sample again (RetryState.ELIGIBLE), as this adapter's retries do.
-    transient = error_type is ModelTransportError and status in _RETRYABLE_HTTP_STATUSES
-    return error_type(message, failure=failure,
-                      retry_state=RetryState.ELIGIBLE if transient else RetryState.NONE)
+    if error_type is ModelContextWindowError:
+        # It has its own recovery.
+        return error_type(message, failure=failure)
+    # Nothing of a response was kept, so the turn loop may sample again
+    # (RetryState.ELIGIBLE), within the count of the status's class: a
+    # transient status's, as this adapter's retries do, a 401's (auth, after
+    # Codex's credential recovery), or any other's (error).
+    return error_type(
+        message, failure=failure, retry_state=RetryState.ELIGIBLE,
+        retry_class=("transient" if transient_http_status(status)
+                     else "auth" if status == 401 else "error"))
 
 
 def _request_transport_failure(
@@ -1828,6 +1865,9 @@ class _ResponsesModelBase:
         self._credential_source = credential_source
         self._expected_account_id = resolved_endpoint.account_id
         self._credential_lock = Lock()
+        # The access token of the credentials that this model's own OAuth
+        # refresh made, if any: it doesn't refresh those again.
+        self._refreshed_token: Optional[str] = None
         # Its own lock, never _credential_lock: a cancel must not wait for the
         # call that holds it.
         self._gate = RequestGate(
@@ -2054,7 +2094,13 @@ class _ResponsesModelBase:
             bearer_token=refreshed.auth.access_token,
             account_id=refreshed.auth.account_id,
         )
+        self._refreshed_token = refreshed.auth.access_token
         return refreshed
+
+    def _refreshed_by_this_model(self, snapshot: _CredentialSnapshot) -> bool:
+        """Whether this model's own OAuth refresh made ``snapshot``'s credentials."""
+        return (self._refreshed_token is not None and snapshot.auth is not None
+                and snapshot.auth.access_token == self._refreshed_token)
 
     @_timed_sample
     def sample(
@@ -2178,7 +2224,11 @@ class _ResponsesModelBase:
                         except TypeError:
                             raw = response.read()
                         if not isinstance(raw, (bytes, bytearray)):
-                            raise ModelResponseError("HTTP response body must be bytes")
+                            raise _invalid_response(
+                                ModelResponseError("HTTP response body must be bytes"),
+                                label=self._gate.label, provider=self.endpoint.api_provider,
+                                model=self.endpoint.model, http_status=status,
+                                attempt_count=attempts, recovery=tuple(recovery))
                         detail = (
                             ""
                             if len(raw) > 1_048_576
@@ -2230,6 +2280,14 @@ class _ResponsesModelBase:
                             recovery.append("http_401_retry")
                             call.wait(retry_delay_seconds(1, headers), self._retry_sleep)
                             continue
+                        if (not refreshed and self._credential_source.kind == "codex_file"
+                                and self._refreshed_by_this_model(snapshot)):
+                            # Its own refresh made the credentials that were
+                            # rejected: one more, as on each of the turn
+                            # loop's retries of an auth failure, would only
+                            # rotate the refresh token again.
+                            refreshed = True
+                            recovery.append("oauth_refresh_skipped")
                         if not refreshed and self._credential_source.kind == "codex_file":
                             refreshed = True
                             # A cancel must not cut a refresh off after the
@@ -2246,7 +2304,7 @@ class _ResponsesModelBase:
                                 continue
                             recovery.append("oauth_refresh_failed")
                     if (
-                        status in _RETRYABLE_HTTP_STATUSES
+                        transient_http_status(status)
                         and not context_window_error
                         and transient_retries < max_transient_retries
                     ):

@@ -28,6 +28,7 @@ from ._transport_retry import body_error_codes
 from ._transport_retry import quota_error_code
 from ._transport_retry import retry_after_seconds
 from ._transport_retry import retry_delay_seconds
+from ._transport_retry import transient_http_status
 from .context import ContextValidationError
 from .context import InteractionContext
 from .items import CompactionMetadata
@@ -61,6 +62,7 @@ from .model import ModelTransportError
 from .model import RetryState
 from .model import SampleParams
 from .model import _apply_extra_sample_params
+from .model import _invalid_response
 from .model import _request_timeout_seconds
 from .model import _timed_sample
 from .model import _timeout_message
@@ -75,9 +77,6 @@ from .usage import TokenUsage
 
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 MESSAGES_COMPACTION_BETA = "compact-2026-01-12"
-_RETRYABLE_HTTP_STATUSES = frozenset(
-    {408, 409, 425, 429, 500, 502, 503, 504, 529}
-)
 # An error body, or the status line's text in its place, is kept to this
 # many characters: the error shows it, on every attempt of a long rate-limit
 # retry too. The debug trace keeps the whole body.
@@ -912,11 +911,21 @@ def _messages_http_failure(
         else ModelThinkingBindingError if thinking
         else ModelTransportError
     )
-    # A transient status: nothing of a response was kept, so the turn loop
-    # may sample again (RetryState.ELIGIBLE), as this adapter's retries do.
-    transient = error_type is ModelTransportError and status in _RETRYABLE_HTTP_STATUSES
-    return error_type(message, failure=failure,
-                      retry_state=RetryState.ELIGIBLE if transient else RetryState.NONE)
+    # Nothing of a response was kept, so the turn loop may sample again
+    # (RetryState.ELIGIBLE), within the count of the status's class: a
+    # transient status's, as this adapter's retries do, a 401's (auth), or
+    # any other's (error). An overflow has its own recovery, and a thinking
+    # block bound to another prefix fails the same way again.
+    if error_type is not ModelTransportError:
+        return error_type(message, failure=failure)
+    return error_type(message, failure=failure, retry_state=RetryState.ELIGIBLE,
+                      retry_class=_status_class(status))
+
+
+def _status_class(status: int) -> str:
+    """The retry class of a failed request's HTTP status (not a 429's, nor an
+    overflow's): transient, auth for a 401, else error."""
+    return "transient" if transient_http_status(status) else "auth" if status == 401 else "error"
 
 
 def _messages_transport_failure(
@@ -1094,6 +1103,38 @@ class MessagesModel:
         with self._gate.call() as call:
             return self._sample(call, context, tools, sample_params)
 
+    def _decode(self, raw: bytes, attempts: int, recovery: Tuple[str, ...]) -> ModelSample:
+        """A successful response's body as a sample; ModelResponseError if it
+        isn't one, or a ModelRefusal, with its failure."""
+        try:
+            text = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ModelResponseError("response is not UTF-8 JSON") from exc
+        try:
+            # Lone surrogates become U+FFFD: UTF-8 can't save them.
+            decoded = loads_json(text)
+        except json.JSONDecodeError as exc:
+            raise ModelResponseError("response is not valid JSON") from exc
+        try:
+            return _decode_response(decoded)
+        except ModelRefusal as exc:
+            exc.failure = ModelFailure(
+                category="refusal",
+                message=str(exc),
+                provider="messages",
+                model=self.endpoint.model,
+                error_code=ModelRefusal.error_code,
+                attempt_count=attempts,
+                recovery=recovery,
+            )
+            raise
+        except ContextValidationError as exc:
+            raise ModelResponseError(str(exc)) from exc
+        except ModelResponseError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise ModelResponseError(str(exc)) from exc
+
     def _sample(
         self,
         call: RequestCall,
@@ -1152,7 +1193,7 @@ class MessagesModel:
                     response_headers = exc.headers
                     exc.close()
                     if (
-                        status in _RETRYABLE_HTTP_STATUSES
+                        transient_http_status(status)
                         and (status == 429 or not _is_context_window_error(detail))
                         and retries < max_retries
                     ):
@@ -1174,11 +1215,14 @@ class MessagesModel:
                 response_headers = getattr(response, "headers", None)
                 raw = response.read()
                 if not isinstance(raw, (bytes, bytearray)):
-                    raise ModelResponseError("HTTP response body must be bytes")
+                    raise _invalid_response(
+                        ModelResponseError("HTTP response body must be bytes"),
+                        label="Messages", provider="messages", model=self.endpoint.model,
+                        http_status=status, attempt_count=attempts, recovery=tuple(recovery))
                 if isinstance(status, int) and not 200 <= status < 300:
                     detail = bytes(raw).decode("utf-8", errors="replace")[:_MAX_ERROR_DETAIL_CHARS]
                     if (
-                        status in _RETRYABLE_HTTP_STATUSES
+                        transient_http_status(status)
                         and (status == 429 or not _is_context_window_error(detail))
                         and retries < max_retries
                     ):
@@ -1198,33 +1242,13 @@ class MessagesModel:
                         headers=response_headers,
                     )
                 try:
-                    text = bytes(raw).decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise ModelResponseError("response is not UTF-8 JSON") from exc
-                try:
-                    # Lone surrogates become U+FFFD: UTF-8 can't save them.
-                    decoded = loads_json(text)
-                except json.JSONDecodeError as exc:
-                    raise ModelResponseError("response is not valid JSON") from exc
-                try:
-                    sample = _decode_response(decoded)
-                except ModelRefusal as exc:
-                    exc.failure = ModelFailure(
-                        category="refusal",
-                        message=str(exc),
-                        provider="messages",
-                        model=self.endpoint.model,
-                        error_code=ModelRefusal.error_code,
-                        attempt_count=attempts,
-                        recovery=tuple(recovery),
-                    )
+                    sample = self._decode(raw, attempts, tuple(recovery))
+                except ModelResponseError as exc:
+                    # Nothing of it is kept: the turn loop may sample again.
+                    _invalid_response(exc, label="Messages", provider="messages",
+                                      model=self.endpoint.model, http_status=status,
+                                      attempt_count=attempts, recovery=tuple(recovery))
                     raise
-                except ContextValidationError as exc:
-                    raise ModelResponseError(str(exc)) from exc
-                except ModelResponseError:
-                    raise
-                except (TypeError, ValueError) as exc:
-                    raise ModelResponseError(str(exc)) from exc
                 return replace(
                     sample,
                     request_attempts=attempts,

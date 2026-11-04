@@ -1131,18 +1131,25 @@ class MessagesModelTests(unittest.TestCase):
         )
         self.assertNotIn("private timeout detail", str(raised.exception))
 
-    def test_without_retries_of_its_own_a_transient_failure_is_eligible_at_once(self):
+    def test_without_retries_of_its_own_a_failure_is_eligible_at_once_with_its_class(self):
         # As the turn loop asks for its own samples: one request, and an
-        # error the loop may sample again. Other failures stay final.
+        # error the loop may sample again, as many times as its class's count.
+        eligible = RetryState.ELIGIBLE
         cases = (
-            (_http_error(503), ModelTransportError, RetryState.ELIGIBLE),
-            (_http_error(529), ModelTransportError, RetryState.ELIGIBLE),
-            (_http_error(429), ModelRateLimitError, RetryState.ELIGIBLE),
-            (socket.timeout("slow"), ModelTimeoutError, RetryState.ELIGIBLE),
-            (urllib.error.URLError(OSError("refused")), ModelTransportError, RetryState.ELIGIBLE),
-            (_http_error(400), ModelTransportError, RetryState.NONE),
+            (_http_error(503), ModelTransportError, eligible, "transient"),
+            (_http_error(529), ModelTransportError, eligible, "transient"),
+            (_http_error(520), ModelTransportError, eligible, "transient"),
+            (_http_error(429), ModelRateLimitError, eligible, "rate_limit"),
+            (socket.timeout("slow"), ModelTimeoutError, eligible, "timeout"),
+            (urllib.error.URLError(OSError("refused")), ModelTransportError, eligible,
+             "transient"),
+            (_http_error(400), ModelTransportError, eligible, "error"),
+            (_http_error(501), ModelTransportError, eligible, "error"),
+            (_http_error(401), ModelTransportError, eligible, "auth"),
+            # An overflow has its own recovery.
+            (_http_error(413), ModelContextWindowError, RetryState.NONE, "response"),
         )
-        for outcome, error_type, state in cases:
+        for outcome, error_type, state, retry_class in cases:
             with self.subTest(outcome=repr(outcome)):
                 opener = _ScriptedOpener(outcome)
                 sleeps = []
@@ -1156,6 +1163,7 @@ class MessagesModelTests(unittest.TestCase):
                                  sample_params=SampleParams(transient_retries=0))
                 self.assertIs(type(raised.exception), error_type)
                 self.assertIs(raised.exception.retry_state, state)
+                self.assertEqual(raised.exception.retry_class, retry_class)
                 self.assertEqual((len(opener.calls), sleeps), (1, []))
                 self.assertEqual(raised.exception.failure.attempt_count, 1)
                 self.assertEqual(raised.exception.failure.recovery, ())
@@ -1399,9 +1407,14 @@ class MessagesRefusalTests(unittest.TestCase):
         ]))
         context = InteractionContext((Init(model="model"), Message("user", "Inspect.")))
         host = Host()
-        with self.assertRaises(ModelRefusal):
+        # Without the turn loop's retries of a refusal (RefusalRetryTests has them).
+        with self.assertRaises(ModelRefusal) as raised:
             run_turn(context, model, environment,
-                     InteractionConfigSnapshot(enable_auto_compaction=False), host)
+                     InteractionConfigSnapshot(enable_auto_compaction=False,
+                                               endpoint_refusal_error_retries=0), host)
+        # The adapter vouched for a retry: its class's count was 0.
+        self.assertIs(raised.exception.retry_state, RetryState.EXHAUSTED)
+        self.assertEqual(raised.exception.retry_class, "refusal")
         self.assertEqual(ran, [])
         # Nothing from the refused response is adopted: only the failure is saved.
         self.assertEqual([type(item).__name__ for item in context.items],

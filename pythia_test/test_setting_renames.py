@@ -1,5 +1,7 @@
 """Renamed settings: three in part 5 of the warm-cold compaction plan, then
-request_timeout_seconds, which became timeouts_request_seconds.
+request_timeout_seconds, which became timeouts_request_seconds, and
+endpoint_rate_limit_retries, which became endpoint_rate_limit_error_retries
+(an option and a /config key only).
 
 The new names work everywhere. The old ones keep working with a warning that
 names the new one: as options, as /config keys, in auto's config files, and as
@@ -39,6 +41,8 @@ RENAMES = {
 TIMEOUT_RENAME = {"request_timeout_seconds": "timeouts_request_seconds"}
 ALL_RENAMES = {**RENAMES, **TIMEOUT_RENAME}
 OLD_NAMES = {new: old for old, new in ALL_RENAMES.items()}
+# Neither an auto config key nor a demo.run keyword; its option has no default.
+RATE_LIMIT_RENAME = {"endpoint_rate_limit_retries": "endpoint_rate_limit_error_retries"}
 
 
 def _option(key):
@@ -54,9 +58,9 @@ def _caught():
 
 class OptionAndConfigKeyTests(unittest.TestCase):
     def test_one_mapping_names_every_rename(self):
-        self.assertEqual(RENAMED_CONFIG_KEYS, ALL_RENAMES)
-        self.assertLessEqual(set(ALL_RENAMES.values()), set(CONFIG_KEYS))
-        self.assertFalse(set(ALL_RENAMES) & set(CONFIG_KEYS))
+        self.assertEqual(RENAMED_CONFIG_KEYS, {**ALL_RENAMES, **RATE_LIMIT_RENAME})
+        self.assertLessEqual(set(RENAMED_CONFIG_KEYS.values()), set(CONFIG_KEYS))
+        self.assertFalse(set(RENAMED_CONFIG_KEYS) & set(CONFIG_KEYS))
 
     def test_old_options_are_hidden_aliases_that_warn(self):
         for frontend, parser, unset in (("cli", cli._build_parser(), None),
@@ -83,9 +87,21 @@ class OptionAndConfigKeyTests(unittest.TestCase):
         with self.assertWarns(FutureWarning):
             args = cli._build_parser().parse_args(["--request-timeout-seconds", "7.5"])
         self.assertEqual(args.timeouts_request_seconds, 7.5)
+        # The rate limit's takes a count or unbounded; neither option has a default.
+        [(old, new)] = RATE_LIMIT_RENAME.items()
+        for frontend, parser in (("cli", cli._build_parser()), ("demo", demo._build_parser()),
+                                 ("auto", build_auto_parser())):
+            with self.subTest(frontend=frontend, old=old):
+                self.assertNotIn(_option(old), parser.format_help())
+                self.assertNotIn(new, vars(parser.parse_args([])))
+                for value, expected in (("7", 7), ("unbounded", "unbounded")):
+                    with self.assertWarnsRegex(FutureWarning, "^" + re.escape(
+                            f"{_option(old)} is deprecated; use {_option(new)}.") + "$"):
+                        args = parser.parse_args([_option(old), value])
+                    self.assertEqual(getattr(args, new), expected)
 
     def test_old_config_keys_parse_as_the_new_ones_with_a_notice(self):
-        for old, new in ALL_RENAMES.items():
+        for old, new in {**ALL_RENAMES, **RATE_LIMIT_RENAME}.items():
             for command in ("/config {}", "/config {} 5", "/config.json {}", "/config.json {} null"):
                 with self.subTest(command=command.format(old)):
                     intent = user_tools.parse_user_tool(command.format(old))

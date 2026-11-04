@@ -517,8 +517,10 @@ class ModelTests(unittest.TestCase):
                                     'its callable name is mcp__pythia__echo'),
                  'unknown-tool-name': ('NativeToolRejected', 'native_tool_name_rejected',
                                        'Native CLI rejected a call to Bash: no such tool'),
-                 # Any other rejection keeps the ordinary validation's error.
-                 'tool-input-rejected': ('MCPError', None, 'Native tool result has an unknown or duplicate call ID')}
+                 # Any other rejection keeps the ordinary validation's error,
+                 # a protocol error.
+                 'tool-input-rejected': ('MCPError', 'native_protocol',
+                                         'Native tool result has an unknown or duplicate call ID')}
         for prompt, (category, code, message) in cases.items():
             with self.subTest(prompt=prompt):
                 with self.assertRaises(ModelError) as caught:
@@ -528,9 +530,10 @@ class ModelTests(unittest.TestCase):
                 self.assertTrue(failure.message.startswith(message + ' (phase='), failure.message)
                 self.assertEqual(caught.exception.completed_items, ())  # nothing published, nothing run
                 self.assertIsNone(self.model._runtime)
-                # A rejection vouches for sampling again, its process confirmed gone.
-                self.assertIs(caught.exception.retry_state,
-                              RetryState.ELIGIBLE if code else RetryState.NONE)
+                # Either vouches for sampling again, its process confirmed gone,
+                # both of class response.
+                self.assertIs(caught.exception.retry_state, RetryState.ELIGIBLE)
+                self.assertEqual(caught.exception.retry_class, 'response')
 
     def test_a_rejection_is_blocked_unless_its_teardown_is_confirmed(self):
         close = Runtime.close

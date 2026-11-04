@@ -1963,7 +1963,7 @@ class RuntimeTests(unittest.TestCase):
                          ["No automatic retry to cancel in #1 (main)."])
         with self.assertRaisesRegex(ValueError, r"^Usage: /cancel \(no arguments; single line\)\.$"):
             auto._local_command("/cancel now", 1, session)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (30,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (30,)):
             submitted = session.submit("task")
             wait_for(lambda: session.status(1).startswith("#1 (main) - retrying"))
             self.assertRegex(session.status(1), r"^#1 \(main\) - retrying\.\.\. \d+s \(1/8\)")

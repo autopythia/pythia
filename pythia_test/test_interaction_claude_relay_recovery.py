@@ -9,11 +9,18 @@ from unittest import mock
 
 from pythia.interaction import ModelContinuationExpired
 from pythia.interaction._debug_trace import DebugTrace
+from dataclasses import replace
+
 from pythia.interaction.claude_relay import ClaudeRelayModel
 from pythia.interaction.claude_relay._context import Snapshot
 from pythia.interaction.claude_relay._mcp import Mailbox, MCPError, NativeToolRejected
 from pythia.interaction.claude_relay._recovery import NativeMCPTimeout, NATIVE_TIMEOUT_TEXT, native_timeout_texts
 from pythia.interaction.claude_relay._recovery import native_tool_rejection
+from pythia.interaction.claude_relay._recovery import coded, final, native_error_class
+from pythia.interaction.claude_relay._model import _retryable
+from pythia.interaction.claude_relay._runtime import native_model_error
+from pythia.interaction.model import ModelConfigurationError, ModelContextWindowError
+from pythia.interaction.model import ModelResponseError, ModelTimeoutError, ModelTransportError
 from pythia.interaction.claude_relay._runtime import Runtime
 from pythia.interaction.context import InteractionContext
 from pythia.interaction.environment import Environment, Tool, ToolOutcome
@@ -380,7 +387,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(result.final_text, 'host-1|host-2')
         self.assertTrue(marker.exists())
         self.assertEqual(effects, [{'value': 1}] * 2)  # the retried sample's calls, run once
-        self.assertEqual(host.notices, ['Sampling again in 2 s (1/3).'])
+        self.assertEqual(host.notices, ['Sampling again in 2 s (1/8).'])
         [failure] = [item for item in context if isinstance(item, ModelFailure)]
         self.assertEqual((failure.category, failure.error_code),
                          ('NativeToolRejected', 'native_tool_name_rejected'))
@@ -434,3 +441,96 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.assertNotIn('Outcome: failed', reports[0])
         finally:
             session.close()
+
+
+class RetryClassUnitTests(unittest.TestCase):
+    """Which relay failures the turn loop may sample again, and of which class
+    (doc/model-error-recovery-plan.md, section 7)."""
+
+    def test_only_what_a_retry_can_fix_is_retryable(self):
+        for error, retryable in (
+                (ModelResponseError('Native stream lacks final output usage'), True),
+                (ModelTimeoutError('Claude Relay generation wait exceeded deadline'), True),
+                (ModelTransportError('Native CLI exited without a successful run result'), True),
+                (final(ModelTransportError('Claude Relay continuation retired')), False),
+                (final(ModelResponseError('Native tool inventory differs from the supplied '
+                                          'MCP catalog')), False),
+                (ModelConfigurationError('ClaudeRelayModel is closed'), False),
+                (ModelContextWindowError('Native context window exceeded'), False)):
+            with self.subTest(error=str(error)):
+                self.assertIs(_retryable(error), retryable)
+
+    def test_the_cli_s_error_type_names_the_failure_and_its_class(self):
+        for code, expected in (('rate_limit', ('rate_limit', 'transient')),
+                               ('server_error', ('server_error', 'transient')),
+                               ('overloaded_error', ('overloaded_error', 'transient')),
+                               ('invalid_request', ('invalid_request', 'error')),
+                               ('billing_error', ('billing_error', 'error')),
+                               ('unknown', ('unknown', 'response')),
+                               ({'nested': 1}, (None, 'response')),
+                               ('two words', (None, 'response'))):
+            with self.subTest(code=code):
+                error = native_model_error(code)
+                self.assertEqual(str(error), 'Native CLI reported a model error')
+                self.assertEqual((error.error_code, error.retry_class), expected)
+        self.assertIsNone(native_error_class('native_protocol'))
+
+    def test_coded_errors_keep_their_type_s_class_unless_given_one(self):
+        error = coded(ModelTimeoutError('x'), 'generation_timeout')
+        self.assertEqual((error.error_code, error.retry_class), ('generation_timeout', 'timeout'))
+        error = coded(ModelResponseError('x'), 'empty_response', 'empty_response')
+        self.assertEqual((error.error_code, error.retry_class),
+                         ('empty_response', 'empty_response'))
+
+
+@unittest.skipIf(os.getuid() == 0, 'non-root fixture broker required')
+class RetryClassIntegrationTests(unittest.TestCase):
+    """The fixture CLI's failures: each sampled again from a cold import within
+    its class's count, but those a retry can't fix."""
+
+    stop_broker = fixture.ModelTests.stop_broker
+
+    def setUp(self):
+        fixture.ModelTests.setUp(self)
+        patcher = mock.patch.object(kernel, '_wait_to_auto_retry', lambda host, seconds: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def turn(self, prompt, model=None, **config):
+        context = InteractionContext((Message('user', prompt),))
+        host = SavingHost(self.root / 'turn.jsonl')
+        with self.assertRaises(ModelError) as raised:
+            run_turn(context, model or self.model, Environment(),
+                     InteractionConfigSnapshot(enable_auto_compaction=False, **config), host)
+        failures = [(item.category, item.error_code) for item in context
+                    if isinstance(item, ModelFailure)]
+        return raised.exception, failures, host.notices
+
+    def test_an_overloaded_api_is_transient(self):
+        error, failures, notices = self.turn('trace-error', endpoint_error_retries=1)
+        self.assertEqual((error.retry_class, error.retry_state),
+                         ('transient', RetryState.EXHAUSTED))
+        self.assertEqual(failures, [('ModelResponseError', 'overloaded_error')] * 2)
+        self.assertEqual(notices, ['Sampling again in 2 s (1/2).'])
+
+    def test_a_generation_deadline_is_a_timeout(self):
+        model = ClaudeRelayModel(replace(self.endpoint, generation_timeout_seconds=1))
+        self.addCleanup(model.close)
+        error, failures, notices = self.turn('api-retry-only', model,
+                                             endpoint_timeout_error_retries=1)
+        self.assertEqual((error.retry_class, error.retry_state), ('timeout', RetryState.EXHAUSTED))
+        self.assertEqual(failures, [('ModelTimeoutError', 'generation_timeout')] * 2)
+        self.assertEqual(len(notices), 1)
+
+    def test_an_exited_cli_is_transient(self):
+        error, failures, notices = self.turn('api-retry-exit', endpoint_error_retries=1)
+        self.assertEqual((error.retry_class, error.retry_state),
+                         ('transient', RetryState.EXHAUSTED))
+        self.assertEqual(failures, [('ModelTransportError', 'native_exit')] * 2)
+
+    def test_a_compatibility_check_is_never_retried(self):
+        error, failures, notices = self.turn('inventory-bad')
+        self.assertIs(error.retry_state, RetryState.NONE)
+        self.assertEqual(str(error), 'Native tool inventory differs from the supplied MCP catalog')
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(notices, [])

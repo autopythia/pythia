@@ -477,14 +477,17 @@ class CLIPersistenceFailureTests(_ControllerTestCase):
         for sample, options in (
             (ModelSample(items=(OpaqueCompaction.from_messages("checkpoint"),), stop_reason="compaction"),
              ["--max-samples", "1"]),
-            (ModelSample(items=(Message("assistant", " "),)), []),
+            # Without the automatic retries an empty answer gets.
+            (ModelSample(items=(Message("assistant", " "),)), ["--endpoint-error-retries", "0"]),
         ):
             with self.subTest(sample=sample):
                 model = _Model(self.path, sample)
                 terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "failed" else None)
                 self.assertEqual(await self._run(model, terminal, ["--prompt", "hello", *options]), 1)
                 self.assertEqual(len(model.calls), 1)
-                self.assertFalse(any(isinstance(i, TurnSummary) for i in load_interaction_save(self.path)))
+                # The full log: an empty answer's failure is saved there.
+                self.assertFalse(any(isinstance(i, TurnSummary)
+                                     for i in load_interaction_save(full_log(self.path))))
 
 
 if __name__ == "__main__":

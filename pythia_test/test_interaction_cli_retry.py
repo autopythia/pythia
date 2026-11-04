@@ -193,11 +193,11 @@ class AutomaticRetryTests(_ControllerTestCase):
         ]), 0)
         self.assertEqual(len(model.calls), 2)
         # The status shows how many of the sample's attempts failed, of all.
-        self.assertTrue(any(status.startswith("retrying") and status.endswith(" (1/3)")
+        self.assertTrue(any(status.startswith("retrying") and status.endswith(" (1/8)")
                             for status in statuses), statuses)
-        self.assertFalse(any("(1/3)" in status for status in statuses[statuses.index("idle"):]))
+        self.assertFalse(any("(1/8)" in status for status in statuses[statuses.index("idle"):]))
         shown = [item.text for item in terminal.items]
-        notice = "[cli] Sampling again in 2 s (1/3)."
+        notice = "[cli] Sampling again in 2 s (1/8)."
         self.assertIn(notice, shown)
         self.assertNotIn(HINT, shown)
         saved = load_interaction_save(full_log(self.path))
@@ -210,9 +210,10 @@ class AutomaticRetryTests(_ControllerTestCase):
     async def test_the_last_attempt_s_failure_says_how_often_sampling_failed(self):
         model = _Model(self.path, _rejected(), _rejected(), _rejected(), _answer("recovered"))
         terminal = _Terminal(retry_then_quit())
-        with mock.patch.object(kernel, "DEFAULT_AUTO_RETRY", kernel.AutoRetryPolicy("default", 3, (0, 0))):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+                "--endpoint-error-retries", "2",
             ]), 1)  # the sticky failure exit status
         self.assertEqual(len(model.calls), 4)  # three attempts, then the /retry
         shown = [item.text for item in terminal.items]
@@ -237,16 +238,16 @@ class AutomaticRetryTests(_ControllerTestCase):
             if status == "failed" and last != "failed":
                 failures += 1
                 if failures == 1:
-                    terminal.submit("/config endpoint_rate_limit_retries 0")
+                    terminal.submit("/config endpoint_rate_limit_error_retries 0")
                     terminal.submit("/retry")
                 else:
                     terminal.key("c-d")
             last = status
         terminal = _Terminal(frame)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (0,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
-                "--endpoint-rate-limit-retries", "2",
+                "--endpoint-rate-limit-error-retries", "2",
             ]), 1)
         self.assertEqual(len(model.calls), 4)  # three attempts, then one after /retry
         shown = [item.text for item in terminal.items]
@@ -268,10 +269,10 @@ class AutomaticRetryTests(_ControllerTestCase):
         # It may never end the turn, where the error would show.
         model = _Model(self.path, *(_rate_limited() for _ in range(4)), _answer("recovered"))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (0,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
-                "--endpoint-rate-limit-retries", "unbounded",
+                "--endpoint-rate-limit-error-retries", "unbounded",
             ]), 0)
         error = "[cli] ModelRateLimitError: Chat Completions HTTP 429: slow down"
         shown = [("failure" if text.startswith("[model]") else text)
@@ -289,10 +290,10 @@ class AutomaticRetryTests(_ControllerTestCase):
         # where the failure shows the last error.
         model = _Model(self.path, *(_rate_limited() for _ in range(5)))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "failed" else None)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (0,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
-                "--endpoint-rate-limit-retries", "4",
+                "--endpoint-rate-limit-error-retries", "4",
             ]), 1)
         error = "[cli] ModelRateLimitError: Chat Completions HTTP 429: slow down"
         shown = [("failure" if text.startswith("[model]") else text)
@@ -318,7 +319,7 @@ class AutomaticRetryTests(_ControllerTestCase):
             elif status == "failed":
                 terminal.key("c-d")
         terminal = _Terminal(frame)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (30,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (30,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
             ]), 1)
@@ -359,7 +360,7 @@ class AutomaticRetryTests(_ControllerTestCase):
             elif cancelled and status in ("failed", "idle"):
                 terminal.key("c-d")
         terminal = _Terminal(frame)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (0,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
             ]), 1)
@@ -375,7 +376,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         # The turn loop's own schedule sets the wait, however long it asks.
         model = _Model(self.path, _rate_limited(retry_after=900.5), _answer("recovered"))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-        with mock.patch.object(kernel, "RATE_LIMIT_DELAYS_SECONDS", (0,)):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
             ]), 0)
@@ -397,8 +398,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         model = _Adapter(self.path, ChatCompletionsModel(
             chat_endpoint(api_url="https://api.example.test"), opener=opener))
         terminal = _Terminal(lambda t, e, s: t.key("c-d") if s == "idle" else None)
-        with mock.patch.object(kernel, "DEFAULT_AUTO_RETRY",
-                               replace(kernel.DEFAULT_AUTO_RETRY, delays=(0,))):
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
             self.assertEqual(await self._run(model, terminal, [
                 "--resume=False", "--prompt", "original", "--enable-default-tools=False",
             ]), 0)
@@ -408,7 +408,7 @@ class AutomaticRetryTests(_ControllerTestCase):
         self.assertTrue(failure.startswith(
             "[model] Chat Completions HTTP 503: request failed kind=http_error"), failure)
         self.assertNotIn("attempts=", failure)  # one request: shown past 1 only
-        self.assertIn("[cli] Sampling again in 0 s (1/3).", shown)
+        self.assertIn("[cli] Sampling again in 0 s (1/8).", shown)
         [sample] = [text for text in shown if text.startswith("[sample]")]
         self.assertTrue(sample.endswith(" recovery=http_503_retry"), sample)
         saved = load_interaction_save(full_log(self.path))
@@ -427,13 +427,16 @@ class RetryControllerTests(_ControllerTestCase):
                 model = _Model(self.path, outcome, _answer("recovered"))
                 terminal = _Terminal(retry_then_quit())
                 with mock.patch.object(cli, "build_model") as build:
+                    # No automatic retries: an empty answer would have them.
                     self.assertEqual(await self._run(model, terminal, [
                         "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+                        "--endpoint-error-retries", "0",
                     ]), 1)  # Existing sticky failure exit status is unchanged.
                 build.assert_not_called()
                 self.assertEqual(len(model.calls), 2)
                 self.assertTrue(all(tools == () for _, tools, _ in model.calls))
-                saved = load_interaction_save(self.path)
+                # The full log: an empty answer's failure is saved there.
+                saved = load_interaction_save(full_log(self.path))
                 self.assertEqual([i for i in saved if isinstance(i, Message) and i.role == "user"],
                                  [Message("user", "original")])
                 self.assertEqual(sum(isinstance(i, UserInteractionBoundary) for i in saved), 1)
@@ -444,6 +447,8 @@ class RetryControllerTests(_ControllerTestCase):
                 self.assertEqual(shown.count(HINT), 1)
                 self.assertLess(shown.index("[cli] " + diagnostic), shown.index(HINT))
                 self.assertIsInstance(saved[-1], TurnSummary)
+                self.assertEqual([i.category for i in saved if isinstance(i, ModelFailure)],
+                                 ["empty_response"] if isinstance(outcome, ModelSample) else [])
 
     async def test_repeated_failures_require_fresh_explicit_retries(self):
         model = _Model(self.path, ModelTimeoutError("first"), ModelTimeoutError("second"), _answer())

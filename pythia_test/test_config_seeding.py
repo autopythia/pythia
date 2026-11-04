@@ -114,7 +114,9 @@ class ConfigSeedingTests(unittest.TestCase):
                     enable_auto_compaction=True, request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
                     prompt_caching="5m" if api == "messages" else None,
                 ))
-                self.assertEqual(config.get("endpoint_rate_limit_retries"), 7)
+                # Every class retries 7 times: the general key's count.
+                self.assertEqual(config.get("endpoint_error_retries"), 7)
+                self.assertIsNone(config.get("endpoint_rate_limit_error_retries"))
 
     def test_unknown_or_wrong_profile_never_inherits_codex_limits(self):
         for api, model in (
@@ -135,7 +137,7 @@ class ConfigSeedingTests(unittest.TestCase):
         self.assertEqual(config.snapshot(), InteractionConfigSnapshot(
             compaction_mode="coldstart,warmpi:2",
             timeouts_request_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
-            endpoint_rate_limit_retries=7,
+            endpoint_error_retries=7,
         ))
 
     def test_python_models_infer_the_compaction_mode(self):

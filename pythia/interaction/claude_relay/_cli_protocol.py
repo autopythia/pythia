@@ -21,6 +21,7 @@ from ..model_catalog import parse_json_value
 from .._provider_text import repaired_json, repaired_text
 from ..usage import TokenUsage
 from ._diagnostics import identifier
+from ._recovery import coded
 
 # v7 adds, since v6: empty streamed tool input, refusal reasons, interrupted
 # messages, callable tool names in the cold import, native tool-name rejections.
@@ -96,10 +97,12 @@ class NativeStreamInterrupted(ModelTransportError):
 
     Nothing from the interrupted message was adopted, and none of its tool
     calls ran. Sampling the same context again is safe. The class name is the
-    saved failure category.
+    saved failure category. For the turn loop's retries, it is a protocol
+    error, as the rest of the native stream's are (retry class ``response``).
     """
 
     error_code = 'native_stream_interrupted'
+    default_retry_class = 'response'
 
 
 class NativeToolInputRewritten(ModelResponseError):
@@ -180,7 +183,9 @@ class NativeMessage:
             else:
                 raise ModelResponseError('Unsupported native content block')
         if not items:
-            raise ModelResponseError('Native assistant message has no supported content')
+            # As a thinking-only message at the output limit (failure catalog O5).
+            raise coded(ModelResponseError('Native assistant message has no supported content'),
+                        'empty_response', 'empty_response')
         # A refusal after answer text stays a stop reason, as for the other
         # adapters: the caller sees the text is incomplete (Pi rejects it).
         return tuple(items), calls

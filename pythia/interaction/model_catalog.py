@@ -100,22 +100,40 @@ MODEL_TIMEOUT_FIELDS = ("request_seconds", *_RELAY_TIMEOUT_FIELDS)
 # entries that each request writes, or none, which sends no cache_control (for
 # servers that reject it). Unset, it is 5m.
 PROMPT_CACHING_VALUES = ("5m", "1h", "none")
-# endpoint.rate_limit_retries, all but Claude Relay: how many times in all the
-# turn loop samples again after a rate limit (ModelRateLimitError), each after
-# a fixed wait (loop.kernel), with no retries of the adapter's own; "unbounded"
-# retries until a sample succeeds or the user cancels or stops. Unset, it is
-# DEFAULT_RATE_LIMIT_RETRIES.
-RATE_LIMIT_RETRIES_UNBOUNDED = "unbounded"
-DEFAULT_RATE_LIMIT_RETRIES = 7
+# The turn loop's automatic retries (loop.kernel), by the class of the failed
+# sample's error (ModelError.retry_class): how many times in all the loop
+# samples again after an error of the class, each after a fixed wait, with no
+# retries of the adapter's own; "unbounded" retries until a sample succeeds or
+# the user cancels or stops. endpoint.error_retries sets every class, and
+# endpoint.<class>_error_retries sets one of ERROR_RETRY_KEY_CLASSES, before
+# it. Unset, each class retries DEFAULT_ERROR_RETRIES times. Claude Relay
+# takes all but the rate limit's: its native CLI retries its own rate limits.
+ERROR_RETRY_CLASSES = ("rate_limit", "transient", "timeout", "response", "empty_response",
+                       "refusal", "auth", "error")
+# The classes with a key of their own; the others follow endpoint.error_retries.
+ERROR_RETRY_KEY_CLASSES = ("rate_limit", "timeout", "refusal", "auth")
+ERROR_RETRIES_UNBOUNDED = "unbounded"
+DEFAULT_ERROR_RETRIES = 7
+# EndpointSpec's fields for them: the catalog's endpoint.<field> keys.
+ERROR_RETRY_FIELDS = ("error_retries",
+                      *(f"{name}_error_retries" for name in ERROR_RETRY_KEY_CLASSES))
+# The deprecated name of endpoint.rate_limit_error_retries.
+LEGACY_RATE_LIMIT_RETRIES = "rate_limit_retries"
 
 
-def validate_rate_limit_retries(value, name="endpoint.rate_limit_retries"):
-    """A rate-limit retry count: a nonnegative integer, or ``"unbounded"``."""
-    if value == RATE_LIMIT_RETRIES_UNBOUNDED:
+def validate_error_retries(value, name="endpoint.error_retries"):
+    """A retry count: a nonnegative integer, or ``"unbounded"``."""
+    if value == ERROR_RETRIES_UNBOUNDED:
         return value
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{name} must be a nonnegative integer or {RATE_LIMIT_RETRIES_UNBOUNDED}")
+        raise ValueError(f"{name} must be a nonnegative integer or {ERROR_RETRIES_UNBOUNDED}")
     return value
+
+
+def error_retries_field(retry_class):
+    """The EndpointSpec field of a class's own count (its endpoint.* key), or
+    None for a class that follows ``error_retries``."""
+    return f"{retry_class}_error_retries" if retry_class in ERROR_RETRY_KEY_CLASSES else None
 
 
 def validate_token_trace(value, name="endpoint.token_trace"):
@@ -309,9 +327,15 @@ class EndpointSpec:
     auth_file: Optional[str] = None
     # PROMPT_CACHING_VALUES; None is 5m. Not part of the connection identity.
     prompt_caching: Optional[str] = None
-    # A count or RATE_LIMIT_RETRIES_UNBOUNDED; None is DEFAULT_RATE_LIMIT_RETRIES.
-    # Not part of the connection identity.
-    rate_limit_retries: Optional[Union[int, str]] = None
+    # Automatic retries (ERROR_RETRY_FIELDS): each a count or
+    # ERROR_RETRIES_UNBOUNDED. An unset class field follows error_retries, and
+    # an unset error_retries is DEFAULT_ERROR_RETRIES. Not part of the
+    # connection identity.
+    error_retries: Optional[Union[int, str]] = None
+    rate_limit_error_retries: Optional[Union[int, str]] = None
+    timeout_error_retries: Optional[Union[int, str]] = None
+    refusal_error_retries: Optional[Union[int, str]] = None
+    auth_error_retries: Optional[Union[int, str]] = None
     # TOKEN_TRACE_LEVELS; None is none. Not part of the connection identity.
     token_trace: Optional[str] = None
 
@@ -341,10 +365,11 @@ class EndpointSpec:
                 raise ValueError("endpoint.prompt_caching must be 5m, 1h, or none")
             if self.api != "messages":
                 raise ValueError("endpoint.prompt_caching requires the Messages API")
-        if self.rate_limit_retries is not None:
-            validate_rate_limit_retries(self.rate_limit_retries)
-            if self.api == "claude-relay":
-                raise ValueError("endpoint.rate_limit_retries does not apply to Claude Relay")
+        for name in ERROR_RETRY_FIELDS:
+            if getattr(self, name) is not None:
+                validate_error_retries(getattr(self, name), "endpoint." + name)
+        if self.rate_limit_error_retries is not None and self.api == "claude-relay":
+            raise ValueError("endpoint.rate_limit_error_retries does not apply to Claude Relay")
         if self.token_trace is not None:
             validate_token_trace(self.token_trace)
             if self.api != "chat-completions":
@@ -1013,7 +1038,9 @@ class ModelCatalog:
 
     def bind(self, api=None, name=None, *, extra_sample_params=None,
              endpoint_url=None, endpoint_model=None, endpoint_auth=None,
-             endpoint_prompt_caching=None, endpoint_rate_limit_retries=None,
+             endpoint_prompt_caching=None, endpoint_error_retries=None,
+             endpoint_rate_limit_error_retries=None, endpoint_timeout_error_retries=None,
+             endpoint_refusal_error_retries=None, endpoint_auth_error_retries=None,
              endpoint_token_trace=None):
         if name is not None:
             if not isinstance(name, str):
@@ -1044,12 +1071,16 @@ class ModelCatalog:
             if endpoint.api != "messages":
                 raise ValueError("--endpoint-prompt-caching requires --endpoint-api messages")
             changes["prompt_caching"] = endpoint_prompt_caching
-        if endpoint_rate_limit_retries is not None:
-            if endpoint.api == "claude-relay":
-                raise ValueError("--endpoint-rate-limit-retries does not apply to "
-                                 "--endpoint-api claude-relay")
-            changes["rate_limit_retries"] = validate_rate_limit_retries(
-                endpoint_rate_limit_retries, "--endpoint-rate-limit-retries")
+        for field_name, value in zip(ERROR_RETRY_FIELDS, (
+                endpoint_error_retries, endpoint_rate_limit_error_retries,
+                endpoint_timeout_error_retries, endpoint_refusal_error_retries,
+                endpoint_auth_error_retries)):
+            if value is None:
+                continue
+            option = "--endpoint-" + field_name.replace("_", "-")
+            if field_name == "rate_limit_error_retries" and endpoint.api == "claude-relay":
+                raise ValueError(f"{option} does not apply to --endpoint-api claude-relay")
+            changes[field_name] = validate_error_retries(value, option)
         if endpoint_token_trace is not None:
             if endpoint.api != "chat-completions":
                 raise ValueError("--endpoint-token-trace requires --endpoint-api chat-completions")
@@ -1095,7 +1126,8 @@ def binding_from_namespace(args, catalog=None):
         endpoint_model=getattr(args, "endpoint_model", None),
         endpoint_auth=auth,
         endpoint_prompt_caching=getattr(args, "endpoint_prompt_caching", None),
-        endpoint_rate_limit_retries=getattr(args, "endpoint_rate_limit_retries", None),
+        **{f"endpoint_{name}": getattr(args, f"endpoint_{name}", None)
+           for name in ERROR_RETRY_FIELDS},
         endpoint_token_trace=getattr(args, "endpoint_token_trace", None),
         extra_sample_params=getattr(args, "extra_sample_params", None),
     )

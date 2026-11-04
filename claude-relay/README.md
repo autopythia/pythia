@@ -71,9 +71,24 @@ by these short tests.
   `native_tool_name_rejected`), naming the tool and its callable name, instead of
   "Native tool result has an unknown or duplicate call ID". Nothing from that
   response is published or run, so once the process is confirmed retired, the
-  turn loop samples the same context again from a cold import, up to 3 attempts
-  per sample (`RetryState.ELIGIBLE`). See the
+  turn loop samples the same context again from a cold import (`RetryState.ELIGIBLE`,
+  of retry class `response`). See the
   [tool-name notes](../doc/claude-relay-tool-name-plan.md).
+- Automatic retries: once its process is confirmed retired, every failure is
+  `RetryState.ELIGIBLE`, and the turn loop samples the same context again from a
+  cold import, as many times as the count of the failure's class allows (7 by
+  default; `endpoint.error_retries` and the class keys, of which Claude Relay
+  refuses only the rate limit's). Generation and startup deadlines are of class
+  `timeout` (error codes `generation_timeout`, `startup_timeout`); an exited CLI
+  (`native_exit`), an expired continuation, and an API request that the CLI
+  reports failed for an overloaded or failing API or a rate limit (its error type
+  is the error code, such as `rate_limit`) are `transient`; protocol errors
+  (`native_protocol`, a rejected tool name, a cut message) are `response`; a
+  message without text or tool calls is `empty_response`; refusals and
+  authentication failures have their own classes. Never retried: startup and
+  compatibility checks (paths, version, tool inventory, MCP readiness), a
+  continuation that the host retired, configuration errors, and an overflow. See
+  the README's "Retrying a failed sample" in `README.interaction.md`.
 - Tool input rewrite: before recording or calling a streamed tool call, CLI
   2.1.289 decodes literal `\uXXXX` text in its input (after an odd run of
   backslashes) into the character, a surrogate pair into one, in its block

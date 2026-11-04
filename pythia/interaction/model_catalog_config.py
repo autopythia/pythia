@@ -18,7 +18,8 @@ from .model_catalog import DISPLAY_ASSISTANT_VALUES, DISPLAY_FIELDS, DisplayDefa
 from .model_catalog import EndpointSpec
 from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
-from .model_catalog import RATE_LIMIT_RETRIES_UNBOUNDED
+from .model_catalog import ERROR_RETRIES_UNBOUNDED, ERROR_RETRY_FIELDS
+from .model_catalog import LEGACY_RATE_LIMIT_RETRIES
 from .model_catalog import ResponsesDefaults
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS, SampleParamDefaults
 from .model_catalog import TOKEN_TRACE_LEVELS
@@ -43,7 +44,11 @@ _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
 _SAMPLE_PARAMS_PREFIX = "sample_params."
 _LIMIT_FIELDS = frozenset(("auto_compaction_context_tokens", "max_context_tokens", "max_output_tokens"))
 # Deprecated catalog keys and their current names.
-_RENAMED_LIMIT_KEYS = {"limits.auto_compact_context_tokens": "limits.auto_compaction_context_tokens"}
+_RENAMED_KEYS = {
+    "limits.auto_compact_context_tokens": "limits.auto_compaction_context_tokens",
+    "endpoint." + LEGACY_RATE_LIMIT_RETRIES: "endpoint.rate_limit_error_retries",
+}
+_ERROR_RETRY_KEYS = frozenset("endpoint." + name for name in ERROR_RETRY_FIELDS)
 _RESPONSES_FIELDS = frozenset(("reasoning_effort", "reasoning_summary", "text_verbosity"))
 _TIMEOUT_FIELDS = frozenset(MODEL_TIMEOUT_FIELDS)
 _INTEGER = re.compile(r"^[+-]?[0-9]+$")
@@ -173,7 +178,7 @@ def _entry(section, values, base):
         raise ValueError("Cannot combine whole-map and per-key extra sample params.")
     for key, value in values.items():
         # parse_model_catalog has rejected a section that sets both names.
-        key = _RENAMED_LIMIT_KEYS.get(key, key)
+        key = _RENAMED_KEYS.get(key, key)
         if key in {"endpoint.model", "endpoint.url", "endpoint.auth"}:
             endpoint[key[9:]] = _text(value)
             if key == "endpoint.auth":
@@ -184,15 +189,16 @@ def _entry(section, values, base):
             if caching is not None and caching not in PROMPT_CACHING_VALUES:
                 raise _FieldError(f"{key} must be 5m, 1h, none, or null")
             endpoint["prompt_caching"] = caching
-        elif key == "endpoint.rate_limit_retries":
-            # null restores the default; unbounded retries until cancelled.
+        elif key in _ERROR_RETRY_KEYS:
+            # null unsets it: a class follows endpoint.error_retries, and that
+            # is the default; unbounded retries until cancelled.
             retries = _text(value)
-            if retries is not None and retries != RATE_LIMIT_RETRIES_UNBOUNDED:
+            if retries is not None and retries != ERROR_RETRIES_UNBOUNDED:
                 if _INTEGER.fullmatch(retries) is None or int(retries) < 0:
                     raise _FieldError(f"{key} must be a nonnegative integer, "
-                                      f"{RATE_LIMIT_RETRIES_UNBOUNDED}, or null")
+                                      f"{ERROR_RETRIES_UNBOUNDED}, or null")
                 retries = int(retries)
-            endpoint["rate_limit_retries"] = retries
+            endpoint[key[len("endpoint."):]] = retries
         elif key == "endpoint.token_trace":
             # null restores the default, none.
             trace = _text(value)
@@ -260,8 +266,10 @@ def _entry(section, values, base):
         raise ValueError("Changing a credentialed endpoint URL requires endpoint.auth.")
     if endpoint.get("prompt_caching") is not None and endpoint.get("api") != "messages":
         raise _FieldError("endpoint.prompt_caching requires endpoint.api messages")
-    if endpoint.get("rate_limit_retries") is not None and endpoint.get("api") == "claude-relay":
-        raise _FieldError("endpoint.rate_limit_retries does not apply to endpoint.api claude-relay")
+    if (endpoint.get("rate_limit_error_retries") is not None
+            and endpoint.get("api") == "claude-relay"):
+        raise _FieldError("endpoint.rate_limit_error_retries does not apply to endpoint.api "
+                          "claude-relay")
     if endpoint.get("token_trace") is not None and endpoint.get("api") != "chat-completions":
         raise _FieldError("endpoint.token_trace requires endpoint.api chat-completions")
     if endpoint.get("api") == "chat-completions":
@@ -351,7 +359,7 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
                 f"Invalid model catalog entry {section!r} in {source}: request_params "
                 "was renamed to extra_sample_params in catalog version 4"
             )
-        for old, new in _RENAMED_LIMIT_KEYS.items():
+        for old, new in _RENAMED_KEYS.items():
             if old in parser[section]:
                 if new in parser[section]:
                     raise ValueError(
@@ -398,7 +406,7 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
         # FutureWarning, not DeprecationWarning: Python shows it by default.
         warnings.warn(
             f"Model catalog {source!r} uses the deprecated {old} in {_listing(used)}; "
-            f"rename it to {_RENAMED_LIMIT_KEYS[old]}.",
+            f"rename it to {_RENAMED_KEYS[old]}.",
             FutureWarning,
             stacklevel=2,
         )

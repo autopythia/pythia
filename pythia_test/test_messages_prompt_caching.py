@@ -40,6 +40,7 @@ from pythia.interaction import interaction_item_to_dict
 from pythia.interaction import summarize_turn_usage
 from pythia.interaction._auto_config import resolve_config
 from pythia.interaction._model_binding_debug import _debug_entry
+from pythia.interaction.model_catalog import ERROR_RETRY_FIELDS
 from pythia.interaction.model_catalog import EndpointSpec
 from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.model_config import build_model
@@ -512,7 +513,8 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
         self.assertNotIn("prompt_caching", render_model_catalog(cleared).splitlines()[-1])
         self.assertEqual(_debug_entry(catalog.bind("messages", "cached"))["endpoint"], {
             "api": "messages", "url": "http://127.0.0.1:9/v1/messages", "model": "fixture",
-            "auth": "none", "prompt_caching": "1h", "rate_limit_retries": None,
+            "auth": "none", "prompt_caching": "1h",
+            **dict.fromkeys(ERROR_RETRY_FIELDS),
             "token_trace": None,
         })
 

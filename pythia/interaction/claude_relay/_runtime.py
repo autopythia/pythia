@@ -28,10 +28,11 @@ from ..model import ModelAuthenticationError, ModelContextWindowError
 from ._cli_protocol import Assembler, MAX_RECORD, NativeStreamInterrupted, PROFILE, decode
 from ._mcp import Mailbox, MCPServer, NativeToolRejected
 from ._sampling import ResolvedSampling
-from ._diagnostics import Diagnostics
+from ._diagnostics import Diagnostics, identifier
 from ._trace import RelayTrace
 from ._recovery import MCP_SERVER_NAME, NativeMCPTimeout, NATIVE_MCP_TIMEOUT, native_tool_rejection
-from ._recovery import DeliveryUnacknowledged, IDLE_EXIT, IDLE_RECORD
+from ._recovery import DeliveryUnacknowledged, IDLE_EXIT, IDLE_RECORD, coded, final
+from ._recovery import native_error_class
 
 
 PREAMBLE = ('You are serving a caller-owned conversation. The initial input is a JSON history, '
@@ -101,6 +102,15 @@ def cache_lifetime(value, previous):
     return previous
 
 
+def native_model_error(code):
+    """The CLI's record of a failed model request, naming its error type as its
+    failure's code (failure catalog D2), and of the retry class that the type
+    names (native_error_class), else response."""
+    name = identifier(code)
+    return coded(ModelResponseError('Native CLI reported a model error'),
+                 None if name.startswith('<') else name, native_error_class(name))
+
+
 class Runtime:
     def __init__(self, endpoint, tools, generation, *, sampling=None, trace=None):
         self.endpoint = endpoint
@@ -111,7 +121,7 @@ class Runtime:
         self.names = {f'mcp__{MCP_SERVER_NAME}__' + t.name: t.name for t in tools}
         self.native_names = {name: native for native, name in self.names.items()}  # Pythia -> native
         if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', t.name) for t in tools):
-            raise ModelResponseError('MCP tool names must be simple identifiers')
+            raise final(ModelResponseError('MCP tool names must be simple identifiers'))
         self.mailbox = Mailbox(tools, wait_seconds=endpoint.parked_timeout_seconds,
                                registration_seconds=endpoint.generation_timeout_seconds,
                                tool_timeout_seconds=endpoint.native_tool_timeout_seconds, trace=self.trace)
@@ -176,15 +186,16 @@ class Runtime:
     def _submit(self, coro, timeout):
         if self.closed.is_set() or self.loop.is_closed():
             coro.close()
-            raise ModelTransportError('Claude Relay continuation retired')
+            raise final(ModelTransportError('Claude Relay continuation retired'))
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         try:
             return future.result(timeout)
         except concurrent.futures.TimeoutError:
             future.cancel()
-            raise ModelTimeoutError('Claude Relay startup/control deadline exceeded') from None
+            raise coded(ModelTimeoutError('Claude Relay startup/control deadline exceeded'),
+                        'startup_timeout') from None
         except concurrent.futures.CancelledError:
-            raise ModelTransportError('Claude Relay continuation retired') from None  # its loop stopped
+            raise final(ModelTransportError('Claude Relay continuation retired')) from None  # its loop stopped
 
     def start(self, snapshot):
         self._submit(self._start(snapshot), self.endpoint.startup_timeout_seconds + 2)
@@ -242,7 +253,7 @@ class Runtime:
             self.pickup = None
             pickup.cancel()
             if self.closed.is_set():
-                raise ModelTransportError('Claude Relay continuation retired') from None
+                raise final(ModelTransportError('Claude Relay continuation retired')) from None
             error = DeliveryUnacknowledged('Native CLI did not report reading the delivered messages')
             self._failure(error)
             raise error from None
@@ -273,7 +284,7 @@ class Runtime:
 
     async def _spawn(self, argv):
         if self.closed.is_set():
-            raise ModelTransportError('Claude Relay continuation retired')
+            raise final(ModelTransportError('Claude Relay continuation retired'))
         launcher = Path(self.endpoint.launcher).resolve(strict=True)
         for part in (*reversed(launcher.parents), launcher):
             info = part.lstat()
@@ -281,7 +292,7 @@ class Runtime:
             sticky = part != launcher and info.st_uid == 0 and info.st_mode & stat.S_ISVTX
             if (not expected(info.st_mode) or info.st_uid not in (0, os.getuid())
                     or (info.st_mode & 0o022 and not sticky)):
-                raise ModelTransportError('Relay client and parents must be trusted, owned paths')
+                raise final(ModelTransportError('Relay client and parents must be trusted, owned paths'))
         # Always a Python client under A. A mistaken native-binary path is never
         # executed as A, and caller PYTHONPATH/user-site imports are ignored.
         environment = self.environment()
@@ -301,7 +312,7 @@ class Runtime:
         self.trace.emit('relay_client_started', client_pid=self.proc.pid)
         if self.closed.is_set():
             await self._stop_process()
-            raise ModelTransportError('Claude Relay continuation retired')
+            raise final(ModelTransportError('Claude Relay continuation retired'))
         return self.proc
 
     async def _start(self, snapshot):
@@ -320,7 +331,7 @@ class Runtime:
                     self.trace.data('stdout' if stream is probe.stdout else 'stderr', part)
                     data.extend(part)
                     if len(data) > limit:
-                        raise ModelResponseError('Native version output exceeds limit')
+                        raise final(ModelResponseError('Native version output exceeds limit'))
             out, err = await asyncio.wait_for(asyncio.gather(bounded(probe.stdout, 4096), bounded(probe.stderr, 65536)),
                                               self.endpoint.startup_timeout_seconds)
             self.stderr_tail.extend(err[:65536])
@@ -328,13 +339,13 @@ class Runtime:
             self.trace.exit(rc)
             self.proc = None
             if rc != 0 or len(out) > 4096 or len(err) > 65536:
-                raise ModelTransportError('Relayed native version query failed')
+                raise final(ModelTransportError('Relayed native version query failed'))
             try:
                 version = out.decode('utf-8', 'strict').strip()
             except UnicodeError:
-                raise ModelResponseError('Native version query is not UTF-8') from None
+                raise final(ModelResponseError('Native version query is not UTF-8')) from None
             if not version.startswith(self.endpoint.expected_version + ' ') and version != self.endpoint.expected_version:
-                raise ModelResponseError('Native CLI version differs from the explicitly selected compatibility version')
+                raise final(ModelResponseError('Native CLI version differs from the explicitly selected compatibility version'))
             self.diagnostics.native_version = self.endpoint.expected_version
             self.trace.emit('native_version_verified', native_version=self.endpoint.expected_version)
             config = {'mcpServers': {}}
@@ -384,18 +395,19 @@ class Runtime:
             self.turn = _Turn(ident, live=False)
             self.lifecycle[ident] = None
             if len(data) > MAX_RECORD:
-                raise ModelResponseError('Cold-import record exceeds protocol limit')
+                raise final(ModelResponseError('Cold-import record exceeds protocol limit'))
             self.trace.data('stdin', data)  # attempted write, not proof of native receipt
             proc.stdin.write(data)
             await asyncio.wait_for(proc.stdin.drain(), self.endpoint.startup_timeout_seconds)
         except asyncio.TimeoutError:
             await self._stop_process()
-            raise ModelTimeoutError('Native startup exceeded deadline') from None
+            raise coded(ModelTimeoutError('Native startup exceeded deadline'),
+                        'startup_timeout') from None
         except Exception as error:
             await self._stop_process()
             if isinstance(error, ModelError):
                 raise
-            raise ModelTransportError('Relay startup failed; check executable, socket, UID and native profile') from None
+            raise final(ModelTransportError('Relay startup failed; check executable, socket, UID and native profile')) from None
         except BaseException:
             await self._stop_process()
             raise
@@ -476,11 +488,11 @@ class Runtime:
     def _inventory(self, record):
         tools = record.get('tools')
         if not isinstance(tools, list) or set(tools) != set(self.names):
-            raise ModelResponseError('Native tool inventory differs from the supplied MCP catalog')
+            raise final(ModelResponseError('Native tool inventory differs from the supplied MCP catalog'))
         if self.names:
             servers = record.get('mcp_servers', [])
             if not any(s.get('name') == 'pythia' and s.get('status') == 'connected' for s in servers if isinstance(s, dict)):
-                raise ModelResponseError('Native MCP connection is not ready; check bearer interpolation and MCP compatibility')
+                raise final(ModelResponseError('Native MCP connection is not ready; check bearer interpolation and MCP compatibility'))
         self.initialized = True
 
     def _system(self, record):
@@ -652,7 +664,7 @@ class Runtime:
                         raise ModelAuthenticationError('Authenticate through the sandbox wrapper as the broker account')
                     if error_code in ('context_length_exceeded', 'prompt_too_long'):
                         raise ModelContextWindowError('Native context window exceeded')
-                    raise ModelResponseError('Native CLI reported a model error')
+                    raise native_model_error(error_code)
                 if heartbeat:
                     if not self.initialized:
                         raise ModelResponseError('Native tool heartbeat before verified initialization')
@@ -743,7 +755,8 @@ class Runtime:
                 return
             if assembler.consecutive_interruptions and assembler.current is None:
                 raise after_interruption('Native CLI exited without a run result')
-            raise ModelTransportError('Native CLI exited without a successful run result')
+            raise coded(ModelTransportError('Native CLI exited without a successful run result'),
+                        'native_exit')
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -763,12 +776,13 @@ class Runtime:
                             phase=diagnostic.phase, last_byte_age=diagnostic.last_byte_age,
                             last_record_age=diagnostic.last_record_age,
                             last_completion_age=diagnostic.last_completion_age)
-            raise ModelTimeoutError('Claude Relay generation wait exceeded deadline '
-                                    f'(budget={self.endpoint.generation_timeout_seconds:g}s)') from None
+            raise coded(ModelTimeoutError(
+                'Claude Relay generation wait exceeded deadline '
+                f'(budget={self.endpoint.generation_timeout_seconds:g}s)'), 'generation_timeout') from None
         if isinstance(event, Exception):
             raise event
         if self.closed.is_set():
-            raise ModelTransportError('Claude Relay continuation retired')
+            raise final(ModelTransportError('Claude Relay continuation retired'))
         if self.error is not None:
             raise self.error
         return event
@@ -776,7 +790,7 @@ class Runtime:
     def _retired(self):
         """On the loop, at close: a delivery waiting to be read waits no more."""
         if self.pickup is not None and not self.pickup[1].done():
-            self.pickup[1].set_exception(ModelTransportError('Claude Relay continuation retired'))
+            self.pickup[1].set_exception(final(ModelTransportError('Claude Relay continuation retired')))
 
     async def _stop_process(self):
         if self._stop_lock is None:
@@ -808,7 +822,7 @@ class Runtime:
         self.trace.emit('continuation_retire')
         self.mailbox.close()
         with contextlib.suppress(queue.Full):
-            self.events.put_nowait(ModelTransportError('Claude Relay continuation retired'))
+            self.events.put_nowait(final(ModelTransportError('Claude Relay continuation retired')))
         with contextlib.suppress(RuntimeError):  # its loop has already closed
             self.loop.call_soon_threadsafe(self._retired)
         try:

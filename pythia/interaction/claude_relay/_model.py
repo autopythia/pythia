@@ -15,6 +15,7 @@ import threading
 import time
 
 from ..model import ModelError, ModelConfigurationError, ModelResponseError, ModelTransportError, ModelContinuationExpired, ModelSample, RetryState, _timed_sample
+from ..model import ModelCancelled, ModelContextWindowError
 from ..items import ModelFailure, Message
 from .._tool_spec import ToolSpec
 from ..model_catalog import EndpointSpec, ModelBinding
@@ -22,7 +23,7 @@ from ._context import Snapshot, record, handoff
 from ._cli_protocol import DEFAULT_NATIVE_TOOL_TIMEOUT_SECONDS, NATIVE_INPUT_REWRITE, PROFILE
 from ._runtime import Runtime
 from ._sampling import resolve_extra, resolve_sampling
-from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT
+from ._recovery import NativeMCPTimeout, NATIVE_MCP_TIMEOUT, coded, final, native_error_class
 from ._recovery import DeliveryUnacknowledged, DELIVERY_UNACKNOWLEDGED, IDLE_DEADLINE, PARKED_DEADLINE
 from .._debug_trace import DebugTrace, capture_trace_scope
 from ..timeouts import DEFAULT_CLAUDE_RELAY_GENERATION_TIMEOUT_SECONDS
@@ -145,6 +146,30 @@ def _note_teardown(error, note):
         error.failure = replace(error.failure, message=f'{error.failure.message[:880]}; {note}')
 
 
+def _retryable(error):
+    """Whether the turn loop may sample again after a relay failure at all
+    (ClaudeRelayModel.sample checks the rest): all but those that a retry
+    can't fix (final), configuration errors, cancels, and overflows, which
+    have their own recovery."""
+    return not (getattr(error, 'relay_final', False) or isinstance(
+        error, (ModelConfigurationError, ModelCancelled, ModelContextWindowError)))
+
+
+def _error_code(error, diagnostic):
+    """A relay failure's saved code: the error's own, as a recognized native
+    failure names it (NativeToolRejected, NativeStreamInterrupted, a timeout,
+    the CLI's own error type...), else the native record's, else
+    native_protocol for a protocol error."""
+    if isinstance(error, NativeMCPTimeout):
+        return NATIVE_MCP_TIMEOUT
+    own = getattr(error, 'error_code', None)
+    if isinstance(own, str):
+        return own
+    if diagnostic is not None and diagnostic.error_code is not None:
+        return diagnostic.error_code
+    return 'native_protocol' if isinstance(error, ModelResponseError) else None
+
+
 class ClaudeRelayModel:
     auto_compaction_owner = 'host'
 
@@ -240,13 +265,13 @@ class ClaudeRelayModel:
                         if delivery.messages:
                             with self._state_lock:
                                 if self._epoch != epoch or self._runtime is not runtime:
-                                    raise ModelTransportError('Claude Relay was retired before handoff')
+                                    raise final(ModelTransportError('Claude Relay was retired before handoff'))
                             # Outside the lock: it waits for the CLI to read the record.
                             runtime.deliver(delivery.messages, results=delivery.results if pending else None)
                         else:
                             with self._state_lock:
                                 if self._epoch != epoch or self._runtime is not runtime:
-                                    raise ModelTransportError('Claude Relay was retired before handoff')
+                                    raise final(ModelTransportError('Claude Relay was retired before handoff'))
                                 runtime.mailbox.release(delivery.results)
                         outcome = runtime.next_message()
                     except DeliveryUnacknowledged as error:
@@ -272,7 +297,7 @@ class ClaudeRelayModel:
                     with self._state_lock:
                         if self._closed or self._epoch != epoch:
                             runtime.close()
-                            raise ModelTransportError('Claude Relay was retired before launch')
+                            raise final(ModelTransportError('Claude Relay was retired before launch'))
                         self._runtime = runtime
                         self._signature = signature
                     runtime.start(snapshot)
@@ -285,7 +310,8 @@ class ClaudeRelayModel:
                     self._acknowledged = snapshot.records + tuple(record(item) for item in items)
                     self._pending = {runtime.generation + ':' + ident: ident for ident, _, _ in calls}
                 if not calls and not any(isinstance(item, Message) and item.content_text.strip() for item in items):
-                    raise ModelResponseError('Native run has no final assistant text')
+                    raise coded(ModelResponseError('Native run has no final assistant text'),
+                                'empty_response', 'empty_response')
                 # The CLI rewrote some of these calls' input in its own copies
                 # (native_input_rewrite), so its history no longer matches
                 # Pythia's records: it must not go on. The host runs the calls as
@@ -329,16 +355,30 @@ class ClaudeRelayModel:
                         event_types=diagnostic.event_types if diagnostic else (),
                         event_count=diagnostic.event_count if diagnostic else 0,
                         last_event_type=diagnostic.last_event_type if diagnostic else None,
-                        error_code=(NATIVE_MCP_TIMEOUT if isinstance(error, NativeMCPTimeout)
-                                    else diagnostic.error_code if diagnostic else None),
+                        error_code=_error_code(error, diagnostic),
                         elapsed_seconds=diagnostic.elapsed_seconds if diagnostic else time.monotonic() - started,
                     )
-                # An MCP expiry is raised NONE: it becomes ELIGIBLE here once its
-                # call's result was just delivered, nothing was adopted, and the
-                # history can be cold-imported.
-                eligible = (isinstance(error, NativeMCPTimeout) and executing is runtime
-                            and runtime is not None and bool(pending) and results is not None
-                            and error.call.native_id in pending.values() and not error.completed_items)
+                if error.retry_class == 'response':
+                    # A protocol failure whose native record named a failed API
+                    # request's type (as a stream's error event does) takes its
+                    # class.
+                    error.retry_class = native_error_class(error.failure.error_code) or 'response'
+                # A failure becomes ELIGIBLE here, for the turn loop to sample
+                # again from a cold import within the count of its class, once
+                # nothing was adopted and the history can be cold-imported; and,
+                # below, once the attempt's process is confirmed gone. Not the
+                # host's own retirement, nor a startup or compatibility check
+                # (final), a configuration error, a cancel, or an overflow,
+                # which has its own recovery. An MCP expiry is raised NONE too:
+                # it needs its call's result just delivered, and becomes
+                # ModelContinuationExpired.
+                if isinstance(error, NativeMCPTimeout):
+                    eligible = (executing is runtime and runtime is not None and bool(pending)
+                                and results is not None and not error.completed_items
+                                and error.call.native_id in pending.values())
+                else:
+                    eligible = (executing is not None and snapshot is not None
+                                and not error.completed_items and _retryable(error))
                 if eligible:
                     try:
                         context.assert_model_ready()
@@ -544,7 +584,7 @@ class ClaudeRelayModel:
     def _retire(self, expected_epoch=None):
         epoch = self._retire_unless_moved(expected_epoch)
         if epoch is None:
-            raise ModelTransportError('Claude Relay was retired before launch')
+            raise final(ModelTransportError('Claude Relay was retired before launch'))
         return epoch
 
     def _retire_unless_moved(self, expected_epoch=None):
