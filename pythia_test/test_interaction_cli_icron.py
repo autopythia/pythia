@@ -210,8 +210,9 @@ class DisplayContractTests(_IcronControllerCase):
         self.assertEqual(len(_texts(with_icron)), len(_texts(plain)) + 1)
         self.assertIn("[cli] icron: main can schedule work and run Python in "
                       "this process, unsandboxed, with the icron tool; /cron schedules your "
-                      "messages, /crontab shows them, and /py runs your code. Jobs and Python "
-                      "state live only in this process.", _texts(with_icron))
+                      "messages, /crontab shows them, /py runs your code, and /afk tells main "
+                      "you're away. Jobs and Python state live only in this process.",
+                      _texts(with_icron))
         self.assertFalse(any("icron" in status for _editor, status, _prompt in with_icron.frames))
         self.assertIn("idle", [status for _editor, status, _prompt in with_icron.frames])
 

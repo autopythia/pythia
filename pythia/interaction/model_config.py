@@ -22,6 +22,8 @@ from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
+from .model_catalog import AFK_CLOCK_TIME
+from .model_catalog import AFK_FIELDS
 from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
 from .model_catalog import COMPACTION_DEFAULT_FIELDS
@@ -307,7 +309,21 @@ def render_model_catalog(catalog):
                if getattr(catalog.display, name) is not None]
     if display:
         lines.append("[display] " + ", ".join(f"{name} = {value}" for name, value in display))
+    afk = [(name, getattr(catalog.afk, name)) for name in AFK_FIELDS
+           if getattr(catalog.afk, name) is not None]
+    if afk:
+        lines.append("[afk] " + ", ".join(f"{name} = {_afk_setting(value)}" for name, value in afk))
     return "\n".join(lines)
+
+
+def _afk_setting(value) -> str:
+    """An [afk] value as the catalog writes it: true or false, a number, an
+    HH:MM time, or a message as a JSON string."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str) and AFK_CLOCK_TIME.fullmatch(value) is None:
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def _compaction_settings(defaults) -> list:

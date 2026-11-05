@@ -122,6 +122,9 @@ class ScheduleTests(_IcronCase):
             (dict(code=3, after=5), "code must be nonblank Python source"),
             (dict(code="def f(:\n  pass", after=5), "the code doesn't compile: "),
             (dict(message="x", after=5, by="model"), "by must be one of main, user, host"),
+            (dict(message="x", after=5, by="user", via=" "), "via must be nonblank text"),
+            (dict(message="x", after=5, by="user", via="/" + "x" * 40), "up to 40 characters"),
+            (dict(message="x", after=5, by="user", via=7), "via must be nonblank text"),
         ]
         for kwargs, text in cases:
             with self.subTest(kwargs=kwargs), self.assertRaises(IcronError) as caught:
@@ -668,7 +671,8 @@ class ToolTests(_IcronCase):
                              "await asyncio.sleep(5)", wait=0.05, by="main").job
         self.assertTrue(_until(lambda: "step 1" in self.job(running.job_id).output))
         poll = icron.schedule(code="print('poll')", every=60, count=3, by="main")
-        users = icron.schedule("Stand-up in 5 minutes.\n  Bring notes.", after=1800, by="user")
+        users = icron.schedule("Stand-up in 5 minutes.\n  Bring notes.", after=1800, by="user",
+                               via="/cron")
         _, listed = self.call(action="jobs")
         self.assertEqual(listed, [
             "3 pending jobs, and 1 that ended", f"Now: {_iso(NOW + 10)}",
@@ -735,6 +739,8 @@ class ToolTests(_IcronCase):
             ({"call": "yield_()"}, "icron.yield_(): missing a required argument: 'note'"),
             ({"call": "jobs(limit=3)"}, "icron.jobs(): got an unexpected keyword argument 'limit'"),
             ({"call": "jobs(by='user')"}, "icron.jobs(): by is for host code only."),
+            ({"call": "schedule('x', after=5, via='/afk')"},
+             "icron.schedule(): via is for host code only."),
             ({"code": 5}, "icron.exec(): code must be a string."),
             ({"call": "help('nothing')"}, "icron.help(): there is no name 'nothing'. help() lists "
                                           "them."),
@@ -745,6 +751,8 @@ class ToolTests(_IcronCase):
                                  "jobs."),
             ({"action": "schedule", "message": "x", "after": 5, "by": "user"},
              "icron.schedule(): by is for host code only."),
+            ({"action": "schedule", "message": "x", "after": 5, "via": "/cron"},
+             "icron.schedule(): via is for host code only."),
             ({"action": "exec", "code": ["print(1)"]}, "icron.exec(): code must be a string."),
             ({"action": "yield"}, "icron.yield_(): missing a required argument: 'note'"),
             ({"action": "jobs", "limit": 3},
@@ -798,7 +806,7 @@ class ToolTests(_IcronCase):
                     # Each keyword of the method has its sentence, so a new one needs one.
                     method = getattr(Icron, name)
                     for parameter in inspect.signature(method).parameters:
-                        if parameter not in ("self", "by"):
+                        if parameter not in ("self", "by", "via"):  # by and via: the host's
                             self.assertIn(f"\n  {parameter}: ", text)
         self.assertEqual(self.icron.help("schedule").splitlines()[0],
                          "schedule(message=None, *, after=None, at=None, every=None, count=None)")
@@ -921,7 +929,7 @@ class YieldTests(_IcronCase):
     def test_the_wake_up_text_names_each_job_and_who_scheduled_it(self):
         icron = self.start()
         mine = icron.schedule("Poll the log.", every=600, by="main")
-        users = icron.schedule("Remind me to review the PR.", after=1200, by="user")
+        users = icron.schedule("Remind me to review the PR.", after=1200, by="user", via="/cron")
         self.advance(1200)  # main's job merges the slot at 600 into the one at 1200
         self.assertTrue(_until(lambda: icron.undelivered() == 2))
         wakeup = icron.take_wakes()
@@ -931,6 +939,23 @@ class YieldTests(_IcronCase):
             "merged):", "Poll the log.", "",
             f"Job {users.job_id} (the user's, from /cron; due {_iso(NOW + 1200)}):",
             "Remind me to review the PR."])
+
+    def test_via_names_the_user_s_command_and_only_the_host_gives_it(self):
+        icron = self.start()
+        afk = icron.schedule("Away.", after=60, every=1800, by="user", via="/afk")
+        plain = icron.schedule("From code.", after=60, by="user")
+        self.assertEqual((afk.via, plain.via), ("/afk", None))
+        self.assertEqual(self.job(afk.job_id).via, "/afk")
+        self.advance(60)
+        self.assertTrue(_until(lambda: icron.undelivered() == 2))
+        labels = [line for line in icron.take_wakes().text().splitlines()
+                  if line.startswith("Job ")]
+        self.assertEqual(sorted(labels), sorted([
+            f"Job {afk.job_id} (the user's, from /afk; due {_iso(NOW + 60)}, every 1800 s):",
+            f"Job {plain.job_id} (the user's; due {_iso(NOW + 60)}):"]))
+        # Code's icron.schedule() has no via.
+        failed = icron.exec("icron.schedule('x', after=60, via='/afk')", by="user")
+        self.assertIn("TypeError", failed.error)
 
 
 def _iso(seconds):

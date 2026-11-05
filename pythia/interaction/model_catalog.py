@@ -605,6 +605,74 @@ class DisplayDefaults:
             raise ValueError(f"assistant must be {' or '.join(DISPLAY_ASSISTANT_VALUES)}")
 
 
+# What a catalog's [afk] section sets: the CLI's /afk, which tells main that
+# the user is away (_cli_afk). Seconds are whole: reminders repeat within
+# icron's bounds for repeats (IcronLimits.min_every and max_delay).
+AFK_FIELDS = ("interval_seconds", "auto_enable_seconds", "auto_disable_on_message",
+              "auto_disable_at", "message")
+DEFAULT_AFK_INTERVAL_SECONDS = 1800
+DEFAULT_AFK_AUTO_DISABLE_ON_MESSAGE = True
+MIN_AFK_INTERVAL_SECONDS = 30
+MIN_AFK_AUTO_ENABLE_SECONDS = 60
+MAX_AFK_SECONDS = 7 * 24 * 3600
+AFK_MESSAGE_MAX_CHARS = 4000
+# auto_disable_at: a local time of day, as /cron at takes it.
+AFK_CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
+
+
+def afk_field_error(name: str, value) -> Optional[str]:
+    """Why ``value`` can't be [afk]'s ``name``, as "expected …"; None if it can."""
+    if value is None:
+        return None
+    if name in ("interval_seconds", "auto_enable_seconds"):
+        low = (MIN_AFK_INTERVAL_SECONDS if name == "interval_seconds"
+               else MIN_AFK_AUTO_ENABLE_SECONDS)
+        if isinstance(value, bool) or not isinstance(value, int) or not (
+                low <= value <= MAX_AFK_SECONDS):
+            return f"expected a whole number of seconds from {low} to {MAX_AFK_SECONDS}, or null"
+    elif name == "auto_disable_on_message":
+        if not isinstance(value, bool):
+            return "expected true, false, or null"
+    elif name == "auto_disable_at":
+        if not isinstance(value, str) or AFK_CLOCK_TIME.fullmatch(value) is None:
+            return "expected a local time of day as HH:MM, such as 08:30, or null"
+    elif name == "message":
+        if not isinstance(value, str) or not value.strip() or len(value) > AFK_MESSAGE_MAX_CHARS:
+            return f"expected nonblank text of at most {AFK_MESSAGE_MAX_CHARS} characters, or null"
+    else:
+        return f"expected one of {', '.join(AFK_FIELDS)}"
+    return None
+
+
+@dataclass(frozen=True)
+class AfkDefaults:
+    """A catalog's [afk] settings; ``None`` leaves the built-in default.
+
+    ``interval_seconds``: between /afk's reminders (default 1800).
+    ``auto_enable_seconds``: turns AFK on after that long without a key press
+    (default: never). ``auto_disable_on_message``: turns it off when the user
+    sends main a message (default: true). ``auto_disable_at``: turns it off at
+    the next such local time, HH:MM (default: never). ``message``: what a
+    reminder says after its first sentence (default: the CLI's guidance).
+    They concern the CLI only, never a model or its requests.
+    """
+
+    interval_seconds: Optional[int] = None
+    auto_enable_seconds: Optional[int] = None
+    auto_disable_on_message: Optional[bool] = None
+    auto_disable_at: Optional[str] = None
+    message: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for name in AFK_FIELDS:
+            error = afk_field_error(name, getattr(self, name))
+            if error is not None:
+                raise ValueError(f"afk {name}: {error}")
+        if self.auto_disable_at is not None:  # 8:30 is 08:30
+            hour, minute = self.auto_disable_at.split(":")
+            object.__setattr__(self, "auto_disable_at", f"{int(hour):02d}:{minute}")
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """A named policy and its single authoritative endpoint."""
@@ -973,7 +1041,8 @@ class ModelCatalog:
     user catalog's optional [auto] section); other frontends ignore it.
     compaction holds the [compaction] section's settings, which every model
     bound through the catalog takes under its own (``bind``). display holds
-    the [display] section's, which the frontends read at launch.
+    the [display] section's, which the frontends read at launch, and afk the
+    [afk] section's, which only the CLI reads, at launch.
     """
 
     specs: Tuple[ModelSpec, ...] = ()
@@ -981,6 +1050,7 @@ class ModelCatalog:
     auto_models: Mapping = field(default_factory=dict)
     compaction: CompactionDefaults = field(default_factory=CompactionDefaults)
     display: DisplayDefaults = field(default_factory=DisplayDefaults)
+    afk: AfkDefaults = field(default_factory=AfkDefaults)
     _index: Mapping = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -999,6 +1069,8 @@ class ModelCatalog:
             raise TypeError("catalog compaction must be CompactionDefaults")
         if not isinstance(self.display, DisplayDefaults):
             raise TypeError("catalog display must be DisplayDefaults")
+        if not isinstance(self.afk, AfkDefaults):
+            raise TypeError("catalog afk must be AfkDefaults")
         if (self.compaction.mode is not None
                 and "provider" in _compaction_grammar().compaction_methods(self.compaction.mode)):
             raise ValueError(f"[compaction] mode: {SECTION_PROVIDER_ERROR}")
@@ -1168,6 +1240,8 @@ __all__ = [
     "CODEX_RESPONSES_API_URL",
     "META_RESPONSES_API_URL",
     "OPENAI_RESPONSES_API_URL",
+    "AFK_FIELDS",
+    "AfkDefaults",
     "COMPACTION_DEFAULT_FIELDS",
     "CompactionDefaults",
     "DEFAULT_DISPLAY_ASSISTANT",

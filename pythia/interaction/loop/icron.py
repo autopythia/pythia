@@ -83,6 +83,7 @@ _ERROR_CHARS = 8000  # a traceback
 _LISTED_CODE_CHARS = 2000  # a job's code, as jobs() shows it: its first characters
 _LISTED_OUTPUT_CHARS = 4000  # a job's latest output, as jobs() shows it: its last characters
 _STREAM_LINES = 40  # output lines that one of the user's runs shows as notices
+_VIA_CHARS = 40  # schedule's via: a command's name
 _WHO = {"main": "main's", "user": "the user's", "host": "the host's"}
 # Why an exec call returned before its run ended, or why the run didn't run to
 # its end: the reason in parentheses on the result's Wall time line (_exec_text).
@@ -132,6 +133,7 @@ class Job:
     ended: Optional[float] = None
     output: str = ""                 # the latest run's output, clipped
     error: Optional[str] = None      # a failed run's traceback
+    via: Optional[str] = None        # the host's word for how it came: /cron or /afk
 
     @property
     def pending(self) -> bool:
@@ -308,11 +310,13 @@ class _Job:
     """A job's live state, guarded by its icron's lock."""
 
     def __init__(self, job_id, origin, kind, created, *, message=None, code=None,
-                 compiled=None, value_name=None, due=None, every=None, remaining=None):
+                 compiled=None, value_name=None, due=None, every=None, remaining=None,
+                 via=None):
         self.job_id, self.origin, self.kind, self.created = job_id, origin, kind, created
         self.message, self.code = message, code
         self.compiled, self.value_name = compiled, value_name
         self.due, self.every, self.remaining = due, every, remaining
+        self.via = via
         self.state = "running" if kind == "exec" else "scheduled"
         # An exec run is listed as a job once its call returns before it ends,
         # and the user's are listed from the start (/cron shows them).
@@ -337,7 +341,7 @@ class _Job:
             state = "cancelled"  # its run, if any, is unwinding
         return Job(self.job_id, self.origin, self.kind, state, self.due, self.message,
                    self.code_text(), self.every, self.remaining, self.created, self.started,
-                   self.ended, output, self.error)
+                   self.ended, output, self.error, self.via)
 
 
 class _Wake:
@@ -439,6 +443,11 @@ class Icron:
         """The handle to main that code gets as ``main``."""
         return self._main
 
+    @property
+    def limits(self) -> IcronLimits:
+        """Its limits: the bounds that every call checks."""
+        return self._limits
+
     def clock(self) -> float:
         """The current time on icron's clock (epoch seconds)."""
         return self._clock()
@@ -520,7 +529,7 @@ class Icron:
     def schedule(self, message: Optional[str] = None, *, code: Optional[Code] = None,
                  after: Optional[float] = None, at: Union[str, datetime, None] = None,
                  every: Optional[float] = None, count: Optional[int] = None,
-                 by: str = "host") -> Job:
+                 by: str = "host", via: Optional[str] = None) -> Job:
         """Schedule a job, and return it.
 
         The first firing is `after` seconds from this call, or at `at`: an
@@ -530,13 +539,19 @@ class Icron:
         the job fires again every `every` seconds: `count` firings in all
         (default: 1 without every, no limit with it). Give exactly one of
         code (run it at each firing) and message (the default code,
-        await main.resume(message)).
+        await main.resume(message)). `via`, like `by` for host code only, is
+        the command it came from, such as /cron or /afk, which its wake-ups
+        and jobs() name.
         """
         call = "icron.schedule()"
         _check_origin(call, by)
         if (message is None) == (code is None):
             raise IcronError(f"{call}: give a message or code"
                              f"{', not both' if message is not None else ''}.")
+        if via is not None and (not isinstance(via, str) or not via.strip()
+                                or len(via) > _VIA_CHARS):
+            raise IcronError(f"{call}: via must be nonblank text, up to {_VIA_CHARS} "
+                             "characters.")
         limits = self._limits
         if message is not None:
             _check_text(call, "message", message, limits.max_chars)
@@ -575,7 +590,7 @@ class Icron:
                                      f"{_syntax_summary(exc)}.") from None
             job = _Job(job_id, by, "message" if message is not None else "code", now,
                        message=message, code=code, compiled=compiled, value_name=value_name,
-                       due=due, every=every, remaining=remaining)
+                       due=due, every=every, remaining=remaining, via=via)
             self._jobs[job_id] = job
             snapshot = job.snapshot()
         self._poke()
@@ -1537,6 +1552,7 @@ def call_text(arguments) -> Optional[Tuple[str, Optional[str]]]:
 
 _METHODS = ("exec", "schedule", "yield_", "cancel", "jobs", "help")  # what main's tool calls
 _TAKES_CODE = ("exec", "schedule")
+_HOST_KEYWORDS = ("by", "via")  # the API's keywords that main's tool and code never give
 _NO_CALL = "icron: give call, one method call such as jobs(), or code to run now."
 
 
@@ -1634,8 +1650,9 @@ def _bind(name: str, args: List[object], keywords: Dict[str, object]) -> _Call:
     """Bind a call's values to its method's signature, so that Python's own
     messages name a missing or unexpected argument."""
     call = f"icron.{name}()"
-    if "by" in keywords:
-        raise IcronError(f"{call}: by is for host code only.")
+    for keyword in _HOST_KEYWORDS:
+        if keyword in keywords:
+            raise IcronError(f"{call}: {keyword} is for host code only.")
     try:
         bound = inspect.signature(getattr(Icron, name)).bind(None, *args, **keywords)
     except TypeError as exc:
@@ -1705,14 +1722,16 @@ def _delivery_label(delivery: Delivery) -> str:
 
 def _whose(job) -> str:
     """Whose a job is, as wake-ups and results say it to main: "yours", "your
-    code", "the user's, from /cron", "your code, from exec", and so on."""
+    code", "the user's, from /cron", "your code, from exec", and so on: a
+    scheduled job's via, if any, is the command it came from."""
     code = {"main": "your code", "user": "the user's code", "host": "the host's code"}[job.origin]
     if job.kind == "exec":
         return f"{code}, from {'/py' if job.origin == 'user' else 'exec'}"
+    via = f", from {job.via}" if job.via is not None else ""
     if job.kind == "message":
         whose = {"main": "yours", "user": "the user's", "host": "the host's"}[job.origin]
-        return whose + (", from /cron" if job.origin == "user" else "")
-    return code
+        return whose + via
+    return code + via
 
 
 def _end_text(job: _Job, run: Run) -> str:
@@ -2020,14 +2039,14 @@ _DETAILS = {
         "  job_id: the job's ID, from schedule's, exec's or jobs()'s result.\n"
         "The job fires no more, a message of its that waits for delivery is withdrawn, and its "
         "running code is cancelled at its next await. You can cancel only your own jobs; the "
-        "user cancels theirs with /cron cancel.",
+        "user cancels theirs with /cron cancel, or /afk off.",
         ('{"call": "cancel(\'k3f9-3\')"}',)),
     "jobs": (
         "Running jobs come first, then the soonest due, then up to {ended_kept} that ended, "
         "latest first. Each job's line says whose it is (yours, your code, the user's, from "
-        "/cron) and when it fires or ran; under it are blocks: its message or code (the first "
-        "{listed_code} characters), its latest run's output (the last {listed_output}), and a "
-        "failed run's error.",
+        "/cron or /afk) and when it fires or ran; under it are blocks: its message or code "
+        "(the first {listed_code} characters), its latest run's output (the last "
+        "{listed_output}), and a failed run's error.",
         ('{"call": "jobs()"}',)),
     "help": (
         "Arguments:\n"
@@ -2070,7 +2089,8 @@ _DETAILS = {
         "seconds, or None.\n"
         "  message or code; every: seconds between firings, or None (once); remaining: "
         "firings still to come, or None (no limit).\n"
-        "  output: the latest run's output; error: a failed run's traceback.",
+        "  output: the latest run's output; error: a failed run's traceback.\n"
+        "  via: the user's command that scheduled it (\"/cron\" or \"/afk\"), or None.",
         ()),
     "Run": (
         "  job_id and origin, as its Job's.\n"
@@ -2172,9 +2192,10 @@ def _bounds(limits: IcronLimits) -> Dict[str, str]:
 
 
 def _signature_text(owner, name: str, prefix: str = "") -> str:
-    """A method's signature as calls write it: without self, the internal by,
-    and, for the tool's methods, code, which goes in its own field."""
-    skip = ("self", "by", "code") if owner is Icron else ("self",)
+    """A method's signature as calls write it: without self, the host's own
+    by and via, and, for the tool's methods, code, which goes in its own
+    field."""
+    skip = ("self", *_HOST_KEYWORDS, "code") if owner is Icron else ("self",)
     parts, keywords = [], False
     for parameter in inspect.signature(getattr(owner, name)).parameters.values():
         if parameter.name in skip:

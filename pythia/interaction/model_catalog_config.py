@@ -10,6 +10,7 @@ import warnings
 
 from ._config_file import read_config_bytes
 from .compaction import compaction_methods
+from .model_catalog import AFK_FIELDS, AfkDefaults, afk_field_error
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .model_catalog import COMPACTION_DEFAULT_FIELDS, CompactionDefaults
 from .model_catalog import SECTION_PROVIDER_ERROR, compaction_route_error
@@ -39,6 +40,7 @@ MAX_CATALOG_MODELS = 1024
 # without a version change.
 # Optional sample_params.* fields were added to version 4 without a version
 # change.
+# The [afk] section was added to version 4 without a version change.
 LATEST_MODEL_CATALOG_VERSION = 4
 _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
 _SAMPLE_PARAMS_PREFIX = "sample_params."
@@ -56,6 +58,8 @@ _INTEGER = re.compile(r"^[+-]?[0-9]+$")
 _DECIMAL = re.compile(r"^[+-]?[0-9]+(?:\.[0-9]+)?$")
 # Roles whose default models the optional [auto] section may name.
 AUTO_ROLES = ("main", "watcher", "worker")
+# The sections that aren't models.
+_SETTING_SECTIONS = ("auto", "compaction", "display", "afk")
 _COMPACTION_PREFIX = "compaction."
 
 
@@ -331,8 +335,7 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             version = LATEST_MODEL_CATALOG_VERSION
             assumed_version = True
         sections = [section for section in parser.sections() if section != "catalog"]
-        sections = [section for section in sections
-                    if section not in ("auto", "compaction", "display")]
+        sections = [section for section in sections if section not in _SETTING_SECTIONS]
         if len(sections) > MAX_CATALOG_MODELS or any(not section.startswith("model.") for section in sections):
             raise ValueError()
     except (configparser.Error, ValueError):
@@ -382,7 +385,7 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
             raise ValueError(f"Invalid model catalog entry {section!r} in {source}") from None
     try:
         catalog = ModelCatalog(tuple(specs.values()), origins, compaction=base.compaction,
-                               display=base.display)
+                               display=base.display, afk=base.afk)
     except ValueError:
         raise ValueError(f"Model catalog selector/alias collision in {source}") from None
     if parser.has_section("auto"):
@@ -395,6 +398,8 @@ def parse_model_catalog(text, *, base=BUILTIN_MODEL_CATALOG, source="user"):
     if parser.has_section("display"):
         catalog = replace(catalog, display=_display_section(
             parser["display"], catalog.display, source))
+    if parser.has_section("afk"):
+        catalog = replace(catalog, afk=_afk_section(parser["afk"], catalog.afk, source))
     if assumed_version:
         warnings.warn(
             f"Model catalog {source!r} does not specify a version; assuming latest "
@@ -479,6 +484,39 @@ def _display_section(section, base, source):
                              f"{_alternatives([*DISPLAY_ASSISTANT_VALUES, 'null'])}")
         values[key] = value
     return DisplayDefaults(**values)
+
+
+def _afk_section(section, base, source):
+    """[afk]: the CLI's /afk settings, over ``base``'s; null unsets one."""
+    values = dict(vars(base))
+    for key, raw in section.items():
+        if key not in AFK_FIELDS:
+            raise ValueError(f"Invalid model catalog [afk] key {key!r} in {source}; "
+                             f"expected {_alternatives(AFK_FIELDS)}")
+        value = _afk_value(key, raw)
+        error = afk_field_error(key, value)
+        if error is not None:
+            raise ValueError(f"Invalid model catalog [afk] {key} in {source}: {error}")
+        values[key] = value
+    return AfkDefaults(**values)
+
+
+def _afk_value(name, raw):
+    """One [afk] value as written: None for null, else the field's type, or
+    something else, which afk_field_error then refuses."""
+    if raw == "null":
+        return None
+    if name in ("interval_seconds", "auto_enable_seconds"):
+        return int(raw) if _INTEGER.fullmatch(raw) else raw
+    if name == "auto_disable_on_message":
+        return configparser.ConfigParser.BOOLEAN_STATES.get(raw.lower(), raw)
+    try:
+        return _text(raw)  # auto_disable_at and message: raw, or a JSON string
+    except ValueError:
+        return _NOT_TEXT
+
+
+_NOT_TEXT = object()  # a quoted value that isn't a JSON string
 
 
 def load_model_catalog(path=None, *, enabled=True, base=BUILTIN_MODEL_CATALOG):
