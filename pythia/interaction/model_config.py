@@ -316,10 +316,13 @@ def render_model_catalog(catalog):
 
 
 def _afk_setting(value) -> str:
-    """An [afk] value as the catalog writes it: a number, a time as
-    parse_afk_when reads it (AfkWhen), or a message as a JSON string."""
+    """An [afk] value as the catalog writes it: a number, rules as
+    parse_afk_rules reads them, or a message as a JSON string."""
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, tuple):
+        rules = ", ".join(str(rule) for rule in value)
+        return rules if len(value) == 1 else json.dumps(rules)  # its commas aren't the line's
     return str(value)
 
 

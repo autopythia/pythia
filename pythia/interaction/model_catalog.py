@@ -606,20 +606,21 @@ class DisplayDefaults:
             raise ValueError(f"assistant must be {' or '.join(DISPLAY_ASSISTANT_VALUES)}")
 
 
-# What a catalog's [afk] section sets: the CLI's /afk and /autoafk, which tell
-# main that the user is away (_cli_afk). Reminders repeat within icron's
-# bounds for repeats (IcronLimits.min_every and max_delay).
+# What a catalog's [afk] section sets: the CLI's AFK (/afk, /autoafk,
+# /autonoafk, and /auto), which tells main that the user is away (_cli_afk).
+# Reminders repeat within icron's bounds for repeats (IcronLimits.min_every
+# and max_delay).
 AFK_FIELDS = ("interval_seconds", "auto_enable", "auto_disable", "message")
 DEFAULT_AFK_INTERVAL_SECONDS = 1800
 MIN_AFK_INTERVAL_SECONDS = 30
-MIN_AFK_AFTER_SECONDS = 60  # a duration of auto_enable's, auto_disable's, or /autoafk's
+MIN_AFK_AFTER_SECONDS = 60  # a duration rule's shortest, as AFK's commands and the catalog give it
 MAX_AFK_SECONDS = 7 * 24 * 3600
 AFK_MESSAGE_MAX_CHARS = 4000
-# auto_enable and auto_disable at one time each day, or at one date and time,
-# would end AFK and start it again there.
-AFK_SAME_TIMES = "auto_enable and auto_disable must differ"
 AFK_WHEN_EXPECTED = ("a duration such as 20m (s, m, h, or d; 1m to 7d), a local time of day "
                      "such as 18:00, or a local date and time such as 2026-11-07 18:00")
+# A rule's class (AfkWhen.kind), as notices and errors name it: singular, plural.
+AFK_CLASSES = {"after": ("duration", "durations"), "daily": ("time of day", "times of day"),
+               "once": ("date and time", "dates and times")}
 _AFK_DURATION = re.compile(r"([1-9][0-9]*)([smhd])")
 _AFK_CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
 _AFK_DATE_TIME = re.compile(
@@ -696,10 +697,55 @@ def parse_afk_when(text) -> AfkWhen:
     raise ValueError(f"expected {AFK_WHEN_EXPECTED}")
 
 
-def afk_same_times(enable: Optional[AfkWhen], disable: Optional[AfkWhen]) -> bool:
-    """Whether AFK would turn on and off at one time: the same time each day,
-    or the same date and time."""
-    return enable is not None and enable.kind != "after" and enable == disable
+def parse_afk_rules(text) -> Tuple[AfkWhen, ...]:
+    """[afk] auto_enable's or auto_disable's value: rules as parse_afk_when
+    reads them, separated by commas, at most one per class. Raises
+    ValueError, which says what was expected."""
+    if not isinstance(text, str):
+        raise ValueError(f"expected {AFK_WHEN_EXPECTED}")
+    items = [item.strip() for item in text.split(",")]
+    rules = []
+    for item in items:
+        try:
+            rules.append(parse_afk_when(item))
+        except ValueError as exc:
+            if len(items) == 1:
+                raise
+            raise ValueError(f"{item or 'an empty rule'}: {exc}") from None
+    error = afk_rules_error(rules)
+    if error is not None:
+        raise ValueError(error)
+    return tuple(rules)
+
+
+def afk_rules_error(rules) -> Optional[str]:
+    """Why ``rules`` can't be the rules of one kind, as "expected …": one
+    that isn't an AfkWhen, or two of one class. None if they can."""
+    seen = {}
+    for rule in rules:
+        if not isinstance(rule, AfkWhen):
+            return f"expected {AFK_WHEN_EXPECTED}"
+        if rule.kind in seen:
+            return (f"expected at most one rule per class, but {seen[rule.kind]} and {rule} "
+                    f"are both {AFK_CLASSES[rule.kind][1]}")
+        seen[rule.kind] = rule
+    return None
+
+
+def afk_shared_time(enable, disable) -> Optional[AfkWhen]:
+    """A time of day, or a date and time, among the rules of both kinds: it
+    would end AFK and start it again there. None if there's none."""
+    return next((rule for rule in enable or ()
+                 if rule.kind != "after" and rule in tuple(disable or ())), None)
+
+
+def afk_pair_error(enable, disable) -> Optional[str]:
+    """Why auto_enable's and auto_disable's rules can't go together, or None."""
+    shared = afk_shared_time(enable, disable)
+    if shared is None:
+        return None
+    return (f"auto_enable and auto_disable both have {shared}, so AFK would end and start "
+            "again there")
 
 
 def afk_field_error(name: str, value) -> Optional[str]:
@@ -712,11 +758,15 @@ def afk_field_error(name: str, value) -> Optional[str]:
             return (f"expected a whole number of seconds from {MIN_AFK_INTERVAL_SECONDS} to "
                     f"{MAX_AFK_SECONDS}, or null")
     elif name in ("auto_enable", "auto_disable"):
-        if not isinstance(value, AfkWhen):
-            try:
-                parse_afk_when(value)
-            except ValueError as exc:
-                return f"{exc}, or null"
+        if isinstance(value, AfkWhen):
+            return None
+        if isinstance(value, tuple):
+            error = afk_rules_error(value) if value else f"expected {AFK_WHEN_EXPECTED}"
+            return None if error is None else f"{error}, or null"
+        try:
+            parse_afk_rules(value)
+        except ValueError as exc:
+            return f"{exc}, or null"
     elif name == "message":
         if not isinstance(value, str) or not value.strip() or len(value) > AFK_MESSAGE_MAX_CHARS:
             return f"expected nonblank text of at most {AFK_MESSAGE_MAX_CHARS} characters, or null"
@@ -730,20 +780,21 @@ class AfkDefaults:
     """A catalog's [afk] settings; ``None`` leaves the built-in default.
 
     ``interval_seconds``: between AFK's reminders (default 1800).
-    ``auto_enable``: when AFK turns on by itself, the trigger that /autoafk
-    replaces: after a duration without a message from the user, at a time
-    each day, or once (default: never). ``auto_disable``: when it turns off by
-    itself, besides the user's next message: once it has been on for a
-    duration, at a time each day, or once (default: never). Both are AfkWhen,
-    or text that parse_afk_when reads, and can't fire at the same time
-    (afk_same_times). ``message``: what a reminder says after its first
-    sentence (default: the CLI's guidance). They concern the CLI only, never
-    a model or its requests.
+    ``auto_enable``: the rules that turn AFK on by itself, which /autoafk and
+    /noautoafk change: after a duration without a message from the user, at a
+    time each day, or once (default: none). ``auto_disable``: the rules that
+    turn it off by itself, besides the user's next message, which /autonoafk
+    and /noautonoafk change: once it has been on for a duration, at a time
+    each day, or once (default: none). Each is a tuple of AfkWhen, at most
+    one per class, given also as one AfkWhen or as text that parse_afk_rules
+    reads; the two can't share a time (afk_pair_error). ``message``: what a
+    reminder says after its first sentence (default: the CLI's guidance).
+    They concern the CLI only, never a model or its requests.
     """
 
     interval_seconds: Optional[int] = None
-    auto_enable: Optional[AfkWhen] = None
-    auto_disable: Optional[AfkWhen] = None
+    auto_enable: Optional[Tuple[AfkWhen, ...]] = None
+    auto_disable: Optional[Tuple[AfkWhen, ...]] = None
     message: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -754,9 +805,13 @@ class AfkDefaults:
         for name in ("auto_enable", "auto_disable"):
             value = getattr(self, name)
             if isinstance(value, str):  # as the catalog writes it
-                object.__setattr__(self, name, parse_afk_when(value))
-        if afk_same_times(self.auto_enable, self.auto_disable):
-            raise ValueError(f"afk {AFK_SAME_TIMES}")
+                value = parse_afk_rules(value)
+            elif isinstance(value, AfkWhen):
+                value = (value,)
+            object.__setattr__(self, name, value)
+        error = afk_pair_error(self.auto_enable, self.auto_disable)
+        if error is not None:
+            raise ValueError(f"afk {error}")
 
 
 @dataclass(frozen=True)

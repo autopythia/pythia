@@ -47,6 +47,9 @@ from typing import Union
 
 from ._account_http import default_account_opener
 from ._cli_afk import Afk
+from ._cli_afk import RULE_COMMANDS
+from ._cli_afk import SOURCES as AFK_SOURCES
+from ._cli_auto import Auto
 from ._cli_editor import Editor
 from ._cli_editor import safe_text
 from ._cli_save import CliSave
@@ -132,6 +135,7 @@ from .model_config import resolve_save_path
 from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
 from .model_catalog import AfkDefaults
+from .model_catalog import afk_rules_error
 from .model_catalog import parse_afk_when
 from ._model_binding_debug import save_debug_model_bindings
 from .registry import Registry
@@ -356,10 +360,11 @@ class _Rebooted:
     exit_code: int = 0
     warning: Optional[str] = None
     # AFK, as Afk.freeze carried it: if it was on, since, due, and until, and
-    # its note; the trigger's state; and what couldn't be read, if anything.
+    # its text; the trigger's state; and what couldn't be read, if anything.
     afk: Optional[dict] = None
-    afk_note: Optional[str] = None
+    afk_text: Optional[str] = None
     autoafk: Optional[dict] = None
+    auto: Optional[dict] = None  # auto mode, if it was on (Auto.freeze)
     afk_warning: Optional[str] = None
 
 
@@ -611,6 +616,10 @@ class _UIState:
     icron_auth_noticed: bool = False
     # /afk (_cli_afk), in an interactive CLI with icron; otherwise None.
     afk: Optional[Afk] = field(default=None, repr=False)
+    # /auto and /noauto (_cli_auto), with /afk; pending_auto is an /auto that
+    # waits for /yes or /no, as it would turn tool-call approval off.
+    auto: Optional[Auto] = field(default=None, repr=False)
+    pending_auto: Optional[str] = None
     # The experimental media tool (--enable-experimental-media) and ui tool
     # (--enable-experimental-ui-plugin), or None: the messages that they queue
     # in their shared outbox (outbox) reach the running turn at its interrupt
@@ -831,6 +840,19 @@ class _UIState:
                     refusal = _TOOL_APPROVAL_REFUSAL
                 self.notice(f"{refusal} Draft preserved.")
                 return
+            if self.pending_auto is not None and text.strip():
+                # /auto's confirmation is modal too, behind a tool call's.
+                if head in (*_APPROVAL_YES, *_APPROVAL_NO) and text.strip() == head:
+                    draft, self.pending_auto = self.pending_auto, None
+                    self.editor = Editor(draft, len(draft))
+                    if head in _APPROVAL_YES:
+                        self._auto_go(draft)
+                    else:
+                        self.notice("auto: not entered; your /auto is back in the input line.")
+                else:
+                    self.notice("auto: /yes enters auto mode, and /no doesn't; answer first. "
+                                "Draft preserved.")
+                return
             intent = text
             steer = command_urgency(head, "/steer")
             if head == "/retry":
@@ -910,8 +932,11 @@ class _UIState:
             elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
                 self._icron_command(head, text)
                 return
-            elif self.afk is not None and head in ("/afk", "/autoafk"):
+            elif self.afk is not None and head in ("/afk", "/noauto", *RULE_COMMANDS):
                 self._icron_command(head, text)
+                return
+            elif self.afk is not None and head == "/auto":
+                self._auto_command(text)
                 return
             elif head.startswith("/"):
                 try:
@@ -939,7 +964,8 @@ class _UIState:
                     self.notice(intent.notice)
 
     def _submit_text(self, text: str, *, draft: Optional[str] = None,
-                     flush: Optional[Urgency] = None, steers: bool = True) -> None:
+                     flush: Optional[Urgency] = None, steers: bool = True,
+                     auto: bool = False) -> None:
         """Read a draft's attachments now, then queue its message.
 
         A bad reference rejects only this draft: it stays in the editor with
@@ -948,7 +974,9 @@ class _UIState:
         editor, and Enter queues nothing else, so the queue keeps its order.
         ``draft`` is the editor text (``/steer <text>``, ``/task <text>``),
         ``flush`` the urgency to flush the queued steers with once the text is
-        queued, and ``steers`` false for ``/task <text>`` (see _Submission).
+        queued, ``steers`` false for ``/task <text>`` (see _Submission), and
+        ``auto`` true for ``/auto <text>``, which turns auto mode on once the
+        text is queued.
         """
         draft = text if draft is None else draft
         if _queued_input(self) >= _MAX_PENDING_QUERIES:
@@ -958,17 +986,17 @@ class _UIState:
             self.reading = draft
             future = asyncio.get_running_loop().run_in_executor(None, self.read_query, text)
             future.add_done_callback(
-                functools.partial(self._read_done, text, draft, flush, steers))
+                functools.partial(self._read_done, text, draft, flush, steers, auto))
             return
         try:
             message = self.read_query(text)
         except AttachmentError as exc:
             self.notice(str(exc))
             return
-        self._queue_submission(_Submission(text, message, steers), draft, flush)
+        self._queue_submission(_Submission(text, message, steers), draft, flush, auto=auto)
 
     def _read_done(self, text: str, draft: str, flush: Optional[Urgency], steers: bool,
-                   future) -> None:
+                   auto: bool, future) -> None:
         self.reading = None
         if future.cancelled() or self.closing:
             return
@@ -980,10 +1008,11 @@ class _UIState:
             self.notice(f"Reading attachments failed ({type(error).__name__}); "
                         "the draft has not been submitted.")
         else:
-            self._queue_submission(_Submission(text, future.result(), steers), draft, flush)
+            self._queue_submission(_Submission(text, future.result(), steers), draft, flush,
+                                   auto=auto)
 
     def _queue_submission(self, submission: _Submission, draft: str,
-                          flush: Optional[Urgency] = None) -> None:
+                          flush: Optional[Urgency] = None, *, auto: bool = False) -> None:
         if _queued_input(self) >= _MAX_PENDING_QUERIES:
             self.notice("Query queue is full; the draft has not been submitted.")
             return
@@ -997,7 +1026,9 @@ class _UIState:
         if self.editor.text == draft:
             self.editor = Editor()
         self.changed.set()
-        if self.afk is not None:
+        if auto and self.auto is not None:
+            self.auto.sent()  # /auto's message: auto mode and AFK on, after it
+        elif self.afk is not None:
             # Typed input, for main: only the user's own text comes here, not
             # icron's wake-ups or the tools' messages.
             self.afk.message()
@@ -1192,14 +1223,21 @@ class _UIState:
                          name="interaction-quota", daemon=True).start()
 
     def _icron_command(self, head: str, text: str) -> None:
-        """/cron, /crontab, /py, /afk, and /autoafk (--enable-icron): handled
-        at once, on the event loop, even while main is busy or needs
-        authentication; never queued or saved. A command that fails leaves its
-        draft in the editor. AFK follows its job, which /cron cancel may have
-        ended."""
-        afk = head in ("/afk", "/autoafk")
-        if afk:
-            command = self.afk.command if head == "/afk" else self.afk.autoafk_command
+        """/cron, /crontab, /py, and AFK's commands (--enable-icron): /afk,
+        /autoafk, /noautoafk, /autonoafk, /noautonoafk, /auto alone, and
+        /noauto. Handled at once, on the event loop, even while main is busy
+        or needs authentication; never queued or saved. A command that fails
+        leaves its draft in the editor. AFK follows its job, which /cron
+        cancel may have ended."""
+        afk = head in ("/afk", "/auto", "/noauto", *RULE_COMMANDS)
+        if head == "/afk":
+            command = self.afk.command
+        elif head == "/auto":
+            command = self.auto.command
+        elif head == "/noauto":
+            command = self.auto.noauto_command
+        elif afk:
+            command = functools.partial(self.afk.rules_command, head)
         else:
             command = {"/cron": self._cron, "/crontab": self._crontab, "/py": self._py}[head]
         try:
@@ -1211,6 +1249,26 @@ class _UIState:
             self.afk.sync()
         if used:
             self.editor = Editor()
+
+    def _auto_command(self, text: str) -> None:
+        """/auto [text] (_cli_auto). While tool calls need approval, which auto
+        mode turns off, it waits for /yes (pending_auto) first."""
+        if self.auto.needs_confirmation():
+            self.pending_auto, self.editor = text, Editor()
+            self.notice(self.auto.confirmation())
+            return
+        self._auto_go(text)
+
+    def _auto_go(self, text: str) -> None:
+        """/auto alone at once; /auto <text>'s text as typed text goes, which
+        turns auto mode on once it's queued (_queue_submission)."""
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            self._icron_command("/auto", text)
+        elif self.auth_required:
+            self.notice(f"{self.auth_notice} Draft was not submitted.")
+        else:
+            self._submit_text(parts[1], draft=text, auto=True)
 
     def _cron(self, text: str) -> bool:
         """/cron: schedule the user's message, cancel jobs, or list them."""
@@ -2468,9 +2526,11 @@ def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> di
         "queue": queue, "exit_code": state.exit_code,
     }
     if state.afk is not None and state.afk.carried is not None:
-        # Optional keys, so the version stays: older code ignores "afk_note"
+        # Optional keys, so the version stays: older code ignores "afk_text"
         # and "autoafk", and reads "afk" in the shape it always had.
         carried.update(json.loads(json.dumps(state.afk.carried)))
+    if state.auto is not None and state.auto.on:
+        carried["auto"] = json.loads(json.dumps(state.auto.freeze()))
     return carried
 
 
@@ -2508,18 +2568,24 @@ def _parse_reboot_state(data) -> _Rebooted:
 
 
 def _parse_afk_state(data: dict) -> dict:
-    """_Rebooted's AFK fields from the reboot state's "afk", "afk_note", and
-    "autoafk". What can't be read goes, with afk_warning, never the rest of
-    the state, which a coldstart reboot's pointer needs."""
-    afk, note, autoafk, lost = data.get("afk"), data.get("afk_note"), data.get("autoafk"), []
-    if afk is not None and not (_is_afk_state(afk) and (note is None or _is_afk_note(note))):
+    """_Rebooted's AFK fields from the reboot state's "afk", "afk_text" (or
+    "afk_note", as 33b31af wrote it), "autoafk", and "auto". What can't be
+    read goes, with afk_warning, never the rest of the state, which a
+    coldstart reboot's pointer needs."""
+    afk, autoafk, auto, lost = data.get("afk"), data.get("autoafk"), data.get("auto"), []
+    text = data.get("afk_text", data.get("afk_note"))
+    if afk is not None and not (_is_afk_state(afk) and (text is None or _is_afk_text(text))):
         afk = None
         lost.append("AFK")
     if autoafk is not None and not _is_autoafk_state(autoafk):
         autoafk = None
-        lost.append("the /autoafk trigger's state")
-    return {"afk": afk, "afk_note": None if afk is None else note, "autoafk": autoafk,
-            "afk_warning": " or ".join(lost) or None}
+        lost.append("AFK's rules")
+    if auto is not None and not _is_auto_state(auto):
+        auto = None
+        lost.append("auto mode")
+    warning = ", ".join(lost[:-1]) + (" or " if len(lost) > 1 else "") + (lost[-1] if lost else "")
+    return {"afk": afk, "afk_text": None if afk is None else text, "autoafk": autoafk,
+            "auto": auto, "afk_warning": warning or None}
 
 
 def _is_int(value) -> bool:
@@ -2533,25 +2599,63 @@ def _is_afk_state(afk) -> bool:
             and all(afk[key] is None or _is_time(afk[key]) for key in ("due", "until")))
 
 
-def _is_afk_note(note) -> bool:
-    """Afk.freeze's note: text a reminder can carry."""
-    return isinstance(note, str) and bool(note.strip()) and len(note) <= IcronLimits().max_chars
+def _is_afk_text(text) -> bool:
+    """Afk.freeze's text: what /afk added to its reminders."""
+    return isinstance(text, str) and bool(text.strip()) and len(text) <= IcronLimits().max_chars
 
 
 def _is_autoafk_state(state) -> bool:
-    """Afk.freeze's trigger state: seen and count_from, times; armed, a
-    boolean; and when, if /autoafk set it, null or a trigger as
-    parse_afk_when reads it."""
-    if not (isinstance(state, dict) and {"seen", "count_from", "armed"} <= set(state)
-            <= {"seen", "count_from", "armed", "when"}
+    """Afk.freeze's rules state: seen and count_from, times; armed, a boolean;
+    on_at, a time, while AFK is on; and enable and disable, the rules that
+    commands or auto mode changed (_is_rules). Or when, in 33b31af's shape:
+    the one rule that turned AFK on, or null."""
+    required, optional = {"seen", "count_from", "armed"}, {"on_at", "enable", "disable", "when"}
+    if not (isinstance(state, dict) and required <= set(state) <= required | optional
             and _is_time(state["seen"]) and _is_time(state["count_from"])
-            and isinstance(state["armed"], bool)):
+            and isinstance(state["armed"], bool)
+            and ("on_at" not in state or _is_time(state["on_at"]))):
         return False
-    when = state.get("when")
+    if "when" in state and not (state["when"] is None or _is_rule(state["when"])):
+        return False
+    return all(_is_rules(state[key]) for key in ("enable", "disable") if key in state)
+
+
+def _is_rules(rules) -> bool:
+    """One kind's rules as Afk carries them: [rule, source] pairs, a rule as
+    parse_afk_when reads it, at most one per class."""
+    if not (isinstance(rules, list) and all(
+            isinstance(pair, list) and len(pair) == 2 and _is_rule(pair[0])
+            and pair[1] in AFK_SOURCES for pair in rules)):
+        return False
+    return afk_rules_error([parse_afk_when(rule) for rule, _source in rules]) is None
+
+
+def _is_rule(text) -> bool:
     try:
-        return when is None or (isinstance(when, str) and parse_afk_when(when) is not None)
+        return isinstance(text, str) and parse_afk_when(text) is not None
     except ValueError:
         return False
+
+
+def _is_auto_state(auto) -> bool:
+    """Auto.freeze's state: since, a time; and saved, Afk.save's state with
+    the approval mode."""
+    if not (isinstance(auto, dict) and set(auto) == {"since", "saved"}
+            and _is_time(auto["since"]) and isinstance(auto["saved"], dict)):
+        return False
+    saved = auto["saved"]
+    if not (set(saved) == {"enable", "disable", "enable_changed", "disable_changed", "afk",
+                           "approval"}
+            and _is_rules(saved["enable"]) and _is_rules(saved["disable"])
+            and isinstance(saved["enable_changed"], bool)
+            and isinstance(saved["disable_changed"], bool)
+            and (isinstance(saved["approval"], bool) or saved["approval"] == _APPROVAL_EXEC)):
+        return False
+    afk = saved["afk"]
+    return afk is None or (
+        isinstance(afk, dict) and set(afk) == {"since", "text", "on_at", "until"}
+        and _is_time(afk["since"]) and (afk["text"] is None or _is_afk_text(afk["text"]))
+        and all(afk[key] is None or _is_time(afk[key]) for key in ("on_at", "until")))
 
 
 def _is_time(value) -> bool:
@@ -3764,7 +3868,8 @@ def _startup_notices(state, args, save, config=None):
                      "unsandboxed, with the icron tool"
                      + ("." if state.headless else
                         "; /cron schedules your messages, /crontab shows them, /py runs your "
-                        "code, /afk tells main you're away, and /autoafk does it by itself.")
+                        "code, /afk tells main you're away, /autoafk does it by itself, and "
+                        "/auto hands main a task and goes away.")
                      + " Jobs and Python state live only in this process.")
     if state.afk is not None:
         for notice in state.afk.startup_notices():
@@ -3798,15 +3903,18 @@ def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted)
     if rebooted.afk_warning is not None:
         state.notice(f"Note: the reboot didn't carry over {rebooted.afk_warning}, which "
                      "couldn't be read.")
-    if rebooted.autoafk is not None and state.afk is not None:
-        state.afk.restore_autoafk(rebooted.autoafk)
-    if rebooted.afk is not None:
+    if state.afk is not None:
+        if rebooted.autoafk is not None:
+            state.afk.restore_autoafk(rebooted.autoafk)
+        if rebooted.auto is not None:
+            state.auto.restore(rebooted.auto, rules=rebooted.autoafk is not None)
+    if rebooted.afk is not None or rebooted.auto is not None:
         if state.afk is None:
             state.notice("Note: the reboot didn't carry over AFK: this CLI has no /afk "
                          "(icron is off, or it runs headless).")
-        else:
+        elif rebooted.afk is not None:
             try:
-                state.afk.restore(rebooted.afk, rebooted.afk_note)
+                state.afk.restore(rebooted.afk, rebooted.afk_text)
             except IcronError as exc:
                 state.notice(f"Note: the reboot didn't carry over AFK: {exc}")
 
@@ -3906,6 +4014,9 @@ async def _run(
     )
     if icron is not None:
         state.afk = Afk(icron, AfkDefaults() if afk is None else afk, state.notice)
+        state.auto = Auto(state.afk, state.notice,
+                          approval=lambda: state.require_tool_approval,
+                          set_approval=functools.partial(setattr, state, "require_tool_approval"))
     state.notice(
         "pythia.interaction — /retry, /continue, /cancel, /steer [text], /task <text>, "
         "/compact [focus], /config, /config.json, /login, /quota, /reboot, /exit or /quit. "
@@ -3988,6 +4099,12 @@ async def _run(
                     status += " | /yes runs it now, /no withdraws it"
                 if state.quota is not None:
                     status += " | quota"
+                if state.pending_auto is not None:
+                    status += " | auto mode: /yes or /no"
+                if state.auto is not None and state.stop_level is None:
+                    part = state.auto.status()
+                    if part:
+                        status += f" | {part}"
                 if state.afk is not None and state.stop_level is None:
                     part = state.afk.status()
                     if part:

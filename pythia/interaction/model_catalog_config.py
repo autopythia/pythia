@@ -10,7 +10,7 @@ import warnings
 
 from ._config_file import read_config_bytes
 from .compaction import compaction_methods
-from .model_catalog import AFK_FIELDS, AFK_SAME_TIMES, AfkDefaults, afk_field_error
+from .model_catalog import AFK_FIELDS, AfkDefaults, afk_field_error
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .model_catalog import COMPACTION_DEFAULT_FIELDS, CompactionDefaults
 from .model_catalog import SECTION_PROVIDER_ERROR, compaction_route_error
@@ -501,8 +501,9 @@ def _afk_section(section, base, source):
         values[key] = value
     try:
         return AfkDefaults(**values)
-    except ValueError:  # each value is valid, so the pair isn't
-        raise ValueError(f"Invalid model catalog [afk] in {source}: {AFK_SAME_TIMES}") from None
+    except ValueError as exc:  # each value is valid, so the pair isn't
+        raise ValueError(f"Invalid model catalog [afk] in {source}: "
+                         f"{str(exc).removeprefix('afk ')}") from None
 
 
 def _afk_value(name, raw):
