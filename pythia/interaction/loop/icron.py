@@ -2039,7 +2039,7 @@ _DETAILS = {
         "  job_id: the job's ID, from schedule's, exec's or jobs()'s result.\n"
         "The job fires no more, a message of its that waits for delivery is withdrawn, and its "
         "running code is cancelled at its next await. You can cancel only your own jobs; the "
-        "user cancels theirs with /cron cancel, or /afk off.",
+        "user cancels theirs with /cron cancel.",
         ('{"call": "cancel(\'k3f9-3\')"}',)),
     "jobs": (
         "Running jobs come first, then the soonest due, then up to {ended_kept} that ended, "

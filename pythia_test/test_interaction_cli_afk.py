@@ -1,4 +1,4 @@
-"""/afk: the CLI tells main that the user is away (doc/cli-afk-plan.md)."""
+"""/afk and /autoafk: the CLI tells main that the user is away (doc/cli-afk-plan.md)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import warnings
 
 from pythia.interaction import Icron, IcronError, InteractionConfig, cli
 from pythia.interaction import _cli_afk
-from pythia.interaction._cli_afk import Afk
+from pythia.interaction._cli_afk import AUTOAFK_USAGE, Afk
 from pythia.interaction.loop.icron import WAKE_HEADER
 from pythia.interaction.loop.supervision import Yield
-from pythia.interaction.model_catalog import AfkDefaults
+from pythia.interaction.model_catalog import AfkDefaults, AfkWhen, parse_afk_when
 from pythia.interaction.model_catalog_config import parse_model_catalog
 from pythia.interaction.model_config import render_model_catalog
 from pythia_test.interaction_helpers import patch_compaction
@@ -30,27 +30,34 @@ def _iso(seconds):
     return datetime.fromtimestamp(seconds).astimezone().isoformat(timespec="seconds")
 
 
-def _reminder(since):
-    return (f"The user has been away from the keyboard (AFK) since {_iso(since)}; only they "
+def _reminder(since, note=None):
+    text = (f"The user has been away from the keyboard (AFK) since {_iso(since)}; only they "
             "can end these reminders. They can't answer until they're back, so don't wait for "
             "them: carry on where you can.")
+    return text if note is None else f"{text}\nTheir note: {note}"
 
 
-def _on(job_id, tail=""):
-    return (f"afk: on; main hears now, then every 30m, that you're away (job {job_id}). "
-            f"/afk off ends it{tail}.")
+def _on(job_id, tail="", head="afk: on"):
+    return (f"{head}; main hears now, then every 30m, that you're away (job {job_id}). Your "
+            f"next message ends it{tail}.")
+
+
+def _ended(kind="ended"):
+    """main's turn ended: the run of the job that it took a reminder from ends."""
+    extra = {"ended": {"final_text": "Carrying on."}, "yielded": {"yield_text": "waiting"}}
+    return extra[kind]
 
 
 class _AfkCase(unittest.TestCase):
-    """A CLI state with icron and /afk, on fake clocks: icron's (wall time)
-    and the idle time's (_cli_afk._idle_clock)."""
+    """A CLI state with icron and /afk, on icron's fake clock (wall time).
+    tick() lets it go on, then checks at once (_cli_afk._check_clock)."""
 
     defaults = AfkDefaults()
 
     def setUp(self):
         self.clock = _Clock()
-        self.idle = _Clock(100.0)
-        patcher = mock.patch.object(_cli_afk, "_idle_clock", self.idle)
+        self.check = _Clock(100.0)
+        patcher = mock.patch.object(_cli_afk, "_check_clock", self.check)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.icron = Icron(clock=self.clock)
@@ -67,45 +74,81 @@ class _AfkCase(unittest.TestCase):
     def job(self, job_id):
         return next(job for job in self.icron.jobs() if job.job_id == job_id)
 
-    def turn_on(self):
-        (notice,) = self.enter("/afk")
+    def turn_on(self, text="/afk"):
+        (notice,) = self.enter(text)
         return re.search(r"\(job (\S+)\)", notice).group(1)
 
-    def tick(self, seconds=1.0, *, may_enable=True):
-        """Let the idle time go on (a tick checks at most once a second), then tick."""
-        self.idle.now += seconds
+    def tick(self, seconds=0.0, *, may_enable=True):
+        self.clock.now += seconds
+        self.check.now += _cli_afk._CHECK_SECONDS
         self.afk.tick(may_enable=may_enable)
         return _notices(self.state)
 
+    def at(self, hour, minute, *, day=15, may_enable=True):
+        """Tick at a local time of NOW's day (January 15, 2027), or another day's."""
+        self.clock.now = datetime(2027, 1, day, hour, minute).timestamp()
+        return self.tick(may_enable=may_enable)
+
+    def remind(self):
+        """Let AFK's reminder fall due, and wait until icron queues it."""
+        self.clock.now += 1
+        self.icron._poke()
+        self.assertTrue(_until(lambda: self.icron.undelivered() == 1))
+
+    def end_turn(self, job_id=None, kind="ended"):
+        self.icron.handoff(Yield(context=1, job_id=job_id, job_text="task", kind=kind,
+                                 resumable=True, revision=0, **_ended(kind)))
+
 
 class CommandTests(_AfkCase):
-    def test_afk_turns_on_shows_its_state_and_afk_off_turns_it_off(self):
+    def test_afk_turns_on_and_again_starts_it_over_with_its_note(self):
         (notice,) = self.enter("/afk")
         job_id = re.fullmatch(r"afk: on; main hears now, then every 30m, that you're away "
-                              r"\(job (\S+)\)\. /afk off ends it\.", notice).group(1)
+                              r"\(job (\S+)\)\. Your next message ends it\.", notice).group(1)
         self.assertEqual(self.state.editor.text, "")
         job = self.job(job_id)
         self.assertEqual((job.origin, job.kind, job.via, job.every, job.due, job.message),
                          ("user", "message", "/afk", 1800.0, NOW + 1, _reminder(NOW)))
         self.assertEqual(self.afk.status(), "afk since 12:00")
-        state = (f"afk: on since 12:00:00 (job {job_id}); next reminder at 12:00:01. /afk off "
-                 "ends it.")
-        self.assertEqual(self.enter("/afk"), [state])
-        self.assertEqual(self.enter("/afk on"), [state])  # the same as /afk
-        self.clock.now += 5400
-        self.assertEqual(self.enter("/afk off"), ["afk: off after 1h 30m."])
+        self.clock.now += 600
+        (notice,) = self.enter("/afk Back at 13:00; finish the parser.")
+        second = self.afk.job_id
+        self.assertEqual(notice, _on(second, head="afk: on again, with your note"))
         self.assertEqual(self.job(job_id).state, "cancelled")
-        self.assertEqual(self.afk.status(), "")
-        self.assertEqual(self.enter("/afk off"), ["afk: already off."])
-        self.assertEqual(self.enter("/afk on"), [_on(self.afk.job_id)])
+        self.assertEqual(self.job(second).message,
+                         _reminder(NOW + 600, "Back at 13:00; finish the parser."))
+        self.assertEqual(self.afk.status(), "afk since 12:10")
+        self.assertEqual(self.enter("/afk"), [_on(self.afk.job_id, head="afk: on again")])
+        self.assertEqual(self.job(second).state, "cancelled")
+        self.assertEqual(self.job(self.afk.job_id).message, _reminder(NOW + 600))
 
-    def test_a_malformed_command_or_a_full_job_list_keeps_the_draft(self):
-        usage = ("Usage: /afk or /afk on tells main, now and every 30m, that you're away, "
-                 "until /afk off; while it's on, /afk shows it. Draft preserved.")
-        for text in ("/afk now", "/afk off now", "/afk of"):
+    def test_a_note_keeps_its_lines(self):
+        self.turn_on("/afk  First the parser,\n  then the docs.  ")
+        self.assertEqual(self.job(self.afk.job_id).message,
+                         _reminder(NOW, "First the parser,\n  then the docs."))
+
+    def test_on_and_off_aren_t_notes_and_a_long_note_or_a_full_job_list_keep_the_draft(self):
+        refusals = {
+            "/afk off": "afk: there's no /afk off: your next message to main ends AFK, and "
+                        "/cron cancel ends its job. Draft preserved.",
+            "/afk On": "afk: there's no /afk on: /afk alone turns AFK on. Draft preserved.",
+        }
+        for text, refusal in refusals.items():
             with self.subTest(text=text):
-                self.assertEqual(self.enter(text), [usage])
+                self.assertEqual(self.enter(text), [refusal])
                 self.assertEqual(self.state.editor.text, text)
+                self.assertIsNone(self.afk.job_id)
+        job_id = self.turn_on()
+        self.assertEqual(self.enter("/afk off"), [refusals["/afk off"]])
+        self.assertTrue(self.afk.sync())
+        long = "/afk " + "x" * 8000
+        (notice,) = self.enter(long)
+        self.assertRegex(notice, r"^afk: the note is too long: a reminder has at most 8000 "
+                                 r"characters, and this one would have 8\d{3}\. Draft preserved\.$")
+        self.assertEqual((self.state.editor.text, self.afk.job_id), (long, job_id))
+        self.icron.cancel(job_id, by="user")
+        self.afk.sync()
+        _notices(self.state)
         for _ in range(16):
             self.icron.schedule("x", after=600, by="user", via="/cron")
         self.assertEqual(self.enter("/afk"), [
@@ -117,12 +160,14 @@ class CommandTests(_AfkCase):
     def test_it_works_while_the_model_needs_authentication_and_not_without_icron(self):
         self.state.auth_required = True
         self.turn_on()
+        self.assertTrue(self.enter("/autoafk 20m")[0].startswith("autoafk: AFK turns on"))
         state = cli._UIState(ready=True, icron=self.icron)  # no /afk: a headless state
-        _enter(state, "/afk")
-        self.assertTrue(_notices(state)[0].startswith("Unsupported command. Use /retry"))
+        for text in ("/afk", "/autoafk"):
+            _enter(state, text)
+            self.assertTrue(_notices(state)[0].startswith("Unsupported command. Use /retry"))
 
     def test_cron_lists_its_job_and_cancels_it_and_main_can_t(self):
-        job_id = self.turn_on()
+        job_id = self.turn_on("/afk Lunch.")
         (listing,) = self.enter("/cron")
         self.assertTrue(listing.startswith(
             f"cron: 1 pending job (now 12:00:00):\n  {job_id} (yours, /afk) 12:00:01, in 1s, "
@@ -150,22 +195,19 @@ class CommandTests(_AfkCase):
 
 class ReminderTests(_AfkCase):
     def test_the_first_reminder_fires_at_once_and_the_next_after_the_turn_that_took_it(self):
-        job_id = self.turn_on()
-        self.clock.now += 1
-        self.icron._poke()
-        self.assertTrue(_until(lambda: self.icron.undelivered() == 1))
+        job_id = self.turn_on("/afk Back at 13:00.")
+        self.remind()
         self.icron.begin_turn()
         wakeup = self.icron.take_wakes()
         self.assertEqual(wakeup.text(), "\n".join([
             f"{WAKE_HEADER} at {_iso(NOW + 1)}.", "",
             f"Job {job_id} (the user's, from /afk; due {_iso(NOW + 1)}, every 1800 s):",
-            _reminder(NOW)]))
+            _reminder(NOW, "Back at 13:00.")]))
         # The turn runs past the next slot, which merges into the run that it took.
         self.clock.now += 1800
         self.icron._poke()
         self.assertFalse(_until(lambda: self.icron.undelivered(), timeout=0.2))
-        self.icron.handoff(Yield(context=1, job_id=None, job_text="task", kind="ended",
-                                 resumable=True, revision=0, final_text="Carrying on."))
+        self.end_turn()
         self.assertTrue(_until(lambda: self.job(job_id).state == "scheduled"))
         self.assertEqual(self.job(job_id).due, NOW + 3601)
         self.clock.now += 1800
@@ -174,21 +216,19 @@ class ReminderTests(_AfkCase):
         self.assertTrue(self.afk.sync())
 
 
-class MessageTests(_AfkCase):
-    def test_a_typed_message_for_main_ends_afk(self):
+class EndTests(_AfkCase):
+    def test_a_message_for_main_ends_afk(self):
         for text in ("I'm back.", "/steer I'm back.", "/task Next, the docs."):
             with self.subTest(text=text):
                 self.turn_on()
                 self.clock.now += 60
-                notices = self.enter(text)
-                self.assertIn("afk: off after 1m: you wrote to main "
-                              "([afk] auto_disable_on_message).", notices)
+                self.assertIn("afk: off after 1m: you wrote to main.", self.enter(text))
                 self.assertIsNone(self.afk.job_id)
 
-    def test_keys_commands_and_wake_ups_leave_it_on(self):
+    def test_commands_keys_and_wake_ups_leave_it_on(self):
         job_id = self.turn_on()
         self.state.editor = self.state.editor.edit("<bracketed-paste>", "half a thought")
-        for text in ("/cron", "/crontab", "/afk", "/cron in 1m ping"):
+        for text in ("/cron", "/crontab", "/autoafk", "/autoafk 20m", "/cron in 1m ping"):
             self.enter(text)
         # Wake-ups, AFK's own reminder and a /cron message among them, reach main
         # without the user's typing: they leave AFK on.
@@ -204,87 +244,283 @@ class MessageTests(_AfkCase):
         self.assertEqual(self.afk.job_id, job_id)
         self.assertFalse(any(notice.startswith("afk: off") for notice in _notices(self.state)))
 
+    def test_ending_afk_stops_its_job_wherever_its_reminder_is(self):
+        def stopped(job_id):
+            self.assertEqual(self.job(job_id).state, "cancelled")
+            self.assertNotIn(job_id, [job.job_id for job in self.icron.status().jobs])
+            self.clock.now += 7200  # hours on, nothing fires
+            self.icron._poke()
+            self.assertFalse(_until(lambda: self.icron.undelivered(), timeout=0.2))
 
-class KeepOnMessageTests(_AfkCase):
-    defaults = AfkDefaults(auto_disable_on_message=False)
-
-    def test_without_auto_disable_a_message_says_once_that_it_is_still_on(self):
+        # Due, not yet delivered: the reminder is withdrawn, and the queued
+        # marker delivers nothing.
         job_id = self.turn_on()
-        self.assertIn("afk: still on; /afk off ends it.", self.enter("I'm back."))
-        self.assertNotIn("afk: still on; /afk off ends it.", self.enter("Still here."))
-        self.assertEqual(self.afk.job_id, job_id)
-        self.enter("/afk off")
-        self.turn_on()  # a new absence says it again
-        self.assertIn("afk: still on; /afk off ends it.", self.enter("Back again."))
-
-
-class DisableAtTests(_AfkCase):
-    defaults = AfkDefaults(auto_disable_at="12:30", auto_enable_seconds=600)
-
-    def test_afk_ends_at_the_time_and_doesn_t_come_back_without_a_key_press(self):
+        self.remind()
+        cli._queue_wake(self.state)
+        self.enter("I'm back.")
+        self.assertEqual(self.icron.undelivered(), 0)
+        self.assertIsNone(self.icron.take_wakes())
+        stopped(job_id)
+        # Taken by the running turn: the job ends at once, though its run
+        # lasts until the turn ends.
         job_id = self.turn_on()
-        tail = ", and so will 12:30 ([afk] auto_disable_at)"
-        self.assertEqual(self.enter("/afk"), [
-            f"afk: on since 12:00:00 (job {job_id}); next reminder at 12:00:01. /afk off ends "
-            f"it{tail}."])
-        self.clock.now = NOW + 1799
-        self.assertEqual(self.tick(), [])
-        self.clock.now = NOW + 1800
-        self.assertEqual(self.tick(), ["afk: off at 12:30 ([afk] auto_disable_at), after 30m."])
+        self.remind()
+        self.icron.begin_turn()
+        self.icron.take_wakes()
+        self.assertEqual(self.job(job_id).state, "running")
+        self.enter("/steer I'm back.")
+        stopped(job_id)
+        self.end_turn()
+        stopped(job_id)
+        # Between reminders.
+        job_id = self.turn_on()
+        self.remind()
+        self.icron.begin_turn()
+        self.icron.take_wakes()
+        self.end_turn()
+        self.assertTrue(_until(lambda: self.job(job_id).state == "scheduled"))
+        self.enter("Back.")
+        stopped(job_id)
+
+
+class DisableTests(_AfkCase):
+    defaults = AfkDefaults(auto_disable="12:30", auto_enable="10m")
+
+    def test_afk_ends_at_the_time_and_the_duration_waits_for_a_message(self):
+        job_id = self.turn_on()
+        self.assertEqual(self.job(job_id).state, "scheduled")
+        self.assertEqual(self.at(12, 29), [])
+        self.assertEqual(self.at(12, 30), ["afk: off at 12:30 ([afk] auto_disable), after 30m."])
         self.assertEqual(self.job(job_id).state, "cancelled")
-        self.assertEqual(self.tick(3600), [])  # away for long, but no key since: it stays off
-        self.afk.key()
+        self.assertEqual(self.tick(3600), [])  # away for long, but no message since: off
+        self.enter("/cron")  # a command isn't a message
+        self.assertEqual(self.tick(3600), [])
+        self.enter("Still there?")
         self.assertEqual(self.tick(599), [])
-        self.assertTrue(self.tick(1)[0].startswith("afk: on after 10m without input"))
+        self.assertTrue(self.tick(1)[0].startswith(
+            "afk: on after 10m without a message ([afk] auto_enable); "))
 
-    def test_a_time_that_has_passed_today_is_tomorrow_s(self):
-        afk = Afk(self.icron, AfkDefaults(auto_disable_at="9:00"), self.state.notice)
+    def test_the_notice_says_when_it_ends_and_a_passed_time_is_tomorrow_s(self):
+        self.assertEqual(self.enter("/afk")[0], _on(self.afk.job_id, ", and so will 12:30 "
+                                                                     "([afk] auto_disable)"))
+        afk = Afk(self.icron, AfkDefaults(auto_disable="9:00"), self.state.notice)
         afk.enable()
-        (notice,) = _notices(self.state)
-        self.assertEqual(notice, _on(afk.job_id, ", and so will 09:00 tomorrow "
-                                                 "([afk] auto_disable_at)"))
+        self.assertEqual(_notices(self.state), [_on(afk.job_id, ", and so will 09:00 tomorrow "
+                                                                "([afk] auto_disable)")])
         self.assertEqual(afk.until, datetime(2027, 1, 16, 9, 0).timestamp())
 
+    def test_a_duration_ends_afk_once_it_has_been_on_that_long(self):
+        self.state.afk = self.afk = Afk(self.icron, AfkDefaults(auto_disable="8h"),
+                                        self.state.notice)
+        self.assertEqual(self.afk.startup_notices(), [
+            "afk: AFK turns off once it has been on 8h ([afk] auto_disable), or at your next "
+            "message."])
+        self.clock.now += 3600
+        self.assertEqual(self.enter("/afk")[0], _on(self.afk.job_id, ", and so will 21:00 "
+                                                                     "([afk] auto_disable)"))
+        self.assertEqual(self.tick(8 * 3600 - 1), [])
+        self.assertEqual(self.tick(1), ["afk: off at 21:00 ([afk] auto_disable), after 8h."])
 
-class AutoEnableTests(_AfkCase):
-    defaults = AfkDefaults(auto_enable_seconds=600)
+    def test_a_date_and_time_ends_afk_once_and_is_spent(self):
+        self.state.afk = self.afk = Afk(self.icron, AfkDefaults(auto_disable="2027-01-16 9:00"),
+                                        self.state.notice)
+        tail = ", and so will 09:00 tomorrow ([afk] auto_disable)"
+        self.assertEqual(self.enter("/afk")[0], _on(self.afk.job_id, tail))
+        self.assertEqual(self.at(9, 0, day=16), [
+            "afk: off at 09:00 ([afk] auto_disable), after 21h."])
+        self.assertIsNone(self.afk.disable_when)
+        self.assertEqual(self.enter("/afk")[0], _on(self.afk.job_id))  # no end now
+        # Spent also while AFK is off.
+        afk = Afk(self.icron, AfkDefaults(auto_disable="2027-01-16 10:00"), self.state.notice)
+        self.clock.now = datetime(2027, 1, 16, 10, 0).timestamp()
+        afk.tick(may_enable=True)
+        self.assertIsNone(afk.disable_when)
 
-    def test_it_turns_on_after_the_idle_time_once_per_absence(self):
-        self.assertEqual(self.afk.startup_notice(), "afk: turns on after 10m without a key "
-                                                    "press ([afk] auto_enable_seconds).")
+    def test_main_waiting_for_the_next_reminder_is_released_and_the_notice_says_so(self):
+        job_id = self.turn_on()
+        self.remind()
+        self.icron.begin_turn()
+        self.icron.take_wakes()
+        self.end_turn(job_id, "yielded")  # main yields until AFK's next reminder
+        self.assertTrue(_until(lambda: self.icron.main.state == "suspended"))
+        self.assertEqual(self.at(12, 30), [
+            "afk: off at 12:30 ([afk] auto_disable), after 30m; main now waits for your "
+            "message."])
+        self.assertNotEqual(self.icron.main.state, "suspended")
+        self.clock.now += 7200
+        self.icron._poke()
+        self.assertFalse(_until(lambda: self.icron.undelivered(), timeout=0.2))
+
+
+class AutoafkCommandTests(_AfkCase):
+    def test_it_shows_sets_replaces_and_removes_the_trigger(self):
+        self.assertEqual(self.enter("/autoafk"), [
+            "autoafk: off; AFK turns on only with /afk. It turns off at your next message. "
+            + AUTOAFK_USAGE])
+        self.assertEqual(self.enter("/autoafk 20m"), [
+            "autoafk: AFK turns on after 20m without a message from you, once per absence. "
+            "/autoafk off removes this."])
+        self.assertEqual(self.enter("/autoafk"), [
+            "autoafk: AFK turns on after 20m without a message from you, once per absence "
+            "(/autoafk). It turns off at your next message. /autoafk <when> replaces the "
+            "trigger, and /autoafk off removes it."])
+        self.assertEqual(self.enter("/autoafk 18:00"), [
+            "autoafk: AFK turns on at 18:00 each day, next today. /autoafk off removes this."])
+        self.assertEqual(self.enter("/autoafk 9:00"), [
+            "autoafk: AFK turns on at 09:00 each day, next tomorrow. /autoafk off removes "
+            "this."])
+        self.assertEqual(self.enter("/autoafk 2027-01-16T18:00"), [
+            "autoafk: AFK turns on once, at 2027-01-16 18:00 (in 1d 6h). /autoafk off removes "
+            "this."])
+        self.assertEqual(self.afk.enable_when, AfkWhen("once", moment=datetime(2027, 1, 16, 18)))
+        self.assertEqual(self.enter("/autoafk off"), [
+            "autoafk: off; it was once, at 2027-01-16 18:00."])
+        self.assertEqual(self.enter("/autoafk off"), [
+            "autoafk: already off; AFK turns on only with /afk."])
+        self.assertEqual(self.state.editor.text, "")
+
+    def test_a_bad_or_passed_time_keeps_the_draft(self):
+        for text in ("/autoafk soon", "/autoafk 30s", "/autoafk 24:00", "/autoafk 8d",
+                     "/autoafk 2027-02-30 10:00", "/autoafk off now"):
+            with self.subTest(text=text):
+                self.assertEqual(self.enter(text), [f"{AUTOAFK_USAGE} Draft preserved."])
+                self.assertEqual(self.state.editor.text, text)
+        self.assertEqual(self.enter("/autoafk 2027-01-15 11:00"), [
+            "autoafk: 2027-01-15 11:00 has passed. Draft preserved."])
+        self.assertIsNone(self.afk.enable_when)
+
+    def test_auto_disable_s_time_is_refused(self):
+        self.state.afk = self.afk = Afk(self.icron, AfkDefaults(auto_disable="08:30"),
+                                        self.state.notice)
+        self.assertEqual(self.enter("/autoafk 8:30"), [
+            "autoafk: 08:30 is [afk] auto_disable's time too, so AFK would end and start "
+            "again there. Draft preserved."])
+        self.assertEqual(self.enter("/autoafk"), [
+            "autoafk: off; AFK turns on only with /afk. It turns off at your next message, or "
+            "at 08:30 each day ([afk] auto_disable). " + AUTOAFK_USAGE])
+
+
+class DurationTests(_AfkCase):
+    defaults = AfkDefaults(auto_enable="10m")
+
+    def test_it_turns_on_after_the_duration_without_a_message_once_per_absence(self):
+        self.assertEqual(self.afk.startup_notices(), [
+            "afk: AFK turns on after 10m without a message from you ([afk] auto_enable); "
+            "/autoafk shows or changes this."])
         self.assertEqual(self.tick(599), [])
         self.assertEqual(self.tick(1, may_enable=False), [])  # not while it may not
         (notice,) = self.tick(1)
         job_id = self.afk.job_id
-        self.assertEqual(notice, (
-            "afk: on after 10m 1s without input ([afk] auto_enable_seconds); main hears now, "
-            f"then every 30m, that you're away (job {job_id}). /afk off ends it."))
-        # Since the last key press, on icron's clock.
-        self.assertEqual(self.job(job_id).message, _reminder(NOW - 601))
+        self.assertEqual(notice, _on(job_id, head="afk: on after 10m 1s without a message "
+                                                  "([afk] auto_enable)"))
+        self.assertEqual(self.job(job_id).message, _reminder(NOW))  # since the CLI's start
+        # Ended another way, AFK doesn't come back in the same absence.
         self.icron.cancel(job_id, by="user")
         self.assertEqual(self.tick(), [f"afk: off; its job {job_id} was cancelled."])
-        self.assertEqual(self.tick(3600), [])  # the same absence: not again
-        self.enter("/afk off")  # a key press, so a new absence counts from here
-        self.assertEqual(self.tick(599), [])
-        self.assertTrue(self.tick(1)[0].startswith("afk: on after 10m without input"))
-        # Turning it off yourself is coming back: when you leave again, it may fire.
-        self.assertEqual(self.enter("/afk off"), ["afk: off after 10m."])  # since you left
-        self.assertEqual(self.tick(599), [])
-        self.assertTrue(self.tick(1)[0].startswith("afk: on after 10m without input"))
-        # Keys while it's on don't start a new absence: the end at a job's
-        # cancel by code leaves it off, however long you stay away.
-        self.enter("/cron")
-        self.icron.cancel(self.afk.job_id, by="user")
-        self.tick()
         self.assertEqual(self.tick(3600), [])
+        self.enter("/cron")  # nor after a command: only a message is coming back
+        self.assertEqual(self.tick(3600), [])
+        message_at = self.clock.now
+        self.enter("Here.")
+        self.assertEqual(self.tick(599), [])
+        self.assertTrue(self.tick(1)[0].startswith("afk: on after 10m without a message "))
+        self.assertEqual(self.job(self.afk.job_id).message, _reminder(message_at))
+        # Your message ends it, and the duration counts from it again.
+        self.assertEqual(self.enter("Back."), ["afk: off after 10m: you wrote to main."])
+        self.assertEqual(self.tick(599), [])
+        self.assertTrue(self.tick(1)[0].startswith("afk: on after 10m without a message "))
+
+    def test_autoafk_s_duration_counts_from_the_command(self):
+        self.enter("/autoafk off")
+        self.assertEqual(self.tick(3600), [])
+        self.enter("/autoafk 20m")
+        self.assertEqual(self.tick(1199), [])
+        (notice,) = self.tick(1)
+        self.assertEqual(notice, _on(self.afk.job_id, head="afk: on after 20m without a "
+                                                           "message (/autoafk)"))
+        self.assertEqual(self.job(self.afk.job_id).message, _reminder(NOW))  # no message since
 
     def test_a_failure_to_turn_on_says_why_once(self):
         for _ in range(16):
             self.icron.schedule("x", after=600, by="user", via="/cron")
         self.assertEqual(self.tick(600), [
-            "afk: not turned on: icron.schedule(): the user has 16 pending jobs already; "
-            "cancel one first."])
+            "afk: not turned on after 10m without a message ([afk] auto_enable): "
+            "icron.schedule(): the user has 16 pending jobs already; cancel one first."])
         self.assertEqual(self.tick(600), [])
+
+
+class DailyTests(_AfkCase):
+    defaults = AfkDefaults(auto_enable="12:30", auto_disable="13:00")
+
+    def test_afk_turns_on_at_the_time_each_day(self):
+        self.assertEqual(self.afk.startup_notices(), [
+            "afk: AFK turns on at 12:30 each day ([afk] auto_enable), and off at 13:00 each day "
+            "([afk] auto_disable) or at your next message; /autoafk shows or changes when it "
+            "turns on."])
+        self.assertEqual(self.at(12, 29), [])
+        (notice,) = self.at(12, 30)
+        job_id = self.afk.job_id
+        self.assertEqual(notice, _on(job_id, ", and so will 13:00 ([afk] auto_disable)",
+                                     head="afk: on at 12:30 ([afk] auto_enable)"))
+        self.assertEqual(self.job(job_id).message, _reminder(NOW))  # since the last message
+        # The absence it reports runs from since, the last message.
+        self.assertEqual(self.at(13, 0), ["afk: off at 13:00 ([afk] auto_disable), after 1h."])
+        self.assertEqual(self.at(12, 29, day=16), [])
+        self.assertTrue(self.at(12, 30, day=16)[0].startswith("afk: on at 12:30 "))
+
+    def test_a_message_ends_afk_and_the_trigger_stays(self):
+        self.at(12, 30)
+        self.assertEqual(self.enter("Back."), ["afk: off after 30m: you wrote to main."])
+        self.assertEqual(self.at(12, 31), [])
+        self.assertTrue(self.at(12, 30, day=16)[0].startswith("afk: on at 12:30 "))
+
+    def test_on_already_at_the_time_it_waits_for_the_next_day(self):
+        self.turn_on()
+        self.assertEqual(self.at(12, 30), [])
+        self.assertEqual(self.enter("Back."), ["afk: off after 30m: you wrote to main."])
+        self.assertEqual(self.at(12, 40), [])  # today's time passed while it was on
+        self.assertTrue(self.at(12, 30, day=16)[0].startswith("afk: on at 12:30 "))
+
+    def test_a_start_after_the_time_waits_and_a_time_that_may_not_fire_waits(self):
+        self.state.afk = self.afk = Afk(self.icron, AfkDefaults(auto_enable="9:00"),
+                                        self.state.notice)
+        self.assertEqual(self.tick(), [])  # it's noon: today's 09:00 has passed
+        self.assertEqual(self.at(9, 0, day=16, may_enable=False), [])  # a reboot pending, say
+        self.assertTrue(self.tick(60)[0].startswith("afk: on at 09:00 ([afk] auto_enable); "))
+
+    def test_a_failure_to_turn_on_says_why_and_waits_for_the_next_day(self):
+        for _ in range(16):
+            self.icron.schedule("x", after=600, by="user", via="/cron")
+        self.assertEqual(self.at(12, 30), [
+            "afk: not turned on at 12:30 ([afk] auto_enable): icron.schedule(): the user "
+            "has 16 pending jobs already; cancel one first."])
+        self.assertEqual(self.tick(), [])
+
+
+class OnceTests(_AfkCase):
+    def test_a_date_and_time_turns_afk_on_once_and_removes_itself(self):
+        self.enter("/autoafk 2027-01-15 12:30")
+        self.assertEqual(self.at(12, 29), [])
+        (on, off) = self.at(12, 30)
+        self.assertEqual(on, _on(self.afk.job_id, head="afk: on at 12:30 (/autoafk)"))
+        self.assertEqual(off, "autoafk: off, since 2027-01-15 12:30 has passed.")
+        self.assertIsNone(self.afk.enable_when)
+        self.enter("Back.")
+        self.assertEqual(self.at(12, 30, day=16), [])
+
+    def test_on_already_at_the_time_it_only_removes_itself(self):
+        self.enter("/autoafk 2027-01-15 12:30")
+        job_id = self.turn_on()
+        self.assertEqual(self.at(12, 30), ["autoafk: off, since 2027-01-15 12:30 has passed."])
+        self.assertEqual(self.afk.job_id, job_id)
+
+    def test_the_catalog_s_passed_dates_and_times_are_ignored_at_launch(self):
+        afk = Afk(self.icron, AfkDefaults(auto_enable="2027-01-15 11:00",
+                                          auto_disable="2027-01-15 11:30"), self.state.notice)
+        self.assertEqual(afk.startup_notices(), [
+            "afk: [afk] auto_enable's 2027-01-15 11:00 has passed, so it's ignored.",
+            "afk: [afk] auto_disable's 2027-01-15 11:30 has passed, so it's ignored."])
+        self.assertEqual((afk.enable_when, afk.disable_when), (None, None))
 
 
 class CatalogTests(unittest.TestCase):
@@ -294,35 +530,58 @@ class CatalogTests(unittest.TestCase):
             return parse_model_catalog(text)
 
     def test_the_afk_section(self):
-        catalog = self.parse("[afk]\ninterval_seconds = 900\nauto_enable_seconds = 1200\n"
-                             "auto_disable_on_message = false\nauto_disable_at = 8:30\n"
-                             'message = "Keep to the plan."\n')
-        self.assertEqual(catalog.afk, AfkDefaults(900, 1200, False, "08:30", "Keep to the plan."))
-        self.assertIn('[afk] interval_seconds = 900, auto_enable_seconds = 1200, '
-                      'auto_disable_on_message = false, auto_disable_at = 08:30, '
+        catalog = self.parse("[afk]\ninterval_seconds = 900\nauto_enable = 20m\n"
+                             'auto_disable = 8:30\nmessage = "Keep to the plan."\n')
+        self.assertEqual(catalog.afk, AfkDefaults(
+            interval_seconds=900, auto_enable=AfkWhen("after", seconds=1200),
+            auto_disable=AfkWhen("daily", clock="08:30"), message="Keep to the plan."))
+        self.assertIn('[afk] interval_seconds = 900, auto_enable = 20m, auto_disable = 08:30, '
                       'message = "Keep to the plan."', render_model_catalog(catalog))
         self.assertEqual(self.parse("[afk]\nmessage = Keep going.\n").afk.message, "Keep going.")
-        unset = self.parse("[afk]\ninterval_seconds = null\n")
+        once = self.parse('[afk]\nauto_enable = "2027-01-16T18:00"\nauto_disable = 2d\n').afk
+        self.assertEqual((str(once.auto_enable), str(once.auto_disable)),
+                         ("2027-01-16 18:00", "2d"))
+        unset = self.parse("[afk]\ninterval_seconds = null\nauto_enable = null\n")
         self.assertEqual(unset.afk, AfkDefaults())
         self.assertNotIn("[afk]", render_model_catalog(unset))
-        self.assertEqual(self.parse("[afk]\nauto_disable_on_message = yes\n").afk,
-                         AfkDefaults(auto_disable_on_message=True))
+        self.assertEqual(AfkDefaults(auto_enable="18:00"),
+                         AfkDefaults(auto_enable=parse_afk_when("18:00")))
+
+    def test_when_reads_its_three_forms_and_writes_them_back(self):
+        for text, kind, canonical in (
+                ("20m", "after", "20m"), ("90m", "after", "90m"), ("3600s", "after", "1h"),
+                ("7d", "after", "7d"), ("8:30", "daily", "08:30"), ("23:59", "daily", "23:59"),
+                ("2027-01-16 18:00", "once", "2027-01-16 18:00"),
+                (" 2027-01-16T9:05 ", "once", "2027-01-16 09:05")):
+            with self.subTest(text=text):
+                when = parse_afk_when(text)
+                self.assertEqual((when.kind, str(when)), (kind, canonical))
+                self.assertEqual(parse_afk_when(str(when)), when)
 
     def test_bad_keys_and_values_name_what_was_expected(self):
+        when = (r"expected a duration such as 20m \(s, m, h, or d; 1m to 7d\), a local time of "
+                r"day such as 18:00, or a local date and time such as 2026-11-07 18:00, or null")
         cases = [
-            ("when = 1", r"\[afk\] key 'when' in user; expected interval_seconds, "
-                         r"auto_enable_seconds, auto_disable_on_message, auto_disable_at, "
-                         r"or message"),
+            ("when = 1", r"\[afk\] key 'when' in user; expected interval_seconds, auto_enable, "
+                         r"auto_disable, or message"),
+            ("auto_enable_seconds = 600", r"\[afk\] key 'auto_enable_seconds' in user"),
+            ("auto_disable_on_message = true", r"\[afk\] key 'auto_disable_on_message' in user"),
             ("interval_seconds = 29", r"interval_seconds in user: expected a whole number of "
                                       r"seconds from 30 to 604800, or null"),
             ("interval_seconds = 1800.0", r"interval_seconds in user: expected a whole number"),
-            ("auto_enable_seconds = 59", r"auto_enable_seconds in user: expected a whole number "
-                                         r"of seconds from 60 to 604800, or null"),
-            ("auto_disable_on_message = maybe", r"auto_disable_on_message in user: expected "
-                                                r"true, false, or null"),
-            ("auto_disable_at = 24:00", r"auto_disable_at in user: expected a local time of "
-                                        r"day as HH:MM, such as 08:30, or null"),
-            ("auto_disable_at = 8.30", r"auto_disable_at in user: expected a local time"),
+            ("auto_enable = 59s", r"auto_enable in user: expected a duration from 1m to 7d, or "
+                                  r"null"),
+            ("auto_enable = 8d", r"auto_enable in user: expected a duration from 1m to 7d"),
+            ("auto_disable = 24:00", r"auto_disable in user: " + when),
+            ("auto_disable = 8.30", r"auto_disable in user: " + when),
+            ("auto_enable = 18", r"auto_enable in user: " + when),
+            ("auto_enable = 2027-02-30 10:00", r"auto_enable in user: expected a real date and "
+                                               r"time, such as 2026-11-07 18:00, or null"),
+            ('auto_enable = "unclosed', r"auto_enable in user: " + when),
+            ("auto_enable = 8:30\nauto_disable = 08:30",
+             r"\[afk\] in user: auto_enable and auto_disable must differ"),
+            ("auto_enable = 2027-01-16 18:00\nauto_disable = 2027-01-16T18:00",
+             r"\[afk\] in user: auto_enable and auto_disable must differ"),
             ('message = "unclosed', r"message in user: expected nonblank text of at most 4000 "
                                     r"characters, or null"),
             ("message = " + "x" * 4001, r"message in user: expected nonblank text"),
@@ -330,8 +589,13 @@ class CatalogTests(unittest.TestCase):
         for line, error in cases:
             with self.subTest(line=line), self.assertRaisesRegex(ValueError, error):
                 self.parse(f"[afk]\n{line}\n")
+        self.parse("[afk]\nauto_enable = 20m\nauto_disable = 20m\n")  # durations may match
         with self.assertRaisesRegex(ValueError, "afk interval_seconds: expected"):
             AfkDefaults(interval_seconds=True)
+        with self.assertRaisesRegex(ValueError, "afk auto_enable and auto_disable must differ"):
+            AfkDefaults(auto_enable="9:00", auto_disable="09:00")
+        with self.assertRaisesRegex(ValueError, "after sets only seconds"):
+            AfkWhen("after", seconds=60, clock="09:00")
 
 
 class RebootTests(_AfkCase):
@@ -344,44 +608,106 @@ class RebootTests(_AfkCase):
                 "icron has 1 pending job, and jobs live only in this process (/cron lists "
                 "them)"))
 
-    def test_the_reboot_state_carries_afk_over(self):
+    def test_the_reboot_state_carries_afk_its_note_and_the_trigger_over(self):
         self.state.reboot = cli._Reboot("/reboot")
         self.afk.freeze()
-        self.assertNotIn("afk", cli._reboot_state(self.state, InteractionConfig()))
-        self.turn_on()
+        carried = cli._reboot_state(self.state, InteractionConfig())
+        self.assertNotIn("afk", carried)
+        self.assertEqual(carried["autoafk"], {"seen": NOW, "count_from": NOW, "armed": True})
+        self.clock.now += 60
+        self.enter("/autoafk 18:00")
+        self.turn_on("/afk Back at 13:00.")
         self.afk.freeze()
         carried = cli._reboot_state(self.state, InteractionConfig())
-        self.assertEqual(carried["afk"], {"since": NOW, "due": NOW + 1, "until": None})
+        self.assertEqual(carried["afk"], {"since": NOW + 60, "due": NOW + 61, "until": None})
+        self.assertEqual(carried["afk_note"], "Back at 13:00.")
+        self.assertEqual(carried["autoafk"], {"seen": NOW, "count_from": NOW, "armed": True,
+                                              "when": "18:00"})
         rebooted = cli._parse_reboot_state(json.loads(json.dumps(carried)))
-        self.assertEqual(rebooted.afk, carried["afk"])
-        self.assertIsNone(cli._parse_reboot_state({**carried, "afk": None}).afk)
+        self.assertEqual((rebooted.afk, rebooted.afk_note, rebooted.autoafk, rebooted.afk_warning),
+                         (carried["afk"], carried["afk_note"], carried["autoafk"], None))
+
+    def test_a_state_from_the_first_version_still_reads(self):
+        state = {"version": 1, "cause": "coldstart", "continues": False, "config": {},
+                 "draft": {"text": "", "cursor": 0}, "queue": [], "exit_code": 0,
+                 "afk": {"since": NOW, "due": NOW + 1801, "until": None}}
+        rebooted = cli._parse_reboot_state(state)
+        self.assertEqual((rebooted.cause, rebooted.afk, rebooted.afk_note, rebooted.autoafk),
+                         ("coldstart", state["afk"], None, None))
+
+    def test_what_can_t_be_read_drops_only_afk(self):
+        self.state.reboot = cli._Reboot("/reboot")
+        self.turn_on("/afk Lunch.")
+        self.afk.freeze()
+        carried = json.loads(json.dumps(cli._reboot_state(self.state, InteractionConfig())))
         for bad in ([], {"since": NOW}, {"since": "noon", "due": None, "until": None},
                     {"since": True, "due": None, "until": None},
-                    {"since": NOW, "due": float("nan"), "until": None}):
-            with self.subTest(afk=bad), self.assertRaises(ValueError):
-                cli._parse_reboot_state({**carried, "afk": bad})
+                    {"since": NOW, "due": float("nan"), "until": None},
+                    {"since": NOW, "due": None, "until": None, "note": "x"}):
+            with self.subTest(afk=bad):
+                rebooted = cli._parse_reboot_state({**carried, "afk": bad})
+                self.assertEqual((rebooted.cause, rebooted.afk, rebooted.afk_note,
+                                  rebooted.afk_warning), ("/reboot", None, None, "AFK"))
+                self.assertEqual(rebooted.autoafk, carried["autoafk"])
+        rebooted = cli._parse_reboot_state({**carried, "afk_note": " "})
+        self.assertEqual((rebooted.afk, rebooted.afk_warning), (None, "AFK"))
+        for bad in ({"seen": NOW}, {"seen": NOW, "count_from": NOW, "armed": 1},
+                    {"seen": NOW, "count_from": NOW, "armed": True, "when": "soon"},
+                    {"seen": NOW, "count_from": NOW, "armed": True, "other": 1}):
+            with self.subTest(autoafk=bad):
+                rebooted = cli._parse_reboot_state({**carried, "autoafk": bad})
+                self.assertEqual((rebooted.afk, rebooted.autoafk, rebooted.afk_warning),
+                                 (carried["afk"], None, "the /autoafk trigger's state"))
+        rebooted = cli._parse_reboot_state({**carried, "afk": 1, "autoafk": 1})
+        self.assertEqual(rebooted.afk_warning, "AFK or the /autoafk trigger's state")
+        state = cli._UIState()
+        cli._carry_over(state, InteractionConfig(), rebooted)
+        self.assertEqual(_notices(state), [
+            "Note: the reboot didn't carry over AFK or the /autoafk trigger's state, which "
+            "couldn't be read."])
 
-    def test_the_restarted_cli_goes_on_from_the_next_reminder(self):
-        self.afk.restore({"since": NOW - 3600, "due": NOW + 600, "until": None})
+    def test_the_restarted_cli_goes_on_from_the_next_reminder_with_the_note(self):
+        self.afk.restore({"since": NOW - 3600, "due": NOW + 600, "until": None}, "Lunch.")
         job_id = self.afk.job_id
         self.assertEqual(_notices(self.state), [
             f"afk: still on since 11:00:00, carried over the reboot (job {job_id}); next "
-            "reminder at 12:10:00. /afk off ends it."])
+            "reminder at 12:10:00. Your next message ends it."])
         job = self.job(job_id)
-        self.assertEqual((job.due, job.every, job.message), (NOW + 600, 1800.0,
-                                                             _reminder(NOW - 3600)))
-        self.assertEqual(self.tick(3600), [])  # restored, it doesn't turn on again by itself
+        self.assertEqual((job.due, job.every, job.message),
+                         (NOW + 600, 1800.0, _reminder(NOW - 3600, "Lunch.")))
+        self.assertEqual(self.tick(3600), [])
 
     def test_a_reminder_due_meanwhile_fires_at_once_and_a_passed_end_ends_it(self):
         self.afk.restore({"since": NOW - 3600, "due": NOW - 5, "until": NOW + 60})
         self.assertEqual(self.job(self.afk.job_id).due, NOW + 1)
         self.assertTrue(_notices(self.state)[0].endswith(
-            "/afk off ends it, and so will 12:01 ([afk] auto_disable_at)."))
+            "Your next message ends it, and so will 12:01 ([afk] auto_disable)."))
         afk = Afk(self.icron, AfkDefaults(), self.state.notice)
         afk.restore({"since": NOW - 3600, "due": NOW + 600, "until": NOW - 60})
         self.assertEqual(_notices(self.state), [
-            "afk: off at 11:59 ([afk] auto_disable_at), during the reboot."])
+            "afk: off at 11:59 ([afk] auto_disable), during the reboot."])
         self.assertIsNone(afk.job_id)
+
+    def test_the_trigger_s_state_carries_over(self):
+        # The count goes on from before the reboot: 10m without a message.
+        self.afk.restore_autoafk({"seen": NOW - 600, "count_from": NOW - 600, "armed": True,
+                                  "when": "10m"})
+        (notice,) = self.tick()
+        self.assertEqual(notice, _on(self.afk.job_id, head="afk: on after 10m without a "
+                                                           "message (/autoafk)"))
+        self.assertEqual(self.job(self.afk.job_id).message, _reminder(NOW - 600))
+        # Disarmed, it waits for a message; /autoafk off overrides the catalog's.
+        afk = Afk(self.icron, AfkDefaults(auto_enable="10m"), self.state.notice)
+        afk.restore_autoafk({"seen": NOW - 3600, "count_from": NOW - 3600, "armed": False})
+        afk.tick(may_enable=True)
+        self.assertIsNone(afk.job_id)
+        afk.restore_autoafk({"seen": NOW, "count_from": NOW, "armed": True, "when": None})
+        self.assertIsNone(afk.enable_when)
+        afk.restore_autoafk({"seen": NOW, "count_from": NOW, "armed": True,
+                             "when": "2027-01-15 11:00"})
+        self.assertIsNone(afk.enable_when)
+        self.assertEqual(_notices(self.state)[-1],
+                         "autoafk: off, since 2027-01-15 11:00 passed during the reboot.")
 
     def test_a_cli_without_afk_says_it_didn_t_carry_it_over(self):
         state = cli._UIState()
@@ -398,8 +724,8 @@ class SessionTests(_IcronControllerCase):
                        _answer("Welcome back."))
         statuses = []
         terminal = _Terminal(_once([
-            (_idle_with("[assistant] Hello."), lambda t: t.submit("/afk")),
-            (lambda t, s: _has(t, "afk: on;"), lambda t: self.advance(1)),
+            (_idle_with("[assistant] Hello."), lambda t: t.submit("/afk Back soon.")),
+            (lambda t, s: _has(t, "afk: on, with your note;"), lambda t: self.advance(1)),
             (_idle_with("[assistant] Carrying on."),
              lambda t: (statuses.append(t.frames[-1][1]), t.submit("I'm back."))),
             (_idle_with("[assistant] Welcome back."),
@@ -409,30 +735,27 @@ class SessionTests(_IcronControllerCase):
         reminder = _users(model.calls[1][0].items)[-1]
         self.assertTrue(reminder.startswith(f"{WAKE_HEADER} at {_iso(NOW + 1)}."), reminder)
         self.assertTrue(reminder.endswith(f"(the user's, from /afk; due {_iso(NOW + 1)}, every "
-                                          f"1800 s):\n{_reminder(NOW)}"), reminder)
+                                          f"1800 s):\n{_reminder(NOW, 'Back soon.')}"), reminder)
         self.assertEqual(_users(model.calls[2][0].items)[-1], "I'm back.")
         self.assertEqual(statuses[0], "idle | afk since 12:00 | icron: 1 job, next 12:30:01")
         self.assertEqual(statuses[1], "idle")
         texts = [item.text for item in terminal.items]
-        self.assertIn("[cli] afk: off after 1s: you wrote to main "
-                      "([afk] auto_disable_on_message).", texts)
+        self.assertIn("[cli] afk: off after 1s: you wrote to main.", texts)
 
-    async def test_the_idle_time_turns_afk_on_in_a_session(self):
-        idle = _Clock(100.0)
+    async def test_a_duration_turns_afk_on_in_a_session(self):
         model = _Model(self.path, _answer("Hello."), _answer("Carrying on."))
         terminal = _Terminal(_once([
-            (_idle_with("[assistant] Hello."), lambda t: setattr(idle, "now", idle.now + 600)),
+            (_idle_with("[assistant] Hello."), lambda t: self.advance(600)),
             (lambda t, s: _has(t, "afk: on after"), lambda t: self.advance(1)),
             (_idle_with("[assistant] Carrying on."), _exit)]))
         args = cli._build_parser().parse_args(["--prompt", "hello"])
         environment = cli.Environment((self.icron.tool(),))
-        with mock.patch.object(_cli_afk, "_idle_clock", idle):
-            await cli._run(model, environment, terminal, args, self.path, icron=self.icron,
-                           afk=AfkDefaults(auto_enable_seconds=600))
+        await cli._run(model, environment, terminal, args, self.path, icron=self.icron,
+                       afk=AfkDefaults(auto_enable="10m"))
         texts = [item.text for item in terminal.items]
-        self.assertIn("[cli] afk: turns on after 10m without a key press "
-                      "([afk] auto_enable_seconds).", texts)
-        self.assertTrue(_users(model.calls[1][0].items)[-1].endswith(_reminder(NOW - 600)))
+        self.assertIn("[cli] afk: AFK turns on after 10m without a message from you "
+                      "([afk] auto_enable); /autoafk shows or changes this.", texts)
+        self.assertTrue(_users(model.calls[1][0].items)[-1].endswith(_reminder(NOW)))
 
 
 class RebootSessionTests(_RebootCase):
@@ -448,14 +771,16 @@ class RebootSessionTests(_RebootCase):
 
         model = _Model(self.path)
         terminal = _Terminal(_steps(
-            (lambda t, s: s == "idle", lambda t: t.submit("/afk")),
-            (lambda t, s: _has(t, "afk: on;"), remind)))
+            (lambda t, s: s == "idle", lambda t: t.submit("/afk Lunch.")),
+            (lambda t, s: _has(t, "afk: on, with your note;"), remind)))
         with _rebootable(), patch_compaction(cli, "create_default_compactor",
                                              return_value=_Compactor()):
             carried = await self._rebooted(model, terminal, [
                 "--resume", "--auto-compaction-context-tokens", "100",
                 "--compaction-coldstart-reboot"], icron=icron)
         self.assertEqual(carried["afk"], {"since": NOW, "due": NOW + 1801, "until": None})
+        self.assertEqual(carried["afk_note"], "Lunch.")
+        self.assertEqual(set(carried["autoafk"]), {"seen", "count_from", "armed"})
         texts = [item.text for item in terminal.items]
         self.assertFalse(any("not rebooting" in text or "icron: dropped" in text
                              for text in texts), texts)

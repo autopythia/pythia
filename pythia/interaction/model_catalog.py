@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
+from datetime import datetime
 import json
 import math
 import re
@@ -605,37 +606,117 @@ class DisplayDefaults:
             raise ValueError(f"assistant must be {' or '.join(DISPLAY_ASSISTANT_VALUES)}")
 
 
-# What a catalog's [afk] section sets: the CLI's /afk, which tells main that
-# the user is away (_cli_afk). Seconds are whole: reminders repeat within
-# icron's bounds for repeats (IcronLimits.min_every and max_delay).
-AFK_FIELDS = ("interval_seconds", "auto_enable_seconds", "auto_disable_on_message",
-              "auto_disable_at", "message")
+# What a catalog's [afk] section sets: the CLI's /afk and /autoafk, which tell
+# main that the user is away (_cli_afk). Reminders repeat within icron's
+# bounds for repeats (IcronLimits.min_every and max_delay).
+AFK_FIELDS = ("interval_seconds", "auto_enable", "auto_disable", "message")
 DEFAULT_AFK_INTERVAL_SECONDS = 1800
-DEFAULT_AFK_AUTO_DISABLE_ON_MESSAGE = True
 MIN_AFK_INTERVAL_SECONDS = 30
-MIN_AFK_AUTO_ENABLE_SECONDS = 60
+MIN_AFK_AFTER_SECONDS = 60  # a duration of auto_enable's, auto_disable's, or /autoafk's
 MAX_AFK_SECONDS = 7 * 24 * 3600
 AFK_MESSAGE_MAX_CHARS = 4000
-# auto_disable_at: a local time of day, as /cron at takes it.
-AFK_CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
+# auto_enable and auto_disable at one time each day, or at one date and time,
+# would end AFK and start it again there.
+AFK_SAME_TIMES = "auto_enable and auto_disable must differ"
+AFK_WHEN_EXPECTED = ("a duration such as 20m (s, m, h, or d; 1m to 7d), a local time of day "
+                     "such as 18:00, or a local date and time such as 2026-11-07 18:00")
+_AFK_DURATION = re.compile(r"([1-9][0-9]*)([smhd])")
+_AFK_CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
+_AFK_DATE_TIME = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([01]?[0-9]|2[0-3]):([0-5][0-9])")
+_AFK_UNITS = (("d", 86400), ("h", 3600), ("m", 60), ("s", 1))
+
+
+@dataclass(frozen=True)
+class AfkWhen:
+    """When an automatic AFK rule fires, as [afk] auto_enable and auto_disable,
+    and /autoafk, give it (parse_afk_when). ``kind`` is "after": a duration,
+    ``seconds``; "daily": a local time of day, ``clock`` (HH:MM); or "once": a
+    local date and time, ``moment`` (naive, to the minute). str() writes it as
+    parse_afk_when reads it: 20m, 08:30, or 2026-11-07 18:00.
+    """
+
+    kind: str
+    seconds: Optional[int] = None
+    clock: Optional[str] = None
+    moment: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        fields = {"after": "seconds", "daily": "clock", "once": "moment"}
+        if self.kind not in fields:
+            raise ValueError("kind must be after, daily, or once")
+        if any(getattr(self, name) is not None for name in fields.values()
+               if name != fields[self.kind]):
+            raise ValueError(f"{self.kind} sets only {fields[self.kind]}")
+        if self.kind == "after":
+            if (isinstance(self.seconds, bool) or not isinstance(self.seconds, int)
+                    or not MIN_AFK_AFTER_SECONDS <= self.seconds <= MAX_AFK_SECONDS):
+                raise ValueError("expected a duration from 1m to 7d")
+        elif self.kind == "daily":
+            match = (_AFK_CLOCK_TIME.fullmatch(self.clock) if isinstance(self.clock, str)
+                     else None)
+            if match is None:
+                raise ValueError("expected a local time of day as HH:MM, such as 08:30")
+            object.__setattr__(self, "clock", f"{int(match.group(1)):02d}:{match.group(2)}")
+        elif (not isinstance(self.moment, datetime) or self.moment.tzinfo is not None
+              or self.moment.second or self.moment.microsecond):
+            raise ValueError("expected a local date and time, to the minute")
+
+    def __str__(self) -> str:
+        if self.kind == "after":
+            unit, size = next((unit, size) for unit, size in _AFK_UNITS
+                              if self.seconds % size == 0)
+            return f"{self.seconds // size}{unit}"
+        if self.kind == "daily":
+            return self.clock
+        return self.moment.strftime("%Y-%m-%d %H:%M")
+
+
+def parse_afk_when(text) -> AfkWhen:
+    """[afk] auto_enable's or auto_disable's value, or /autoafk's argument: a
+    duration (20m), a local time of day (18:00), or a local date and time
+    (2026-11-07 18:00, or 2026-11-07T18:00). Raises ValueError, which says
+    what was expected."""
+    if not isinstance(text, str):
+        raise ValueError(f"expected {AFK_WHEN_EXPECTED}")
+    text = " ".join(text.split())
+    match = _AFK_DURATION.fullmatch(text)
+    if match is not None:
+        size = dict(_AFK_UNITS)[match.group(2)]
+        return AfkWhen("after", seconds=int(match.group(1)) * size)
+    if _AFK_CLOCK_TIME.fullmatch(text) is not None:
+        return AfkWhen("daily", clock=text)
+    match = _AFK_DATE_TIME.fullmatch(text)
+    if match is not None:
+        try:
+            moment = datetime(*(int(part) for part in match.groups()))
+        except ValueError:
+            raise ValueError("expected a real date and time, such as 2026-11-07 18:00") from None
+        return AfkWhen("once", moment=moment)
+    raise ValueError(f"expected {AFK_WHEN_EXPECTED}")
+
+
+def afk_same_times(enable: Optional[AfkWhen], disable: Optional[AfkWhen]) -> bool:
+    """Whether AFK would turn on and off at one time: the same time each day,
+    or the same date and time."""
+    return enable is not None and enable.kind != "after" and enable == disable
 
 
 def afk_field_error(name: str, value) -> Optional[str]:
     """Why ``value`` can't be [afk]'s ``name``, as "expected …"; None if it can."""
     if value is None:
         return None
-    if name in ("interval_seconds", "auto_enable_seconds"):
-        low = (MIN_AFK_INTERVAL_SECONDS if name == "interval_seconds"
-               else MIN_AFK_AUTO_ENABLE_SECONDS)
+    if name == "interval_seconds":
         if isinstance(value, bool) or not isinstance(value, int) or not (
-                low <= value <= MAX_AFK_SECONDS):
-            return f"expected a whole number of seconds from {low} to {MAX_AFK_SECONDS}, or null"
-    elif name == "auto_disable_on_message":
-        if not isinstance(value, bool):
-            return "expected true, false, or null"
-    elif name == "auto_disable_at":
-        if not isinstance(value, str) or AFK_CLOCK_TIME.fullmatch(value) is None:
-            return "expected a local time of day as HH:MM, such as 08:30, or null"
+                MIN_AFK_INTERVAL_SECONDS <= value <= MAX_AFK_SECONDS):
+            return (f"expected a whole number of seconds from {MIN_AFK_INTERVAL_SECONDS} to "
+                    f"{MAX_AFK_SECONDS}, or null")
+    elif name in ("auto_enable", "auto_disable"):
+        if not isinstance(value, AfkWhen):
+            try:
+                parse_afk_when(value)
+            except ValueError as exc:
+                return f"{exc}, or null"
     elif name == "message":
         if not isinstance(value, str) or not value.strip() or len(value) > AFK_MESSAGE_MAX_CHARS:
             return f"expected nonblank text of at most {AFK_MESSAGE_MAX_CHARS} characters, or null"
@@ -648,19 +729,21 @@ def afk_field_error(name: str, value) -> Optional[str]:
 class AfkDefaults:
     """A catalog's [afk] settings; ``None`` leaves the built-in default.
 
-    ``interval_seconds``: between /afk's reminders (default 1800).
-    ``auto_enable_seconds``: turns AFK on after that long without a key press
-    (default: never). ``auto_disable_on_message``: turns it off when the user
-    sends main a message (default: true). ``auto_disable_at``: turns it off at
-    the next such local time, HH:MM (default: never). ``message``: what a
-    reminder says after its first sentence (default: the CLI's guidance).
-    They concern the CLI only, never a model or its requests.
+    ``interval_seconds``: between AFK's reminders (default 1800).
+    ``auto_enable``: when AFK turns on by itself, the trigger that /autoafk
+    replaces: after a duration without a message from the user, at a time
+    each day, or once (default: never). ``auto_disable``: when it turns off by
+    itself, besides the user's next message: once it has been on for a
+    duration, at a time each day, or once (default: never). Both are AfkWhen,
+    or text that parse_afk_when reads, and can't fire at the same time
+    (afk_same_times). ``message``: what a reminder says after its first
+    sentence (default: the CLI's guidance). They concern the CLI only, never
+    a model or its requests.
     """
 
     interval_seconds: Optional[int] = None
-    auto_enable_seconds: Optional[int] = None
-    auto_disable_on_message: Optional[bool] = None
-    auto_disable_at: Optional[str] = None
+    auto_enable: Optional[AfkWhen] = None
+    auto_disable: Optional[AfkWhen] = None
     message: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -668,9 +751,12 @@ class AfkDefaults:
             error = afk_field_error(name, getattr(self, name))
             if error is not None:
                 raise ValueError(f"afk {name}: {error}")
-        if self.auto_disable_at is not None:  # 8:30 is 08:30
-            hour, minute = self.auto_disable_at.split(":")
-            object.__setattr__(self, "auto_disable_at", f"{int(hour):02d}:{minute}")
+        for name in ("auto_enable", "auto_disable"):
+            value = getattr(self, name)
+            if isinstance(value, str):  # as the catalog writes it
+                object.__setattr__(self, name, parse_afk_when(value))
+        if afk_same_times(self.auto_enable, self.auto_disable):
+            raise ValueError(f"afk {AFK_SAME_TIMES}")
 
 
 @dataclass(frozen=True)

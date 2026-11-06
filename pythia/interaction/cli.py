@@ -101,6 +101,7 @@ from .media_tool import Outbox
 from .loop import Interrupt
 from .loop import Icron
 from .loop import IcronError
+from .loop import IcronLimits
 from .loop import auto_retry_policy
 from .loop import Preemption
 from .loop import Steer
@@ -131,6 +132,7 @@ from .model_config import resolve_save_path
 from .model_config import supports_account_services
 from .model_config import frontend_catalog, prepare_namespace, render_model_catalog
 from .model_catalog import AfkDefaults
+from .model_catalog import parse_afk_when
 from ._model_binding_debug import save_debug_model_bindings
 from .registry import Registry
 from .registry import RegistryError
@@ -353,7 +355,12 @@ class _Rebooted:
     queue: tuple = ()  # queued input, as _Submission, UserToolIntent, and _ContinueIntent
     exit_code: int = 0
     warning: Optional[str] = None
-    afk: Optional[dict] = None  # AFK, if it was on (Afk.freeze): since, due, and until
+    # AFK, as Afk.freeze carried it: if it was on, since, due, and until, and
+    # its note; the trigger's state; and what couldn't be read, if anything.
+    afk: Optional[dict] = None
+    afk_note: Optional[str] = None
+    autoafk: Optional[dict] = None
+    afk_warning: Optional[str] = None
 
 
 def _plain_message(text: str) -> Message:
@@ -735,8 +742,6 @@ class _UIState:
         return ""
 
     def handle_key(self, key: str, data: str) -> None:
-        if self.afk is not None:
-            self.afk.key()  # any key press: the user is here
         if key in {"c-c", "c-d"}:
             # The first press is /exit!; a later one also cancels (/exit!!).
             self.escalate_stop()
@@ -905,7 +910,7 @@ class _UIState:
             elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
                 self._icron_command(head, text)
                 return
-            elif self.afk is not None and head == "/afk":
+            elif self.afk is not None and head in ("/afk", "/autoafk"):
                 self._icron_command(head, text)
                 return
             elif head.startswith("/"):
@@ -1187,19 +1192,23 @@ class _UIState:
                          name="interaction-quota", daemon=True).start()
 
     def _icron_command(self, head: str, text: str) -> None:
-        """/cron, /crontab, /py, and /afk (--enable-icron): handled at once,
-        on the event loop, even while main is busy or needs authentication;
-        never queued or saved. A command that fails leaves its draft in the
-        editor. AFK follows its job, which /cron cancel may have ended."""
-        command = (self.afk.command if head == "/afk" else
-                   {"/cron": self._cron, "/crontab": self._crontab, "/py": self._py}[head])
+        """/cron, /crontab, /py, /afk, and /autoafk (--enable-icron): handled
+        at once, on the event loop, even while main is busy or needs
+        authentication; never queued or saved. A command that fails leaves its
+        draft in the editor. AFK follows its job, which /cron cancel may have
+        ended."""
+        afk = head in ("/afk", "/autoafk")
+        if afk:
+            command = self.afk.command if head == "/afk" else self.afk.autoafk_command
+        else:
+            command = {"/cron": self._cron, "/crontab": self._crontab, "/py": self._py}[head]
         try:
             used = command(text)
         except IcronError as exc:
             self.notice(f"{exc} Draft preserved.")
             return
-        if self.afk is not None and head != "/afk":
-            self.afk.sync(by_user=True)
+        if self.afk is not None and not afk:
+            self.afk.sync()
         if used:
             self.editor = Editor()
 
@@ -2203,8 +2212,9 @@ def _waits_for_icron(state: _UIState) -> bool:
 
 
 def _afk_may_enable(state: _UIState) -> bool:
-    """Whether [afk] auto_enable_seconds may turn AFK on now: once the session
-    is ready, and not while it stops or reboots, or after a failed checkpoint."""
+    """Whether AFK's trigger ([afk] auto_enable, /autoafk) may turn it on now:
+    once the session is ready, and not while it stops or reboots, or after a
+    failed checkpoint."""
     return (state.ready and state.stop_level is None and state.reboot is None
             and not state.persistence_failed)
 
@@ -2458,8 +2468,9 @@ def _reboot_state(state: _UIState, config: InteractionConfig, queued=None) -> di
         "queue": queue, "exit_code": state.exit_code,
     }
     if state.afk is not None and state.afk.carried is not None:
-        # Optional, so the version stays: older code ignores it, and drops AFK.
-        carried["afk"] = dict(state.afk.carried)
+        # Optional keys, so the version stays: older code ignores "afk_note"
+        # and "autoafk", and reads "afk" in the shape it always had.
+        carried.update(json.loads(json.dumps(state.afk.carried)))
     return carried
 
 
@@ -2491,12 +2502,24 @@ def _parse_reboot_state(data) -> _Rebooted:
             queued.append(_ContinueIntent())
         else:
             raise ValueError("invalid queued input")
-    afk = data.get("afk")
-    if afk is not None and not _is_afk_state(afk):
-        raise ValueError("invalid AFK state")
     return _Rebooted(cause=cause, continues=data["continues"] is True, config=config,
                      draft=Editor(text, min(max(cursor, 0), len(text))),
-                     queue=tuple(queued), exit_code=exit_code, afk=afk)
+                     queue=tuple(queued), exit_code=exit_code, **_parse_afk_state(data))
+
+
+def _parse_afk_state(data: dict) -> dict:
+    """_Rebooted's AFK fields from the reboot state's "afk", "afk_note", and
+    "autoafk". What can't be read goes, with afk_warning, never the rest of
+    the state, which a coldstart reboot's pointer needs."""
+    afk, note, autoafk, lost = data.get("afk"), data.get("afk_note"), data.get("autoafk"), []
+    if afk is not None and not (_is_afk_state(afk) and (note is None or _is_afk_note(note))):
+        afk = None
+        lost.append("AFK")
+    if autoafk is not None and not _is_autoafk_state(autoafk):
+        autoafk = None
+        lost.append("the /autoafk trigger's state")
+    return {"afk": afk, "afk_note": None if afk is None else note, "autoafk": autoafk,
+            "afk_warning": " or ".join(lost) or None}
 
 
 def _is_int(value) -> bool:
@@ -2505,12 +2528,35 @@ def _is_int(value) -> bool:
 
 def _is_afk_state(afk) -> bool:
     """Afk.freeze's state: since, a time; due and until, times or null."""
-    def time_value(value):
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value))
     return (isinstance(afk, dict) and set(afk) == {"since", "due", "until"}
-            and time_value(afk["since"])
-            and all(afk[key] is None or time_value(afk[key]) for key in ("due", "until")))
+            and _is_time(afk["since"])
+            and all(afk[key] is None or _is_time(afk[key]) for key in ("due", "until")))
+
+
+def _is_afk_note(note) -> bool:
+    """Afk.freeze's note: text a reminder can carry."""
+    return isinstance(note, str) and bool(note.strip()) and len(note) <= IcronLimits().max_chars
+
+
+def _is_autoafk_state(state) -> bool:
+    """Afk.freeze's trigger state: seen and count_from, times; armed, a
+    boolean; and when, if /autoafk set it, null or a trigger as
+    parse_afk_when reads it."""
+    if not (isinstance(state, dict) and {"seen", "count_from", "armed"} <= set(state)
+            <= {"seen", "count_from", "armed", "when"}
+            and _is_time(state["seen"]) and _is_time(state["count_from"])
+            and isinstance(state["armed"], bool)):
+        return False
+    when = state.get("when")
+    try:
+        return when is None or (isinstance(when, str) and parse_afk_when(when) is not None)
+    except ValueError:
+        return False
+
+
+def _is_time(value) -> bool:
+    """Seconds since the epoch, as JSON carries them."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _take_reboot_state() -> _Rebooted:
@@ -3140,7 +3186,7 @@ async def _drive_interaction(model, environment, state, args, save, config):
             carried = None
             if state.afk is not None:
                 state.afk.freeze()
-                if (state.afk.carried is not None and state.reboot is not None
+                if (state.afk.carries_job and state.reboot is not None
                         and state.reboot.ready and state.stop_level is None):
                     carried = state.afk.job_id
             # Before the model and the environment: no code runs after this.
@@ -3718,11 +3764,10 @@ def _startup_notices(state, args, save, config=None):
                      "unsandboxed, with the icron tool"
                      + ("." if state.headless else
                         "; /cron schedules your messages, /crontab shows them, /py runs your "
-                        "code, and /afk tells main you're away.")
+                        "code, /afk tells main you're away, and /autoafk does it by itself.")
                      + " Jobs and Python state live only in this process.")
     if state.afk is not None:
-        notice = state.afk.startup_notice()
-        if notice is not None:
+        for notice in state.afk.startup_notices():
             state.notice(notice)
     if state.ui is not None:
         state.notice(state.ui.notice())
@@ -3750,13 +3795,18 @@ def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted)
     if state.pending:
         state.changed.set()
     state.exit_code = rebooted.exit_code
+    if rebooted.afk_warning is not None:
+        state.notice(f"Note: the reboot didn't carry over {rebooted.afk_warning}, which "
+                     "couldn't be read.")
+    if rebooted.autoafk is not None and state.afk is not None:
+        state.afk.restore_autoafk(rebooted.autoafk)
     if rebooted.afk is not None:
         if state.afk is None:
             state.notice("Note: the reboot didn't carry over AFK: this CLI has no /afk "
                          "(icron is off, or it runs headless).")
         else:
             try:
-                state.afk.restore(rebooted.afk)
+                state.afk.restore(rebooted.afk, rebooted.afk_note)
             except IcronError as exc:
                 state.notice(f"Note: the reboot didn't carry over AFK: {exc}")
 

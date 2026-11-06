@@ -10,7 +10,7 @@ import warnings
 
 from ._config_file import read_config_bytes
 from .compaction import compaction_methods
-from .model_catalog import AFK_FIELDS, AfkDefaults, afk_field_error
+from .model_catalog import AFK_FIELDS, AFK_SAME_TIMES, AfkDefaults, afk_field_error
 from .model_catalog import BUILTIN_MODEL_CATALOG
 from .model_catalog import COMPACTION_DEFAULT_FIELDS, CompactionDefaults
 from .model_catalog import SECTION_PROVIDER_ERROR, compaction_route_error
@@ -487,7 +487,8 @@ def _display_section(section, base, source):
 
 
 def _afk_section(section, base, source):
-    """[afk]: the CLI's /afk settings, over ``base``'s; null unsets one."""
+    """[afk]: the CLI's /afk and /autoafk settings, over ``base``'s; null
+    unsets one."""
     values = dict(vars(base))
     for key, raw in section.items():
         if key not in AFK_FIELDS:
@@ -498,7 +499,10 @@ def _afk_section(section, base, source):
         if error is not None:
             raise ValueError(f"Invalid model catalog [afk] {key} in {source}: {error}")
         values[key] = value
-    return AfkDefaults(**values)
+    try:
+        return AfkDefaults(**values)
+    except ValueError:  # each value is valid, so the pair isn't
+        raise ValueError(f"Invalid model catalog [afk] in {source}: {AFK_SAME_TIMES}") from None
 
 
 def _afk_value(name, raw):
@@ -506,12 +510,10 @@ def _afk_value(name, raw):
     something else, which afk_field_error then refuses."""
     if raw == "null":
         return None
-    if name in ("interval_seconds", "auto_enable_seconds"):
+    if name == "interval_seconds":
         return int(raw) if _INTEGER.fullmatch(raw) else raw
-    if name == "auto_disable_on_message":
-        return configparser.ConfigParser.BOOLEAN_STATES.get(raw.lower(), raw)
     try:
-        return _text(raw)  # auto_disable_at and message: raw, or a JSON string
+        return _text(raw)  # auto_enable, auto_disable, and message: raw, or a JSON string
     except ValueError:
         return _NOT_TEXT
 

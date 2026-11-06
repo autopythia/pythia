@@ -22,7 +22,6 @@ from .messages import MessagesPromptCaching
 from .messages import MessagesServerCompaction
 from .messages import MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS
 from .model import Model
-from .model_catalog import AFK_CLOCK_TIME
 from .model_catalog import AFK_FIELDS
 from .model_catalog import list_model_specs
 from .model_catalog import binding_from_namespace
@@ -317,11 +316,9 @@ def render_model_catalog(catalog):
 
 
 def _afk_setting(value) -> str:
-    """An [afk] value as the catalog writes it: true or false, a number, an
-    HH:MM time, or a message as a JSON string."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, str) and AFK_CLOCK_TIME.fullmatch(value) is None:
+    """An [afk] value as the catalog writes it: a number, a time as
+    parse_afk_when reads it (AfkWhen), or a message as a JSON string."""
+    if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     return str(value)
 
