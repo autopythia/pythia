@@ -88,6 +88,7 @@ from .model import _transient_retries
 from .model import _with_sample_param_defaults
 from .model_catalog import ModelSpec
 from .model_catalog import ModelBinding
+from .model_catalog import RESPONSES_DEFAULT_FIELDS
 from .timeouts import DEFAULT_REQUEST_TIMEOUT_SECONDS
 from .timeouts import validate_timeout_seconds
 from .usage import TokenUsage
@@ -1978,7 +1979,9 @@ class _ResponsesModelBase:
             payload["prompt_cache_key"] = provider_state.session_id
         _apply_sample_params(payload, _with_sample_param_defaults(self.binding, sample_params),
                              generic=not codex)
-        _apply_extra_sample_params(payload, self.binding, sample_params)
+        # An extra sample param replaces the typed reasoning or text whole.
+        _apply_extra_sample_params(payload, self.binding, sample_params,
+                                   defaults=RESPONSES_DEFAULT_FIELDS)
         return payload, provider_state
 
     def _build_headers(

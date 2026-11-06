@@ -492,13 +492,17 @@ def _apply_extra_sample_params(
     payload: dict,
     binding: "ModelBinding",
     sample_params: Optional[SampleParams],
+    *,
+    defaults: Tuple[str, ...] = (),
 ) -> None:
     """Add one request's body extensions without replacing adapter fields.
 
     A per-call ``extra`` map replaces the binding's map, even when empty;
     ``None`` params or ``extra`` use the binding's map. Per-call maps are
     validated without an API, so the names reserved by this binding's API are
-    checked here before sending.
+    checked here before sending. ``defaults`` are the fields that the adapter
+    filled from the entry's typed defaults, which an extension of the same
+    name replaces whole (Responses' RESPONSES_DEFAULT_FIELDS).
     """
     override = None if sample_params is None else sample_params.extra
     if override is None:
@@ -510,7 +514,7 @@ def _apply_extra_sample_params(
             raise ModelConfigurationError(str(exc)) from None
     extensions = thaw_json(params)
     # Typed and structural fields stay authoritative; never override silently.
-    replaced = sorted(extensions.keys() & payload.keys())
+    replaced = sorted(extensions.keys() & payload.keys() - set(defaults))
     if replaced:
         raise ModelConfigurationError(
             "extra_sample_params cannot replace adapter-owned request fields: "

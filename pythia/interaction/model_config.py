@@ -605,15 +605,17 @@ def build_model(
 
 
 def _request_settings(spec) -> list:
-    """A preset's typed Responses defaults, then its extra sample params as sent."""
+    """A preset's typed Responses defaults, but those that an extra sample
+    param of their field's name replaces (RESPONSES_DEFAULT_FIELDS), then its
+    extra sample params, as sent."""
     settings = []
     if spec.responses is not None:
-        for label, value in (
-            ("effort", spec.responses.reasoning_effort),
-            ("summary", spec.responses.reasoning_summary),
-            ("verbosity", spec.responses.text_verbosity),
+        for label, value, field_name in (
+            ("effort", spec.responses.reasoning_effort, "reasoning"),
+            ("summary", spec.responses.reasoning_summary, "reasoning"),
+            ("verbosity", spec.responses.text_verbosity, "text"),
         ):
-            if value is not None:
+            if value is not None and field_name not in spec.extra_sample_params:
                 settings.append(f"{label}={value}")
     # Compact JSON, i.e. the value syntax of extra_sample_params.<key> and --extra-sample-params.
     for key, value in spec.extra_sample_params.items():

@@ -52,14 +52,18 @@ _RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
     "bearer_token", "access_token", "account_id", "request_timeout_seconds",
     "timeouts_request_seconds",
 ))
-# Each API's adapter also owns these top-level fields, including those holding
-# typed catalog defaults (Responses reasoning/text).
+# Each API's adapter also owns these top-level fields.
 # They are protected even when a particular request omits them.
 _RESPONSES_RESERVED_EXTRA_SAMPLE_PARAMS = frozenset((
-    "tool_choice", "store", "include", "reasoning", "text", "prompt_cache_key",
+    "tool_choice", "store", "include", "prompt_cache_key",
     # Stateless requests carry the complete context; no server-side history.
     "previous_response_id", "conversation",
 ))
+# The Responses fields that the adapter fills from an entry's typed
+# responses.* defaults: reasoning (effort and summary) and text (verbosity). An
+# extra sample param of the same name replaces the field whole, and must be an
+# object, as the API takes it.
+RESPONSES_DEFAULT_FIELDS = ("reasoning", "text")
 # Chat Completions reads one choice (n) and owns the tools, which the legacy
 # functions and function_call would compete with. It sends no tool_choice: with
 # tools, servers default to "auto", and pi's summary requests carry no tools,
@@ -277,6 +281,12 @@ def freeze_extra_sample_params(value, profile=None):
     if any(not isinstance(key, str) or not key or key.lower() in reserved
            or any(ord(char) < 32 for char in key) for key in value):
         raise ValueError("Invalid or adapter-owned extra sample param.")
+    if profile is not None and _normalize_profile(profile) in ("responses", "codex"):
+        shapeless = [key for key in RESPONSES_DEFAULT_FIELDS
+                     if key in value and not isinstance(value[key], MappingABC)]
+        if shapeless:
+            raise ValueError(f"Extra sample param {shapeless[0]} must be an object, as the "
+                             "Responses API takes it.")
     frozen = _freeze_json(value)
     try:
         encoded = json.dumps(thaw_json(frozen), ensure_ascii=False, allow_nan=False).encode("utf-8")

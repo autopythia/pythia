@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import configparser
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +22,7 @@ from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import ERROR_RETRIES_UNBOUNDED, ERROR_RETRY_FIELDS
 from .model_catalog import LEGACY_RATE_LIMIT_RETRIES
+from .model_catalog import RESPONSES_DEFAULT_FIELDS
 from .model_catalog import ResponsesDefaults
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS, SampleParamDefaults
 from .model_catalog import TOKEN_TRACE_LEVELS
@@ -283,6 +285,14 @@ def _entry(section, values, base):
         if traced:
             raise _FieldError(f"{_EXTRA_SAMPLE_PARAMS_PREFIX}{traced[0]}: {traced[0]} belongs "
                               "to endpoint.token_trace; set that instead")
+    if endpoint.get("api") in ("responses", "codex"):
+        # They replace what responses.* would send (RESPONSES_DEFAULT_FIELDS),
+        # as objects; name the key rather than failing the entry as a whole.
+        shapeless = [name for name in RESPONSES_DEFAULT_FIELDS
+                     if name in params and not isinstance(params[name], Mapping)]
+        if shapeless:
+            raise _FieldError(f"{_EXTRA_SAMPLE_PARAMS_PREFIX}{shapeless[0]} must be an object, "
+                              "as the Responses API takes it")
     endpoint = EndpointSpec(**endpoint)
     if endpoint.auth == "codex-login" and not endpoint.is_official_codex:
         raise ValueError("Catalog Codex login requires the official Codex endpoint.")

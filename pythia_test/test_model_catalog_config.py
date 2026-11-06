@@ -297,7 +297,7 @@ limits.auto_compact_context_tokens = null
             LOCAL.replace("endpoint.auth = none", "endpoint.auth = env:BAD-NAME"),
             MESSAGE.replace("60000", "49999"),
             MESSAGE + 'extra_sample_params.system = "replacement instructions"\n',
-            CODEX + 'extra_sample_params.reasoning = {"effort": "low"}\n',
+            CODEX + 'extra_sample_params.reasoning = "low"\n',
             '[model.codex-gpt-6-astra]\noverride = true\nendpoint.api = null\n',
             '[model.missing]\noverride = true\n',
             LOCAL.replace("local-max", "codex-gpt-6-astra").replace("chat-completions", "codex"),
@@ -373,7 +373,9 @@ extra_sample_params.service_tier = "priority"
         self.assertFalse(BUILTIN_MODEL_CATALOG.bind("codex", "codex-gpt-6-astra").extra_sample_params)
 
     def test_extra_sample_params_protect_the_fields_each_api_adapter_owns(self):
-        responses_owned = ("tool_choice", "store", "include", "reasoning", "text",
+        # Not reasoning or text, which replace the typed responses.* defaults
+        # (test_responses_extras_replace_the_typed_reasoning_and_text_whole).
+        responses_owned = ("tool_choice", "store", "include",
                            "prompt_cache_key", "previous_response_id", "conversation")
         owned = {
             "chat-completions": ("n", "tool_choice", "functions", "function_call"),
@@ -751,6 +753,51 @@ class BoundRequestTests(unittest.TestCase):
         # Other preset params are kept.
         self.assertEqual(payload["thinking"], {"type": "adaptive", "display": "summarized"})
 
+    def test_responses_extras_replace_the_typed_reasoning_and_text_whole(self):
+        def payload(binding, params=None):
+            model = CodexResponsesModel(endpoint=StreamingResponsesEndpoint(
+                binding=binding, bearer_token="token"))
+            return model._build_request_payload(context(), (), params)[0]
+
+        variant = BUILTIN_MODEL_CATALOG.bind("codex", "codex-gpt-6-astra-max",
+                                             endpoint_auth="supplied")
+        typed = payload(variant)
+        self.assertEqual((typed["reasoning"], typed["text"]),
+                         ({"effort": "max", "summary": "auto"}, {"verbosity": "low"}))
+        # From a launch overlay or a call, an extra replaces its field whole; the other stays.
+        overlay = payload(variant.with_extra_sample_params({"reasoning": {"effort": "low"}}))
+        self.assertEqual((overlay["reasoning"], overlay["text"]),
+                         ({"effort": "low"}, {"verbosity": "low"}))
+        call = payload(variant, SampleParams(extra={"text": {"verbosity": "high"}}))
+        self.assertEqual((call["reasoning"], call["text"]),
+                         ({"effort": "max", "summary": "auto"}, {"verbosity": "high"}))
+        # In the catalog: over an entry's own typed effort, and on an entry without typed fields.
+        registry = catalog(CODEX + 'extra_sample_params.reasoning = {"summary": "detailed"}\n'
+                           + GENERIC + 'extra_sample_params.reasoning = {"effort": "high"}\n'
+                           'extra_sample_params.text = {"verbosity": "low"}\n')
+        with mock.patch.dict("os.environ", {"CATALOG_TEST_TOKEN": "fake-token"}):
+            code = build_model(args_for(registry, "--model", "code-env"))
+        generic = build_model(args_for(registry, "--model", "generic"))
+        self.assertEqual(code._build_request_payload(context(), (), None)[0]["reasoning"],
+                         {"summary": "detailed"})
+        built = generic._build_request_payload(context(), (), None)[0]
+        self.assertEqual((built["reasoning"], built["text"]),
+                         ({"effort": "high"}, {"verbosity": "low"}))
+        # --list-models shows what goes: the extra, not the typed effort that it replaces.
+        line = next(line for line in render_model_catalog(registry).splitlines()
+                    if "code-env" in line)
+        self.assertIn('reasoning={"summary":"detailed"}', line)
+        self.assertNotIn("effort=high", line)
+        # They are objects, as the API takes them, and the adapter's other fields stay its own.
+        with self.assertRaisesRegex(ValueError, r"'model\.generic' in user: "
+                                    r"extra_sample_params\.reasoning must be an object"):
+            catalog(GENERIC + 'extra_sample_params.reasoning = "high"\n')
+        with self.assertRaisesRegex(ValueError, "text must be an object"):
+            model_catalog.freeze_extra_sample_params({"text": "low"}, "codex")
+        for key in ("include", "store", "tool_choice", "prompt_cache_key"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "adapter-owned"):
+                model_catalog.freeze_extra_sample_params({key: None}, "responses")
+
     def test_user_codex_extra_sample_params_extend_every_request(self):
         registry = catalog(CODEX + 'extra_sample_params.service_tier = "flex"\n')
         args = args_for(registry, "--model", "code-env", "--extra-sample-params", '{"truncation": "auto"}')
@@ -778,8 +825,14 @@ class BoundRequestTests(unittest.TestCase):
         codex = codex_model(responses_endpoint(
             "http://localhost:8000/v1", "literal", "token", api_provider="codex",
         ))
+        # Responses takes reasoning as an extra too (RESPONSES_DEFAULT_FIELDS), as an
+        # object, and still owns its other fields.
+        payload, _ = codex._build_request_payload(context(), (), SampleParams(extra=reasoning))
+        self.assertEqual(payload["reasoning"], {"effort": "low"})
         with self.assertRaisesRegex(ModelConfigurationError, "adapter-owned"):
-            codex._build_request_payload(context(), (), SampleParams(extra=reasoning))
+            codex._build_request_payload(context(), (), SampleParams(extra={"store": True}))
+        with self.assertRaisesRegex(ModelConfigurationError, "reasoning must be an object"):
+            codex._build_request_payload(context(), (), SampleParams(extra={"reasoning": "low"}))
         messages = MessagesModel(MessagesEndpoint(binding=catalog(MESSAGE).bind(name="worker")))
         with self.assertRaisesRegex(ModelConfigurationError, "adapter-owned"):
             messages._build_request_payload(context(), (), SampleParams(
@@ -909,6 +962,10 @@ class BoundRequestTests(unittest.TestCase):
         # an adapter write to the same key would already have raised while building the payload.
         extensions = {"messages": set(messages.binding.extra_sample_params)}
         self.assertEqual(extensions["messages"], {"output_config"})
+        # Responses' reasoning and text hold the typed responses.* defaults, which an extra of
+        # the same name replaces whole (RESPONSES_DEFAULT_FIELDS); the adapter owns the rest.
+        for api in ("codex", "responses"):
+            extensions[api] = set(model_catalog.RESPONSES_DEFAULT_FIELDS)
         for api, payload in written.items():
             for key in payload.keys() - extensions.get(api, set()):
                 with self.subTest(api=api, key=key), self.assertRaises(ValueError):
