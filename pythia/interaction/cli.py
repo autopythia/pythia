@@ -223,6 +223,11 @@ _TOOL_COUNTDOWN_REBOOT_OUTPUT = (
 _TOOL_APPROVAL_AUTO_LAUNCH_ERROR = (
     "--tool-approval-auto-seconds applies only with --require-tool-approval."
 )
+# --icron-timing chose how repeats met a running turn, for a day: now they
+# always reach it at each firing. A restart reruns its command line, so the
+# option is still read, and ignored.
+_ICRON_TIMING_GONE = ("Note: --icron-timing is gone, and ignored: repeating messages reach a "
+                      "running turn at each firing.")
 _TOOL_APPROVAL_UI_COUNTDOWN_LAUNCH_ERROR = (
     "--tool-approval-ui-countdown-seconds applies only with "
     "--enable-experimental-ui-plugin and --require-tool-approval."
@@ -605,13 +610,10 @@ class _UIState:
             max_workers=1, thread_name_prefix="interaction-context"),
         repr=False,
     )
-    # icron (--enable-icron), or None. cron_entries maps the
-    # jobs that /cron made to their entries as typed, for /crontab;
-    # icron_resumes counts the turns that icron started since the user's
-    # last input; icron_auth_noticed is true once the notice that due
-    # wake-ups wait for a model has been shown.
+    # icron (--enable-icron), or None. icron_resumes counts the turns that
+    # icron started since the user's last input; icron_auth_noticed is true
+    # once the notice that due wake-ups wait for a model has been shown.
     icron: Optional[Icron] = field(default=None, repr=False)
-    cron_entries: dict = field(default_factory=dict)
     icron_resumes: int = 0
     icron_auth_noticed: bool = False
     # /afk (_cli_afk), in an interactive CLI with icron; otherwise None.
@@ -929,7 +931,7 @@ class _UIState:
             elif head == "/quota":
                 self._quota_command(text)
                 return
-            elif self.icron is not None and head in ("/cron", "/crontab", "/py"):
+            elif self.icron is not None and head in ("/cron", "/icron", "/crontab", "/py"):
                 self._icron_command(head, text)
                 return
             elif self.afk is not None and head in ("/afk", "/noauto", *RULE_COMMANDS):
@@ -1223,7 +1225,7 @@ class _UIState:
                          name="interaction-quota", daemon=True).start()
 
     def _icron_command(self, head: str, text: str) -> None:
-        """/cron, /crontab, /py, and AFK's commands (--enable-icron): /afk,
+        """/cron (or /icron), /py, /crontab's hint, and AFK's commands (--enable-icron): /afk,
         /autoafk, /noautoafk, /autonoafk, /noautonoafk, /auto alone, and
         /noauto. Handled at once, on the event loop, even while main is busy
         or needs authentication; never queued or saved. A command that fails
@@ -1239,7 +1241,8 @@ class _UIState:
         elif afk:
             command = functools.partial(self.afk.rules_command, head)
         else:
-            command = {"/cron": self._cron, "/crontab": self._crontab, "/py": self._py}[head]
+            command = {"/cron": self._cron, "/icron": self._cron, "/crontab": self._crontab,
+                       "/py": self._py}[head]
         try:
             used = command(text)
         except IcronError as exc:
@@ -1271,14 +1274,19 @@ class _UIState:
             self._submit_text(parts[1], draft=text, auto=True)
 
     def _cron(self, text: str) -> bool:
-        """/cron: schedule the user's message, cancel jobs, or list them."""
+        """/cron, or its alias /icron: schedule the user's message, list the jobs,
+        clear the user's /cron jobs, or cancel jobs (_cron_cancel). Its jobs say
+        /cron either way (via)."""
         icron, words = self.icron, text.split(maxsplit=3)
         if len(words) == 1:
             self.notice(_cron_list(icron))
             return True
         form = words[1]
-        if form == "cancel" and len(words) == 3:
-            return self._cron_cancel(words[2])
+        if form == "clear" and len(words) == 2:
+            return self._cron_clear()
+        level = command_urgency(form, "cancel")
+        if level is not None and len(words) == 3:
+            return self._cron_cancel(words[2], level)
         seconds = at = None
         if form in ("in", "every") and len(words) == 4:
             seconds = _parse_duration(words[2])
@@ -1298,56 +1306,77 @@ class _UIState:
             job = icron.schedule(message, at=at, by="user", via="/cron")
             tomorrow = " tomorrow" if at.date() != datetime.fromtimestamp(now).date() else ""
             text = f"at {_hms(job.due)}{tomorrow} (in {_span(job.due - now)})"
-        self.cron_entries[job.job_id] = f"{form} {when} {message}"
         self.notice(f"cron: job {job.job_id} sends your message {text}.")
         return True
 
-    def _cron_cancel(self, target: str) -> bool:
+    def _cron_cancel(self, target: str, level: Urgency) -> bool:
+        """/cron cancel <job-id>: one of the user's jobs (theirs: /cron's, and
+        AFK's). Main's, and all of them, take cancel! or cancel!!: one ! lets
+        running code finish its run, and !! also stops it (Icron.cancel's
+        finish). A message still waiting is withdrawn, unless it comes from
+        code that one ! lets finish."""
         icron = self.icron
         suspended = icron.main.state == "suspended"
+        finish = level < Urgency.PREEMPT
+        pending = [job for job in icron.jobs(by="user") if job.pending]
         if target == "all":
-            jobs = [job for job in icron.jobs(by="user") if job.pending]
-            for job in jobs:
+            if not level:
+                self.notice(f"{_CRON_CANCEL_ALL_HINT} Draft preserved.")
+                return False
+            cancelled = code = 0  # code: the jobs whose code was running
+            for job in pending:
+                with suppress(IcronError):  # it ended, or was cancelled, meanwhile
+                    icron.cancel(job.job_id, by="user", finish=finish)
+                    cancelled += 1
+                    code += _runs_code(job)
+            text = (f"cron: cancelled {cancelled} job{'s' if cancelled != 1 else ''}"
+                    if cancelled else "cron: no pending jobs to cancel")
+            if code:
+                text += f"; code running in {code} of them {_CANCELLED_CODE[finish]}"
+        else:
+            job = next((job for job in pending if job.job_id == target), None)
+            if job is not None and job.origin != "user" and not level:
+                self.notice(f"cron: job {target} is {_OWNER[job.origin]}: /cron cancel! {target} "
+                            "cancels it and lets its running code finish its run, and /cron "
+                            f"cancel!! {target} stops that code too. Draft preserved.")
+                return False
+            ended = icron.cancel(target, by="user", finish=finish)
+            text = f"cron: cancelled job {ended.job_id} ({_OWNER[ended.origin]})"
+            if job is not None and _runs_code(job):
+                text += f"; its running code {_CANCELLED_CODE[finish]}"
+        if suspended and icron.main.state != "suspended":
+            text += "; main now waits for your message"
+        self.notice(text + ".")
+        return True
+
+    def _cron_clear(self) -> bool:
+        """/cron clear: cancel the user's /cron jobs; AFK's and main's go on."""
+        icron = self.icron
+        suspended, cancelled = icron.main.state == "suspended", 0
+        for job in icron.jobs(by="user"):
+            if job.pending and job.origin == "user" and job.via == "/cron":
                 with suppress(IcronError):  # it ended meanwhile
                     icron.cancel(job.job_id, by="user")
-            text = (f"cron: cancelled {len(jobs)} job{'s' if len(jobs) != 1 else ''}" if jobs
-                    else "cron: no pending jobs to cancel")
-        else:
-            job = icron.cancel(target, by="user")
-            text = f"cron: cancelled job {job.job_id} ({_OWNER[job.origin]})"
+                    cancelled += 1
+        text = (f"cron: cancelled {cancelled} job{'s' if cancelled != 1 else ''} of yours"
+                if cancelled else "cron: no /cron jobs of yours to clear")
         if suspended and icron.main.state != "suspended":
             text += "; main now waits for your message"
         self.notice(text + ".")
         return True
 
     def _crontab(self, text: str) -> bool:
-        """/crontab: the user's /cron jobs as one table; /crontab clear cancels them."""
-        icron, words = self.icron, text.split()
-        pending = {job.job_id for job in icron.jobs(by="user") if job.pending}
-        for job_id in [job_id for job_id in self.cron_entries if job_id not in pending]:
-            del self.cron_entries[job_id]
-        if words == ["/crontab"]:
-            self.notice(_crontab_table(icron, self.cron_entries))
-            return True
-        if words != ["/crontab", "clear"]:
-            self.notice(f"{_CRONTAB_USAGE} Draft preserved.")
-            return False
-        suspended, cancelled = icron.main.state == "suspended", 0
-        for job_id in list(self.cron_entries):
-            with suppress(IcronError):  # it ended meanwhile
-                icron.cancel(job_id, by="user")
-                cancelled += 1
-            del self.cron_entries[job_id]
-        text = (f"crontab: cancelled {cancelled} job{'s' if cancelled != 1 else ''}" if cancelled
-                else "crontab: your table is empty; nothing to cancel")
-        if suspended and icron.main.state != "suspended":
-            text += "; main now waits for your message"
-        self.notice(text + ".")
-        return True
+        """/crontab, which /cron replaced: a hint."""
+        self.notice(f"{_CRONTAB_GONE} Draft preserved.")
+        return False
 
     def _py(self, text: str) -> bool:
         """/py <code>: run the user's code on icron's watcher thread, without
-        waiting; its output, value, and traceback come as notices."""
+        waiting; its output, value, and traceback come as notices. Off unless
+        _PY_ENABLED."""
+        if not _PY_ENABLED:
+            self.notice(f"{_PY_DISABLED} Draft preserved.")
+            return False
         code = _command_body(text, "/py")
         if not code.strip():
             self.notice(f"{_PY_USAGE} Draft preserved.")
@@ -2088,11 +2117,21 @@ async def _write_leading_records(context, state, writer) -> None:
 # icron (--enable-icron): its wake-ups, its commands, and its notices.
 
 _CRON_USAGE = ("Usage: /cron in 10m <text>, /cron at 14:30 <text>, /cron every 1h <text>, "
-               "/cron cancel <job-id>|all, or /cron alone to list jobs (units: s, m, h, d).")
-_CRONTAB_USAGE = ("Usage: /crontab shows your /cron jobs as a table, and /crontab clear "
-                  "cancels them.")
+               "/cron clear (your /cron jobs), /cron cancel <job-id>, or /cron alone to list "
+               "jobs (units: s, m, h, d). Main's jobs, and all, take cancel! (running code "
+               "finishes its run) or cancel!! (it stops). /icron is the same command.")
+_CRON_CANCEL_ALL_HINT = ("cron: cancelling every job takes a bang: /cron cancel! all lets "
+                         "running code finish its run, and /cron cancel!! all stops it too; "
+                         "/cron clear cancels only your /cron jobs.")
+# What a cancel does to running code: one ! lets it finish (finish), !! stops it.
+_CANCELLED_CODE = {True: "finishes its run", False: "stops at its next await"}
+_CRONTAB_GONE = "crontab: /crontab is gone: /cron lists the jobs, and /cron clear cancels yours."
 _PY_USAGE = ("Usage: /py <code> runs Python in this process, on icron's watcher thread, with "
              "icron, main, asyncio, and print.")
+# /py, the user's Python, is off for now: nobody has used it. True turns it
+# back on: the command, and its mentions at startup and in --help.
+_PY_ENABLED = False
+_PY_DISABLED = "py: /py is disabled."
 _DURATION = re.compile(r"([1-9][0-9]*)([smhd])")
 _CLOCK_TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -2172,6 +2211,11 @@ def _job_line(job: IcronJob, now: float) -> str:
     return f"{job.job_id} ({whose}) {_job_timing(job, now)}: {_one_line(what)}"
 
 
+def _runs_code(job: IcronJob) -> bool:
+    """Whether a job's code is running now: a message job's run is no code."""
+    return job.state == "running" and job.kind != "message"
+
+
 def _cron_list(icron: Icron) -> str:
     now = icron.clock()
     jobs = [job for job in icron.jobs(by="user") if job.pending]
@@ -2179,33 +2223,6 @@ def _cron_list(icron: Icron) -> str:
         return "cron: no pending jobs."
     lines = [f"cron: {len(jobs)} pending job{'s' if len(jobs) != 1 else ''} (now {_hms(now)}):"]
     lines += [f"  {_job_line(job, now)}" for job in jobs]
-    return "\n".join(lines)
-
-
-def _crontab_table(icron: Icron, entries: dict) -> str:
-    """The user's /cron jobs as entries, each under a comment with its ID and
-    next firing, and the other pending jobs as comments."""
-    now = icron.clock()
-    pending = [job for job in icron.jobs(by="user") if job.pending]
-    mine = [job for job in pending if job.job_id in entries]
-    others = [job for job in pending if job.job_id not in entries]
-    head = f"crontab (now {_hms(now)}): "
-    if mine:
-        head += (f"{len(mine)} job{'s' if len(mine) != 1 else ''} of yours; /crontab clear "
-                 "cancels them.")
-    else:
-        head += "no jobs of yours; /cron schedules one."
-    lines = [head]
-    for job in mine:
-        if job.state == "scheduled":
-            repeat = "once" if job.every is None else f"every {_span(job.every)}"
-            when = f"next {_hms(job.due)} (in {_span(job.due - now)}), {repeat}"
-        else:
-            when = _job_timing(job, now)
-        lines += [f"# {job.job_id}: {when}", _one_line(entries[job.job_id])]
-    if others:
-        lines.append("# Not in your table (/cron cancel ends them):")
-        lines += [f"#   {_job_line(job, now)}" for job in others]
     return "\n".join(lines)
 
 
@@ -2239,6 +2256,11 @@ def _yield_notice(job: Optional[IcronJob], now: float) -> str:
     if job.due is None or job.state == "running":
         return (f"main yielded to icron; it waits for job {job.job_id} (running code), unless "
                 "you write first.")
+    if job.kind != "message":
+        # Code resumes main with its message (main.resume) or its end, not by firing.
+        return (f"main yielded to icron; it waits for job {job.job_id}'s code, next run at "
+                f"{_hms(job.due)} (in {_span(job.due - now)}), to message it or end, unless you "
+                "write first.")
     return (f"main yielded to icron; job {job.job_id} resumes it at {_hms(job.due)} "
             f"(in {_span(job.due - now)}), unless you write first.")
 
@@ -3867,10 +3889,13 @@ def _startup_notices(state, args, save, config=None):
         state.notice("icron: main can schedule work and run Python in this process, "
                      "unsandboxed, with the icron tool"
                      + ("." if state.headless else
-                        "; /cron schedules your messages, /crontab shows them, /py runs your "
-                        "code, /afk tells main you're away, /autoafk does it by itself, and "
+                        "; /cron (or /icron) schedules your messages and lists jobs, "
+                        + ("/py runs your code, " if _PY_ENABLED else "")
+                        + "/afk tells main you're away, /autoafk does it by itself, and "
                         "/auto hands main a task and goes away.")
                      + " Jobs and Python state live only in this process.")
+    if getattr(args, "icron_timing", None) is not None:
+        state.notice(_ICRON_TIMING_GONE)
     if state.afk is not None:
         for notice in state.afk.startup_notices():
             state.notice(notice)
@@ -4289,16 +4314,22 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="{False,True}",
         help=(
             "run icron, an in-process scheduler. The model gets the icron tool, which "
-            "schedules wake-ups and runs Python in this process, unsandboxed; /cron and "
-            "/crontab schedule and show your messages, and /py runs your code. Jobs and "
-            "Python state live only in memory. Launch-only: repeat when resuming. A bare "
-            "flag means True; --enable-experimental-icron, its name while experimental, "
-            "is an alias (default: True, but False with --enable-default-tools False)"
+            "schedules wake-ups and runs Python in this process, unsandboxed; /cron (or "
+            "/icron) schedules your messages and lists jobs"
+            + (", and /py runs your code" if _PY_ENABLED else "")
+            + ". Jobs and Python state live only in memory. Launch-only: repeat when "
+            "resuming. A bare flag means True; --enable-experimental-icron, its name "
+            "while experimental, is an alias (default: True, but False with "
+            "--enable-default-tools False)"
         ),
     )
     parser.add_argument(  # --enable-icron's name while it was experimental
         "--enable-experimental-icron", dest="enable_icron", nargs="?", const=True,
         default=argparse.SUPPRESS, type=_boolean_argument, help=argparse.SUPPRESS,
+    )
+    parser.add_argument(  # gone, and ignored (_ICRON_TIMING_GONE)
+        "--icron-timing", choices=("turn", "clock"), default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--enable-experimental-ui-plugin",

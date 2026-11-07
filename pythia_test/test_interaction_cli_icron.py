@@ -21,7 +21,7 @@ from pythia.interaction import ModelSample, ModelSampleBoundary, ModelTransportE
 from pythia.interaction import ToolCall, ToolOutcome, ToolResult, ToolSpec, Tools
 from pythia.interaction import UserInteractionBoundary, cli, save_interaction_save
 from pythia.interaction._cli_editor import Editor
-from pythia.interaction.loop.icron import WAKE_HEADER
+from pythia.interaction.loop.icron import WAKE_HEADER, Job
 from pythia.interaction.loop.supervision import Yield
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.interaction_helpers import seed_cli_save
@@ -78,6 +78,20 @@ def _blocking_probe():
         return ToolOutcome("probed")
 
     return Tool(ToolSpec("probe", "Probe.", {"type": "object"}), probe), entered, release
+
+
+def _stepping_probe():
+    """A probe whose every call waits until the test releases it: its calls,
+    and the semaphore that releases one."""
+    calls, releases = [], threading.Semaphore(0)
+
+    def probe(arguments, *, timeout_seconds=None):
+        calls.append(arguments)
+        if not releases.acquire(timeout=4):
+            raise AssertionError("the test did not release the tool")
+        return ToolOutcome("probed")
+
+    return Tool(ToolSpec("probe", "Probe.", {"type": "object"}), probe), calls, releases
 
 
 class _IcronControllerCase(unittest.IsolatedAsyncioTestCase):
@@ -173,12 +187,75 @@ class LaunchTests(unittest.TestCase):
                 self.assertEqual([str(item.message) for item in caught
                                   if "icron" in str(item.message)], [])
 
+    def test_icron_timing_still_parses_and_help_hides_it(self):
+        parser = cli._build_parser()
+        for value in ("turn", "clock"):
+            self.assertEqual(parser.parse_args(["--icron-timing", value]).icron_timing, value)
+        self.assertFalse(hasattr(parser.parse_args([]), "icron_timing"))
+        self.assertNotIn("--icron-timing", parser.format_help())
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["--icron-timing", "sometimes"])
+
     def test_help_lists_the_option_and_not_its_alias(self):
         text = cli._build_parser().format_help()
         self.assertIn("--enable-icron [{False,True}]", text)
         self.assertNotIn("--enable-experimental-icron [", text)
+        flat = " ".join(re.sub(r"-\n\s+", "-", text).split())  # argparse wraps at hyphens
         self.assertIn("--enable-experimental-icron, its name while experimental, is an alias",
-                      " ".join(text.split()))
+                      flat)
+        # /py is off (_PY_ENABLED), and /icron is /cron's alias.
+        self.assertIn("unsandboxed; /cron (or /icron) schedules your messages and lists jobs. "
+                      "Jobs and Python state", flat)
+        self.assertNotIn("/py", flat)
+
+
+class RepeatTests(_IcronControllerCase):
+    async def test_a_running_turn_takes_a_repeat_s_message_at_each_firing(self):
+        probe, calls, releases = _stepping_probe()
+        model = _Model(self.path,
+                       _calls(_icron("c1", call="schedule('Check the log.', every=60)"),
+                              ToolCall("probe", "p1", "{}")),
+                       _calls(ToolCall("probe", "p2", "{}")),
+                       _answer("done"))
+        start = self.clock.now
+
+        def due():
+            return next(job.due for job in self.icron.jobs() if job.message == "Check the log.")
+
+        terminal = _Terminal(_once([
+            (lambda t, s: len(calls) == 1, lambda t: self.advance(60)),
+            (lambda t, s: self.icron.undelivered() == 1, lambda t: releases.release()),
+            (lambda t, s: len(calls) == 2, lambda t: self.advance(60)),
+            # The job fired again: its new message waits for the next interrupt point.
+            (lambda t, s: self.icron.undelivered() == 1 and due() == start + 180,
+             lambda t: releases.release()),
+            (_idle_with("[assistant] done"), _exit)]))
+        try:
+            self.assertEqual(await self._run(model, terminal, ["--prompt", "hello"], (probe,)), 0)
+        finally:
+            releases.release()
+            releases.release()
+        self.assertEqual(len(model.calls), 3)
+        items = model.calls[2][0].items
+        self.assertEqual(sum(isinstance(item, UserInteractionBoundary) for item in items), 1)
+        for index in (1, 2):  # one turn, a message at each firing
+            message = _users(model.calls[index][0].items)[-1]
+            self.assertTrue(message.startswith(WAKE_HEADER)
+                            and message.endswith("):\nCheck the log."), message)
+        (notice,) = [text for text in _texts(terminal) if text.startswith("[cli] icron: main")]
+        self.assertTrue(notice.endswith(" and /auto hands main a task and goes away. Jobs and "
+                                        "Python state live only in this process."), notice)
+
+
+class TimingOptionTests(_IcronControllerCase):
+    async def test_icron_timing_is_read_and_ignored_with_a_note(self):
+        # A restart reruns its command line, so an option that went is still read.
+        model = _Model(self.path, _answer("done"))
+        terminal = _Terminal(_once([(_idle_with("[assistant] done"), _exit)]))
+        self.assertEqual(await self._run(model, terminal,
+                                         ["--prompt", "hello", "--icron-timing", "turn"]), 0)
+        self.assertIn("[cli] Note: --icron-timing is gone, and ignored: repeating messages reach "
+                      "a running turn at each firing.", _texts(terminal))
 
 
 class DisplayContractTests(_IcronControllerCase):
@@ -209,13 +286,35 @@ class DisplayContractTests(_IcronControllerCase):
         self.assertEqual(shown, expected)
         self.assertEqual(len(_texts(with_icron)), len(_texts(plain)) + 1)
         self.assertIn("[cli] icron: main can schedule work and run Python in "
-                      "this process, unsandboxed, with the icron tool; /cron schedules your "
-                      "messages, /crontab shows them, /py runs your code, /afk tells main "
-                      "you're away, /autoafk does it by itself, and /auto hands main a task and "
-                      "goes away. Jobs and Python state live only in this process.",
+                      "this process, unsandboxed, with the icron tool; /cron (or /icron) "
+                      "schedules your messages and lists jobs, /afk tells main you're away, "
+                      "/autoafk does it by itself, and /auto hands main a task and goes away. "
+                      "Jobs and Python state live only in this process.",
                       _texts(with_icron))
         self.assertFalse(any("icron" in status for _editor, status, _prompt in with_icron.frames))
         self.assertIn("idle", [status for _editor, status, _prompt in with_icron.frames])
+
+
+class YieldNoticeTests(unittest.TestCase):
+    def test_the_notice_says_what_resumes_main(self):
+        def job(kind, state="scheduled", **fields):
+            return Job("k3f9-1", "main", kind, state, created=NOW, **fields)
+
+        later = NOW + 600
+        self.assertEqual(cli._yield_notice(job("message", due=later, message="Check CI."), NOW),
+                         "main yielded to icron; job k3f9-1 resumes it at 12:10:00 (in 10m), "
+                         "unless you write first.")
+        # Code resumes main with its message or its end, not by firing.
+        self.assertEqual(cli._yield_notice(job("code", due=later, code="print(1)", every=600.0),
+                                           NOW),
+                         "main yielded to icron; it waits for job k3f9-1's code, next run at "
+                         "12:10:00 (in 10m), to message it or end, unless you write first.")
+        self.assertEqual(cli._yield_notice(job("exec", "running", code="print(1)"), NOW),
+                         "main yielded to icron; it waits for job k3f9-1 (running code), unless "
+                         "you write first.")
+        self.assertEqual(cli._yield_notice(None, NOW),
+                         "main yielded to icron, but nothing that could resume it is pending; "
+                         "it waits for your message.")
 
 
 class WakeUpTests(_IcronControllerCase):
@@ -344,6 +443,7 @@ class WakeUpTests(_IcronControllerCase):
                                          r"finished\.", text) for text in texts), texts)
         self.assertIn("[tool-call] icron (c1)\nicron.exec(wait=5)", texts)
 
+    @mock.patch.object(cli, "_PY_ENABLED", True)  # /py is off for now; its code still works
     async def test_the_user_s_code_can_resume_main(self):
         model = _Model(self.path, _answer("Ready."), _answer("Got it."))
         terminal = _Terminal(_once([
@@ -384,6 +484,7 @@ class WakeUpTests(_IcronControllerCase):
         time.sleep(0.05)
         self.assertEqual(len(model.calls), 2)
 
+    @mock.patch.object(cli, "_PY_ENABLED", True)  # /py holds the watcher here
     async def test_the_status_line_shows_running_code_and_a_stall(self):
         self.icron = Icron(clock=self.clock, limits=IcronLimits(stall_seconds=0.2))
         self.addCleanup(self.icron.close, 3.0)
@@ -597,15 +698,13 @@ class CronCommandTests(_CommandCase):
         self.assertRegex(self.enter("/cron at 9:00 Stand up.")[0],
                          r"^cron: job \S+ sends your message at 09:00:00 tomorrow \(in 21h\)\.$")
         self.enter("/cron in 1m line one\nline two")
-        self.assertEqual(sorted(self.state.cron_entries.values()), [
-            "at 14:30 Post the summary.", "at 9:00 Stand up.", "every 1h Poll the training log.",
-            "in 10m Check the CI run.", "in 1m line one\nline two"])
         self.assertIn("line one\nline two", [job.message for job in self.icron.jobs()])
 
     def test_malformed_commands_keep_the_draft(self):
         usage = f"{cli._CRON_USAGE} Draft preserved."
         for text in ("/cron in ten x", "/cron in 10m", "/cron at 25:00 x", "/cron soon x",
-                     "/cron cancel", "/cron in 0s x", "/cron in 1h30m x", "/cron every x y"):
+                     "/cron cancel", "/cron in 0s x", "/cron in 1h30m x", "/cron every x y",
+                     "/cron clear x", "/cron cancel! a b", "/cron cancel? all"):
             with self.subTest(text=text):
                 self.assert_kept(text, usage)
         self.assert_kept("/cron in 8d x", "icron.schedule(): after must be from 1 to 604800 "
@@ -624,55 +723,109 @@ class CronCommandTests(_CommandCase):
             f"  {running.job.job_id} (main's) running code since 12:00:00: "
             "await asyncio.sleep(5) print('done')\n"
             f"  {main_job.job_id} (main's) 12:10:00, in 10m, once: Check CI run 123."])
-        self.assertEqual(self.enter(f"/cron cancel {running.job.job_id}"),
-                         [f"cron: cancelled job {running.job.job_id} (main's)."])
-        self.assertEqual(self.enter(f"/cron cancel {main_job.job_id}"),
+        # Main's jobs take cancel! or cancel!!; a bare cancel keeps the draft.
+        job_id = running.job.job_id
+        self.assert_kept(f"/cron cancel {job_id}",
+                         f"cron: job {job_id} is main's: /cron cancel! {job_id} cancels it and "
+                         f"lets its running code finish its run, and /cron cancel!! {job_id} "
+                         "stops that code too. Draft preserved.")
+        self.assertEqual(self.enter(f"/cron cancel!! {job_id}"),
+                         [f"cron: cancelled job {job_id} (main's); its running code stops at "
+                          "its next await."])
+        self.assertEqual(self.enter(f"/cron cancel! {main_job.job_id}"),
                          [f"cron: cancelled job {main_job.job_id} (main's); main now waits for "
                           "your message."])
+        # So does every job; three or more ! read as two.
         self.enter("/cron in 1m a")
-        self.enter("/cron in 2m b")
-        self.assertEqual(self.enter("/cron cancel all"), ["cron: cancelled 2 jobs."])
-        self.assertEqual(self.enter("/cron cancel all"), ["cron: no pending jobs to cancel."])
+        self.icron.schedule("b", after=120, by="main")
+        self.assert_kept("/cron cancel all", f"{cli._CRON_CANCEL_ALL_HINT} Draft preserved.")
+        self.assertEqual(self.enter("/cron cancel!!! all"), ["cron: cancelled 2 jobs."])
+        self.assertEqual(self.enter("/cron cancel! all"), ["cron: no pending jobs to cancel."])
         self.assert_kept("/cron cancel nope-1",
                          "icron.cancel(): there is no job nope-1. Draft preserved.")
+
+    def test_cancel_with_one_bang_lets_running_code_finish_its_run(self):
+        mine = self.enter("/cron in 10m Check the CI run.")[0].split()[2]
+        self.assertEqual(self.enter(f"/cron cancel {mine}"),  # the user's own: no bang
+                         [f"cron: cancelled job {mine} (yours)."])
+        job_id = self.icron.exec("await asyncio.sleep(0.2)\nprint('done')", wait=0.05,
+                                 by="main").job.job_id
+        self.assertEqual(self.enter(f"/cron cancel! {job_id}"),
+                         [f"cron: cancelled job {job_id} (main's); its running code finishes "
+                          "its run."])
+        self.assertTrue(_until(lambda: self.icron_notices
+                               == [f"icron: job {job_id} (main's code) finished."]))
+        ended = next(job for job in self.icron.jobs() if job.job_id == job_id)
+        self.assertEqual((ended.state, ended.output), ("done", "done\n"))
+        quick, slow = (self.icron.exec(f"await asyncio.sleep({seconds})", wait=0.05,
+                                       by="main").job.job_id for seconds in (0.2, 30))
+
+        def state(job_id):
+            return next(job.state for job in self.icron.jobs() if job.job_id == job_id)
+
+        self.assertEqual(self.enter("/cron cancel! all"),
+                         ["cron: cancelled 2 jobs; code running in 2 of them finishes its run."])
+        self.assertTrue(_until(lambda: state(quick) == "done"))
+        self.assertEqual(state(slow), "running")  # until cancel!!
+        self.assertEqual(self.enter("/cron cancel!! all"),
+                         ["cron: cancelled 1 job; code running in 1 of them stops at its next "
+                          "await."])
+        self.assertTrue(_until(lambda: state(slow) == "cancelled"))
 
     def test_the_commands_work_while_the_model_needs_authentication(self):
         self.state.auth_required = True
         self.assertRegex(self.enter("/cron in 10m x")[0], r"^cron: job \S+ sends your message")
 
+    def test_icron_is_an_alias_of_cron(self):
+        (notice,) = self.enter("/icron in 10m Check the CI run.")
+        job_id = re.fullmatch(r"cron: job (\S+) sends your message at 12:10:00 \(in 10m\)\.",
+                              notice).group(1)
+        (job,) = self.icron.jobs()
+        # Its job says /cron, as the command's other name's would.
+        self.assertEqual((job.job_id, job.origin, job.via), (job_id, "user", "/cron"))
+        self.assertRegex(self.enter("/icron")[0], r"^cron: 1 pending job \(now 12:00:00\):")
+        self.assert_kept("/icron soon x", f"{cli._CRON_USAGE} Draft preserved.")
+        self.assertEqual(self.enter("/icron clear"), ["cron: cancelled 1 job of yours."])
+
     def test_without_icron_the_commands_are_unsupported(self):
         state = cli._UIState(ready=True)
-        for text in ("/cron in 10m x", "/crontab", "/py 1"):
+        for text in ("/cron in 10m x", "/icron in 10m x", "/crontab", "/py 1"):
             _enter(state, text)
             self.assertTrue(_notices(state)[0].startswith("Unsupported command. Use /retry"))
 
 
-class CrontabCommandTests(_CommandCase):
-    def test_the_table_shows_the_user_s_cron_jobs_and_clear_cancels_only_them(self):
-        self.assertEqual(self.enter("/crontab"), [
-            "crontab (now 12:00:00): no jobs of yours; /cron schedules one."])
-        first = self.enter("/cron in 10m Check the CI run.")[0].split()[2]
-        second = self.enter("/cron every 1h Poll the training log.")[0].split()[2]
+class ClearCommandTests(_CommandCase):
+    def test_clear_cancels_only_the_user_s_cron_jobs(self):
+        self.assertEqual(self.enter("/cron clear"), ["cron: no /cron jobs of yours to clear."])
+        self.enter("/cron in 10m Check the CI run.")
+        self.enter("/icron every 1h Poll the training log.")
         mains = self.icron.schedule("Check CI run 123.", after=300, by="main")
-        code = self.icron.exec("await asyncio.sleep(5)", wait=0.05, by="user")
-        self.assertEqual(self.enter("/crontab"), ["\n".join([
-            "crontab (now 12:00:00): 2 jobs of yours; /crontab clear cancels them.",
-            f"# {first}: next 12:10:00 (in 10m), once",
-            "in 10m Check the CI run.",
-            f"# {second}: next 13:00:00 (in 1h), every 1h",
-            "every 1h Poll the training log.",
-            "# Not in your table (/cron cancel ends them):",
-            f"#   {code.job.job_id} (yours) running code since 12:00:00: await asyncio.sleep(5)",
-            f"#   {mains.job_id} (main's) 12:05:00, in 5m, once: Check CI run 123."])])
-        self.assertEqual(self.enter("/crontab clear"), ["crontab: cancelled 2 jobs."])
+        afk = self.icron.schedule("Away.", every=1800, by="user", via="/afk")
+        self.assertEqual(self.enter("/cron clear"), ["cron: cancelled 2 jobs of yours."])
         self.assertEqual(sorted(job.job_id for job in self.icron.jobs() if job.pending),
-                         sorted((mains.job_id, code.job.job_id)))
-        self.assertEqual(self.enter("/crontab clear"),
-                         ["crontab: your table is empty; nothing to cancel."])
-        self.assert_kept("/crontab edit", f"{cli._CRONTAB_USAGE} Draft preserved.")
+                         sorted((mains.job_id, afk.job_id)))
+
+    def test_clear_says_when_main_is_left_waiting_for_the_user(self):
+        self.enter("/cron in 10m Check the CI run.")
+        self.icron.begin_turn()
+        self.icron.yield_("Waiting.")  # on the user's job: nothing else could resume it
+        self.icron.handoff(Yield(context=1, job_id=None, job_text="task", kind="yielded",
+                                 resumable=True, revision=0, yield_text="Waiting."))
+        self.assertEqual(self.enter("/cron clear"),
+                         ["cron: cancelled 1 job of yours; main now waits for your message."])
+
+    def test_crontab_is_gone_with_a_hint(self):
+        for text in ("/crontab", "/crontab clear"):
+            self.assert_kept(text, f"{cli._CRONTAB_GONE} Draft preserved.")
 
 
 class PyCommandTests(_CommandCase):
+    def test_py_is_disabled(self):
+        self.assertFalse(cli._PY_ENABLED)
+        self.assert_kept("/py print(1)", "py: /py is disabled. Draft preserved.")
+        self.assertEqual((self.icron.jobs(), self.icron_notices), ((), []))
+
+    @mock.patch.object(cli, "_PY_ENABLED", True)  # its code, for when it's back on
     def test_py_runs_the_user_s_code_and_shows_what_it_prints(self):
         self.assertEqual(self.enter("/py print(1)\n6 * 7"), [])
         self.assertEqual(self.state.editor.text, "")

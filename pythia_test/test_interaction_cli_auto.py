@@ -232,14 +232,13 @@ class NoautoJobTests(_AutoCase):
         self.assertEqual(self.icron.undelivered(), 0)
         self.assertIsNone(self.icron.take_wakes())
         self.stopped(job_id)
-        # Taken by the running turn: the job ends at once, though its run
-        # lasts until the turn ends.
+        # Taken by the running turn: the job ends at once.
         self.enter("/auto")
         job_id = self.afk.job_id
         self.remind()
         self.icron.begin_turn()
         self.icron.take_wakes()
-        self.assertEqual(self.job(job_id).state, "running")
+        self.assertEqual(self.job(job_id).state, "scheduled")  # its run ended once queued
         self.enter("/noauto")
         self.stopped(job_id)
         self.end_turn()

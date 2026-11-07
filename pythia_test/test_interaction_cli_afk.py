@@ -175,15 +175,14 @@ class CommandTests(_AfkCase):
             "every 30m: The user has been away"), listing)
         with self.assertRaisesRegex(IcronError, "you can cancel only your own jobs"):
             self.icron.cancel(job_id, by="main")
-        cron = self.icron.schedule("ping", after=600, by="user", via="/cron")
-        self.state.cron_entries[cron.job_id] = "in 10m ping"
-        self.assertEqual(self.enter("/crontab clear"), ["crontab: cancelled 1 job."])
-        self.assertTrue(self.afk.sync())  # /crontab clear cancels /cron's jobs only
+        self.icron.schedule("ping", after=600, by="user", via="/cron")
+        self.assertEqual(self.enter("/cron clear"), ["cron: cancelled 1 job of yours."])
+        self.assertTrue(self.afk.sync())  # /cron clear cancels /cron's jobs only
         self.assertEqual(self.enter(f"/cron cancel {job_id}"), [
             f"cron: cancelled job {job_id} (yours).", f"afk: off; its job {job_id} was cancelled."])
         self.assertEqual(self.afk.status(), "")
         job_id = self.turn_on()
-        self.assertEqual(self.enter("/cron cancel all"), [
+        self.assertEqual(self.enter("/cron cancel! all"), [
             "cron: cancelled 1 job.", f"afk: off; its job {job_id} was cancelled."])
 
     def test_a_job_that_ends_another_way_ends_afk_at_the_next_tick(self):
@@ -195,7 +194,7 @@ class CommandTests(_AfkCase):
 
 
 class ReminderTests(_AfkCase):
-    def test_the_first_reminder_fires_at_once_and_the_next_after_the_turn_that_took_it(self):
+    def test_the_first_reminder_fires_at_once_and_the_next_at_its_firing(self):
         job_id = self.turn_on("/afk Back at 13:00.")
         self.remind()
         self.icron.begin_turn()
@@ -204,16 +203,16 @@ class ReminderTests(_AfkCase):
             f"{WAKE_HEADER} at {_iso(NOW + 1)}.", "",
             f"Job {job_id} (the user's, from /afk; due {_iso(NOW + 1)}, every 1800 s):",
             _reminder(NOW, "Back at 13:00.")]))
-        # The turn runs past the next slot, which merges into the run that it took.
-        self.clock.now += 1800
-        self.icron._poke()
-        self.assertFalse(_until(lambda: self.icron.undelivered(), timeout=0.2))
-        self.end_turn()
+        # Its run ended once it queued the reminder; the next slot sends another, which
+        # the running turn takes at its next interrupt point, as any repeat's message.
         self.assertTrue(_until(lambda: self.job(job_id).state == "scheduled"))
-        self.assertEqual(self.job(job_id).due, NOW + 3601)
         self.clock.now += 1800
         self.icron._poke()
         self.assertTrue(_until(lambda: self.icron.undelivered() == 1))
+        self.assertEqual(self.job(job_id).due, NOW + 3601)
+        self.assertEqual([delivery.due for delivery in self.icron.take_wakes().deliveries],
+                         [NOW + 1801])
+        self.end_turn()
         self.assertTrue(self.afk.sync())
 
 
@@ -229,7 +228,7 @@ class EndTests(_AfkCase):
     def test_commands_keys_and_wake_ups_leave_it_on(self):
         job_id = self.turn_on()
         self.state.editor = self.state.editor.edit("<bracketed-paste>", "half a thought")
-        for text in ("/cron", "/crontab", "/autoafk", "/autoafk 20m", "/cron in 1m ping"):
+        for text in ("/cron", "/cron clear", "/autoafk", "/autoafk 20m", "/cron in 1m ping"):
             self.enter(text)
         # Wake-ups, AFK's own reminder and a /cron message among them, reach main
         # without the user's typing: they leave AFK on.
@@ -262,13 +261,12 @@ class EndTests(_AfkCase):
         self.assertEqual(self.icron.undelivered(), 0)
         self.assertIsNone(self.icron.take_wakes())
         stopped(job_id)
-        # Taken by the running turn: the job ends at once, though its run
-        # lasts until the turn ends.
+        # Taken by the running turn: the job ends at once.
         job_id = self.turn_on()
         self.remind()
         self.icron.begin_turn()
         self.icron.take_wakes()
-        self.assertEqual(self.job(job_id).state, "running")
+        self.assertEqual(self.job(job_id).state, "scheduled")  # its run ended once queued
         self.enter("/steer I'm back.")
         stopped(job_id)
         self.end_turn()

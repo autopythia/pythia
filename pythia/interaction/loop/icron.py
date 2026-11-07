@@ -4,10 +4,11 @@ Main hands off to icron whenever its turn loop stops (:meth:`Icron.handoff`).
 A *job* runs code on the watcher thread's asyncio event loop, once or
 repeatedly, first after a delay counted from the call that scheduled it
 (``after``) or at an absolute time (``at``). A job's ``message`` is its
-default code: it sends main the message and waits for the end of the turn
-that receives it. :meth:`Icron.exec` runs code at once. Code has a handle to
-main, ``main``: ``await main.resume(text)`` sends main a *wake-up* and returns
-main's first handoff after receiving it.
+default code: it sends main the message, and a repeat's firing merges into
+the last one while that still waits for delivery. :meth:`Icron.exec` runs
+code at once. Code has a handle to main, ``main``: ``await
+main.resume(text)`` sends main a *wake-up* and returns main's first handoff
+after receiving it.
 
 The host delivers wake-ups (:meth:`Icron.take_wakes`) as it delivers text the
 user typed: at an interrupt point of main's running turn, or as the input of a
@@ -206,7 +207,9 @@ class Run:
 
     ``due`` is the slot that fired it (None for exec), and ``merged`` counts
     the firings that merged into it: slots missed before it started, and
-    firings while it ran.
+    firings while it ran. For a repeating message job, firings also merge
+    into its message while that waits for delivery, and ``due`` moves to the
+    latest of them.
     """
 
     def __init__(self, icron: "Icron", job: "_Job", *, due: Optional[float], merged: int) -> None:
@@ -538,10 +541,10 @@ class Icron:
         one; with neither, it is `every` seconds from this call. With every,
         the job fires again every `every` seconds: `count` firings in all
         (default: 1 without every, no limit with it). Give exactly one of
-        code (run it at each firing) and message (the default code,
-        await main.resume(message)). `via`, like `by` for host code only, is
-        the command it came from, such as /cron or /afk, which its wake-ups
-        and jobs() name.
+        code (run it at each firing) and message (the default code, which
+        sends main the message: _call). `via`, like `by` for host code only,
+        is the command it came from, such as /cron or /afk, which its
+        wake-ups and jobs() name.
         """
         call = "icron.schedule()"
         _check_origin(call, by)
@@ -640,15 +643,22 @@ class Icron:
             self._finish(run, "cancelled")
         return self._await_exec(run, wait)
 
-    def cancel(self, job_id: JobId, *, by: str = "host") -> Job:
+    def cancel(self, job_id: JobId, *, by: str = "host", finish: bool = False) -> Job:
         """End a job: no more firings, its undelivered wake-up is withdrawn,
         and its running code is cancelled at its next await, unless the
         caller is that code, which goes on. Main may cancel only its own
-        jobs."""
+        jobs.
+
+        With finish (the host's, for the user's /cron cancel!), running code
+        goes on too: its run finishes as it would have, with the messages it
+        sends, and its end ends the job. A later cancel without finish still
+        stops it. A message job's run ends either way."""
         call = "icron.cancel()"
         _check_origin(call, by)
         if not isinstance(job_id, str):
             raise IcronError(f"{call}: job_id must be a string.")
+        if not isinstance(finish, bool):
+            raise IcronError(f"{call}: finish must be True or False.")
         current = _CURRENT_RUN.get()
         task = None
         with self._lock:
@@ -663,15 +673,20 @@ class Icron:
             if job.cancelled:
                 raise IcronError(f"{call}: job {job_id} is already cancelled.")
             own = current is not None and current._job is job
-            job.due, job.remaining = None, 0
-            job.cancelled = job.cancelled or not own
-            futures = [wake.future for wake in self._wakes
-                       if wake.job is job and wake.future is not None]
-            self._wakes = [wake for wake in self._wakes if wake.job is not job]
             run = job.run
+            # The run goes on if it is the caller's, or code that finish lets
+            # end its run, with its messages, which stay.
+            finishes = finish and run is not None and job.kind != "message"
+            job.due, job.remaining = None, 0
+            job.cancelled = job.cancelled or not (own or finishes)
+            withdrawn = [wake for wake in self._wakes
+                         if wake.job is job and not (finishes and wake.run is run)]
+            futures = [wake.future for wake in withdrawn if wake.future is not None]
+            self._wakes = [wake for wake in self._wakes
+                           if not any(wake is gone for gone in withdrawn)]
             if run is None:
                 self._end_locked(job, "cancelled")
-            elif not own:
+            elif not (own or finishes):
                 run._cancelled = True
                 task = run._task
             self._release_if_idle_locked()
@@ -981,11 +996,12 @@ class Icron:
             return self._loop.create_future()
         return concurrent.futures.Future()
 
-    def _send_wake(self, text: str):
+    def _send_wake(self, text: str, *, waits: bool = True):
         call = "main.resume()"
         _check_text(call, "text", text, self._limits.max_chars)
         run = _CURRENT_RUN.get()
-        future = self._new_future()
+        # A repeat's message run doesn't wait for main (waits=False): no future.
+        future = self._new_future() if waits else None
         with self._lock:
             if self._closed or self._stopping:
                 raise IcronError(f"{call}: icron is stopping; nothing was sent.")
@@ -1142,7 +1158,9 @@ class Icron:
         return min(_TICK_SECONDS, max(0.0, soonest - now))
 
     def _fire_locked(self, job: _Job, now: float) -> None:
-        """Fire a due job: the slots due by now merge into one run, at a fixed rate."""
+        """Fire a due job: the slots due by now merge into one run, at a fixed
+        rate. A run still going takes them, and so does a repeat's message that
+        waits for delivery, whose due becomes the latest slot."""
         slots = 1 if job.every is None else 1 + int((now - job.due) // job.every)
         if job.remaining is not None:
             slots = min(slots, job.remaining)
@@ -1152,7 +1170,19 @@ class Icron:
             job.due += slots * job.every
         else:
             job.due = None
-        if job.run is not None:
+        if job.kind == "message" and job.every is not None:
+            waiting = next((wake.run for wake in self._wakes if wake.job is job), None)
+            into = job.run if waiting is None else waiting
+            if into is not None:
+                into.merged += slots
+                into.due = due  # the message stands for the latest firing
+                if job.due is None and job.run is None:
+                    # Its last firing merged into the waiting message, so no
+                    # run's end will end the job: it ends now.
+                    self._end_locked(job, "done")
+                    self._changed.notify_all()
+                return
+        elif job.run is not None:
             job.run.merged += slots
             return
         run = Run(self, job, due=due, merged=slots - 1)
@@ -1195,6 +1225,13 @@ class Icron:
     async def _call(self, run: Run) -> Optional[str]:
         job = run._job
         if job.kind == "message":
+            if job.every is not None:
+                # A repeat's run only queues the message: the next firing sends
+                # again, or merges into it while it waits (_fire_locked).
+                self._send_wake(job.message, waits=False)
+                return None
+            # Once: the run lasts until the turn that receives the message
+            # ends, so that a cancel can withdraw it until it's delivered.
             await self._main.resume(job.message)
             return None
         if job.compiled is None:  # a host function
@@ -1552,7 +1589,8 @@ def call_text(arguments) -> Optional[Tuple[str, Optional[str]]]:
 
 _METHODS = ("exec", "schedule", "yield_", "cancel", "jobs", "help")  # what main's tool calls
 _TAKES_CODE = ("exec", "schedule")
-_HOST_KEYWORDS = ("by", "via")  # the API's keywords that main's tool and code never give
+# The API's keywords that main's tool and code never give.
+_HOST_KEYWORDS = ("by", "via", "finish")
 _NO_CALL = "icron: give call, one method call such as jobs(), or code to run now."
 
 
@@ -1841,13 +1879,23 @@ def _yield_text(job: Optional[Job], now: float) -> str:
     is host code's."""
     if job is None:
         how = "A wake-up already waits for you."
-    elif job.due is not None and (job.state == "scheduled" or job.kind == "message"):
+    elif job.kind == "message" and job.due is not None:
         how = f"Job {_job_ref(job, now)} resumes you when it fires, unless the user writes first."
     elif job.kind == "message" or not job.pending:
         how = f"A wake-up from job {_job_ref(job, now)} already waits for you."
-    else:
+    elif job.state == "running":
         how = (f"Job {_job_ref(job, now)} resumes you when it sends you a message or ends, "
                "unless the user writes first.")
+    elif job.origin == "main" and (job.every is None or job.remaining is not None):
+        how = (f"Job {_job_ref(job, now)} resumes you when its code sends you a message, "
+               "with main.resume, or the job ends, unless the user writes first.")
+    else:
+        # Code that fires, but ends only if it fails or is cancelled (or isn't
+        # main's, whose end main doesn't hear).
+        how = (f"Job {_job_ref(job, now)} resumes you only when its code sends you a message, "
+               "with main.resume, unless the user writes first: firing doesn't, and "
+               + ("it repeats with no count." if job.origin == "main"
+                  else "you don't hear of its end."))
     return f"Yielded: your turn ends once this tool batch is saved\n{how}\nNow: {_iso(now)}"
 
 
@@ -1896,16 +1944,18 @@ _SUMMARIES = {
     "exec": ("run the code field now, in this process, on icron's event loop; top-level await "
              "works. Returns what it printed, its last expression's value, or the traceback; if "
              "it still runs after wait seconds (at most {max_wait}), it goes on as a job."),
-    "schedule": ("a job that sends you message, or runs the code field. It first fires after "
-                 "`after` seconds, or at `at` (ISO 8601 with a UTC offset), or else in `every` "
-                 "seconds; with every it repeats, count times in all (default: no limit). A job "
-                 "runs once at a time: a message's run lasts until the turn that receives it "
-                 "ends, and firings meanwhile merge into it. Write a message that makes sense on "
-                 "its own; a compaction may have removed this call by then."),
+    "schedule": ("a job that sends you message, or runs the code field. Code sends you nothing "
+                 "unless it calls main.resume(text); a code job's end, with its output or error, "
+                 "reaches you only while you wait in a yield. It first fires after "
+                 "`after` seconds, or at `at` (ISO 8601, best with a UTC offset), or else "
+                 "in `every` seconds; with every it repeats, count times in all (default: "
+                 "no limit). "
+                 "{repeats} Write a message that makes sense on its own; a compaction may have "
+                 "removed this call by then."),
     "yield_": ("end your turn without a final answer, once this tool batch is saved; note says "
-               "what you're waiting for. It needs a pending job, yours or the user's, or your "
-               "running code: the next message from icron resumes you, unless the user writes "
-               "first."),
+               "what you're waiting for. It needs something that will resume you: a message "
+               "job, yours or the user's, or code of yours that calls main.resume(text) or ends. "
+               "The next message from icron resumes you, unless the user writes first."),
     "cancel": "end one of your jobs, and stop its running code.",
     "jobs": ("your jobs and the user's (the user schedules messages with /cron), with the "
              "current time and each job's latest output."),
@@ -1920,7 +1970,8 @@ _DESCRIPTION_HEAD = (
     "it now, as exec(). For example:\n"
     '  {"call": "schedule(\'Check CI run 123.\', after=600)"}\n'
     '  {"code": "import os\\nprint(os.getloadavg())"}\n'
-    '  {"call": "schedule(every=600)", "code": "await check_credit()"}'
+    '  {"call": "schedule(every=600)", '
+    '"code": "if await credit_low(): await main.resume(\'Credit is low.\')"}'
 )
 
 _DESCRIPTION_TAIL = (
@@ -1958,7 +2009,10 @@ _HELP_REST = (
     "Messages:\n"
     "  Messages from icron reach you as text typed by the user would: during a turn, right "
     "before your next sample, once the current tool batch is done; between turns, they start "
-    "one, and after a yield they resume you. Each names the job it comes from.\n"
+    "one, and after a yield they resume you. Each names the job it comes from. Code sends "
+    "them with main.resume(text); what it prints stays in its run's output, which jobs() "
+    "shows. A code job's end, with its output, value, or error, comes as one only while you "
+    "wait in a yield; otherwise only the user sees a notice of it.\n"
     "Limits:\n"
     "  {max_jobs} pending jobs and {max_jobs} undelivered messages each, for you and for the "
     "user; after from {min_delay} to {max_delay} seconds ({max_days}); `at` up to {max_days} "
@@ -2008,10 +2062,13 @@ _DETAILS = {
          '    await asyncio.sleep(20)"}')),
     "schedule": (
         "Arguments:\n"
-        "  message: the text it sends you, nonblank, up to {max_chars} characters. Its run is "
-        "await main.resume(message). Give a message or the code field, not both.\n"
+        "  message: the text it sends you, nonblank, up to {max_chars} characters. Each "
+        "firing sends it, and while it still waits for delivery, firings merge into it. Give "
+        "a message or the code field, not both.\n"
         "  code: the code field: Python source, run at each firing in your namespace, as exec "
-        "runs it. It compiles now, so a syntax error refuses the call.\n"
+        "runs it. It compiles now, so a syntax error refuses the call. It sends you nothing "
+        "unless it calls main.resume(text): what it prints is its run's output, which jobs() "
+        "shows.\n"
         "  after: seconds from now to the first firing, from {min_delay} to {max_delay} "
         "({max_days}).\n"
         "  at: the first firing's time, in ISO 8601 with a date, a time, and an offset or Z "
@@ -2019,19 +2076,25 @@ _DETAILS = {
         "both; with neither, the first firing is every seconds from now.\n"
         "  every: seconds between firings, from {min_every} to {max_delay}; it repeats until "
         "cancelled, or count times.\n"
-        "  count: how many firings in all, with every. Default: no limit.\n"
-        "A failed run ends its job. You can have {max_jobs} pending jobs.",
+        "  count: how many firings in all, with every; firings that merge count too. Default: "
+        "no limit.\n"
+        "A failed run ends its job. A code job's end, after its last firing or a failed one, "
+        "reaches you, with its output, value, or error, only while you wait in a yield; "
+        "otherwise only the user sees a notice of it. You can have {max_jobs} pending jobs.",
         ('{"call": "schedule(\'Check CI run 123.\', after=600)"}',
          '{"call": "schedule(\'Post the summary.\', at=\'2026-10-25T17:00:00+00:00\')"}',
-         '{"call": "schedule(every=60, count=3)", "code": "await check_credit()"}')),
+         '{"call": "schedule(every=600, count=6)", '
+         '"code": "if await credit_low(): await main.resume(\'Credit is low.\')"}')),
     "yield_": (
         "Arguments:\n"
         "  note: what you're waiting for, nonblank, up to {max_chars} characters.\n"
-        "Once per turn. It needs something that can resume you: a pending job, yours or the "
-        "user's, your running code, or a message that already waits. The next message from "
-        "icron resumes you: a job's message, a message from code, or the end of a job of yours "
-        "that sent you none while you waited. If the user writes first, their message starts "
-        "your next turn instead.\n"
+        "Once per turn. icron refuses it when nothing could resume you: no pending job, yours "
+        "or the user's, none of your code running, and no message waiting. The next message "
+        "from icron resumes you: a job's message, a message from code (main.resume), or the "
+        "end of a job of yours that sent you none while you waited. icron can't tell whether "
+        "code will send you one: a code job that repeats with no count, and never calls "
+        "main.resume, leaves you waiting until the user writes. If the user writes first, "
+        "their message starts your next turn instead.\n"
         "Write yield_, since yield is a Python keyword; yield('…') is read as yield_('…').",
         ('{"call": "yield_(\'Waiting for CI run 123.\')"}',)),
     "cancel": (
@@ -2039,7 +2102,7 @@ _DETAILS = {
         "  job_id: the job's ID, from schedule's, exec's or jobs()'s result.\n"
         "The job fires no more, a message of its that waits for delivery is withdrawn, and its "
         "running code is cancelled at its next await. You can cancel only your own jobs; the "
-        "user cancels theirs with /cron cancel.",
+        "user can cancel any job, yours too.",
         ('{"call": "cancel(\'k3f9-3\')"}',)),
     "jobs": (
         "Running jobs come first, then the soonest due, then up to {ended_kept} that ended, "
@@ -2073,12 +2136,15 @@ _DETAILS = {
         "  main.view(): your log as of that handoff, as interaction items.",
         ("await main.handoff()\nprint(main.last().kind)",)),
     "main.resume": (
-        "Awaiting it is optional: unawaited, resume only sends. During your turn, the message "
+        "It is how code tells you something: what code prints stays in its run's output, "
+        "which jobs() shows. Awaiting it is optional: unawaited, resume only sends. During "
+        "your turn, the message "
         "arrives right before your next sample, once the current tool batch is done; between "
         "turns, it starts one, and after a yield it resumes you.\n"
         "Arguments:\n"
         "  text: nonblank, up to {max_chars} characters. Up to {max_jobs} messages from your "
-        "code wait for delivery at a time.",
+        "code wait for delivery at a time; past that, main.resume raises, and an error that "
+        "code doesn't catch fails its run, which ends its job.",
         ("await main.resume(f'CI run 123 finished: {status}')",)),
     "Job": (
         "  job_id; origin: \"main\" (yours), \"user\", or \"host\"; kind: \"message\", "
@@ -2175,10 +2241,18 @@ def _help_name_of(thing, code_icron: "_CodeIcron", main: "ContextHandle") -> Opt
     return None
 
 
+# How repeats meet a running turn, as the description and help() say it.
+_REPEATS = ("A job runs once at a time: a firing during a run merges into it. A message "
+            "reaches a running turn at each firing, at its next interrupt point, and "
+            "firings merge into it only while it waits; cancel a repeat that you no "
+            "longer need.")
+
+
 def _bounds(limits: IcronLimits) -> Dict[str, str]:
     """The values that the description and help() quote, by placeholder."""
     days = limits.max_delay / 86400
     return {
+        "repeats": _REPEATS,
         "max_jobs": str(limits.max_jobs), "min_delay": f"{limits.min_delay:g}",
         "max_delay": f"{limits.max_delay:g}",
         "max_days": f"{days:g} day{'' if days == 1 else 's'}",
@@ -2223,8 +2297,9 @@ def _help_samples() -> Dict[str, str]:
     now = _SAMPLE_NOW
     once = Job("k3f9-1", "main", "message", "scheduled", due=now + 600,
                message="Check CI run 123.", remaining=1, created=now)
-    repeat = Job("k3f9-2", "main", "code", "scheduled", due=now + 60,
-                 code="await check_credit()", every=60, remaining=3, created=now)
+    repeat = Job("k3f9-2", "main", "code", "scheduled", due=now + 600,
+                 code="if await credit_low(): await main.resume('Credit is low.')",
+                 every=600, remaining=6, created=now)
     code = "for step in (1, 2):\n    print('step', step)\n    await asyncio.sleep(20)"
     running = Job("k3f9-3", "main", "exec", "running", code=code, created=now - 30,
                   started=now - 30, output="step 1\nstep 2\n")

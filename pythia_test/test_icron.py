@@ -423,6 +423,51 @@ class CodeTests(_IcronCase):
         icron.exec(f"icron.cancel({other.job.job_id!r})", by="main")
         self.assertEqual(self.wait_for(other.job.job_id, "cancelled").state, "cancelled")
 
+    def test_the_host_s_finish_lets_running_code_end_its_run(self):
+        # /cron cancel!: the job fires no more, and its run goes on to its end.
+        icron = self.start()
+        job = icron.schedule(code="print('start')\nawait asyncio.sleep(0.2)\nprint('end')",
+                             every=60, by="main")
+        self.advance(60)
+        self.assertTrue(_until(lambda: self.job(job.job_id).started is not None))
+        self.assertEqual(icron.cancel(job.job_id, by="user", finish=True).state, "running")
+        ended = self.wait_for(job.job_id, "done")
+        self.assertEqual((ended.output, ended.due, icron.status().jobs), ("start\nend\n", None, ()))
+        self.assertEqual(self.notices, [f"icron: job {job.job_id} (main's code) finished."])
+
+    def test_finish_keeps_the_run_s_messages_and_a_plain_cancel_still_stops_it(self):
+        icron = self.start()
+        icron.begin_turn()
+        sender = icron.schedule(code="await main.resume('Partial results.')\nprint('after')",
+                                after=60, by="main")
+        self.advance(60)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        icron.cancel(sender.job_id, by="user", finish=True)
+        # Its run's message stays, and the run ends with the turn that gets it.
+        self.assertEqual([delivery.text for delivery in icron.take_wakes().deliveries],
+                         ["Partial results."])
+        icron.handoff(_yield("ended"))
+        self.assertEqual(self.wait_for(sender.job_id, "done").output, "after\n")
+        sleeper = icron.exec("await asyncio.sleep(30)", wait=0, by="main").job
+        self.assertTrue(_until(lambda: self.job(sleeper.job_id).started is not None))
+        icron.cancel(sleeper.job_id, by="user", finish=True)
+        self.assertEqual(self.job(sleeper.job_id).state, "running")
+        icron.cancel(sleeper.job_id, by="user")  # /cron cancel!! after /cron cancel!
+        self.assertEqual(self.wait_for(sleeper.job_id, "cancelled").state, "cancelled")
+
+    def test_finish_ends_a_message_job_at_once(self):
+        icron = self.start()
+        icron.begin_turn()
+        job = icron.schedule("Check the log.", every=600, by="main")
+        self.advance(600)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        with self.assertRaisesRegex(IcronError, r"^icron.cancel\(\): finish must be True or "
+                                                "False\.$"):
+            icron.cancel(job.job_id, by="user", finish="yes")
+        icron.cancel(job.job_id, by="user", finish=True)
+        self.assertEqual(icron.undelivered(), 0)  # its message is withdrawn
+        self.assertEqual(self.wait_for(job.job_id, "cancelled").state, "cancelled")
+
     def test_the_stall_check_names_the_run_that_holds_the_watcher(self):
         self.limits = IcronLimits(stall_seconds=0.2)
         self.icron = Icron(clock=self.clock, limits=self.limits)
@@ -648,6 +693,24 @@ class ToolTests(_IcronCase):
                          f"Job {code.job_id} (your code, from exec; running since {_iso(NOW)}) "
                          "resumes you when it sends you a message or ends, unless the user "
                          "writes first.")
+        # A scheduled code job: by its message or its end, not by firing; with
+        # no count, or someone else's, by its message only.
+        due = f"due {_iso(NOW + 600)}, in 600 s"
+        counted = icron.schedule(code="print('checked')", every=600, count=3, by="main")
+        self.assertEqual(yielded(counted.job_id),
+                         f"Job {counted.job_id} (your code; {due}, every 600 s, 3 firings left) "
+                         "resumes you when its code sends you a message, with main.resume, or "
+                         "the job ends, unless the user writes first.")
+        endless = icron.schedule(code="print('checked')", every=600, by="main")
+        self.assertEqual(yielded(endless.job_id),
+                         f"Job {endless.job_id} (your code; {due}, every 600 s) resumes you "
+                         "only when its code sends you a message, with main.resume, unless the "
+                         "user writes first: firing doesn't, and it repeats with no count.")
+        users = icron.schedule(code="print('checked')", after=600, by="user")
+        self.assertEqual(yielded(users.job_id),
+                         f"Job {users.job_id} (the user's code; {due}) resumes you only when "
+                         "its code sends you a message, with main.resume, unless the user "
+                         "writes first: firing doesn't, and you don't hear of its end.")
         # A message that already waits for main: from a job, or from host code.
         fired = icron.schedule("Look at the logs.", after=30, by="main")
         self.advance(30)
@@ -741,6 +804,8 @@ class ToolTests(_IcronCase):
             ({"call": "jobs(by='user')"}, "icron.jobs(): by is for host code only."),
             ({"call": "schedule('x', after=5, via='/afk')"},
              "icron.schedule(): via is for host code only."),
+            ({"call": "cancel('k3f9-1', finish=True)"},
+             "icron.cancel(): finish is for host code only."),
             ({"code": 5}, "icron.exec(): code must be a string."),
             ({"call": "help('nothing')"}, "icron.help(): there is no name 'nothing'. help() lists "
                                           "them."),
@@ -788,6 +853,26 @@ class ToolTests(_IcronCase):
         self.assertIn("(at most 20)", narrow.tool().spec.description)
         self.assertIn("exec's wait up to 20 seconds", narrow.help())
 
+    def test_the_text_says_that_code_reaches_main_by_main_resume_or_its_job_s_end(self):
+        description = self.icron.tool().spec.description
+        self.assertIn('  {"call": "schedule(every=600)", "code": "if await credit_low(): await '
+                      'main.resume(\'Credit is low.\')"}', description)
+        for text in (description, self.icron.help(), self.icron.help("schedule")):
+            with self.subTest(text=text[:20]):
+                self.assertIn("Code sends you nothing unless it calls main.resume(text); a code "
+                              "job's end, with its output or error, reaches you only while you "
+                              "wait in a yield.", text)
+        self.assertIn("It needs something that will resume you: a message job, yours or the "
+                      "user's, or code of yours that calls main.resume(text) or ends.",
+                      description)
+        self.assertIn("a code job that repeats with no count, and never calls main.resume, "
+                      "leaves you waiting until the user writes.", self.icron.help("yield_"))
+        self.assertIn("It is how code tells you something: what code prints stays in its run's "
+                      "output", self.icron.help("main.resume"))
+        self.assertIn("A code job's end, with its output, value, or error, comes as one only "
+                      "while you wait in a yield; otherwise only the user sees a notice of it.",
+                      self.icron.help())
+
     def test_help_shows_an_overview_and_each_name_in_full(self):
         overview = self.icron.help()
         self.assertTrue(overview.startswith("icron: this session's in-process scheduler."))
@@ -806,7 +891,7 @@ class ToolTests(_IcronCase):
                     # Each keyword of the method has its sentence, so a new one needs one.
                     method = getattr(Icron, name)
                     for parameter in inspect.signature(method).parameters:
-                        if parameter not in ("self", "by", "via"):  # by and via: the host's
+                        if parameter not in ("self", "by", "via", "finish"):  # the host's
                             self.assertIn(f"\n  {parameter}: ", text)
         self.assertEqual(self.icron.help("schedule").splitlines()[0],
                          "schedule(message=None, *, after=None, at=None, every=None, count=None)")
@@ -926,6 +1011,45 @@ class YieldTests(_IcronCase):
         self.assertEqual(sorted(texts), sorted([(failing.job.job_id, "end", "failed:"),
                                                 (messaging.job.job_id, "message", "progress")]))
 
+    def test_code_resumes_a_yielded_main_by_its_message_or_its_end_not_by_firing(self):
+        icron = self.start()
+
+        def suspend(job):
+            icron.begin_turn()
+            icron.yield_("Waiting for the checks.")
+            self.assertEqual(icron.handoff(_yield("yielded")).job_id, job.job_id)
+
+        def fire(job, done):
+            """The job's next firing, run to its end: done(job) says when."""
+            self.advance(600)
+            self.assertTrue(_until(lambda: done(self.job(job.job_id))))
+            self.assertEqual((icron.status().main_state, icron.undelivered()), ("suspended", 0))
+
+        # Firings that print, and send nothing, leave main suspended; the last
+        # one ends the job, and its end resumes main.
+        counted = icron.schedule(code="print('checked')", every=600, count=3, by="main")
+        suspend(counted)
+        fire(counted, lambda job: job.remaining == 2 and job.state == "scheduled")
+        fire(counted, lambda job: job.remaining == 1 and job.state == "scheduled")
+        self.advance(600)
+        self.wait_delivery()
+        (delivery,) = icron.take_wakes().deliveries
+        self.assertEqual((delivery.kind, delivery.text.splitlines()),
+                         ("end", ["ended without a message for you. Its last output:",
+                                  "checked"]))
+        icron.handoff(_yield("ended"))
+        # Code that repeats with no count resumes main only with main.resume.
+        endless = icron.schedule(
+            code="fired = globals().get('fired', 0) + 1\nif fired == 2: main.resume('Done.')",
+            every=600, by="main")
+        suspend(endless)
+        first = self.clock.now + 600
+        fire(endless, lambda job: job.started == first and job.state == "scheduled")
+        self.advance(600)
+        self.wait_delivery()
+        self.assertEqual([delivery.text for delivery in icron.take_wakes().deliveries],
+                         ["Done."])
+
     def test_the_wake_up_text_names_each_job_and_who_scheduled_it(self):
         icron = self.start()
         mine = icron.schedule("Poll the log.", every=600, by="main")
@@ -964,6 +1088,102 @@ def _iso(seconds):
 
 def _call(call_id, **arguments):
     return ToolCall("icron", call_id, json.dumps(arguments))
+
+
+class RepeatTests(_IcronCase):
+    """Repeating messages: a message at each firing, and firings merge into
+    it only while it waits."""
+
+    def fired(self, job_id, remaining):
+        """Wait for the firing that leaves `remaining` firings, and its run's end."""
+        self.assertTrue(_until(lambda: self.job(job_id).remaining == remaining
+                               and self.job(job_id).state == "scheduled"), self.job(job_id))
+
+    def test_a_running_turn_gets_a_message_at_each_firing(self):
+        icron = self.start()
+        job = icron.schedule("Check the log.", every=600, count=3, by="main")
+        icron.begin_turn()
+        for slot in (1, 2):
+            self.advance(600)
+            self.wait_delivery()
+            (delivery,) = icron.take_wakes().deliveries
+            self.assertEqual((delivery.text, delivery.due, delivery.merged),
+                             ("Check the log.", NOW + 600 * slot, 0))
+            # Its run ended once it queued the message: the next firing sends again.
+            self.fired(job.job_id, 3 - slot)
+        self.assertEqual(icron.status().main_state, "running")  # one turn, no handoff
+
+    def test_firings_merge_into_a_message_while_it_waits(self):
+        icron = self.start()
+        job = icron.schedule("Check the log.", every=600, count=5, by="main")
+        self.advance(600)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        self.fired(job.job_id, 4)
+        for remaining in (3, 2):  # main takes nothing meanwhile
+            self.advance(600)
+            self.assertTrue(_until(lambda: self.job(job.job_id).remaining == remaining))
+            self.assertEqual(icron.undelivered(), 1)
+        wakeup = icron.take_wakes()
+        # It stands for the latest firing, and says how many merged before it.
+        self.assertEqual([(d.due, d.merged) for d in wakeup.deliveries], [(NOW + 1800, 2)])
+        self.assertIn(f"Job {job.job_id} (yours; due {_iso(NOW + 1800)}, every 600 s; 2 earlier "
+                      "firings merged):", wakeup.text())
+        # Taken, it lets the next firing send again.
+        self.advance(600)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        self.assertEqual([(d.due, d.merged) for d in icron.take_wakes().deliveries],
+                         [(NOW + 2400, 0)])
+
+    def test_the_last_firing_ends_the_job_and_its_waiting_message_still_comes(self):
+        icron = self.start()
+        job = icron.schedule("Check the log.", every=600, count=2, by="main")
+        self.advance(600)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        self.advance(600)  # the last firing merges into the waiting message
+        self.wait_for(job.job_id, "done")
+        self.assertEqual(icron.status().jobs, ())
+        self.assertEqual([(d.due, d.merged) for d in icron.take_wakes().deliveries],
+                         [(NOW + 1200, 1)])
+        with self.assertRaisesRegex(IcronError, "has already ended"):
+            icron.cancel(job.job_id)
+
+    def test_cancel_withdraws_a_waiting_message(self):
+        icron = self.start()
+        job = icron.schedule("Check the log.", every=600, by="main")
+        self.advance(600)
+        self.assertTrue(_until(lambda: icron.undelivered() == 1))
+        icron.cancel(job.job_id, by="main")
+        self.assertEqual((icron.undelivered(), self.job(job.job_id).state), (0, "cancelled"))
+
+    def test_the_text_says_how_repeats_meet_a_running_turn(self):
+        repeats = ("A job runs once at a time: a firing during a run merges into it. A message "
+                   "reaches a running turn at each firing, at its next interrupt point, and "
+                   "firings merge into it only while it waits; cancel a repeat that you no "
+                   "longer need.")
+        icron = self.icron
+        for text in (icron.tool().spec.description, icron.help(), icron.help("schedule")):
+            with self.subTest(text=text[:20]):
+                self.assertIn(repeats, text)
+                self.assertIn("at `at` (ISO 8601, best with a UTC offset)", text)
+        schedule = icron.help("schedule")
+        self.assertIn("  message: the text it sends you, nonblank, up to 8000 characters. Each "
+                      "firing sends it, and while it still waits for delivery, firings merge "
+                      "into it.", schedule)
+        self.assertNotIn("await main.resume(message)", schedule)
+        self.assertIn("  count: how many firings in all, with every; firings that merge count "
+                      "too.", schedule)
+        self.assertIn("You can cancel only your own jobs; the user can cancel any job, yours "
+                      "too.", icron.help("cancel"))
+        self.assertIn("Up to 16 messages from your code wait for delivery at a time; past that, "
+                      "main.resume raises, and an error that code doesn't catch fails its run, "
+                      "which ends its job.", icron.help("main.resume"))
+        # The signature has no timing: repeats always meet a turn as above.
+        line = next(line for line in icron.tool().spec.description.splitlines()
+                    if line.startswith("- schedule("))
+        self.assertTrue(line.startswith("- schedule(message=None, *, after=None, at=None, "
+                                        "every=None, count=None): "), line)
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'timing'"):
+            icron.schedule("x", every=60, timing="turn")
 
 
 class LogTests(unittest.TestCase):
