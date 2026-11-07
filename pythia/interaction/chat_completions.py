@@ -18,7 +18,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-from ._http import USER_AGENT
+from ._http import user_agent_for
 from ._provider_text import loads_json
 from ._provider_text import repaired_json_text
 from ._request_gate import RequestCall
@@ -765,7 +765,7 @@ class ChatCompletionsModel:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
+            "User-Agent": user_agent_for(self.binding.endpoint),
         }
         if self.endpoint.api_key is not None:
             headers["Authorization"] = f"Bearer {self.endpoint.api_key}"

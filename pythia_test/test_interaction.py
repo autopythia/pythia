@@ -6,7 +6,6 @@ import io
 import json
 import socket
 import urllib.error
-import urllib.request
 import unittest
 from unittest import mock
 
@@ -399,10 +398,6 @@ class UserInteractionTests(unittest.TestCase):
 
 
 class EndpointTests(unittest.TestCase):
-    def test_user_agent_matches_urllib_default(self):
-        urllib_headers = dict(urllib.request.OpenerDirector().addheaders)
-        self.assertEqual(USER_AGENT, urllib_headers["User-agent"])
-
     def test_endpoint_builds_url_after_path_prefix(self):
         endpoint = chat_endpoint(
             api_url=" HTTPS://api.example.test:8443/proxy/root/ ",

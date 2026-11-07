@@ -27,6 +27,7 @@ from .model_catalog import ResponsesDefaults
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS, SampleParamDefaults
 from .model_catalog import TOKEN_TRACE_LEVELS
 from .model_catalog import TOKEN_TRACE_FIELDS
+from .model_catalog import validate_user_agent
 from .model_catalog import sample_params_route_error
 from .model_catalog import _normalize_profile, parse_json_value
 
@@ -43,6 +44,7 @@ MAX_CATALOG_MODELS = 1024
 # Optional sample_params.* fields were added to version 4 without a version
 # change.
 # The [afk] section was added to version 4 without a version change.
+# endpoint.user_agent was added to version 4 without a version change.
 LATEST_MODEL_CATALOG_VERSION = 4
 _EXTRA_SAMPLE_PARAMS_PREFIX = "extra_sample_params."
 _SAMPLE_PARAMS_PREFIX = "sample_params."
@@ -211,6 +213,15 @@ def _entry(section, values, base):
             if trace is not None and trace not in TOKEN_TRACE_LEVELS:
                 raise _FieldError(f"{key} must be {', '.join(TOKEN_TRACE_LEVELS)}, or null")
             endpoint["token_trace"] = trace
+        elif key == "endpoint.user_agent":
+            # null restores the default, _http.USER_AGENT.
+            agent = _text(value)
+            if agent is not None:
+                try:
+                    validate_user_agent(agent, key)
+                except ValueError as exc:
+                    raise _FieldError(f"{exc}, or null") from None
+            endpoint["user_agent"] = agent
         elif key == "aliases":
             fields[key] = parse_json_value(value)
             if not isinstance(fields[key], list):
@@ -276,6 +287,8 @@ def _entry(section, values, base):
             and endpoint.get("api") == "claude-relay"):
         raise _FieldError("endpoint.rate_limit_error_retries does not apply to endpoint.api "
                           "claude-relay")
+    if endpoint.get("user_agent") is not None and endpoint.get("api") == "claude-relay":
+        raise _FieldError("endpoint.user_agent does not apply to endpoint.api claude-relay")
     if endpoint.get("token_trace") is not None and endpoint.get("api") != "chat-completions":
         raise _FieldError("endpoint.token_trace requires endpoint.api chat-completions")
     if endpoint.get("api") == "chat-completions":

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import warnings
 
+from ._http import USER_AGENT
 from ._prompt import add_prompt_arguments
 from ._request_gate import cancellable_urlopen
 from .chat_completions import ChatCompletionsEndpoint
@@ -35,6 +36,7 @@ from .model_catalog import MODEL_TIMEOUT_FIELDS
 from .model_catalog import PROMPT_CACHING_VALUES
 from .model_catalog import SAMPLE_PARAM_DEFAULT_FIELDS
 from .model_catalog import TOKEN_TRACE_LEVELS
+from .model_catalog import USER_AGENT_EXPECTED, validate_user_agent
 from .model_catalog import parse_json_value, freeze_extra_sample_params, thaw_json
 from .codex_auth import CodexAuth, _resolve_auth_file
 from .model_catalog_config import load_model_catalog
@@ -72,12 +74,20 @@ CLAUDE_RELAY_FIELDS = (
 # Likewise; auto gives them to its Messages roles only.
 MESSAGES_FIELDS = ("endpoint_prompt_caching",)
 # Likewise; auto gives them to its HTTP roles, all but Claude Relay.
-HTTP_FIELDS = ("endpoint_rate_limit_error_retries",)
+HTTP_FIELDS = ("endpoint_rate_limit_error_retries", "endpoint_user_agent")
 # Likewise; auto gives them to every role.
 ERROR_RETRY_OPTION_FIELDS = tuple("endpoint_" + name for name in ERROR_RETRY_FIELDS
                                   if name != "rate_limit_error_retries")
 # Likewise; auto gives them to its Chat Completions roles.
 CHAT_COMPLETIONS_FIELDS = ("endpoint_token_trace",)
+
+
+def _user_agent_argument(text: str):
+    """An ``--endpoint-user-agent`` value: the header's whole value."""
+    try:
+        return validate_user_agent(text, "--endpoint-user-agent")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be {USER_AGENT_EXPECTED}") from None
 
 
 def _error_retries_argument(text: str):
@@ -295,6 +305,9 @@ def render_model_catalog(catalog):
                 caching += f", {name}={getattr(spec.endpoint, name)}"
         if spec.endpoint.token_trace is not None:
             caching += f", token_trace={spec.endpoint.token_trace}"
+        if spec.endpoint.user_agent is not None:
+            # Quoted, as the value may hold commas and spaces.
+            caching += f", user_agent={json.dumps(spec.endpoint.user_agent)}"
         lines.append(f"{spec.name}{aliases}: api={spec.endpoint.api}, model={spec.endpoint.model}, "
                      f"url={spec.endpoint.url}, auth={spec.endpoint.auth}{caching}, "
                      f"source={origin}{settings}")
@@ -429,6 +442,15 @@ def add_endpoint_arguments(parser, *, auto=False):
               "fork's patch 0057 the server then prefills every prompt whole); or none"
               + ("" if auto else "; the CLI's /config endpoint_token_trace changes it later")
               + " (default: the model catalog's endpoint.token_trace, else none)"))
+    parser.add_argument(
+        "--endpoint-user-agent", type=_user_agent_argument, default=argparse.SUPPRESS,
+        metavar="TEXT",
+        help=(("the User-Agent header's whole value, for every role's requests; Claude "
+               "Relay roles, whose native CLI sends its own, ignore it" if auto else
+               "the User-Agent header's whole value, for the model's requests; not for "
+               "Claude Relay, whose native CLI sends its own")
+              + f"; launch-only (default: the model catalog's endpoint.user_agent, else "
+                f"{USER_AGENT})"))
     if not auto:
         parser.add_argument("--endpoint-api-key", dest="api_key", default=None,
                             help="supplied credential; prefer an env:NAME reference")

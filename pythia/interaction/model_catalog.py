@@ -149,6 +149,21 @@ def validate_token_trace(value, name="endpoint.token_trace"):
     return value
 
 
+# endpoint.user_agent's longest value; servers allow far longer headers.
+MAX_USER_AGENT_CHARS = 256
+USER_AGENT_EXPECTED = (f"printable ASCII text, up to {MAX_USER_AGENT_CHARS} characters, "
+                       "without leading or trailing spaces")
+
+
+def validate_user_agent(value, name="endpoint.user_agent"):
+    """A User-Agent header's whole value: printable ASCII, with spaces only
+    inside, so that no line break or other control reaches a request's headers."""
+    if (not isinstance(value, str) or not value or len(value) > MAX_USER_AGENT_CHARS
+            or value != value.strip() or any(not " " <= char <= "~" for char in value)):
+        raise ValueError(f"{name} must be {USER_AGENT_EXPECTED}")
+    return value
+
+
 def parse_json_value(text: str):
     """Strict JSON, also used for structured INI values; never evaluate Python."""
     def pairs(items):
@@ -349,6 +364,9 @@ class EndpointSpec:
     auth_error_retries: Optional[Union[int, str]] = None
     # TOKEN_TRACE_LEVELS; None is none. Not part of the connection identity.
     token_trace: Optional[str] = None
+    # The User-Agent header's whole value (validate_user_agent), for HTTP APIs;
+    # None is the default, _http.USER_AGENT. Not part of the connection identity.
+    user_agent: Optional[str] = None
 
     def __post_init__(self):
         object.__setattr__(self, "api", _normalize_profile(self.api))
@@ -385,6 +403,11 @@ class EndpointSpec:
             validate_token_trace(self.token_trace)
             if self.api != "chat-completions":
                 raise ValueError("endpoint.token_trace requires the Chat Completions API")
+        if self.user_agent is not None:
+            validate_user_agent(self.user_agent)
+            # The native CLI makes the requests, with its own.
+            if self.api == "claude-relay":
+                raise ValueError("endpoint.user_agent does not apply to Claude Relay")
 
     @property
     def environment_variable(self):
@@ -1264,7 +1287,7 @@ class ModelCatalog:
              endpoint_prompt_caching=None, endpoint_error_retries=None,
              endpoint_rate_limit_error_retries=None, endpoint_timeout_error_retries=None,
              endpoint_refusal_error_retries=None, endpoint_auth_error_retries=None,
-             endpoint_token_trace=None):
+             endpoint_token_trace=None, endpoint_user_agent=None):
         if name is not None:
             if not isinstance(name, str):
                 raise TypeError("model name must be a string or None")
@@ -1309,6 +1332,12 @@ class ModelCatalog:
                 raise ValueError("--endpoint-token-trace requires --endpoint-api chat-completions")
             changes["token_trace"] = validate_token_trace(
                 endpoint_token_trace, "--endpoint-token-trace")
+        if endpoint_user_agent is not None:
+            if endpoint.api == "claude-relay":
+                raise ValueError("--endpoint-user-agent does not apply to --endpoint-api "
+                                 "claude-relay")
+            changes["user_agent"] = validate_user_agent(
+                endpoint_user_agent, "--endpoint-user-agent")
         endpoint = replace(endpoint, **changes)
         binding = ModelBinding(
             name, endpoint, spec,
@@ -1352,6 +1381,7 @@ def binding_from_namespace(args, catalog=None):
         **{f"endpoint_{name}": getattr(args, f"endpoint_{name}", None)
            for name in ERROR_RETRY_FIELDS},
         endpoint_token_trace=getattr(args, "endpoint_token_trace", None),
+        endpoint_user_agent=getattr(args, "endpoint_user_agent", None),
         extra_sample_params=getattr(args, "extra_sample_params", None),
     )
     if inferred_supplied and binding.api == "codex" and (

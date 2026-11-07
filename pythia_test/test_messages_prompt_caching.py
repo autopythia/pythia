@@ -515,7 +515,7 @@ class MessagesPromptCachingCLITests(unittest.TestCase):
             "api": "messages", "url": "http://127.0.0.1:9/v1/messages", "model": "fixture",
             "auth": "none", "prompt_caching": "1h",
             **dict.fromkeys(ERROR_RETRY_FIELDS),
-            "token_trace": None,
+            "token_trace": None, "user_agent": None,
         })
 
     def test_catalog_prompt_caching_is_checked(self):

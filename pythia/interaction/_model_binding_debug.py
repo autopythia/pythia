@@ -43,6 +43,9 @@ def _debug_entry(binding):
             # None means none, as for every API but Chat Completions. Added
             # without a version change, likewise.
             "token_trace": binding.endpoint.token_trace,
+            # The User-Agent header; None means the default, _http.USER_AGENT.
+            # Added without a version change, likewise.
+            "user_agent": binding.endpoint.user_agent,
         },
         "limits": {
             name: getattr(binding.limits, name)

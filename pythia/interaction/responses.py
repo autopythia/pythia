@@ -23,7 +23,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-from ._http import USER_AGENT
+from ._http import user_agent_for
 from ._provider_text import loads_json
 from ._provider_text import quoted
 from ._provider_text import repaired_json_text
@@ -1996,7 +1996,7 @@ class _ResponsesModelBase:
         headers = {
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
+            "User-Agent": user_agent_for(self.binding.endpoint),
         }
         if auth is not None:
             headers["Authorization"] = f"Bearer {auth.access_token}"

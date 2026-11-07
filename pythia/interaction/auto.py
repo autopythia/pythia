@@ -554,6 +554,13 @@ class _Session:
                                      b.endpoint, rate_limit_error_retries=retries))
                                  if b.api != "claude-relay" else b)
                              for i, b in self.bindings.items()}
+        agent = self._http_options.get("endpoint_user_agent")
+        if agent is not None:
+            # Launch-only too: every HTTP role's endpoint takes it, and Claude
+            # Relay roles ignore it.
+            self.bindings = {i: (replace(b, endpoint=replace(b.endpoint, user_agent=agent))
+                                 if b.api != "claude-relay" else b)
+                             for i, b in self.bindings.items()}
         retries = {name[len("endpoint_"):]: value
                    for name, value in self._error_retry_options.items()}
         if retries:

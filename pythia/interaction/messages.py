@@ -18,7 +18,7 @@ from typing import Literal
 from typing import Optional
 from typing import Tuple
 
-from ._http import USER_AGENT
+from ._http import user_agent_for
 from ._provider_text import loads_json
 from ._provider_text import quoted
 from ._request_gate import RequestCall
@@ -1157,7 +1157,7 @@ class MessagesModel:
             "Accept": "application/json",
             "Anthropic-Version": self.endpoint.anthropic_version,
             "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
+            "User-Agent": user_agent_for(self.binding.endpoint),
         }
         if "context_management" in payload:
             headers["Anthropic-Beta"] = MESSAGES_COMPACTION_BETA
