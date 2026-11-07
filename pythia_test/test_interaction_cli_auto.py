@@ -9,14 +9,14 @@ import threading
 import unittest
 
 from pythia.interaction import Icron, InteractionConfig, Message, cli
-from pythia.interaction._cli_afk import AUTONOAFK_USAGE, Afk
+from pythia.interaction._cli_afk import AUTONOAFK_USAGE, VIA, Afk
 from pythia.interaction._cli_auto import Auto
 from pythia.interaction.model_catalog import AfkDefaults
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_afk import _AfkCase, _on, _reminder
 from pythia_test.test_interaction_cli_icron import NOW, _Clock, _IcronControllerCase, _enter
 from pythia_test.test_interaction_cli_icron import _exit, _has, _idle_with, _notices, _once
-from pythia_test.test_interaction_cli_icron import _users
+from pythia_test.test_interaction_cli_icron import _until, _users
 
 _AUTO_ON = ("auto: on. Until /noauto, AFK turns on after 30m without a message from you, and "
             "only your messages turn it off.")
@@ -33,6 +33,11 @@ def _auto(state, afk):
 
 def _rules(afk, kind):
     return {cls: (str(rule.when), rule.source) for cls, rule in afk.rules[kind].items()}
+
+
+def _afk_jobs(icron):
+    """AFK's pending jobs, as icron lists them."""
+    return [job.job_id for job in icron.status().jobs if job.via == VIA]
 
 
 class _AutoCase(_AfkCase):
@@ -187,12 +192,104 @@ class NoautoTests(_AutoCase):
             "approval back as they were at /auto. Draft preserved."])
 
 
+class NoautoJobTests(_AutoCase):
+    """/noauto ends auto mode's AFK job, as icron sees it."""
+
+    def stopped(self, *job_ids):
+        """The jobs ended, AFK has none pending, and hours on, nothing fires."""
+        for job_id in job_ids:
+            self.assertEqual(self.job(job_id).state, "cancelled")
+        self.assertEqual(_afk_jobs(self.icron), [])
+        self.clock.now += 5 * 3600
+        self.icron._poke()
+        self.assertFalse(_until(lambda: self.icron.undelivered(), timeout=0.2))
+        self.assertEqual(self.tick(), [])  # nor does a rule turn AFK on
+
+    def yield_on_afk(self):
+        """Main takes AFK's reminder, then yields until its next one."""
+        self.remind()
+        self.icron.begin_turn()
+        self.icron.take_wakes()
+        self.end_turn(kind="yielded")
+        self.assertTrue(_until(lambda: self.icron.status().main_state == "suspended"))
+        self.assertEqual(self.icron.status().suspended_on.job_id, self.afk.job_id)
+
+    def test_noauto_ends_afk_s_job_wherever_its_reminder_is(self):
+        # Between reminders.
+        self.enter("/auto")
+        job_id = self.afk.job_id
+        self.assertEqual(_afk_jobs(self.icron), [job_id])
+        self.assertEqual(self.enter("/noauto"),
+                         ["auto: off after 0s. AFK is as it was at /auto: off."])
+        self.stopped(job_id)
+        # Due, not yet delivered: the reminder is withdrawn, and the queued
+        # marker delivers nothing.
+        self.enter("/auto")
+        job_id = self.afk.job_id
+        self.remind()
+        cli._queue_wake(self.state)
+        self.enter("/noauto")
+        self.assertEqual(self.icron.undelivered(), 0)
+        self.assertIsNone(self.icron.take_wakes())
+        self.stopped(job_id)
+        # Taken by the running turn: the job ends at once, though its run
+        # lasts until the turn ends.
+        self.enter("/auto")
+        job_id = self.afk.job_id
+        self.remind()
+        self.icron.begin_turn()
+        self.icron.take_wakes()
+        self.assertEqual(self.job(job_id).state, "running")
+        self.enter("/noauto")
+        self.stopped(job_id)
+        self.end_turn()
+        self.stopped(job_id)
+        # Started over by a second /auto, ended by a message, and on again by
+        # auto mode's rule: each job ends, the last at /noauto.
+        self.enter("/auto")
+        first = self.afk.job_id
+        self.enter("/auto Again.")
+        again = self.afk.job_id
+        self.enter("Status?")
+        (notice,) = self.tick(1800)
+        self.assertTrue(notice.startswith("afk: on after 30m without a message (/auto)"))
+        job_id = self.afk.job_id
+        self.assertEqual(len({first, again, job_id}), 3)
+        self.enter("/noauto")
+        self.stopped(first, again, job_id)
+
+    def test_main_that_yielded_until_afk_s_reminder_then_waits_for_your_message(self):
+        self.enter("/auto")
+        job_id = self.afk.job_id
+        self.yield_on_afk()
+        self.assertEqual(self.enter("/noauto"), [
+            "auto: off after 1s. AFK is as it was at /auto: off; main now waits for your "
+            "message."])
+        self.assertEqual(self.icron.status().main_state, "quiescent")
+        self.stopped(job_id)
+
+    def test_afk_on_again_wakes_main_that_yielded(self):
+        self.turn_on("/afk Lunch.")
+        self.enter("/auto Next.")
+        self.yield_on_afk()
+        notices = self.enter("/noauto")
+        job_id = self.afk.job_id
+        self.assertEqual(notices, [
+            f"auto: off after 1s. AFK is as it was at /auto: on since 12:00:00 (job {job_id})."])
+        self.assertEqual(_afk_jobs(self.icron), [job_id])
+        # So main doesn't wait for your message: AFK's first reminder wakes it.
+        self.remind()
+        wakeup = self.icron.take_wakes()
+        self.assertEqual([delivery.job.job_id for delivery in wakeup.deliveries], [job_id])
+
+
 class SnapshotTests(_AutoCase):
     def test_afk_that_was_on_at_auto_is_on_again_though_auto_sent_a_message(self):
-        self.turn_on("/afk Lunch.")  # on since 12:00, with its text
+        before = self.turn_on("/afk Lunch.")  # on since 12:00, with its text
         self.clock.now += 600
         self.assertEqual(self.enter("/auto Next, the docs."),
                          [_AUTO_ON, _on(self.afk.job_id, head="afk: on again")])
+        auto_job = self.afk.job_id
         self.clock.now += 600
         notices = self.enter("/noauto")
         job_id = self.afk.job_id
@@ -200,6 +297,10 @@ class SnapshotTests(_AutoCase):
             f"auto: off after 10m. AFK is as it was at /auto: on since 12:00:00 (job {job_id})."])
         self.assertEqual(self.job(job_id).message, _reminder(NOW, "Lunch."))
         self.assertEqual((self.afk.since, self.afk.text), (NOW, "Lunch."))
+        # A job of its own: auto mode's ended, as did the one it replaced.
+        self.assertEqual([self.job(other).state for other in (before, auto_job)],
+                         ["cancelled", "cancelled"])
+        self.assertEqual(_afk_jobs(self.icron), [job_id])
 
     def test_afk_whose_end_passed_in_auto_mode_is_off_after_noauto(self):
         self.state.afk = self.afk = Afk(self.icron, AfkDefaults(auto_disable="12:30"),
@@ -240,9 +341,13 @@ class RebootTests(_AutoCase):
                          ({"after": ("30m", "/auto"), "daily": ("18:00", "/autoafk")}, {}))
         self.assertIn("auto: still on, carried over the reboot; /noauto ends it.",
                       _notices(state))
+        carried_job = afk.job_id  # AFK, carried over with auto mode
+        self.assertEqual(_afk_jobs(self.icron), [carried_job])
         self.assertTrue(auto.noauto_command("/noauto"))
         self.assertEqual(state.require_tool_approval, "exec")
         self.assertEqual(_rules(afk, "off"), {"daily": ("13:00", "[afk] auto_disable")})
+        self.assertEqual(self.job(carried_job).state, "cancelled")
+        self.assertEqual(_afk_jobs(self.icron), [])
 
     def test_without_afk_s_rules_auto_mode_gets_its_profile_again(self):
         self.enter("/auto")

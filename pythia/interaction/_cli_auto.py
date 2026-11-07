@@ -90,7 +90,8 @@ class Auto:
 
     def noauto_command(self, line: str) -> bool:
         """/noauto: auto mode off, and AFK and the approval mode back as they
-        were at /auto. True once the draft is used."""
+        were at /auto, which ends auto mode's AFK job. True once the draft is
+        used."""
         if line.split() != ["/noauto"]:
             self._notice(f"{NOAUTO_USAGE} Draft preserved.")
             return False
@@ -99,9 +100,15 @@ class Auto:
             return True
         saved, since = self.saved, self.since
         self.on, self.since, self.saved = False, None, None
+        icron = self.afk.icron
+        suspended = icron.main.state == "suspended"
         state = self.afk.load(saved)
         self._set_approval(saved["approval"])
-        text = f"auto: off after {_span(self.afk.icron.clock() - since)}. AFK is as it was at "
+        # Main that yielded until AFK's next reminder can't wake up now, unless
+        # AFK is on again, as it was at /auto: its first reminder wakes main.
+        if suspended and icron.main.state != "suspended" and self.afk.job_id is None:
+            state += "; main now waits for your message"
+        text = f"auto: off after {_span(icron.clock() - since)}. AFK is as it was at "
         text += f"/auto: {state}."
         if saved["approval"]:
             text += (" Tool calls need approval again"
