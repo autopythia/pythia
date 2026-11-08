@@ -26,6 +26,7 @@ from pythia.interaction._cli_editor import Editor
 from pythia.interaction.claude_relay._mcp import NativeToolRejected
 from pythia.interaction.items import SampleMetadata
 from pythia.interaction.loop import kernel
+from pythia.interaction.model import ModelTransportError
 from pythia_test.test_interaction import _FakeHTTPResponse, _ScriptedOpener
 from pythia_test.test_interaction_cli import _ControllerTestCase, _Model, _Terminal, _answer
 
@@ -127,26 +128,51 @@ class _Adapter(_Model):
         return self.adapter.sample(context, tools=tools, sample_params=sample_params)
 
 
+class _RetiringModel(_Model):
+    """A scripted model whose retire() reaches the sample in flight, as a Claude
+    relay continuation's does: a step waits for it, then fails (_retired_step)."""
+
+    def __init__(self, path, *outcomes):
+        super().__init__(path, *outcomes)
+        self.retired = threading.Event()
+
+    def retire(self):
+        self.retired.set()
+
+
+def _retired_step(test, model):
+    """A sample that would run on, until a cancel retires the model."""
+    def step(context):
+        test.assertTrue(model.retired.wait(3))
+        raise ModelTransportError("Claude Relay continuation retired", failure=ModelFailure(
+            "ModelTransportError", "Claude Relay continuation retired", provider="claude-relay"))
+    return step
+
+
 class CancelInputTests(unittest.TestCase):
     """/cancel stops the running turn's automatic retries, and only those."""
 
     def test_cancel_needs_an_automatic_retry_in_progress_and_no_arguments(self):
         for phase in ("idle", "sampling", "executing tools", "failed"):
-            with self.subTest(phase=phase):
-                state = cli._UIState(ready=True)
-                state.set_phase(phase)
-                submit(state, "/cancel")
-                self.assertEqual(_notices(state), ["No automatic retry to cancel."])
-                self.assertFalse(state.retry_cancel.is_set())
-                self.assertEqual(tuple(state.pending), ())
+            for command in ("/cancel", "/cancel!", "/cancel!!"):
+                with self.subTest(phase=phase, command=command):
+                    state = cli._UIState(ready=True)
+                    state.set_phase(phase)
+                    submit(state, command)
+                    self.assertEqual(_notices(state), ["No automatic retry to cancel."])
+                    self.assertFalse(state.retry_cancel.is_set())
+                    self.assertEqual(tuple(state.pending), ())
         state = cli._UIState(ready=True)
         state.set_phase("retrying")
         submit(state, "/cancel now")
         self.assertEqual(_notices(state), ["Usage: /cancel (no arguments; single line)."])
-        submit(state, "/cancel!")  # it takes no bangs
+        submit(state, "/cancel!! now")
+        self.assertEqual(_notices(state), ["Usage: /cancel!! (no arguments; single line)."])
+        submit(state, "/cancelled")  # not a level of /cancel
         [notice] = _notices(state)
         self.assertTrue(notice.startswith("Unsupported command. Use /retry, /continue, /cancel, "),
                         notice)
+        self.assertIn("(/steer, /reboot, /cancel, /exit, and /quit take ! or !!", notice)
         self.assertFalse(state.retry_cancel.is_set())
 
     def test_cancel_takes_effect_at_once_until_the_sample_succeeds_or_the_turn_ends(self):
@@ -174,6 +200,64 @@ class CancelInputTests(unittest.TestCase):
         state.set_phase("retrying")
         cli._end_auto_retry(state)  # a sample succeeded
         self.assertFalse(state.auto_retrying)
+
+    def test_cancel_bang_bang_also_cancels_the_retried_attempt_in_flight(self):
+        state = cli._UIState(ready=True)
+        state.set_phase("retrying")
+        state.set_phase("sampling")  # the retried attempt
+        cancels = []
+        with state.preemption.operation(lambda: cancels.append("retired"), retry=True):
+            submit(state, "/cancel!!")
+        self.assertEqual(cancels, ["retired"])
+        self.assertTrue(state.retry_cancel.is_set())
+        shown = _notices(state)  # the call, its arguments, and its result
+        self.assertEqual(shown[1], '{"urgency":2}')
+        self.assertTrue(shown[-1].endswith(
+            "[ok]\nStopped the automatic retries and cancelled the attempt in flight."), shown)
+        [entry] = state.pending
+        self.assertEqual((entry.call.call.name, entry.call.call.arguments_json),
+                         ("cancel", '{"urgency":2}'))
+        submit(state, "/cancel!!")
+        self.assertEqual(_notices(state), ["The automatic retries are already cancelled."])
+        self.assertEqual(cancels, ["retired"])
+
+    def test_a_plain_cancel_says_the_attempt_in_flight_finishes_and_bangs_escalate(self):
+        state = cli._UIState(ready=True)
+        state.set_phase("retrying")
+        state.set_phase("sampling")
+        state.phase_started -= 42
+        cancels = []
+        with state.preemption.operation(lambda: cancels.append("retired"), retry=True):
+            submit(state, "/cancel")
+            result = _notices(state)[1]
+            self.assertRegex(result, r"\[ok\]\nStopped the automatic retries; the attempt in "
+                                     r"flight \(4\d s so far\) finishes first\. /cancel!! "
+                                     r"cancels it too\.$")
+            self.assertEqual(cancels, [])  # it finishes
+            submit(state, "/cancel!")  # the same as /cancel
+            self.assertEqual(_notices(state), ["The automatic retries are already cancelled."])
+            submit(state, "/cancel!!")  # still cancels
+            self.assertTrue(_notices(state)[-1].endswith("cancelled the attempt in flight."))
+        self.assertEqual(cancels, ["retired"])
+        self.assertEqual([entry.call.call.arguments_json for entry in state.pending],
+                         ["{}", '{"urgency":2}'])
+        # During the wait, /cancel!! ends it as /cancel does.
+        state = cli._UIState(ready=True)
+        state.set_phase("retrying")
+        with state.preemption.operation(lambda: cancels.append("woken"), retry=True):
+            submit(state, "/cancel!!")
+        self.assertEqual(cancels, ["retired", "woken"])
+        self.assertTrue(_notices(state)[-1].endswith("[ok]\nStopped the automatic retries."))
+
+    def test_a_queued_command_says_it_waits_and_outlives_a_failure(self):
+        state = cli._UIState(ready=True)
+        state.set_phase("sampling")
+        submit(state, "/compact")
+        self.assertEqual(_notices(state), ["/compact is queued: it runs when the work in "
+                                           "progress ends, even if that fails."])
+        state = cli._UIState(ready=True, phase="idle")
+        submit(state, "/compact")
+        self.assertEqual(_notices(state), [])  # it runs at once
 
 
 class AutomaticRetryTests(_ControllerTestCase):
@@ -372,6 +456,37 @@ class AutomaticRetryTests(_ControllerTestCase):
         saved = load_interaction_save(full_log(self.path))
         self.assertEqual(sum(isinstance(item, ModelFailure) for item in saved), 2)
 
+    async def test_cancel_bang_bang_during_a_retried_attempt_ends_the_turn_at_once(self):
+        model = _RetiringModel(self.path, _rate_limited(), None, _answer("never"))
+        model.outcomes[1] = _retired_step(self, model)
+        cancelled = False
+
+        def frame(terminal, editor, status):
+            nonlocal cancelled
+            if len(model.calls) == 2 and status.startswith("sampling") and not cancelled:
+                cancelled = True
+                terminal.submit("/cancel!!")
+            elif cancelled and status in ("failed", "idle"):
+                terminal.key("c-d")
+        terminal = _Terminal(frame)
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
+            self.assertEqual(await self._run(model, terminal, [
+                "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+            ]), 1)
+        self.assertEqual(len(model.calls), 2)  # nothing after the cancelled attempt
+        shown = [item.text for item in terminal.items]
+        self.assertEqual(shown.count("[cli] Automatic retry cancelled. Use /retry to try again."), 1)
+        # The turn ends with the failure that the cancelled attempt retried.
+        self.assertIn("[cli] ModelRateLimitError: Chat Completions HTTP 429: slow down", shown)
+        saved = load_interaction_save(full_log(self.path))
+        self.assertEqual([item.error_code for item in saved if isinstance(item, ModelFailure)],
+                         [None, "preempted_by_cancel"])
+        [call] = [item for item in saved if isinstance(item, UserToolCall)]
+        self.assertEqual((call.call.name, call.call.arguments_json), ("cancel", '{"urgency":2}'))
+        [result] = [item for item in saved if isinstance(item, UserToolResult)]
+        self.assertEqual(result.result.output,
+                         "Stopped the automatic retries and cancelled the attempt in flight.")
+
     async def test_a_provider_s_long_retry_after_is_not_followed_yet(self):
         # The turn loop's own schedule sets the wait, however long it asks.
         model = _Model(self.path, _rate_limited(retry_after=900.5), _answer("recovered"))
@@ -414,6 +529,129 @@ class AutomaticRetryTests(_ControllerTestCase):
         saved = load_interaction_save(full_log(self.path))
         self.assertEqual([item.recovery for item in saved if isinstance(item, SampleMetadata)],
                          [("http_503_retry",)])
+
+
+class QueueAfterFailureTests(_ControllerTestCase):
+    """What a failed turn does with the input queued meanwhile: all of it stays
+    after the user's /cancel, and commands stay after any failure."""
+
+    def compactor(self):
+        compactor = mock.Mock()
+        compactor.compact.return_value = CompactionResult(
+            (ContextPrefix((Message("user", "summary"),)),), protocol="pi",
+        )
+        return compactor
+
+    async def _cancel_then_queue(self, typed, released, *, answers=()):
+        """A retried attempt in flight; then /cancel and ``typed``; the attempt
+        fails once ``released(status)`` holds, which ends the turn. Returns
+        the model, the terminal and the compactor."""
+        go = threading.Event()
+
+        def second_attempt(context):
+            self.assertTrue(go.wait(3))
+            raise _rate_limited()
+        model = _Model(self.path, _rate_limited(), second_attempt, *answers)
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            texts = [item.text for item in terminal.items]
+            if step == 0 and len(model.calls) == 2 and status.startswith("sampling"):
+                step = 1
+                terminal.submit("/cancel")
+                terminal.submit(typed)
+            elif step == 1 and released(status):
+                step = 2
+                go.set()  # the attempt fails, and the turn with it
+            elif step == 2 and status == "idle" and "[cli] Automatic retry cancelled. " \
+                    "Use /retry to try again." in texts:
+                step = 3
+                terminal.key("c-d")
+        terminal = _Terminal(frame)
+        compactor = self.compactor()
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)), \
+                patch_compaction(cli, "create_default_compactor", return_value=compactor):
+            await self._run(model, terminal, [
+                "--resume=False", "--prompt", "original", "--enable-default-tools=False",
+            ])
+        self.assertEqual(step, 3)
+        return model, terminal, compactor
+
+    async def test_a_compact_queued_during_a_cancelled_retry_runs_after_the_failure(self):
+        model, terminal, compactor = await self._cancel_then_queue(
+            "/compact", lambda status: "queued=1" in status)
+        compactor.compact.assert_called_once()
+        self.assertEqual(len(model.calls), 2)
+        shown = [item.text for item in terminal.items]
+        self.assertIn("[cli] /compact is queued: it runs when the work in progress ends, even if "
+                      "that fails.", shown)
+        self.assertIn("[cli] /compact runs next.", shown)
+        self.assertLess(shown.index("[cli] /compact runs next."),
+                        shown.index("[cli] Automatic retry cancelled. Use /retry to try again."))
+        saved = list(load_interaction_save(full_log(self.path)))
+        names = [item.call.name for item in saved if isinstance(item, UserToolCall)]
+        self.assertEqual(names, ["cancel", "compact"])
+        last_failure = max(n for n, item in enumerate(saved) if isinstance(item, ModelFailure))
+        compact = next(n for n, item in enumerate(saved)
+                       if isinstance(item, UserToolCall) and item.call.name == "compact")
+        self.assertLess(last_failure, compact)
+
+    async def test_text_typed_during_a_cancelled_retry_is_sent_after_the_failure(self):
+        model, terminal, compactor = await self._cancel_then_queue(
+            "also this", lambda status: "steers=1" in status, answers=(_answer("answered"),))
+        compactor.compact.assert_not_called()
+        self.assertEqual(len(model.calls), 3)  # the steer starts the next turn
+        context, _tools, _params = model.calls[2]
+        messages = [item for item in context.items if isinstance(item, Message)]
+        self.assertEqual(messages[-1], Message("user", "also this"))
+        self.assertIsInstance(context.items[-1], UserInteractionBoundary)  # a turn of its own
+        shown = [item.text for item in terminal.items]
+        self.assertIn("[cli] 1 queued message runs next.", shown)
+        self.assertFalse(any("Discarded" in text for text in shown), shown)
+
+    async def test_an_unexpected_failure_keeps_a_queued_compact_and_discards_text(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def fail(context):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            raise ModelTimeoutError("timed out")
+        model = _Model(self.path, fail)
+        step = 0
+
+        def frame(terminal, editor, status):
+            nonlocal step
+            texts = [item.text for item in terminal.items]
+            if step == 0 and entered.is_set():
+                step = 1
+                terminal.submit("/compact")
+                terminal.submit("queued task")  # behind a command: the next query
+            elif step == 1 and "queued=2" in status:
+                step = 2
+                release.set()
+            elif step == 2 and status == "idle" and any(
+                    text.startswith("[user-tool-ret]  compact") for text in texts):
+                step = 3
+                terminal.key("c-d")
+        terminal = _Terminal(frame)
+        compactor = self.compactor()
+        try:
+            with patch_compaction(cli, "create_default_compactor", return_value=compactor):
+                await self._run(model, terminal, ["--resume=False", "--prompt", "hello",
+                                                  "--enable-default-tools=False"])
+        finally:
+            release.set()
+        self.assertEqual(step, 3)
+        compactor.compact.assert_called_once()
+        shown = [item.text for item in terminal.items]
+        self.assertIn("[cli] Discarded after the failure, not sent: 1 queued message; submit it "
+                      "again explicitly. /compact runs next.", shown)
+        self.assertIn(HINT, shown)
+        saved = load_interaction_save(full_log(self.path))
+        self.assertNotIn(Message("user", "queued task"), saved.items)
+        self.assertEqual([item.call.name for item in saved if isinstance(item, UserToolCall)],
+                         ["compact"])
 
 
 class RetryControllerTests(_ControllerTestCase):
@@ -685,7 +923,9 @@ class RetryControllerTests(_ControllerTestCase):
             release.set()
         shown = [i.text for i in terminal.items]
         self.assertLess(shown.index("[cli] ModelTimeoutError: timed out"), shown.index(HINT))
-        self.assertLess(next(n for n, text in enumerate(shown) if "Queued queries discarded" in text), shown.index(HINT))
+        discarded = ("[cli] Discarded after the failure, not sent: 1 queued message; submit it "
+                     "again explicitly.")
+        self.assertLess(shown.index(discarded), shown.index(HINT))
 
 
 class RetryAuthenticationTests(_ControllerTestCase):

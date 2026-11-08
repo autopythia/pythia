@@ -1954,6 +1954,37 @@ class RuntimeTests(unittest.TestCase):
             self.assertNotIn("(1/8)", session.status(1))
             self.assertEqual(session.cancel_retry(1), "No automatic retry to cancel in #1 (main).")
 
+    def test_cancel_bang_bang_also_cancels_the_retried_attempt_in_flight(self):
+        session = self.session({}, worker_board=False)
+        host = auto._AutoHost(session, 1)
+        session._phase(1, "retrying")
+        session._phase(1, "sampling")  # the retried attempt
+        cancels = []
+        with host.preemptible(lambda: cancels.append("retired"), retry=True):
+            self.assertEqual(session.cancel_retry(1), (
+                "Stopped the automatic retries in #1 (main); the attempt in flight finishes "
+                "first. /cancel!! cancels it too."))
+            self.assertEqual(cancels, [])
+            self.assertEqual(session.cancel_retry(1, auto.Urgency.IMMEDIATE),
+                             "The automatic retries in #1 (main) are already cancelled.")
+            selected, items, stop = auto._local_command("/cancel!!", 1, session)
+            self.assertEqual((selected, stop), (1, None))
+            self.assertEqual([item.text for item in items], [
+                "Stopped the automatic retries in #1 (main) and cancelled the attempt in flight."])
+            self.assertEqual(session.cancel_retry(1, auto.Urgency.PREEMPT),
+                             "The automatic retries in #1 (main) are already cancelled.")
+        self.assertEqual(cancels, ["retired"])
+        self.assertTrue(host.retry_cancelled())
+        # A first attempt is no retry's: /cancel!! has nothing to cancel there.
+        with host.preemptible(lambda: cancels.append("first")):
+            self.assertEqual(session.cancel_retry(1, auto.Urgency.PREEMPT),
+                             "The automatic retries in #1 (main) are already cancelled.")
+        self.assertEqual(cancels, ["retired"])
+        with self.assertRaisesRegex(ValueError, r"^Usage: /cancel!! \(no arguments; single line\)\.$"):
+            auto._local_command("/cancel!! now", 1, session)
+        with self.assertRaisesRegex(ValueError, r"\(/steer, /cancel, /exit, and /quit take ! or !!"):
+            auto._local_command("/cancelled", 1, session)
+
     def test_cancel_ends_main_s_rate_limit_wait_and_its_task(self):
         error = ModelRateLimitError("Messages HTTP 429: slow down", failure=ModelFailure(
             "rate_limit", "Messages HTTP 429: rate limited", http_status=429, attempt_count=3))

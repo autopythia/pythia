@@ -42,6 +42,14 @@ an automatic-retry policy, after a notice and a wait each time
 failure too (``MissingFinalText``). So the loop's own samples ask HTTP
 adapters for no retries of their own (``SampleParams.transient_retries``);
 compaction keeps them.
+
+The user can stop those retries (``TurnHost.retry_cancelled``, the CLI's
+/cancel): the wait ends, and a retried attempt in flight finishes, but no
+retry follows it. Each retried attempt, and each wait, is a preemptible
+operation marked as a retry (``preemptible(retry=True)``), which /cancel!!
+cancels too (``Preemption.cancel_retry``): the turn then ends at once, with
+the failure that the attempt retried. A sample that any preempting command
+cancelled saves that command with its failure (``CANCELLED_ERROR_CODES``).
 """
 
 from __future__ import annotations
@@ -85,6 +93,9 @@ from ..model import retire_model
 from ..model_catalog import DEFAULT_ERROR_RETRIES
 from ..model_catalog import ERROR_RETRIES_UNBOUNDED
 from ..model_catalog import error_retries_field
+from .preemption import CANCEL_RETRY
+from .preemption import CANCEL_STEER
+from .preemption import CANCEL_STOP
 from .preemption import NOT_PREEMPTIBLE
 
 
@@ -105,6 +116,15 @@ AUTO_RETRY_DELAYS_SECONDS = (2, 2, 5, 10, 20, 30)
 # The failure that a final answer without text records.
 EMPTY_RESPONSE = "empty_response"
 EMPTY_RESPONSE_MESSAGE = "Model returned no final assistant text."
+# A sample's saved failure, once a preempting command cancelled it in flight
+# (the operation's cancel_reason), names that command as its error code: a
+# steer (/steer!!), a stop (/exit!!, a later Ctrl-C), or /cancel!!, which also
+# ends the turn's automatic retries.
+CANCELLED_ERROR_CODES = {
+    CANCEL_STEER: "preempted_by_steer",
+    CANCEL_STOP: "preempted_by_stop",
+    CANCEL_RETRY: "preempted_by_cancel",
+}
 # How often a retry's wait checks whether something should end it early.
 _WAIT_POLL_SECONDS = 0.25
 
@@ -331,13 +351,17 @@ class TurnHost:
         after a coldstart compaction with ``compaction_coldstart_reboot``.
         """
 
-    def preemptible(self, cancel):
+    def preemptible(self, cancel, *, retry=False):
         """Bracket one sample or tool call; ``cancel`` (or None) ends it early.
 
         Returns a context manager whose ``skipped`` is true when the operation
         must not start (input came after the interrupt point), and whose
-        ``cancelled`` is true once ``cancel`` was started from another thread.
-        The default never skips or cancels.
+        ``cancelled`` is true once ``cancel`` was started from another thread,
+        with ``cancel_reason`` saying by what (``preemption.CANCEL_STEER``,
+        ``CANCEL_STOP`` or ``CANCEL_RETRY``). ``retry`` marks an automatic
+        retry's attempt, or the wait before one: the only operations that the
+        host's retry cancel (the CLI's /cancel!!) cancels. The default never
+        skips or cancels.
         """
         return NOT_PREEMPTIBLE
 
@@ -375,8 +399,11 @@ class TurnHost:
 
         The loop asks before each automatic retry and during its wait; the
         failure then ends the turn, ``RetryState.CANCELLED``. The host resets
-        it, as the CLI does when a sample succeeds or a turn starts. The
-        default host never cancels.
+        it, as the CLI does when a sample succeeds or a turn starts. A host
+        may also cancel the retried attempt in flight (/cancel!!, through
+        ``preemptible``'s retry operations); the loop then ends the turn at
+        once, with the failure that the attempt retried. The default host
+        never cancels.
         """
         return False
 
@@ -443,6 +470,9 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
     # the metadata of the attempt that succeeds.
     attempts = {}
     recovery = []
+    # The failure that the current attempt retries, if it is an automatic
+    # retry's: what the turn ends with if /cancel!! cancels the attempt.
+    retried = None
     while config.max_samples is None or samples < config.max_samples:
         if host.stop_requested():
             return STOPPED
@@ -451,6 +481,13 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 compact(context, model, environment, config, host, sample_params)
             except _CompactionStopped:
                 return STOPPED
+        if retried is not None and host.retry_cancelled():
+            # The user stopped the retries after the wait ended, before this
+            # retried attempt started (during a compaction, say, or after a
+            # preempting steer): none starts. Queued steers wait as queries.
+            _cancel_retried(context, retried, host, config, attempts)
+            host.retryable_failure()
+            raise retried
         answer = host.interrupt()
         if answer is Interrupt.STOP:
             return STOPPED
@@ -459,7 +496,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             host.show(render_interaction_items(answer.messages))
         if host.reboot_requested():
             return STOPPED  # the restarted program continues the turn
-        operation = host.preemptible(_retirer(model))
+        operation = host.preemptible(_retirer(model), retry=retried is not None)
         try:
             with operation:
                 if operation.skipped:
@@ -482,6 +519,9 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
             # rest end the turn with /retry offered. Compaction retries its
             # own requests (run_compaction).
             stopping, cancelled = host.stop_requested(), operation.cancelled
+            reason = getattr(operation, "cancel_reason", None) if cancelled else None
+            if cancelled:
+                _note_cancel(exc, reason)
             if stopping or cancelled or exc.retry_state is not RetryState.ELIGIBLE:
                 record_sample_failure(context, exc, host)
             if stopping or host.stop_requested():
@@ -489,6 +529,14 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 # the turn may sample no more: no retry or recovery.
                 return STOPPED
             if cancelled:
+                if reason == CANCEL_RETRY and retried is not None:
+                    # /cancel!! cancelled a retried attempt: the turn ends at
+                    # once, as the attempt's own failure would have ended it
+                    # after /cancel, with the failure that it retried, and
+                    # /retry offered.
+                    _cancel_retried(context, retried, host, config, attempts)
+                    host.retryable_failure()
+                    raise retried
                 # A preempting steer cancelled it: not a failure, and not
                 # counted. The steer is delivered at the interrupt point.
                 continue
@@ -503,6 +551,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                     # previous host tool batch.
                     attempts[policy.name] = attempt + 1
                     recovery.append(label)
+                    retried = exc
                     continue
             if (isinstance(exc, ModelContextWindowError) and not overflow_recovered
                     and config.enable_auto_compaction and uses_host_auto_compaction(model)):
@@ -537,6 +586,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                  and not (text and text.strip()))
         samples += 1
         previous, attempts = attempts, {}
+        retried = None
         if recovery:
             # In order: the loop's retries came before this attempt's own
             # recovery (such as a Codex credential reload).
@@ -573,6 +623,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                     samples -= 1
                     attempts[policy.name] = attempt + 1
                     recovery.append(label)
+                    retried = exc
                     continue
                 host.retryable_failure()
                 raise exc
@@ -669,6 +720,29 @@ def record_sample_failure(context, exc: ModelError, host: TurnHost, *,
                         for call in calls)
         host.append(context, results)
         host.show(render_interaction_items(results, source_calls=calls))
+
+
+def _note_cancel(exc: ModelError, reason: Optional[str]) -> None:
+    """Save what cancelled a sample in flight with its failure, as its error
+    code (CANCELLED_ERROR_CODES): a bare "continuation retired" or "request
+    cancelled" doesn't say."""
+    code = CANCELLED_ERROR_CODES.get(reason)
+    if code is not None and exc.failure is not None:
+        exc.failure = replace(exc.failure, error_code=code)
+
+
+def _cancel_retried(context, failure: ModelError, host: TurnHost, config, attempts) -> None:
+    """/cancel!! cancelled the attempt that retried ``failure``: settle the
+    failure CANCELLED, as ``_auto_retry`` settles one after /cancel, and
+    trace the decision. The failure itself was saved when it was retried, and
+    the cancelled attempt's own failure just now."""
+    policy = auto_retry_policy(failure, config)
+    with host.trace("sample_retry", context_revision=len(context), policy=policy.name,
+                    attempt=attempts.get(policy.name, 1),
+                    error_code=failure.failure.error_code if failure.failure else None,
+                    retry_after_seconds=getattr(failure, "retry_after_seconds", None),
+                    retry_state=RetryState.CANCELLED.value, delay_seconds=None):
+        failure.retry_state = RetryState.CANCELLED
 
 
 def _auto_retry(context, exc: ModelError, host: TurnHost, policy: AutoRetryPolicy,
@@ -843,14 +917,15 @@ def _wait_to_auto_retry(host: TurnHost, seconds: float) -> None:
 
     The wait is a preemptible operation, as a sample is: a flush or stop at
     IMMEDIATE or above that came first skips it, and one at PREEMPT ends it
-    through its cancel. Unlike a sample, it also ends early, within
-    ``_WAIT_POLL_SECONDS``, once nothing would come of waiting on: a stop or a
-    reboot at any level, flushed steers (``should_steer``), or the user's
-    cancel (``retry_cancelled``). A plain steer waits, then goes in before the
-    next attempt. A host that doesn't preempt (the default) waits it out.
+    through its cancel, as /cancel!! does (it is a retry's operation). Unlike a
+    sample, it also ends early, within ``_WAIT_POLL_SECONDS``, once nothing
+    would come of waiting on: a stop or a reboot at any level, flushed steers
+    (``should_steer``), or the user's cancel (``retry_cancelled``). A plain
+    steer waits, then goes in before the next attempt. A host that doesn't
+    preempt (the default) waits it out.
     """
     woken = threading.Event()
-    operation = host.preemptible(woken.set)
+    operation = host.preemptible(woken.set, retry=True)
     with operation:
         if operation.skipped:
             return

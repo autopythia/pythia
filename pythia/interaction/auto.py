@@ -457,9 +457,9 @@ class _AutoHost(TurnHost):
     def should_steer(self):
         return self._index == 1 and self._session._preemption[1].due()
 
-    def preemptible(self, cancel):
+    def preemptible(self, cancel, *, retry=False):
         # Every role: a preempting stop cancels each context's operation.
-        return self._session._preemption[self._index].operation(cancel)
+        return self._session._preemption[self._index].operation(cancel, retry=retry)
 
     def after_sample(self, model, sample):
         # The sample succeeded: its automatic retries, if any, are over.
@@ -627,10 +627,12 @@ class _Session:
         # Each context's automatic retry (the turn loop's own, after a failure
         # it may sample again): in progress from the first "retrying" wait of
         # a sample until a sample succeeds or the turn ends (a phase in
-        # _BETWEEN_TURNS_PHASES); and whether /cancel stopped it (cancel_retry).
-        # Guarded by _changed.
+        # _BETWEEN_TURNS_PHASES); whether /cancel stopped it (cancel_retry),
+        # and at which level (/cancel!! after /cancel still cancels the attempt
+        # in flight). Guarded by _changed.
         self._auto_retrying = {i: False for i in self.roles}
         self._retry_cancel = {i: threading.Event() for i in self.roles}
+        self._retry_cancel_level = {i: None for i in self.roles}
         # Its latest (failed, attempts), as its notice says, shown with the
         # context's status while it waits and while the retried sample runs
         # (TurnHost.retry_progress); None once it is over. Guarded by _changed.
@@ -923,6 +925,7 @@ class _Session:
                 # A /cancel applies to the turn it came in.
                 self._auto_retrying[index] = False
                 self._retry_cancel[index].clear()
+                self._retry_cancel_level[index] = None
                 self._retry_progress[index] = None
             self._changed.notify_all()
 
@@ -932,6 +935,7 @@ class _Session:
         with self._changed:
             self._auto_retrying[index] = False
             self._retry_cancel[index].clear()
+            self._retry_cancel_level[index] = None
             self._retry_progress[index] = None
 
     def _set_retry_progress(self, index, progress):
@@ -939,21 +943,36 @@ class _Session:
             self._retry_progress[index] = progress
             self._changed.notify_all()
 
-    def cancel_retry(self, index):
-        """/cancel for context ``index``: stop its turn's automatic retries.
+    def cancel_retry(self, index, level=Urgency.QUEUED):
+        """/cancel, /cancel! or /cancel!! (``level``) for context ``index``:
+        stop its turn's automatic retries.
 
         Accepted while one is in progress: a wait ends at once, and a retried
-        attempt in flight finishes, but no retry follows it; the failure then
-        ends the turn. Returns the notice to show.
+        attempt in flight finishes, but no retry follows it; /cancel!! also
+        cancels that attempt (Preemption.cancel_retry), and the turn ends at
+        once. The failure then ends the turn. A /cancel!! after a /cancel
+        still cancels. Returns the notice to show.
         """
         label = f"#{index} ({self.names[index]})"
+        level = Urgency(level)
         with self._changed:
             if not self._auto_retrying[index]:
                 return f"No automatic retry to cancel in {label}."
-            if self._retry_cancel[index].is_set():
+            previous = self._retry_cancel_level[index]
+            if previous is None and self._retry_cancel[index].is_set():
+                previous = Urgency.QUEUED
+            if previous is not None and (previous >= Urgency.PREEMPT or level < Urgency.PREEMPT):
                 return f"The automatic retries in {label} are already cancelled."
+            self._retry_cancel_level[index] = level
+            # First, so that no retry starts after the attempt that /cancel!! finds.
             self._retry_cancel[index].set()
+            in_flight = self._states[index][0] == "sampling"  # a retried attempt
             self._changed.notify_all()
+        if level >= Urgency.PREEMPT and self._preemption[index].cancel_retry() and in_flight:
+            return f"Stopped the automatic retries in {label} and cancelled the attempt in flight."
+        if in_flight and level < Urgency.PREEMPT:
+            return (f"Stopped the automatic retries in {label}; the attempt in flight finishes "
+                    "first. /cancel!! cancels it too.")
         return f"Stopped the automatic retries in {label}."
 
     def status(self, index):
@@ -1763,13 +1782,14 @@ def _local_command(text, selected, session):
                         else ", ".join(choices[:-1]) + ", or " + choices[-1])
                 raise ValueError(f"Use {hint}.")
         return target, (DisplayItem(f"Selected #{target} ({session.names[target]})."),), None
-    if words and words[0] == "/cancel":
+    cancel = command_urgency(words[0], "/cancel") if words else None
+    if cancel is not None:
         # The selected context's automatic retries (_Session.cancel_retry).
-        if words != ["/cancel"]:
-            raise ValueError("Usage: /cancel (no arguments; single line).")
-        return selected, (DisplayItem(session.cancel_retry(selected)),), None
+        if len(words) != 1:
+            raise ValueError(f"Usage: /cancel{'!' * cancel} (no arguments; single line).")
+        return selected, (DisplayItem(session.cancel_retry(selected, cancel)),), None
     raise ValueError("Use /contexts, /context N, /task, /steer, /continue, /cancel, /exit, or "
-                     "/quit (/steer, /exit, and /quit take ! or !! to act sooner).")
+                     "/quit (/steer, /cancel, /exit, and /quit take ! or !! to act sooner).")
 
 
 def _exit_level(words):
@@ -1883,13 +1903,15 @@ def _shell_help(session):
         return ("pythia.interaction.auto — plain text or /task <text> posts a new user board "
                 "thread for main; /contexts, /context N, /cancel, /exit or /quit. /exit waits "
                 "for the current tool batch; with ! it waits only for the current operation, "
-                "and with !! it also cancels it where possible. Ctrl-C/Ctrl-D is /exit!, and a "
-                "second press /exit!!.")
+                "and with !! it also cancels it where possible. /cancel stops automatic retries, "
+                "and /cancel!! also cancels the retried attempt in flight. Ctrl-C/Ctrl-D is "
+                "/exit!, and a second press /exit!!.")
     return ("pythia.interaction.auto — plain text steers main's open task, or else queues a "
             "new one; /task <text>, /steer [text], /continue, /cancel, /contexts, /context N, "
             "/exit or /quit. /steer and /exit wait for the current tool batch; with ! they wait "
             "only for the current operation, and with !! they also cancel it where possible. "
-            "Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!.")
+            "/cancel stops automatic retries, and /cancel!! also cancels the retried attempt in "
+            "flight. Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!.")
 
 
 async def _interactive(session, terminal):

@@ -16,6 +16,14 @@ at its next interrupt point, after its tool batch; at ``IMMEDIATE``
 too. A stop drops the steers, but steers flushed before it still keep the turn
 from starting anything new.
 
+A *retry cancel* (``/cancel!!``) is neither: it cancels the operation in
+flight only if that is an automatic retry's attempt, or the wait before one
+(``operation(retry=True)``), and changes no steer or stop. The host's own flag
+(``TurnHost.retry_cancelled``) keeps further retries from starting, and the
+turn loop ends the turn (see ``kernel``). Each cancelled operation says what
+cancelled it (``cancel_reason``), and the loop saves that with a cancelled
+sample's failure.
+
 Only samples and tool calls are operations here. Compaction is not, so a flush
 never skips or cancels it; a preempting stop reaches it through the model,
 which the apps close (see ``kernel``).
@@ -26,6 +34,14 @@ from __future__ import annotations
 import enum
 import threading
 from typing import Callable, Optional
+
+
+# What cancelled an operation (``cancel_reason``): a preempting steer
+# (/steer!!), a preempting stop (/exit!!, a later Ctrl-C), or a retry cancel
+# (/cancel!!, ``Preemption.cancel_retry``).
+CANCEL_STEER = "steer"
+CANCEL_STOP = "stop"
+CANCEL_RETRY = "retry"
 
 
 class Urgency(enum.IntEnum):
@@ -75,6 +91,8 @@ class _NotPreemptible:
 
     skipped = False
     cancelled = False
+    cancel_reason = None
+    retry = False
 
     def __enter__(self) -> "_NotPreemptible":
         return self
@@ -93,8 +111,8 @@ class Preemption:
     ``operation(cancel)``, answers ``TurnHost.should_steer`` with ``due()``,
     and calls ``take()`` where the host hands over the steers. The input side
     calls ``flush`` once steers are queued, and ``stop`` when a stop is
-    requested; the host's ``should_stop`` and ``stop_requested`` read
-    ``stop_level``.
+    requested, and ``cancel_retry`` for /cancel!!; the host's ``should_stop``
+    and ``stop_requested`` read ``stop_level``.
 
     Cancels run on a helper thread, never the caller's, since one can take
     seconds (retiring a Claude relay model). Each operation is cancelled at
@@ -134,7 +152,7 @@ class Preemption:
             self._level = max(self._level, level)
             current = self._current if level >= Urgency.PREEMPT else None
         if current is not None:
-            current._cancel_async()
+            current._cancel_async(CANCEL_STEER)
 
     def stop(self, level: Urgency) -> None:
         """Stop at ``level`` (it only rises).
@@ -155,7 +173,23 @@ class Preemption:
             self._level = Urgency.QUEUED
             current = self._current if self._stop >= Urgency.PREEMPT else None
         if current is not None:
-            current._cancel_async()
+            current._cancel_async(CANCEL_STOP)
+
+    def cancel_retry(self) -> bool:
+        """Cancel the operation in flight if it is an automatic retry's attempt,
+        or the wait before one (``operation(retry=True)``): /cancel!!.
+
+        Nothing else changes: no later operation is skipped, and the steers'
+        urgency and the stop level stay as they are. Any other operation (a
+        first attempt, a tool call) goes on. Call it once the host's own retry
+        cancel is set (``TurnHost.retry_cancelled``), so that no retry starts
+        after the operation it finds. True if it cancelled one.
+        """
+        with self._lock:
+            current = self._current
+            if current is None or not current.retry:
+                return False
+        return current._cancel_async(CANCEL_RETRY)
 
     def due(self) -> bool:
         """True while flushed steers wait for the interrupt point (never once
@@ -169,9 +203,11 @@ class Preemption:
             level, self._level = self._level, Urgency.QUEUED
             return level
 
-    def operation(self, cancel: Optional[Callable[[], None]] = None) -> "_Operation":
-        """Bracket one sample or tool call (see ``TurnHost.preemptible``)."""
-        return _Operation(self, cancel)
+    def operation(self, cancel: Optional[Callable[[], None]] = None, *,
+                  retry: bool = False) -> "_Operation":
+        """Bracket one sample or tool call (see ``TurnHost.preemptible``);
+        ``retry`` marks an automatic retry's attempt or wait (``cancel_retry``)."""
+        return _Operation(self, cancel, retry)
 
 
 class _Operation:
@@ -179,13 +215,18 @@ class _Operation:
 
     ``skipped`` is true if it must not start (a flush, or a stop at
     IMMEDIATE or above, came first); ``cancelled`` once its cancel was
-    started.
+    started, and ``cancel_reason`` says by what (CANCEL_STEER, CANCEL_STOP or
+    CANCEL_RETRY). ``retry`` marks an automatic retry's attempt or wait,
+    which a retry cancel may cancel.
     """
 
-    def __init__(self, owner: Preemption, cancel: Optional[Callable[[], None]]) -> None:
+    def __init__(self, owner: Preemption, cancel: Optional[Callable[[], None]],
+                 retry: bool = False) -> None:
         self._owner, self._cancel = owner, cancel
+        self.retry = retry
         self.skipped = False
         self.cancelled = False
+        self.cancel_reason: Optional[str] = None
         self._cancel_done = threading.Event()
         self._cancel_done.set()
 
@@ -210,14 +251,17 @@ class _Operation:
         self._cancel_done.wait()  # a cancel never outlives its operation
         return False
 
-    def _cancel_async(self) -> None:
+    def _cancel_async(self, reason: str) -> bool:
+        """Start the cancel, at most once and only while the operation runs;
+        True if this call started it."""
         with self._owner._lock:
             if self.cancelled or self._cancel is None or self._owner._current is not self:
-                return
-            self.cancelled = True
+                return False
+            self.cancelled, self.cancel_reason = True, reason
             self._cancel_done.clear()
         threading.Thread(target=self._run_cancel, name="interaction-cancel",
                          daemon=True).start()
+        return True
 
     def _run_cancel(self) -> None:
         try:
@@ -230,5 +274,5 @@ class _Operation:
             self._cancel_done.set()
 
 
-__all__ = ["NOT_PREEMPTIBLE", "Preemption", "Urgency", "command_urgency", "escalated_stop",
-           "urgency_marker"]
+__all__ = ["CANCEL_RETRY", "CANCEL_STEER", "CANCEL_STOP", "NOT_PREEMPTIBLE", "Preemption",
+           "Urgency", "command_urgency", "escalated_stop", "urgency_marker"]

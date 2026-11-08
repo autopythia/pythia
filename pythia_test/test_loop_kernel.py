@@ -23,6 +23,7 @@ from pythia.interaction.loop import Interrupt, MissingFinalText, Preemption, Sam
 from pythia.interaction.loop import TurnHost, TurnResult, run_turn
 from pythia.interaction.loop import Urgency, command_urgency, escalated_stop
 from pythia.interaction.loop import kernel
+from pythia.interaction.loop.preemption import CANCEL_RETRY, CANCEL_STEER, CANCEL_STOP
 from pythia.interaction.model import ModelCancelled, ModelContinuationExpired, ModelContextWindowError
 from pythia.interaction.model import ModelError, ModelRateLimitError, ModelRefusal, ModelResponseError
 from pythia.interaction.model import ModelAuthenticationError, ModelTimeoutError
@@ -644,8 +645,8 @@ class _SteeringHost(_Host):
     def should_steer(self):
         return self.preemption.due()
 
-    def preemptible(self, cancel):
-        return self.preemption.operation(cancel)
+    def preemptible(self, cancel, *, retry=False):
+        return self.preemption.operation(cancel, retry=retry)
 
 
 def _results(context):
@@ -1114,6 +1115,38 @@ class PreemptionTests(unittest.TestCase):
         self.assertTrue(operation.cancelled)
         self.assertTrue(preemption.due())
 
+    def test_a_retry_cancel_reaches_only_a_retry_s_operation(self):
+        # /cancel!!: a retried attempt or the wait before one, never a first
+        # attempt or a tool call; and it skips nothing later.
+        preemption, cancels = Preemption(), []
+        self.assertFalse(preemption.cancel_retry())  # nothing in flight
+        with preemption.operation(lambda: cancels.append("first")) as first:
+            self.assertFalse(preemption.cancel_retry())
+        self.assertFalse(first.cancelled)
+        with preemption.operation(lambda: cancels.append("retry"), retry=True) as retried:
+            self.assertTrue(preemption.cancel_retry())
+            self.assertFalse(preemption.cancel_retry())  # at most once
+        self.assertEqual((retried.cancelled, retried.cancel_reason), (True, CANCEL_RETRY))
+        self.assertEqual(cancels, ["retry"])
+        self.assertEqual((preemption.level, preemption.stop_level), (Urgency.QUEUED, None))
+        with preemption.operation(lambda: cancels.append("next"), retry=True) as later:
+            self.assertFalse(later.skipped)
+        self.assertEqual(cancels, ["retry"])
+
+    def test_each_cancel_says_what_cancelled_it_and_the_first_one_wins(self):
+        kinds = ((lambda p: p.flush(Urgency.PREEMPT), CANCEL_STEER),
+                 (lambda p: p.stop(Urgency.PREEMPT), CANCEL_STOP),
+                 (lambda p: p.cancel_retry(), CANCEL_RETRY))
+        for cancel, reason in kinds:
+            for later, _ in kinds:
+                with self.subTest(reason=reason):
+                    preemption = Preemption()
+                    with preemption.operation(lambda: None, retry=True) as operation:
+                        cancel(preemption)
+                        later(preemption)
+                    self.assertEqual((operation.cancelled, operation.cancel_reason),
+                                     (True, reason))
+
 
 class RetryStateTests(unittest.TestCase):
     """ModelError.retry_state: who vouches for a retry, and how it may move."""
@@ -1171,9 +1204,16 @@ class RetryStateTests(unittest.TestCase):
             error.retry_state = RetryState.ELIGIBLE
             error.retry_state = settled
             for state in RetryState:
+                if (settled, state) == (RetryState.RETRIED, RetryState.CANCELLED):
+                    continue  # /cancel!! cancelled the attempt that retried it (below)
                 with self.subTest(settled=settled, state=state), self.assertRaises(ValueError):
                     error.retry_state = state
             self.assertIs(error.retry_state, settled)
+        error = ModelError('failed', retry_state=RetryState.ELIGIBLE)
+        error.retry_state = RetryState.RETRIED
+        error.retry_state = RetryState.CANCELLED  # the one move after settling
+        with self.assertRaises(ValueError):
+            error.retry_state = RetryState.RETRIED
         with self.assertRaises(TypeError):
             ModelError('failed').retry_state = None
 
@@ -1674,6 +1714,173 @@ class RetryWaitTests(unittest.TestCase):
                     self.assertEqual(result.kind, 'stopped')
                 self.assertLess(time.monotonic() - started, 10)
                 self.assertEqual(len(model.script), 1)  # no attempt after it
+
+
+class _RetryCancelHost(_LevelHost):
+    """A host with the CLI's /cancel: its flag, and at /cancel!! the
+    Preemption's retry cancel too (_UIState._cancel_command)."""
+
+    def __init__(self, **options):
+        super().__init__(**options)
+        self.cancelled = False
+
+    def cancel(self, level=Urgency.QUEUED):
+        self.cancelled = True  # first, as the CLI does
+        return level >= Urgency.PREEMPT and self.preemption.cancel_retry()
+
+    def retry_cancelled(self):
+        return self.cancelled
+
+
+def _retired(model, action):
+    """A sample step that runs ``action`` (a cancel), then fails once the cancel
+    has retired the model, as a Claude relay sample does."""
+    def step():
+        action()
+        deadline = time.monotonic() + 5
+        while not model.retired and time.monotonic() < deadline:
+            time.sleep(0.001)  # the cancel retires the model on a helper thread
+        return ModelTransportError("Claude Relay continuation retired", failure=ModelFailure(
+            "ModelTransportError", "Claude Relay continuation retired", provider="claude-relay"))
+    return step
+
+
+def _failure_codes(context):
+    return [item.error_code for item in context.items if isinstance(item, ModelFailure)]
+
+
+class RetryCancelTests(unittest.TestCase):
+    """/cancel!!: the retried attempt in flight is cancelled, and the turn ends."""
+
+    def test_only_a_retry_s_attempts_and_waits_are_marked(self):
+        class Host(_Host):
+            def __init__(self):
+                super().__init__()
+                self.marks = []
+
+            def preemptible(self, cancel, *, retry=False):
+                self.marks.append(retry)
+                return super().preemptible(cancel, retry=retry)
+        host = Host()
+        model = _Model(host, _calls(_call("a")), _rejected(), _rejected(), _answer("done"))
+        with _default_delays(0, 0):
+            result = run_turn(_context(), model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, "done")
+        # A first attempt and its tool call; the next sample's first attempt,
+        # then each wait and each retried attempt.
+        self.assertEqual(host.marks, [False, False, False, True, True, True, True])
+
+    def test_it_ends_the_turn_with_the_failure_that_the_attempt_retried(self):
+        _record_waits(self)
+        host, context = _RetryCancelHost(), _context()
+        error = _rejected()
+        model = _Model(host, error, None, _answer("never"))
+        model.script[1] = _retired(model, lambda: self.assertTrue(host.cancel(Urgency.PREEMPT)))
+        with self.assertRaises(NativeToolRejected) as raised:
+            run_turn(context, model, _environment(host), _config(), host)
+        self.assertIs(raised.exception, error)
+        self.assertIs(error.retry_state, RetryState.CANCELLED)
+        self.assertEqual(len(model.script), 1)  # no attempt after it
+        self.assertEqual(host.retryable, 1)
+        self.assertEqual(_failure_codes(context), ["native_tool_name_rejected", "preempted_by_cancel"])
+
+    def test_the_decision_is_traced_as_cancelled(self):
+        _record_waits(self)
+
+        class Host(_RetryCancelHost):
+            def __init__(self):
+                super().__init__()
+                self.traced = []
+
+            def trace(self, op, **tags):
+                self.traced.append((op, tags))
+                return super().trace(op, **tags)
+        host = Host()
+        model = _Model(host, _rejected(), None, _answer("never"))
+        model.script[1] = _retired(model, lambda: host.cancel(Urgency.PREEMPT))
+        with self.assertRaises(NativeToolRejected):
+            run_turn(_context(), model, _environment(host), _config(), host)
+        retries = [(tags['policy'], tags['attempt'], tags['retry_state'], tags['delay_seconds'],
+                    tags['error_code']) for op, tags in host.traced if op == 'sample_retry']
+        self.assertEqual(retries, [
+            ('response', 1, 'retried', 2, 'native_tool_name_rejected'),
+            ('response', 2, 'cancelled', None, 'native_tool_name_rejected'),
+        ])
+
+    def test_a_plain_cancel_lets_the_attempt_finish_and_a_late_cancel_keeps_its_answer(self):
+        _record_waits(self)
+        for level in (Urgency.QUEUED, Urgency.PREEMPT):
+            host = _RetryCancelHost()
+
+            def answered():
+                # /cancel lets it finish; /cancel!! comes too late to stop it.
+                host.cancel(level)
+                return _answer("done")
+            model = _Model(host, _rejected(), answered)
+            with self.subTest(level=level.name):
+                result = run_turn(_context(), model, _environment(host), _config(), host)
+                self.assertEqual(result.final_text, "done")
+                self.assertEqual(model.retired, 1 if level == Urgency.PREEMPT else 0)
+
+    def test_a_cancel_after_the_wait_keeps_the_retried_attempt_from_starting(self):
+        _record_waits(self)
+
+        class Host(_TracingHost):
+            asked = 0
+
+            def retry_cancelled(self):
+                # False for _auto_retry's checks on either side of the wait, then
+                # true: the cancel came after the wait (during a compaction, say).
+                self.asked += 1
+                return self.asked > 2
+        host = Host()
+        error = _rejected()
+        model = _Model(host, error, _answer("never"))
+        with self.assertRaises(NativeToolRejected):
+            run_turn(_context(), model, _environment(host), _config(), host)
+        self.assertIs(error.retry_state, RetryState.CANCELLED)
+        self.assertEqual(len(model.script), 1)  # the retried attempt never started
+        self.assertEqual(host.retryable, 1)
+        retries = [tags['retry_state'] for op, tags in host.traced if op == 'sample_retry']
+        self.assertEqual(retries, ['retried', 'cancelled'])
+
+    def test_a_preempting_steer_during_a_retried_attempt_goes_in_and_samples_again(self):
+        _record_waits(self)
+        host, context = _RetryCancelHost(), _context()
+        model = _Model(host, _rejected(), None, _answer("done"))
+        model.script[1] = _retired(model, lambda: host.steer("now", Urgency.PREEMPT))
+        result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(_failure_codes(context), ["native_tool_name_rejected", "preempted_by_steer"])
+        texts = [item.content for item in context.items if isinstance(item, Message)]
+        self.assertEqual(texts, ["task", "now", "done"])
+
+    def test_after_a_plain_cancel_a_preempting_steer_ends_the_turn_and_its_steer_waits(self):
+        # No retried attempt starts once the retries are cancelled: the steer
+        # stays queued, for the host to keep (the CLI sends it next).
+        _record_waits(self)
+        host, context = _RetryCancelHost(), _context()
+        error = _rejected()
+
+        def cancel_then_steer():
+            host.cancel()
+            host.steer("now", Urgency.PREEMPT)
+        model = _Model(host, error, None, _answer("never"))
+        model.script[1] = _retired(model, cancel_then_steer)
+        with self.assertRaises(NativeToolRejected):
+            run_turn(context, model, _environment(host), _config(), host)
+        self.assertIs(error.retry_state, RetryState.CANCELLED)
+        self.assertEqual(host.queued, [Message("user", "now")])
+        self.assertNotIn(Message("user", "now"), context.items)
+        self.assertEqual(len(model.script), 1)
+
+    def test_a_preempting_stop_names_itself_in_the_cancelled_sample_s_failure(self):
+        host, context = _RetryCancelHost(), _context()
+        model = _Model(host, None, _answer("never"))
+        model.script[0] = _retired(model, lambda: host.request_stop(Urgency.PREEMPT))
+        result = run_turn(context, model, _environment(host), _config(), host)
+        self.assertEqual(result.kind, "stopped")
+        self.assertEqual(_failure_codes(context), ["preempted_by_stop"])
 
 
 class ErrorClassTests(unittest.TestCase):

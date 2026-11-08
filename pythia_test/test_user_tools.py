@@ -1298,8 +1298,8 @@ class UserToolControllerTests(unittest.IsolatedAsyncioTestCase):
                          ("config", '{"key":"max_samples","value":5}'))
         self.assertEqual(changed.result.call_id, change.call.call_id)
         self.assertNotIn(Message("user", "queued text"), saved.items)
-        self.assertIn("[cli] Queued queries discarded after failure; submit again explicitly.",
-                      [i.text for i in terminal.items])
+        self.assertIn("[cli] Discarded after the failure, not sent: 1 queued message; submit it "
+                      "again explicitly.", [i.text for i in terminal.items])
 
     async def test_same_account_login_rebinds_without_sampling_or_changing_provider_state(self):
         metadata = SampleMetadata(TokenUsage(), provider_turn_id="turn", provider_turn_state="state")

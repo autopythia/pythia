@@ -50,10 +50,12 @@ class RetryState(enum.Enum):
     itself: ``ModelError.retry_state``. The values are for traces.
 
     It only moves forward: from ``NONE`` to ``ELIGIBLE``, when a model adapter
-    vouches for a retry, and from ``ELIGIBLE`` to ``BLOCKED``, ``RETRIED``,
-    ``EXHAUSTED`` or ``CANCELLED``. So an error a frontend sees is ``NONE``,
-    ``BLOCKED``, ``EXHAUSTED`` or ``CANCELLED``: the turn loop settles an
-    eligible one before raising it.
+    vouches for a retry; from ``ELIGIBLE`` to ``BLOCKED``, ``RETRIED``,
+    ``EXHAUSTED`` or ``CANCELLED``; and from ``RETRIED`` to ``CANCELLED``, when
+    the user cancels the retried attempt in flight (the CLI's /cancel!!), so
+    that the turn ends with this failure. So an error a frontend sees is
+    ``NONE``, ``BLOCKED``, ``EXHAUSTED`` or ``CANCELLED``: the turn loop
+    settles an eligible one before raising it.
     """
 
     NONE = "none"  # no retry is claimed (the default)
@@ -71,7 +73,8 @@ class RetryState(enum.Enum):
     BLOCKED = "blocked"
     RETRIED = "retried"  # the turn loop sampled again after it
     EXHAUSTED = "exhausted"  # eligible, but the sample's attempts were used up
-    # Eligible, but the user stopped the automatic retries (the CLI's /cancel).
+    # Eligible, but the user stopped the automatic retries (the CLI's /cancel);
+    # or retried, and the user cancelled the attempt in flight (/cancel!!).
     CANCELLED = "cancelled"
 
 
@@ -79,6 +82,7 @@ _RETRY_MOVES = {
     RetryState.NONE: (RetryState.ELIGIBLE,),
     RetryState.ELIGIBLE: (RetryState.BLOCKED, RetryState.RETRIED, RetryState.EXHAUSTED,
                           RetryState.CANCELLED),
+    RetryState.RETRIED: (RetryState.CANCELLED,),
 }
 
 

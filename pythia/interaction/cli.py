@@ -651,6 +651,10 @@ class _UIState:
     # stops it (retry_cancel, which the turn's host reports).
     auto_retrying: bool = False
     retry_cancel: threading.Event = field(default_factory=threading.Event)
+    # The level of the /cancel that stopped it, once one did: a /cancel!!
+    # after a /cancel still cancels the attempt in flight. On the event loop,
+    # reset with auto_retrying.
+    retry_cancel_level: Optional[Urgency] = None
     # Its latest (failed, attempts), as its notice says (attempts None:
     # unbounded), shown with the status while it waits and while the retried
     # sample runs (TurnHost.retry_progress); None once it is over.
@@ -672,6 +676,7 @@ class _UIState:
             self.auto_retrying = True
         elif phase in {"idle", "failed", "auth needed"}:
             self.auto_retrying = False
+            self.retry_cancel_level = None
             self.retry_progress = None
 
     def notice(self, text: str) -> None:
@@ -922,7 +927,7 @@ class _UIState:
             elif command_urgency(head, "/reboot") is not None:
                 self._request_reboot(text)
                 return
-            elif head == "/cancel":
+            elif command_urgency(head, "/cancel") is not None:
                 self._cancel_command(text)
                 return
             elif head in ("/config", "/config.json"):
@@ -964,6 +969,12 @@ class _UIState:
                 self.changed.set()
                 if isinstance(intent, UserToolIntent) and intent.notice is not None:
                     self.notice(intent.notice)
+                if (isinstance(intent, UserToolIntent)
+                        and self.phase not in {"idle", "failed", "auth needed"}):
+                    # It may wait long (a retried attempt runs to its end), and
+                    # a failure keeps it (_kept_after_failure): say both.
+                    self.notice(f"/{intent.name} is queued: it runs when the work in progress "
+                                "ends, even if that fails.")
 
     def _submit_text(self, text: str, *, draft: Optional[str] = None,
                      flush: Optional[Urgency] = None, steers: bool = True,
@@ -1130,28 +1141,50 @@ class _UIState:
         self.changed.set()
 
     def _cancel_command(self, text: str) -> None:
-        """/cancel: stop the running turn's automatic retries (the turn
-        loop's, after a failure that it may sample again; TurnHost.retry_cancelled).
+        """/cancel, /cancel! and /cancel!!: stop the running turn's automatic
+        retries (the turn loop's, after a failure that it may sample again;
+        TurnHost.retry_cancelled).
 
         Accepted while one is in progress, from the sample's first "retrying"
-        wait until the sample succeeds or the turn ends: a wait ends at once,
-        and a retried attempt in flight finishes, but no retry follows it. The
-        failure then ends the turn, with /retry offered. It takes effect at
-        once, so its record shows now, and is logged at the next safe point
-        (_RecordEntry), like a /config change's.
+        wait until the sample succeeds or the turn ends: a wait ends at once.
+        /cancel, and /cancel! alike, let a retried attempt in flight finish,
+        but no retry follows it. /cancel!! also cancels that attempt, as
+        /steer!! cancels a sample (Preemption.cancel_retry), and the turn
+        ends at once, with the failure that the attempt retried. Either way
+        the failure ends the turn, with /retry offered, and the input queued
+        meanwhile still goes on (_kept_after_failure). A /cancel!! after a
+        /cancel still cancels. It takes effect at once, so its record shows
+        now, and is logged at the next safe point (_RecordEntry), like a
+        /config change's.
         """
         self.editor = Editor()
-        if text.strip() != "/cancel" or "\n" in text or "\r" in text:
-            self.notice("Usage: /cancel (no arguments; single line).")
+        level = command_urgency(text.split(maxsplit=1)[0], "/cancel")
+        if len(text.split()) != 1 or "\n" in text or "\r" in text:
+            self.notice(f"Usage: /cancel{'!' * level} (no arguments; single line).")
             return
         if not self.auto_retrying or self.phase in {"idle", "failed", "auth needed"}:
             self.notice("No automatic retry to cancel.")
             return
-        if self.retry_cancel.is_set():
+        previous = self.retry_cancel_level
+        if previous is None and self.retry_cancel.is_set():
+            previous = Urgency.QUEUED
+        if previous is not None and (previous >= Urgency.PREEMPT or level < Urgency.PREEMPT):
             self.notice("The automatic retries are already cancelled.")
             return
+        self.retry_cancel_level = level
+        # First, so that no retry starts after the attempt that /cancel!! finds.
         self.retry_cancel.set()
-        call, result = _record(_user_call("cancel", {}), "Stopped the automatic retries.")
+        in_flight = self.phase == "sampling"  # a retried attempt, not the wait
+        if level >= Urgency.PREEMPT and self.preemption.cancel_retry() and in_flight:
+            output = "Stopped the automatic retries and cancelled the attempt in flight."
+        elif in_flight and level < Urgency.PREEMPT:
+            seconds = int(time.monotonic() - self.phase_started)
+            output = (f"Stopped the automatic retries; the attempt in flight ({seconds} s so "
+                      "far) finishes first. /cancel!! cancels it too.")
+        else:
+            output = "Stopped the automatic retries."
+        call, result = _record(
+            _user_call("cancel", {"urgency": int(level)} if level else {}), output)
         self.displays.extend(render_interaction_items((call, result)))
         self._queue_record(_RecordEntry(call, result=result))
 
@@ -1848,6 +1881,7 @@ def _arm_retry(state: _UIState) -> None:
 def _end_auto_retry(state: _UIState) -> None:
     """A sample succeeded: its automatic retries, if any, are over (/cancel)."""
     state.auto_retrying = False
+    state.retry_cancel_level = None
     state.retry_progress = None
 
 
@@ -1938,6 +1972,65 @@ def _steers(entry) -> bool:
 def _queued_input(state: _UIState) -> int:
     """The user's queued entries: a wake-up marker or a record entry isn't one."""
     return sum(not isinstance(entry, (_WakeIntent, _RecordEntry)) for entry in state.pending)
+
+
+def _kept_after_failure(entry, *, cancelled: bool, runs: bool = True) -> bool:
+    """Whether a queued entry outlives a turn that failed.
+
+    A record stays, a /config change's or a /cancel's: the command took
+    effect when it was typed. After a failure that the user's /cancel settled
+    (``cancelled``: RetryState.CANCELLED), everything else stays too, since
+    the user chose that ending and queued what comes next: steers wait as
+    queued queries, behind their /steer records, as at any turn's end. After
+    any other failure, queued commands stay (/compact, /login: the usual ways
+    to recover), but queued text goes, since it may presume the turn's
+    outcome. icron's due wake-ups are queued again (_queue_wake). When nothing
+    more ``runs`` (a failed checkpoint), only the records with results stay.
+    """
+    if isinstance(entry, _WakeIntent):
+        return False
+    if isinstance(entry, _RecordEntry):
+        return entry.result is not None or (cancelled and runs)
+    return runs and (cancelled or isinstance(entry, UserToolIntent))
+
+
+def _queued_names(entries) -> list:
+    """The user's entries among ``entries``, as a notice names them: each
+    command, then the number of messages."""
+    names, messages = [], 0
+    for entry in entries:
+        if isinstance(entry, (_WakeIntent, _RecordEntry)):
+            continue
+        if isinstance(entry, UserToolIntent):
+            names.append(f"/{entry.name}")
+        elif isinstance(entry, _ContinueIntent):
+            names.append("/continue")
+        elif isinstance(entry, _RetryIntent):
+            names.append("/retry")
+        else:
+            messages += 1
+    if messages:
+        names.append(f"{messages} queued message{'s' if messages != 1 else ''}")
+    return names
+
+
+def _queue_after_failure_notice(kept, dropped) -> Optional[str]:
+    """What a failed turn did with the input queued meanwhile (_kept_after_failure):
+    what it discarded, and what runs next; None if nothing was queued."""
+    def joined(names):
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+    def single(names):
+        # One command ("/compact"), or one message ("1 queued message").
+        return len(names) == 1 and names[0].startswith(("/", "1 "))
+    parts = []
+    gone, going = _queued_names(dropped), _queued_names(kept)
+    if gone:
+        parts.append(f"Discarded after the failure, not sent: {joined(gone)}; submit "
+                     f"{'it' if single(gone) else 'them'} again explicitly.")
+    if going:
+        parts.append(f"{joined(going)} {'runs' if single(going) else 'run'} next.")
+    return " ".join(parts) or None
 
 
 def _queue_front(state: _UIState, entry) -> None:
@@ -3068,8 +3161,8 @@ class _CliHost(TurnHost):
             # Synchronously: the interrupt point that follows must see it.
             self._on_loop(_coldstart_reboot, self._state)
 
-    def preemptible(self, cancel):
-        return self._state.preemption.operation(cancel)
+    def preemptible(self, cancel, *, retry=False):
+        return self._state.preemption.operation(cancel, retry=retry)
 
     def log_path(self):
         save = getattr(self._writer, "cli_save", None)
@@ -3143,6 +3236,7 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     # A /cancel applies to the turn it came in; this one starts afresh.
     state.retry_cancel.clear()
     state.auto_retrying = False
+    state.retry_cancel_level = None
     state.retry_progress = None
     state.turn_config = snapshot
     _apply_workspace(environment, snapshot)
@@ -3671,14 +3765,21 @@ async def _drive_interaction_body(
                 state.active_model = None
                 _mark_auth_required(state, exc)
             state.notice(_error_notice(exc))
-            if _queued_input(state):
-                state.notice(
-                    "Queued queries discarded after failure; submit again explicitly."
-                )
-            # A /config change's record stays: the change applied when it was
-            # typed. A /steer's goes with its steers.
-            kept = [entry for entry in state.pending
-                    if isinstance(entry, _RecordEntry) and entry.result is not None]
+            # What was queued meanwhile: all of it after the user's own /cancel
+            # ended the retries, and otherwise only commands and records
+            # (_kept_after_failure). Nothing more runs after a failed checkpoint.
+            cancelled = (getattr(exc, "retry_state", None) is RetryState.CANCELLED
+                         and not state.persistence_failed)
+            kept, dropped = [], []
+            for entry in state.pending:
+                if _kept_after_failure(entry, cancelled=cancelled,
+                                       runs=not state.persistence_failed):
+                    kept.append(entry)
+                else:
+                    dropped.append(entry)
+            notice = _queue_after_failure_notice(kept, dropped)
+            if notice is not None:
+                state.notice(notice)
             state.pending.clear()
             state.pending.extend(kept)
             state.changed.clear()
@@ -4046,8 +4147,9 @@ async def _run(
         "pythia.interaction — /retry, /continue, /cancel, /steer [text], /task <text>, "
         "/compact [focus], /config, /config.json, /login, /quota, /reboot, /exit or /quit. "
         "/steer, /reboot and /exit wait for the current tool batch; with ! they wait only for "
-        "the current operation, and with !! they also cancel it where possible. Ctrl-C/Ctrl-D "
-        "is /exit!, and a second press /exit!!."
+        "the current operation, and with !! they also cancel it where possible. /cancel stops "
+        "automatic retries, and /cancel!! also cancels the retried attempt in flight. "
+        "Ctrl-C/Ctrl-D is /exit!, and a second press /exit!!."
     )
     _startup_notices(state, args, save, config)
     if rebooted is not None:
