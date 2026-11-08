@@ -1,0 +1,45 @@
+-- numbers.lem: lem's numbers, which every runtime computes and prints
+-- alike: whole numbers within ±(2^53 − 1), finite Nums, printed as Rust
+-- prints them, and text(). It has no widgets, so it runs on lem alone.
+enum Shape:
+  Dot, Ring(width: Num), Tag(name: Text)
+
+-- Each case's text, by its name.
+rel Shown(name: Text, text: Text) key name
+Shown("01 one", text(1.0))
+Shown("02 a tenth", text(0.1))
+Shown("03 a tenth and a fifth", text(0.1 + 0.2))
+Shown("04 a third", text(1.0 / 3.0))
+Shown("05 a whole quotient", text(6 / 3))
+Shown("06 a half quotient", text(7 / 2))
+Shown("07 1e15", text(1000000000000000.0))
+Shown("08 1e16", text(10000000000000000.0))
+Shown("09 1.5e16", text(15000000000000000.0))
+Shown("10 1e32", text(10000000000000000.0 * 10000000000000000.0))
+Shown("11 1e-4", text(0.0001))
+Shown("12 1e-5", text(0.00001))
+Shown("13 1.5e-5", text(0.000015))
+Shown("14 2^53, as a Num", text(9007199254740992.0))
+Shown("15 the largest Int, widened", text(9007199254740991 + 0.0))
+Shown("16 the largest Int", text(9007199254740991))
+Shown("17 the smallest Int", text(-9007199254740991))
+Shown("18 negative zero", text(-0.0))
+Shown("19 zero times minus one", text(0.0 * -1.0))
+Shown("20 a Bool", text(True))
+Shown("21 a Text", text("a \"quoted\" word"))
+Shown("22 a constructor", text(Ring(2)))
+Shown("23 a constructor with text", text(Tag("x")))
+Shown("24 a constructor alone", text(Dot))
+Shown("25 joined", text(3) + " turns")
+
+-- What overflows, for the ticks to try.
+input N(n: Int)
+input X(x: Num)
+rel Twice(n: Int)
+Twice(n * 2) :- N(n)
+rel Squared(x: Num)
+Squared(x * x) :- X(x)
+rel Negated(x: Num)
+Negated(-x) :- X(x)
+rel Power(x: Num)
+Power(x * x * x * x * x * x * x * x * x * x * x * x * x * x * x * x) :- X(x)

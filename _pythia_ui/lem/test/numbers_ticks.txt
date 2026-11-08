@@ -1,0 +1,77 @@
+# Ticks of numbers.lem, on lem alone: how numbers compute and print, which
+# every runtime must do alike. Each case is a tick on the facts that the
+# cases before it left: `=== title`; lines that assert (`+ Fact`) or
+# retract (`- Fact`) the host's facts, or show a relation's facts after the
+# tick (`? Name`); `---`; then the facts asked for, or the tick's error.
+
+=== numbers print as Rust prints them
+? Shown
+---
+Shown("01 one", "1.0")
+Shown("02 a tenth", "0.1")
+Shown("03 a tenth and a fifth", "0.30000000000000004")
+Shown("04 a third", "0.3333333333333333")
+Shown("05 a whole quotient", "2.0")
+Shown("06 a half quotient", "3.5")
+Shown("07 1e15", "1000000000000000.0")
+Shown("08 1e16", "1e16")
+Shown("09 1.5e16", "1.5e16")
+Shown("10 1e32", "1e32")
+Shown("11 1e-4", "0.0001")
+Shown("12 1e-5", "1e-5")
+Shown("13 1.5e-5", "1.5e-5")
+Shown("14 2^53, as a Num", "9007199254740992.0")
+Shown("15 the largest Int, widened", "9007199254740991.0")
+Shown("16 the largest Int", "9007199254740991")
+Shown("17 the smallest Int", "-9007199254740991")
+Shown("18 negative zero", "0.0")
+Shown("19 zero times minus one", "0.0")
+Shown("20 a Bool", "True")
+Shown("21 a Text", "a \"quoted\" word")
+Shown("22 a constructor", "Ring(2.0)")
+Shown("23 a constructor with text", "Tag(\"x\")")
+Shown("24 a constructor alone", "Dot")
+Shown("25 joined", "3 turns")
+
+=== a product within 53 bits
++ N(4503599627370495)
+? Twice
+---
+Twice(9007199254740990)
+
+=== a product beyond 53 bits
+- N(4503599627370495)
++ N(4503599627370496)
+---
+error: `*` overflowed: a whole number stays within ±9007199254740991 (2^53 − 1), in the rule at lem/test/numbers.lem:39:1
+
+=== beyond 53 bits, below zero
+- N(4503599627370496)
++ N(-4503599627370496)
+---
+error: `*` overflowed: a whole number stays within ±9007199254740991 (2^53 − 1), in the rule at lem/test/numbers.lem:39:1
+
+=== Nums, and their negatives
+- N(-4503599627370496)
++ X(1.5)
+? Squared
+? Negated
+? Power
+---
+Squared(2.25)
+Negated(-1.5)
+Power(656.8408355712891)
+
+=== a Num that overflows
+- X(1.5)
++ X(100000000000000000000.0)
+---
+error: `*` overflowed: a Num stays finite, in the rule at lem/test/numbers.lem:45:1
+
+=== the host's whole numbers are 53 bits too
+- X(100000000000000000000.0)
++ N(9007199254740992)
+---
+error: fact:1:3: a whole number must be at most 9007199254740991 (2^53 − 1), to be exact in every runtime:
+N(9007199254740992)
+  ^^^^^^^^^^^^^^^^

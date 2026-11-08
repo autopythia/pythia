@@ -11,11 +11,15 @@
 //!
 //! Types are simple: a variable's is that of the first column it's in, and a
 //! literal fits the types made from its own, as `"job_1"` fits `JobId`.
-//! An Int widens to Num, and a field of type `Any` takes any value.
+//! An Int widens to Num, and a field of type `Any` takes any value but a
+//! Num. Whole numbers stay within ±(2^53 − 1), and `text(x)` is lem's one
+//! function so far.
 
-use super::parse::{parse, Cmp, Decl, Mod, Param, Sent, SentRef, SpanIdent, Term, TermRef};
+use super::parse::{
+  parse, Cmp, Decl, Mod, Param, ParseError, Sent, SentRef, SpanIdent, Term, TermRef,
+};
 use super::token::Span;
-use super::value::{Ty, Value};
+use super::value::{int_fits, Ty, Value};
 use std::collections::HashMap;
 use std::panic::Location;
 use std::rc::Rc;
@@ -134,6 +138,8 @@ pub enum Expr {
   Arith(Op, Box<Expr>, Box<Expr>),
   /// An Int, widened to Num.
   ToNum(Box<Expr>),
+  /// `text(x)`: the value as text ([`Value::text`]).
+  Text(Box<Expr>),
 }
 
 /// What a column, or a constructor's field, matches.
@@ -262,7 +268,7 @@ impl Program {
   /// A fact written in lem, as the host or a test gives it, such as
   /// `Job("job_1", "review", 0)`: its relation and values.
   pub fn fact(&mut self, text: &str) -> Result<(usize, Vec<Value>), String> {
-    let term = one_term(text)?;
+    let term = one_term("fact", text)?;
     let mut loader = Loader {
       prog: self,
       file: 0,
@@ -280,7 +286,7 @@ impl Program {
   /// A value written in lem, of type `ty`, such as the message
   /// `Finish("job_1")`.
   pub fn value(&mut self, text: &str, ty: &Ty) -> Result<Value, String> {
-    let term = one_term(text)?;
+    let term = one_term("value", text)?;
     let mut loader = Loader {
       prog: self,
       file: 0,
@@ -297,8 +303,8 @@ impl Program {
 }
 
 /// The one term that `text` holds.
-fn one_term(text: &str) -> Result<TermRef, String> {
-  let mod_ = parse(text).map_err(|e| e.render("value", text))?;
+fn one_term(name: &str, text: &str) -> Result<TermRef, String> {
+  let mod_ = parse(text).map_err(|e| e.render(name, text))?;
   match mod_.body.as_slice() {
     [sent] => match &**sent {
       Sent::Just(_, term) => Ok(term.clone()),
@@ -419,8 +425,9 @@ fn is_literal(term: &Term) -> bool {
 fn free_vars<'t>(term: &'t Term, out: &mut Vec<&'t str>) {
   match term {
     Term::Ident(_, name) if is_var(name) => out.push(name),
+    // The head names a relation, a constructor or a function, never a
+    // variable.
     Term::Apply(_, tup) => {
-      free_vars(&tup[0], out);
       for arg in &tup[1..] {
         match &**arg {
           Term::Equal(_, l, r) if matches!(&**l, Term::Ident(_, n) if is_var(n)) => {
@@ -732,9 +739,11 @@ impl Loader<'_> {
       Term::Ident(span, name) if !is_var(name) => Ok((name, &[], span.clone())),
       Term::Apply(_, tup) => match &*tup[0] {
         Term::Ident(span, name) if !is_var(name) => Ok((name, &tup[1..], span.clone())),
-        Term::Ident(span, name) => {
-          self.fail(span.clone(), format!("lem has no function `{name}` yet"))
-        }
+        Term::Ident(span, name) if is_function(name) => self.fail(
+          span.clone(),
+          format!("`{name}(…)` gives a value, not {want}"),
+        ),
+        Term::Ident(span, name) => self.fail(span.clone(), no_function(name)),
         head => self.fail(head.span(), format!("expected {want}'s name")),
       },
       term => self.fail(term.span(), format!("expected {want}, such as `Job(j)`")),
@@ -796,17 +805,20 @@ impl Loader<'_> {
           Some(hex) => i64::from_str_radix(hex, 16).ok(),
           None => s.parse().ok(),
         };
-        let Some(n) = n else {
-          return self.fail(span.clone(), "a number must fit in 64 bits");
+        let Some(n) = n.filter(|n| int_fits(*n)) else {
+          return self.fail(span.clone(), ParseError::IntTooLarge.to_string());
         };
         (Ty::Int, Value::Int(n))
       }
-      Term::FloatLit(_, s) => (Ty::Num, Value::Num(s.parse().unwrap_or(f64::NAN))),
+      Term::FloatLit(span, s) => match s.parse().ok().and_then(Value::num) {
+        Some(value) => (Ty::Num, value),
+        None => return self.fail(span.clone(), ParseError::NumTooLarge.to_string()),
+      },
       Term::AtomLit(_, s) => (Ty::Text, Value::Text(s.clone())),
       Term::LogicLit(_, b) => (Ty::Bool, Value::Bool(*b)),
       Term::Minus(_, t) => match self.natural(t)? {
         (ty, Value::Int(n)) => (ty, Value::Int(-n)),
-        (ty, Value::Num(x)) => (ty, Value::Num(-x)),
+        (ty, Value::Num(x)) => (ty, Value::num(-x).expect("a finite number, negated")),
         _ => return self.fail(term.span(), "`-` negates numbers"),
       },
       term => return self.fail(term.span(), "expected a literal"),
@@ -817,6 +829,7 @@ impl Loader<'_> {
   fn literal(&self, term: &Term, ty: &Ty, what: &str) -> Check<Value> {
     let (natural, value) = self.natural(term)?;
     Ok(match (self.prog.base(ty), value) {
+      (Ty::Any, Value::Num(_)) => return self.fail(term.span(), any_but_num(what)),
       (Ty::Any, value) => value,
       (Ty::Num, Value::Int(n)) => Value::Num(n as f64),
       (Ty::Time, value @ Value::Int(_)) => value,
@@ -849,6 +862,7 @@ impl Loader<'_> {
           format!("`{name}` isn't bound: an atom in the body must bind it"),
         ),
       },
+      Term::Apply(_, tup) if is_call(tup) => self.call(scope, term, tup),
       Term::Ident(..) | Term::Apply(..) => self.ctor_expr(scope, term),
       Term::IntLit(..) | Term::FloatLit(..) | Term::AtomLit(..) | Term::LogicLit(..) => {
         let (ty, value) = self.natural(term)?;
@@ -907,6 +921,21 @@ impl Loader<'_> {
     Ok((Expr::Arith(op, Box::new(a), Box::new(b)), ty))
   }
 
+  /// A call of one of lem's functions: `text(x)`, for now.
+  fn call(&mut self, scope: &mut Scope, term: &Term, tup: &[TermRef]) -> Check<(Expr, Ty)> {
+    let Term::Ident(span, name) = &*tup[0] else {
+      unreachable!("a call's head is a name");
+    };
+    match (&**name, &tup[1..]) {
+      ("text", [arg]) if !is_named(arg) => {
+        let (e, _) = self.expr(scope, arg)?;
+        Ok((Expr::Text(Box::new(e)), Ty::Text))
+      }
+      ("text", _) => self.fail(term.span(), "`text` takes one value, as in `text(n)`"),
+      _ => self.fail(span.clone(), no_function(name)),
+    }
+  }
+
   fn ctor_expr(&mut self, scope: &mut Scope, term: &Term) -> Check<(Expr, Ty)> {
     let (name, args, span) = self.atom_parts(term, "a constructor")?;
     let ctor = &self.prog.ctors[self.ctor_of(name, &span)?];
@@ -932,6 +961,9 @@ impl Loader<'_> {
       return Ok(Expr::Const(self.literal(term, ty, what)?));
     }
     let (e, got) = self.expr(scope, term)?;
+    if *ty == Ty::Any && self.prog.base(&got) == Ty::Num {
+      return self.fail(term.span(), any_but_num(what));
+    }
     let base = self.prog.base(ty);
     let written =
       matches!(term, Term::Ident(_, n) if !is_var(n)) || matches!(term, Term::Apply(..));
@@ -968,6 +1000,8 @@ impl Loader<'_> {
           self.fail(span.clone(), message)
         }
       },
+      // A function's value, from variables that earlier atoms bound.
+      Term::Apply(_, tup) if is_call(tup) => Ok(Pat::Expr(self.expr_fit(scope, term, ty, what)?)),
       Term::Ident(..) | Term::Apply(..) => {
         let (name, args, span) = self.atom_parts(term, "a constructor")?;
         let ctor = &self.prog.ctors[self.ctor_of(name, &span)?];
@@ -1430,6 +1464,29 @@ fn kind_a(kind: DeclKind) -> &'static str {
     DeclKind::Effect => "an effect",
     DeclKind::Id | DeclKind::Msg => "a constructor",
   }
+}
+
+/// lem's functions.
+fn is_function(name: &str) -> bool {
+  name == "text"
+}
+
+/// Whether `f(args)` calls a function: its head is a lowercase name.
+fn is_call(tup: &[TermRef]) -> bool {
+  matches!(&*tup[0], Term::Ident(_, name) if is_var(name))
+}
+
+/// Whether an argument is given by name, as `name=value`.
+fn is_named(arg: &Term) -> bool {
+  matches!(arg, Term::Equal(_, l, _) if matches!(&**l, Term::Ident(_, n) if is_var(n)))
+}
+
+fn no_function(name: &str) -> String {
+  format!("lem has no function `{name}`; it has `text`")
+}
+
+fn any_but_num(what: &str) -> String {
+  format!("{what} takes any value but a Num")
 }
 
 /// A value that an expression has without variables, if it has one.

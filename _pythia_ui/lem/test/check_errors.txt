@@ -166,3 +166,45 @@ rel Now(t: Int)
 t.lem:1:5: `Now` is declared twice, first at src/lem/prelude.lem:4:7:
 rel Now(t: Int)
     ^^^
+
+=== a Num where any value goes
+rel X(o: Any)
+X(o=1.5)
+---
+t.lem:2:5: X's `o` takes any value but a Num:
+X(o=1.5)
+    ^^^
+
+=== a Num variable where any value goes
+input N(x: Num)
+rel X(o: Any)
+X(o=x) :- N(x)
+---
+t.lem:3:5: X's `o` takes any value but a Num:
+X(o=x) :- N(x)
+    ^
+
+=== text with two values
+rel X(t: Text)
+X(t=text(1, 2))
+---
+t.lem:2:5: `text` takes one value, as in `text(n)`:
+X(t=text(1, 2))
+    ^^^^^^^^^^
+
+=== a function that lem doesn't have
+rel X(n: Int)
+X(n=max(1, 2))
+---
+t.lem:2:5: lem has no function `max`; it has `text`:
+X(n=max(1, 2))
+    ^^^
+
+=== a function where an atom goes
+input N(n: Int)
+rel X(n: Int)
+X(n) :- N(n), text(n)
+---
+t.lem:3:15: `text(…)` gives a value, not an atom:
+X(n) :- N(n), text(n)
+              ^^^^

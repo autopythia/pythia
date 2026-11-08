@@ -3,3 +3,4 @@
 # text that parses to the same tree. (The test reads lem's prelude too.)
 test/syntax.lem
 test/jobs.lem
+test/numbers.lem

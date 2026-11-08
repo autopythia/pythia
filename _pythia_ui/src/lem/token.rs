@@ -18,6 +18,7 @@
 //! error rather than the end of the file.
 
 use super::parse::{ParseError, ParseSpanError};
+use super::value::int_fits;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -363,11 +364,16 @@ impl<'a> Tokenizer<'a> {
         .unwrap_or(s.len())
     };
     let rest = self.rest();
+    // The token, or what's wrong with the number's digits.
     let (len, tok) = if let Some(hex) = rest.strip_prefix("0x") {
       let hex = &hex[..digits(hex, true)];
-      let ok = !hex.is_empty() && i64::from_str_radix(hex, 16).is_ok();
       let len = 2 + hex.len();
-      (len, ok.then(|| Token::IntLit(rest[..len].into())))
+      let tok = match i64::from_str_radix(hex, 16) {
+        _ if hex.is_empty() => Err(ParseError::BadNumber),
+        Ok(n) if int_fits(n) => Ok(Token::IntLit(rest[..len].into())),
+        _ => Err(ParseError::IntTooLarge),
+      };
+      (len, tok)
     } else {
       let whole = digits(rest, false);
       let after = &rest[whole..];
@@ -377,35 +383,37 @@ impl<'a> Tokenizer<'a> {
       };
       let len = whole + fraction;
       let text = &rest[..len];
-      if fraction > 0 {
-        let ok = text.parse::<f64>().is_ok_and(f64::is_finite);
-        (len, ok.then(|| Token::FloatLit(text.into())))
+      let tok = if fraction > 0 {
+        match text.parse::<f64>() {
+          Ok(x) if x.is_finite() => Ok(Token::FloatLit(text.into())),
+          _ => Err(ParseError::NumTooLarge),
+        }
       } else {
-        (
-          len,
-          text
-            .parse::<i64>()
-            .is_ok()
-            .then(|| Token::IntLit(text.into())),
-        )
-      }
+        // Digits alone fail to parse only when they're too many.
+        match text.parse::<i64>() {
+          Ok(n) if int_fits(n) => Ok(Token::IntLit(text.into())),
+          _ => Err(ParseError::IntTooLarge),
+        }
+      };
+      (len, tok)
     };
     self.pos += len;
     let runs_on = self
       .peek_char()
       .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    if runs_on {
+      let o = self
+        .rest()
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(self.rest().len());
+      return Err(ParseSpanError::new(
+        start..self.pos + o,
+        ParseError::BadNumber,
+      ));
+    }
     match tok {
-      Some(tok) if !runs_on => Ok((start..self.pos, tok).into()),
-      _ => {
-        let o = self
-          .rest()
-          .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-          .unwrap_or(self.rest().len());
-        Err(ParseSpanError::new(
-          start..self.pos + o,
-          ParseError::BadNumber,
-        ))
-      }
+      Ok(tok) => Ok((start..self.pos, tok).into()),
+      Err(err) => Err(ParseSpanError::new(start..self.pos, err)),
     }
   }
 
@@ -555,6 +563,29 @@ mod tests {
   }
 
   #[test]
+  fn whole_numbers_fit_in_53_bits() {
+    assert_eq!(
+      lex("9007199254740991 0x1fffffffffffff 9007199254740993.0"),
+      "Indent(0) 9007199254740991 0x1fffffffffffff 9007199254740993.0 NL _Eof"
+    );
+    for src in [
+      "9007199254740992",
+      "0x20000000000000",
+      "99999999999999999999",
+    ] {
+      let error = lex_error(src);
+      assert!(
+        error.starts_with("t:1:1: a whole number must be at most 9007199254740991 (2^53 − 1)"),
+        "{error}"
+      );
+      assert!(
+        error.ends_with(&format!("\n{}", "^".repeat(src.len()))),
+        "{error}"
+      );
+    }
+  }
+
+  #[test]
   fn indents_comments_and_blank_lines() {
     let src = "a:\n\n  -- note\n  b # more\n\tc\n   \n";
     assert_eq!(
@@ -600,7 +631,7 @@ mod tests {
     );
     assert!(lex_error("x = \"a\\qb\"").starts_with("t:1:7: the escapes are"));
     assert!(lex_error("x = \"\\ud800\"").starts_with("t:1:6: the escapes are"));
-    assert!(lex_error("x = 12px").starts_with("t:1:5: a number must fit in 64 bits"));
+    assert!(lex_error("x = 12px").starts_with("t:1:5: a number must end before any letter"));
     assert!(lex_error("x = 99999999999999999999").contains("\n    ^^^^^^^^^^^^^^^^^^^^"));
     assert!(lex_error("x = 0x").starts_with("t:1:5: a number"));
     assert!(lex_error("a \\ b").starts_with("t:1:3: a `\\` joins the next line"));

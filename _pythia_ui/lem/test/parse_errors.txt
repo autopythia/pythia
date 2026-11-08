@@ -132,3 +132,10 @@ A :- B \ C
 t.lem:1:8: a `\` joins the next line to this one, so it must end the line:
 A :- B \ C
        ^
+
+=== a whole number beyond 53 bits
+X(n=9007199254740992)
+---
+t.lem:1:5: a whole number must be at most 9007199254740991 (2^53 − 1), to be exact in every runtime:
+X(n=9007199254740992)
+    ^^^^^^^^^^^^^^^^

@@ -47,8 +47,12 @@ pub enum ParseError {
   BadEscape,
   /// A control character in text, which needs an escape.
   ControlInStr,
-  /// A number that's too large, or that runs into a name, as `12px` does.
+  /// A number that runs into a name, as `12px` does, or `0x` without digits.
   BadNumber,
+  /// A whole number beyond Int's range, ±(2^53 − 1).
+  IntTooLarge,
+  /// A number with a decimal point that's too large to be finite.
+  NumTooLarge,
   /// A bracket still open at the end of the file.
   Unclosed(char),
   /// Something else was expected here: what, and the token found.
@@ -90,9 +94,13 @@ impl Display for ParseError {
         "the escapes are \\\" \\\\ \\/ \\b \\f \\n \\r \\t and \\u with 4 hex digits"
       ),
       ParseError::ControlInStr => write!(f, "a control character in text needs an escape"),
-      ParseError::BadNumber => {
-        write!(f, "a number must fit in 64 bits, and end before any letter")
-      }
+      ParseError::BadNumber => write!(f, "a number must end before any letter"),
+      ParseError::IntTooLarge => write!(
+        f,
+        "a whole number must be at most {} (2^53 − 1), to be exact in every runtime",
+        super::value::MAX_INT
+      ),
+      ParseError::NumTooLarge => write!(f, "this number is too large to be a Num"),
       ParseError::Unclosed(c) => {
         let close = match c {
           '(' => ')',

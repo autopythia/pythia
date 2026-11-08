@@ -11,7 +11,7 @@
 
 use super::check::{Change, DeclKind, Expr, Lit, Op, Pat, Program, Test};
 use super::parse::Cmp;
-use super::value::{Ty, Value};
+use super::value::{int_fits, Ty, Value, MAX_INT};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -454,8 +454,12 @@ fn eval(e: &Expr, env: &Env) -> Result<Value, String> {
       Value::Ctor(name.clone(), args.into())
     }
     Expr::Neg(e) => match eval(e, env)? {
-      Value::Int(n) => Value::Int(n.checked_neg().ok_or("a number overflowed in `-`")?),
-      Value::Num(x) => Value::Num(-x),
+      Value::Int(n) => Value::Int(
+        n.checked_neg()
+          .filter(|n| int_fits(*n))
+          .ok_or_else(|| int_overflow("-"))?,
+      ),
+      Value::Num(x) => Value::num(-x).ok_or_else(|| num_overflow("-"))?,
       v => return Err(format!("`-` can't negate {v}")),
     },
     Expr::ToNum(e) => match eval(e, env)? {
@@ -463,11 +467,19 @@ fn eval(e: &Expr, env: &Env) -> Result<Value, String> {
       v => v,
     },
     Expr::Arith(op, a, b) => arith(*op, eval(a, env)?, eval(b, env)?)?,
+    Expr::Text(e) => Value::Text(eval(e, env)?.text()),
   })
 }
 
+fn int_overflow(op: &str) -> String {
+  format!("`{op}` overflowed: a whole number stays within ±{MAX_INT} (2^53 − 1)")
+}
+
+fn num_overflow(op: &str) -> String {
+  format!("`{op}` overflowed: a Num stays finite")
+}
+
 fn arith(op: Op, a: Value, b: Value) -> Result<Value, String> {
-  let overflow = || format!("a number overflowed in `{}`", op.spelling());
   Ok(match (a, b) {
     (Value::Int(a), Value::Int(b)) => Value::Int(
       match op {
@@ -476,17 +488,19 @@ fn arith(op: Op, a: Value, b: Value) -> Result<Value, String> {
         Op::Mul => a.checked_mul(b),
         Op::Div => return arith(op, Value::Num(a as f64), Value::Num(b as f64)),
       }
-      .ok_or_else(overflow)?,
+      .filter(|n| int_fits(*n))
+      .ok_or_else(|| int_overflow(op.spelling()))?,
     ),
     (Value::Num(_), Value::Num(b)) if op == Op::Div && b == 0.0 => {
       return Err("a division by zero".to_string());
     }
-    (Value::Num(a), Value::Num(b)) => Value::Num(match op {
+    (Value::Num(a), Value::Num(b)) => Value::num(match op {
       Op::Add => a + b,
       Op::Sub => a - b,
       Op::Mul => a * b,
       Op::Div => a / b,
-    }),
+    })
+    .ok_or_else(|| num_overflow(op.spelling()))?,
     (Value::Text(a), Value::Text(b)) if op == Op::Add => Value::Text(format!("{a}{b}").into()),
     (a, b) => return Err(format!("`{}` can't take {a} and {b}", op.spelling())),
   })
