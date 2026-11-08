@@ -1,0 +1,23 @@
+-- joins.lem: bodies that the runtime joins in the order that their facts
+-- ask for, the smallest bucket first, for lem's tests.
+input E(a: Int, b: Int)
+
+-- Triangles: each atom shares a variable with each of the others.
+rel Tri(a: Int, b: Int, c: Int)
+Tri(a, b, c) :- E(a, b), E(b, c), E(a, c)
+
+-- An atom whose column is an expression waits for the atom that binds its
+-- variable, however few facts it has.
+input A(n: Int)
+input B(n: Int)
+rel Next(n: Int)
+Next(n) :- A(n), B(n + 1)
+
+-- An edge with no way back: a negation, looked up by its key.
+rel OneWay(a: Int, b: Int)
+OneWay(a, b) :- E(a, b), not E(b, a)
+
+-- An atom with no facts fails the join at once.
+input Never(n: Int)
+rel Reached(a: Int)
+Reached(a) :- E(a, b), E(b, c), Never(c)

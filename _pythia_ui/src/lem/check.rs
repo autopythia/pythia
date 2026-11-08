@@ -5,7 +5,9 @@
 //! their rules, so that files may come in any order. Then it lowers each
 //! rule to a flat one: everything inside a `for` gets its body. On the way
 //! it checks names, fields and types, that an atom binds every variable
-//! (safety), and that no relation depends on its own negation (strata). lem
+//! (safety), and that no relation depends on its own negation. It plans
+//! each body, so that the runtime looks facts up by the columns that are
+//! bound ([`Atom`]), and orders the rules by component ([`Component`]). lem
 //! itself gives blocks (`Head:`) no meaning: a layer above it may rewrite
 //! them before this checks the files ([`check`]).
 //!
@@ -20,7 +22,8 @@ use super::parse::{
 };
 use super::token::Span;
 use super::value::{int_fits, Ty, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write;
 use std::panic::Location;
 use std::rc::Rc;
 
@@ -161,16 +164,34 @@ pub enum Test {
   Cmp(Cmp, Expr, Expr),
 }
 
+/// A body's atom: its relation, what each column matches, and its key: the
+/// columns whose values the parts of the body before it, as written, bind.
+/// A negation is looked up by its key. The runtime joins a body's positive
+/// atoms in the order that their facts ask for ([`super::eval`]), so their
+/// keys are what the written order would use, for [`Program::plans`].
+#[derive(Clone, Debug)]
+pub struct Atom {
+  pub rel: usize,
+  pub pats: Vec<Pat>,
+  pub key: Vec<usize>,
+  /// The variables that its expressions use, in order: the runtime joins
+  /// it only once they're bound.
+  pub needs: Vec<usize>,
+}
+
+/// The most atoms that a body may have, which a join tracks as bits.
+pub const MAX_ATOMS: usize = 64;
+
 /// A part of a body, in the order that they run: atoms first, as written;
 /// then bindings by `=`; then tests and negations, whose variables are
 /// bound by then.
 #[derive(Clone, Debug)]
 pub enum Lit {
-  Atom(usize, Vec<Pat>),
+  Atom(Atom),
   /// `x = e`, where only `e` is bound: binds `x`.
   Let(usize, Expr),
   Test(Test),
-  Not(usize, Vec<Pat>),
+  Not(Atom),
   NotTest(Test),
 }
 
@@ -183,6 +204,18 @@ pub struct Rule {
   pub body: Vec<Lit>,
   /// Its variables' names, by number.
   pub vars: Vec<Rc<str>>,
+}
+
+/// Relations that depend on each other, and the rules that derive them.
+#[derive(Debug)]
+pub struct Component {
+  /// The relations, by number, in order.
+  pub rels: Vec<usize>,
+  /// The rules whose heads are those relations, in program order.
+  pub rules: Vec<usize>,
+  /// Whether a rule reads a relation of its own component: then the rules
+  /// run again on what each round adds, until a round adds nothing.
+  pub recursive: bool,
 }
 
 /// What a sentence of an `on` block does to its relation.
@@ -222,8 +255,10 @@ pub struct Program {
   /// Types by name: a type made with `type` has its base; an enum, None.
   types: HashMap<Rc<str>, Option<Ty>>,
   pub rules: Vec<Rule>,
-  /// The rules, a list per stratum, in the order to run them.
-  pub strata: Vec<Vec<usize>>,
+  /// The components that rules derive, in the order to run them: each after
+  /// those whose relations its rules read, so that a negation reads a
+  /// relation that's complete.
+  pub components: Vec<Component>,
   pub actions: Vec<Action>,
 }
 
@@ -256,6 +291,68 @@ impl Program {
       }
     }
     ty
+  }
+
+  /// The plans, as text, for tests and for debugging: each component in the
+  /// order that the runtime runs them, with its rules; then each sentence of
+  /// the `on` blocks; and for each, the atoms that it reads, as written. An
+  /// atom with a key is looked up by it, as `Job by id`; any other is read
+  /// whole. The runtime may join a body's positive atoms in another order,
+  /// as their facts ask: the smallest bucket first.
+  pub fn plans(&self) -> String {
+    let mut out = String::new();
+    for component in &self.components {
+      let names: Vec<&str> = component
+        .rels
+        .iter()
+        .map(|&r| &*self.rels[r].name)
+        .collect();
+      let recursive = if component.recursive {
+        ", recursive"
+      } else {
+        ""
+      };
+      let _ = writeln!(out, "{}{recursive}", names.join(", "));
+      for &r in &component.rules {
+        let rule = &self.rules[r];
+        let _ = writeln!(
+          out,
+          "  {}: {}",
+          self.place(&rule.at),
+          self.reads(&rule.body)
+        );
+      }
+    }
+    for action in &self.actions {
+      if let Pat::Ctor(msg, _) = &action.msg {
+        let place = self.place(&action.at);
+        let _ = writeln!(out, "on {msg}, {place}: {}", self.reads(&action.body));
+      }
+    }
+    out
+  }
+
+  /// What a body reads, for [`Program::plans`].
+  fn reads(&self, body: &[Lit]) -> String {
+    let mut atoms = Vec::new();
+    for lit in body {
+      let (atom, not) = match lit {
+        Lit::Atom(atom) => (atom, ""),
+        Lit::Not(atom) => (atom, "not "),
+        _ => continue,
+      };
+      let rel = &self.rels[atom.rel];
+      let mut text = format!("{not}{}", rel.name);
+      for (i, &c) in atom.key.iter().enumerate() {
+        let name = rel.fields[c].name.as_deref().unwrap_or("_");
+        let _ = write!(text, "{}{name}", if i == 0 { " by " } else { ", " });
+      }
+      atoms.push(text);
+    }
+    match atoms.is_empty() {
+      true => "nothing".to_string(),
+      false => atoms.join(", "),
+    }
   }
 
   /// `file:line:col`.
@@ -354,7 +451,7 @@ pub fn check(files: &[(&str, &str)], mods: &[Mod]) -> Result<Program, LoadError>
     names: HashMap::new(),
     types,
     rules: Vec::new(),
-    strata: Vec::new(),
+    components: Vec::new(),
     actions: Vec::new(),
   };
   let mut loader = Loader {
@@ -555,7 +652,7 @@ impl Loader<'_> {
         }
       }
     }
-    self.strata()
+    self.components()
   }
 
   /// What a declaration's word declares.
@@ -1144,8 +1241,18 @@ impl Loader<'_> {
     let mut rest = Vec::new();
     for &item in items {
       if is_atom(item) {
+        if lits.len() == MAX_ATOMS {
+          let message = format!("a body may have at most {MAX_ATOMS} atoms");
+          return self.fail(item.span(), message);
+        }
         let (rel, pats) = self.atom(scope, item, true)?;
-        lits.push(Lit::Atom(rel, pats));
+        let (key, needs) = (Vec::new(), Vec::new());
+        lits.push(Lit::Atom(Atom {
+          rel,
+          pats,
+          key,
+          needs,
+        }));
       } else {
         rest.push(item);
       }
@@ -1175,7 +1282,13 @@ impl Loader<'_> {
           }
           if is_atom(inner) {
             let (rel, pats) = self.atom(scope, inner, false)?;
-            Lit::Not(rel, pats)
+            let (key, needs) = (Vec::new(), Vec::new());
+            Lit::Not(Atom {
+              rel,
+              pats,
+              key,
+              needs,
+            })
           } else {
             Lit::NotTest(self.test(scope, inner)?)
           }
@@ -1229,7 +1342,8 @@ impl Loader<'_> {
       body_items(own, &mut items);
     }
     let mut scope = Scope::default();
-    let lits = self.body(&mut scope, &items)?;
+    let mut lits = self.body(&mut scope, &items)?;
+    plan(&mut lits, vec![false; scope.names.len()]);
     let (rel, args) = self.head(&mut scope, head)?;
     let why = match self.prog.rels[rel].kind {
       DeclKind::Input => Some("the host sends `input` facts, so rules don't derive them"),
@@ -1332,7 +1446,12 @@ impl Loader<'_> {
     if let Some(own) = own {
       body_items(own, &mut items);
     }
-    let lits = self.body(&mut scope, &items)?;
+    // The message binds its variables before the body.
+    let message_vars = scope.names.len();
+    let mut lits = self.body(&mut scope, &items)?;
+    let mut bound = vec![false; scope.names.len()];
+    bound[..message_vars].fill(true);
+    plan(&mut lits, bound);
     let (name, _, nspan) = self.atom_parts(head, "a head")?;
     let rel = self.rel_of(name, &nspan)?;
     let kind = self.prog.rels[rel].kind;
@@ -1365,38 +1484,35 @@ impl Loader<'_> {
     Ok(())
   }
 
-  /// Orders the rules into strata, so that a relation's rules run after
-  /// those of every relation that it negates. A relation that depends on its
+  /// Orders the rules by component ([`Component`]): each component after
+  /// those that its rules read, and of the components that are ready, the
+  /// one with the lowest-numbered rule first. A relation that depends on its
   /// own negation is an error.
-  fn strata(&mut self) -> Check<()> {
+  fn components(&mut self) -> Check<()> {
     let n = self.prog.rels.len();
     // (from, to, whether negated, rule): the head depends on the atom.
     let mut edges = Vec::new();
     for (i, rule) in self.prog.rules.iter().enumerate() {
       for lit in &rule.body {
         match lit {
-          Lit::Atom(rel, _) => edges.push((*rel, rule.head, false, i)),
-          Lit::Not(rel, _) => edges.push((*rel, rule.head, true, i)),
+          Lit::Atom(atom) => edges.push((atom.rel, rule.head, false, i)),
+          Lit::Not(atom) => edges.push((atom.rel, rule.head, true, i)),
           _ => {}
         }
       }
     }
-    let mut reach = vec![vec![false; n]; n];
+    let mut next = vec![Vec::new(); n];
     for &(from, to, ..) in &edges {
-      reach[from][to] = true;
+      next[from].push(to);
     }
-    for k in 0..n {
-      let via = reach[k].clone();
-      for row in reach.iter_mut() {
-        if row[k] {
-          for (cell, &r) in row.iter_mut().zip(&via) {
-            *cell |= r;
-          }
-        }
-      }
-    }
+    let reach: Vec<Vec<bool>> = (0..n).map(|from| reachable(&next, from)).collect();
+    // A relation's component is named by its lowest-numbered relation: the
+    // first that it reaches, and that reaches it.
+    let comp: Vec<usize> = (0..n)
+      .map(|r| (0..n).find(|&s| reach[r][s] && reach[s][r]).unwrap_or(r))
+      .collect();
     for &(from, to, negated, i) in &edges {
-      if negated && (from == to || reach[to][from]) {
+      if negated && comp[from] == comp[to] {
         let at = self.prog.rules[i].at.clone();
         self.file = at.file;
         let (head, atom) = (&self.prog.rels[to].name, &self.prog.rels[from].name);
@@ -1406,26 +1522,132 @@ impl Loader<'_> {
         return self.fail(at.span, message);
       }
     }
-    let mut level = vec![0; n];
-    for _ in 0..=n {
-      let mut changed = false;
-      for &(from, to, negated, _) in &edges {
-        let want = level[from] + usize::from(negated);
-        if want > level[to] {
-          level[to] = want;
-          changed = true;
+    let mut rules = vec![Vec::new(); n];
+    for (i, rule) in self.prog.rules.iter().enumerate() {
+      rules[comp[rule.head]].push(i);
+    }
+    // Between components, (from, to): `to` reads `from`.
+    let mut after = BTreeSet::new();
+    let mut waits = vec![0; n];
+    for &(from, to, ..) in &edges {
+      if comp[from] != comp[to] && after.insert((comp[from], comp[to])) {
+        waits[comp[to]] += 1;
+      }
+    }
+    // Components without rules go first; then by their first rule.
+    let first = |c: usize| rules[c].first().map_or(0, |&r| r + 1);
+    let mut ready: BTreeSet<(usize, usize)> = (0..n)
+      .filter(|&c| comp[c] == c && waits[c] == 0)
+      .map(|c| (first(c), c))
+      .collect();
+    let mut order = Vec::new();
+    while let Some((_, c)) = ready.pop_first() {
+      order.push(c);
+      for &(_, to) in after.range((c, 0)..(c + 1, 0)) {
+        waits[to] -= 1;
+        if waits[to] == 0 {
+          ready.insert((first(to), to));
         }
       }
-      if !changed {
-        break;
+    }
+    self.prog.components = order
+      .into_iter()
+      .filter(|&c| !rules[c].is_empty())
+      .map(|c| Component {
+        rels: (0..n).filter(|&r| comp[r] == c).collect(),
+        rules: rules[c].clone(),
+        recursive: edges
+          .iter()
+          .any(|&(from, to, ..)| comp[from] == c && comp[to] == c),
+      })
+      .collect();
+    Ok(())
+  }
+}
+
+/// Which nodes `from` reaches along `next`, itself among them.
+fn reachable(next: &[Vec<usize>], from: usize) -> Vec<bool> {
+  let mut seen = vec![false; next.len()];
+  let mut stack = vec![from];
+  seen[from] = true;
+  while let Some(node) = stack.pop() {
+    for &to in &next[node] {
+      if !seen[to] {
+        seen[to] = true;
+        stack.push(to);
       }
     }
-    let top = level.iter().copied().max().unwrap_or(0);
-    self.prog.strata = vec![Vec::new(); top + 1];
-    for (i, rule) in self.prog.rules.iter().enumerate() {
-      self.prog.strata[level[rule.head]].push(i);
+  }
+  seen
+}
+
+/// Sets each atom's key: the columns whose values the parts of the body
+/// before it bind. `bound` says which variables are bound before the body,
+/// as an `on` block's message binds its own.
+fn plan(lits: &mut [Lit], mut bound: Vec<bool>) {
+  for lit in lits {
+    let (atom, binds) = match lit {
+      Lit::Atom(atom) => (atom, true),
+      Lit::Not(atom) => (atom, false),
+      Lit::Let(v, _) => {
+        bound[*v] = true;
+        continue;
+      }
+      Lit::Test(_) | Lit::NotTest(_) => continue,
+    };
+    atom.key = (0..atom.pats.len())
+      .filter(|&c| known(&atom.pats[c], &bound))
+      .collect();
+    let mut needs = Vec::new();
+    atom.pats.iter().for_each(|pat| pat_needs(pat, &mut needs));
+    needs.sort_unstable();
+    needs.dedup();
+    atom.needs = needs;
+    if binds {
+      atom.pats.iter().for_each(|pat| bind(pat, &mut bound));
     }
-    Ok(())
+  }
+}
+
+/// Whether a pattern's value is known, from what `bound` says is bound.
+fn known(pat: &Pat, bound: &[bool]) -> bool {
+  match pat {
+    Pat::Any => false,
+    Pat::Var(v) => bound[*v],
+    Pat::Const(_) | Pat::Expr(_) => true,
+    Pat::Ctor(_, pats) => pats.iter().all(|pat| known(pat, bound)),
+  }
+}
+
+/// The variables in a pattern's expressions.
+fn pat_needs(pat: &Pat, out: &mut Vec<usize>) {
+  match pat {
+    Pat::Expr(e) => expr_vars(e, out),
+    Pat::Ctor(_, pats) => pats.iter().for_each(|pat| pat_needs(pat, out)),
+    Pat::Any | Pat::Var(_) | Pat::Const(_) => {}
+  }
+}
+
+/// The variables that an expression uses.
+fn expr_vars(e: &Expr, out: &mut Vec<usize>) {
+  match e {
+    Expr::Var(v) => out.push(*v),
+    Expr::Const(_) => {}
+    Expr::Ctor(_, args) => args.iter().for_each(|e| expr_vars(e, out)),
+    Expr::Neg(e) | Expr::ToNum(e) | Expr::Text(e) => expr_vars(e, out),
+    Expr::Arith(_, a, b) => {
+      expr_vars(a, out);
+      expr_vars(b, out);
+    }
+  }
+}
+
+/// Marks the variables that a pattern binds.
+fn bind(pat: &Pat, bound: &mut [bool]) {
+  match pat {
+    Pat::Var(v) => bound[*v] = true,
+    Pat::Ctor(_, pats) => pats.iter().for_each(|pat| bind(pat, bound)),
+    Pat::Any | Pat::Const(_) | Pat::Expr(_) => {}
   }
 }
 

@@ -31,6 +31,7 @@ make release       # the same, in release/
 make test          # the unit tests, on this machine
 make check         # rustfmt; clippy for macOS and for this machine; and
                    # every macOS binary, tests too, linked against the stubs
+make bench         # times lem at the size of a long log, and on a hard join
 make msrv          # check and test with Rust 1.78.0, the oldest supported
 make inspect       # from any host: will the binaries load on macOS?
 make plugin-check  # loads this machine's build of the plugin with ctypes

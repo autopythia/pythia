@@ -4,3 +4,5 @@
 test/syntax.lem
 test/jobs.lem
 test/numbers.lem
+test/recursion.lem
+test/joins.lem

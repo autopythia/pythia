@@ -1,0 +1,27 @@
+-- recursion.lem: recursive rules, which the runtime runs semi-naively, for
+-- lem's tests: paths in a graph, and even and odd steps along it.
+input Edge(a: Int, b: Int)
+input Start(n: Int)
+
+-- Paths: recursion through one relation.
+rel Path(a: Int, b: Int)
+Path(a, b) :- Edge(a, b)
+Path(a, c) :- Path(a, b), Edge(b, c)
+
+-- Even and odd steps from a start: recursion through two relations.
+rel Even(n: Int)
+rel Odd(n: Int)
+Even(n) :- Start(n)
+Odd(b) :- Even(a), Edge(a, b)
+Even(b) :- Odd(a), Edge(a, b)
+rel Both(n: Int)
+Both(n) :- Even(n), Odd(n)
+
+-- Why a fact holds names the lowest-numbered rule that derives it, though
+-- a later one derives it in an earlier round: the key's error shows it.
+input Seed(n: Int)
+rel Pick(k: Int, n: Int) key k
+Pick(0, n) :- Pick(1, n)
+Pick(1, n) :- Seed(n)
+Pick(0, 5) :- Seed(5)
+Pick(0, 6) :- Seed(6)

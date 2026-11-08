@@ -14,7 +14,7 @@ OUT := target/$(TARGET)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 HOST_LIB := target/$(HOST)/release/libpythia_ui.$(if $(findstring apple-darwin,$(HOST)),dylib,so)
 
-.PHONY: all build dev debug rel release test check msrv plugin-check tbd inspect clean
+.PHONY: all build dev debug rel release test check bench msrv plugin-check tbd inspect clean
 
 all: build
 
@@ -38,6 +38,14 @@ ifneq ($(HOST),$(TARGET))
 	$(CARGO) clippy --all-targets --target $(HOST) -- -D warnings
 endif
 	$(CARGO) build --all-targets
+
+# Times lem, the GUI's rule language, on a log's shape, up to the most items
+# that one of pythia's contexts has had, and on triangles in a star, a join
+# that needs a good order (tools/lem_bench.py), with pythia-ui built in
+# release for this machine.
+bench:
+	$(CARGO) build --release --bin $(BIN) --target $(HOST)
+	$(PYTHON) tools/lem_bench.py target/$(HOST)/release/$(BIN)
 
 # check and test with the oldest Rust that Cargo.toml's rust-version names,
 # which must be installed:

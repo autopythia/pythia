@@ -1,0 +1,26 @@
+# The plans of jobs.lem (Program::plans): its components, in the order
+# that the runtime runs them, with their rules, then the `on` blocks; and
+# for each, the atoms that it reads, as written, by their keys. The runtime
+# may join a body's positive atoms in another order, as their facts ask.
+Waits, recursive
+  lem/test/jobs.lem:17:1: After
+  lem/test/jobs.lem:18:1: After, Waits by job
+Open
+  lem/test/jobs.lem:20:1: Job, not Done by job
+Blocked
+  lem/test/jobs.lem:22:1: Waits, Open by job
+Ready
+  lem/test/jobs.lem:24:1: Open, not Blocked by job
+Late
+  lem/test/jobs.lem:28:1: Open, Job by id, Now
+Urgent
+  lem/test/jobs.lem:34:3: Job by priority, Ready by job
+  lem/test/jobs.lem:35:3: Job by priority, Late by job
+on Finish, lem/test/jobs.lem:38:3: Now, Open by job
+on Finish, lem/test/jobs.lem:39:3: Job by id, Open by job
+on Reopen, lem/test/jobs.lem:41:3: nothing
+on Annotate, lem/test/jobs.lem:43:3: nothing
+on Twice, lem/test/jobs.lem:48:3: nothing
+on Twice, lem/test/jobs.lem:49:3: nothing
+on Redo, lem/test/jobs.lem:51:3: Done by job
+on Redo, lem/test/jobs.lem:52:3: nothing

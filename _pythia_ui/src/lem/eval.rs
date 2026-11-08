@@ -4,16 +4,28 @@
 //!
 //! A tick ([`Runtime::tick`]) is the design's: the message's `on` blocks run
 //! against the facts as they are, derived ones as the last tick left them;
-//! their changes apply; each stratum's rules run until nothing new appears
-//! (naively, for now); and the keys are checked. A layer above lem can add
-//! its own checks after a tick, through [`Runtime::rel_facts`] and
+//! their changes apply; the rules run, component by component, in the
+//! checker's order; and the keys are checked. A layer above lem can add its
+//! own checks after a tick, through [`Runtime::rel_facts`] and
 //! [`Runtime::drop_facts`].
+//!
+//! Every tick derives everything again, but cheaply. A body's positive atoms
+//! join in the order that their facts ask for, after meringue's joins
+//! (`doc/pythia-ui-gui-design.md` in pythia): at each step, every atom that's
+//! ready is looked up by the columns bound so far, in an index on them; if
+//! one has no facts there, the step fails; else the join takes the atom
+//! with the fewest, the first written on a tie. A recursive component runs
+//! semi-naively: each round joins what the last round added, at one atom,
+//! with all the facts at the others. Whatever order a join takes, its
+//! results are the same, so the runtimes agree; only an error in an atom's
+//! expression may come at another step.
 
-use super::check::{Change, DeclKind, Expr, Lit, Op, Pat, Program, Test};
+use super::check::{Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Test, MAX_ATOMS};
 use super::parse::Cmp;
 use super::value::{int_fits, Ty, Value, MAX_INT};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::btree_map::{self, Entry};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::rc::Rc;
 
@@ -23,7 +35,8 @@ pub type Tuple = Rc<[Value]>;
 type Env = Vec<Option<Value>>;
 
 /// Why a fact holds: the host asserted it, an `on` block's sentence (an
-/// action) added it, or a rule, the first, derived it.
+/// action) added it, or rules derived it: the lowest-numbered of them, so
+/// that any order of evaluation names the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Why {
   Host,
@@ -45,22 +58,177 @@ impl Display for Effect {
   }
 }
 
+/// An index: by the values of some columns, the facts that have them.
+type Index = HashMap<Vec<Value>, Vec<Tuple>>;
+
+/// A fact's values in `cols`.
+fn project(tuple: &Tuple, cols: &[usize]) -> Vec<Value> {
+  cols.iter().map(|&c| tuple[c].clone()).collect()
+}
+
+/// Indexes by their columns, built as joins ask for them.
+type Indexes = RefCell<HashMap<Vec<usize>, Rc<Index>>>;
+
+/// The index on `cols` in `indexes`, built from `tuples` if it isn't there.
+fn index<'a>(
+  indexes: &Indexes,
+  cols: &[usize],
+  tuples: impl Iterator<Item = &'a Tuple>,
+) -> Rc<Index> {
+  if let Some(index) = indexes.borrow().get(cols) {
+    return index.clone();
+  }
+  let mut index = Index::new();
+  for tuple in tuples {
+    index
+      .entry(project(tuple, cols))
+      .or_default()
+      .push(tuple.clone());
+  }
+  let index = Rc::new(index);
+  indexes.borrow_mut().insert(cols.to_vec(), index.clone());
+  index
+}
+
+/// A relation's facts, and why each holds; and indexes on them, which only
+/// [`Table::derive`] keeps as facts change: every other change drops them.
+#[derive(Default)]
+struct Table {
+  facts: BTreeMap<Tuple, Why>,
+  indexes: Indexes,
+}
+
+impl Table {
+  /// The index on `cols`, which mustn't be empty.
+  fn index(&self, cols: &[usize]) -> Rc<Index> {
+    index(&self.indexes, cols, self.facts.keys())
+  }
+
+  /// A fact that rule `rule` derives, into the indexes too: whether it's
+  /// new. One that holds already keeps the lowest-numbered of its rules.
+  fn derive(&mut self, tuple: &Tuple, rule: usize) -> bool {
+    match self.facts.entry(tuple.clone()) {
+      Entry::Occupied(mut entry) => {
+        if matches!(entry.get(), Why::Rule(r) if rule < *r) {
+          entry.insert(Why::Rule(rule));
+        }
+        false
+      }
+      Entry::Vacant(entry) => {
+        entry.insert(Why::Rule(rule));
+        for (cols, index) in self.indexes.get_mut().iter_mut() {
+          Rc::make_mut(index)
+            .entry(project(tuple, cols))
+            .or_default()
+            .push(tuple.clone());
+        }
+        true
+      }
+    }
+  }
+
+  /// The facts themselves, to change otherwise: so the indexes go.
+  fn facts_mut(&mut self) -> &mut BTreeMap<Tuple, Why> {
+    self.indexes.get_mut().clear();
+    &mut self.facts
+  }
+}
+
+/// What a recursive round added to a relation, and indexes on it.
+struct Fresh {
+  tuples: Vec<Tuple>,
+  indexes: Indexes,
+}
+
+/// The facts that a lookup gives: all of a relation's, or a key's.
+enum Tuples<'a> {
+  All(btree_map::Keys<'a, Tuple, Why>),
+  Some(std::slice::Iter<'a, Tuple>),
+}
+
+impl<'a> Iterator for Tuples<'a> {
+  type Item = &'a Tuple;
+
+  fn next(&mut self) -> Option<&'a Tuple> {
+    match self {
+      Tuples::All(tuples) => tuples.next(),
+      Tuples::Some(tuples) => tuples.next(),
+    }
+  }
+}
+
+/// The facts that might match an atom, given the columns bound so far.
+enum Bucket<'a> {
+  /// All of a relation's: no column is bound.
+  Table(&'a BTreeMap<Tuple, Why>),
+  /// All that a round added: no column is bound.
+  Fresh(&'a [Tuple]),
+  /// Those with a key's values, in an index on its columns.
+  Index(Rc<Index>, Vec<Value>),
+}
+
+impl Bucket<'_> {
+  fn len(&self) -> usize {
+    match self {
+      Bucket::Table(facts) => facts.len(),
+      Bucket::Fresh(tuples) => tuples.len(),
+      Bucket::Index(index, key) => index.get(key).map_or(0, Vec::len),
+    }
+  }
+
+  fn tuples(&self) -> Tuples<'_> {
+    match self {
+      Bucket::Table(facts) => Tuples::All(facts.keys()),
+      Bucket::Fresh(tuples) => Tuples::Some(tuples.iter()),
+      Bucket::Index(index, key) => {
+        Tuples::Some(index.get(key).map_or([].iter(), |tuples| tuples.iter()))
+      }
+    }
+  }
+}
+
+/// A recursive round's new facts, for the atom at a place in a body.
+type Delta<'a> = Option<(usize, &'a Fresh)>;
+
+/// What a join reads, the tables, and where it counts the facts it visits.
+#[derive(Clone, Copy)]
+struct Join<'a> {
+  tables: &'a [Table],
+  visits: &'a Cell<u64>,
+}
+
+/// A relation's new facts, from (relation, fact, rule) triples.
+type New = Vec<(usize, Tuple, usize)>;
+
 pub struct Runtime {
   pub prog: Program,
-  /// Each relation's facts, and why each holds.
-  facts: Vec<BTreeMap<Tuple, Why>>,
+  /// Each relation's facts and indexes.
+  tables: Vec<Table>,
+  /// The facts that the last tick's joins visited.
+  visits: Cell<u64>,
 }
 
 impl Runtime {
   pub fn new(prog: Program) -> Runtime {
-    let facts = vec![BTreeMap::new(); prog.rels.len()];
-    Runtime { prog, facts }
+    let tables = prog.rels.iter().map(|_| Table::default()).collect();
+    let visits = Cell::new(0);
+    Runtime {
+      prog,
+      tables,
+      visits,
+    }
+  }
+
+  /// The facts that the last tick's joins visited: a measure of its work,
+  /// which tests of how joins scale read, rather than times.
+  pub fn visits(&self) -> u64 {
+    self.visits.get()
   }
 
   /// A relation's facts, in order.
   pub fn facts(&self, rel: &str) -> Vec<Tuple> {
     match self.prog.rel(rel) {
-      Some(rel) => self.facts[rel].keys().cloned().collect(),
+      Some(rel) => self.tables[rel].facts.keys().cloned().collect(),
       None => Vec::new(),
     }
   }
@@ -68,13 +236,16 @@ impl Runtime {
   /// A relation's facts, by its number in the program, in order, and why
   /// each holds.
   pub fn rel_facts(&self, rel: usize) -> impl Iterator<Item = (&Tuple, Why)> + '_ {
-    self.facts[rel].iter().map(|(tuple, why)| (tuple, *why))
+    self.tables[rel]
+      .facts
+      .iter()
+      .map(|(tuple, why)| (tuple, *why))
   }
 
   /// Drops a relation's facts that `drop` picks: for a layer above lem that
   /// cleans up between ticks.
   pub fn drop_facts(&mut self, rel: usize, mut drop: impl FnMut(&Tuple) -> bool) {
-    self.facts[rel].retain(|tuple, _| !drop(tuple));
+    self.tables[rel].facts_mut().retain(|tuple, _| !drop(tuple));
   }
 
   /// The host's fact, written in lem, such as `Now(1000)`. In a relation
@@ -83,17 +254,18 @@ impl Runtime {
     let (rel, tuple) = self.input(text)?;
     let r = &self.prog.rels[rel];
     let key: Vec<usize> = r.key.clone();
+    let facts = self.tables[rel].facts_mut();
     if !key.is_empty() {
-      self.facts[rel].retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
+      facts.retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
     }
-    self.facts[rel].insert(tuple, Why::Host);
+    facts.insert(tuple, Why::Host);
     Ok(())
   }
 
   /// Retracts the host's fact, written in lem; whether it held.
   pub fn retract(&mut self, text: &str) -> Result<bool, String> {
     let (rel, tuple) = self.input(text)?;
-    Ok(self.facts[rel].remove(&tuple).is_some())
+    Ok(self.tables[rel].facts_mut().remove(&tuple).is_some())
   }
 
   fn input(&mut self, text: &str) -> Result<(usize, Tuple), String> {
@@ -176,6 +348,7 @@ impl Runtime {
   /// One tick: the message's `on` blocks, if there's a message, then the
   /// rules. Gives the effects that the `on` blocks sent, in order.
   pub fn tick(&mut self, msg: Option<&Value>) -> Result<Vec<Effect>, String> {
+    self.visits.set(0);
     let mut effects = Vec::new();
     if let Some(msg) = msg {
       let (inserts, deletes) = self.update(msg)?;
@@ -187,7 +360,7 @@ impl Runtime {
         }
       }
       for (rel, tuple, _) in deletes {
-        self.facts[rel].remove(&tuple);
+        self.tables[rel].facts_mut().remove(&tuple);
       }
       let mut added: BTreeMap<(usize, Vec<Value>), (Tuple, usize)> = BTreeMap::new();
       for (rel, tuple, a) in inserts {
@@ -212,8 +385,9 @@ impl Runtime {
             return Err(format!("one key, two facts: {x} ({at}) and {y} ({other})"));
           }
         }
-        self.facts[rel].retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
-        self.facts[rel].insert(tuple.clone(), Why::Action(a));
+        let facts = self.tables[rel].facts_mut();
+        facts.retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
+        facts.insert(tuple.clone(), Why::Action(a));
         added.insert((rel, k), (tuple, a));
       }
     }
@@ -224,18 +398,18 @@ impl Runtime {
 
   /// What the `on` blocks of a message would add and delete: (relation,
   /// fact, action) each.
-  #[allow(clippy::type_complexity)]
-  fn update(
-    &self,
-    msg: &Value,
-  ) -> Result<(Vec<(usize, Tuple, usize)>, Vec<(usize, Tuple, usize)>), String> {
+  fn update(&self, msg: &Value) -> Result<(New, New), String> {
+    let j = Join {
+      tables: &self.tables,
+      visits: &self.visits,
+    };
     let (mut inserts, mut deletes) = (Vec::new(), Vec::new());
     for (a, action) in self.prog.actions.iter().enumerate() {
       let mut env = vec![None; action.vars.len()];
       if !match_pat(&action.msg, msg, &mut env, &mut Vec::new())? {
         continue;
       }
-      self.solve(&action.body, &mut env, &mut |env| {
+      solve(j, &action.body, &mut env, None, &mut |env| {
         match &action.change {
           Change::Insert(exprs) => {
             let values = exprs
@@ -245,7 +419,7 @@ impl Runtime {
             inserts.push((action.rel, values.into(), a));
           }
           Change::Delete(pats) => {
-            for tuple in self.facts[action.rel].keys() {
+            for tuple in j.tables[action.rel].facts.keys() {
               if match_all(pats, tuple, &mut env.clone(), &mut Vec::new())? {
                 deletes.push((action.rel, tuple.clone(), a));
               }
@@ -258,89 +432,59 @@ impl Runtime {
     Ok((inserts, deletes))
   }
 
-  /// Runs the rules again from the input and state facts: each stratum, in
-  /// order, until nothing new appears.
+  /// Runs the rules again from the input and state facts, component by
+  /// component, in the checker's order.
   fn derive(&mut self) -> Result<(), String> {
-    for (facts, rel) in self.facts.iter_mut().zip(&self.prog.rels) {
+    for (table, rel) in self.tables.iter_mut().zip(&self.prog.rels) {
       if rel.kind == DeclKind::Rel {
-        facts.clear();
+        table.facts_mut().clear();
       }
     }
-    for stratum in 0..self.prog.strata.len() {
-      loop {
-        let mut new = Vec::new();
-        for &r in &self.prog.strata[stratum] {
-          let rule = &self.prog.rules[r];
-          let mut env = vec![None; rule.vars.len()];
-          self.solve(&rule.body, &mut env, &mut |env| {
-            let values = rule
-              .args
-              .iter()
-              .map(|e| eval(e, env))
-              .collect::<Result<Vec<_>, _>>();
-            let values =
-              values.map_err(|e| format!("{e}, in the rule at {}", self.prog.place(&rule.at)))?;
-            new.push((rule.head, Tuple::from(values), r));
-            Ok(())
-          })?;
-        }
-        let mut changed = false;
-        for (rel, tuple, r) in new {
-          if let Entry::Vacant(entry) = self.facts[rel].entry(tuple) {
-            entry.insert(Why::Rule(r));
-            changed = true;
-          }
-        }
-        if !changed {
-          break;
-        }
-      }
+    for c in 0..self.prog.components.len() {
+      self.run(c)?;
     }
     Ok(())
   }
 
-  /// Calls `out` with each solution of a body, as the variables' values.
-  fn solve(
-    &self,
-    lits: &[Lit],
-    env: &mut Env,
-    out: &mut dyn FnMut(&Env) -> Result<(), String>,
-  ) -> Result<(), String> {
-    let Some((lit, rest)) = lits.split_first() else {
-      return out(env);
+  /// Runs a component's rules: once on every fact; then, if it's recursive,
+  /// again for each of their atoms on its relations, joining just what the
+  /// last round added there, until a round adds nothing.
+  fn run(&mut self, c: usize) -> Result<(), String> {
+    let prog = &self.prog;
+    let component = &prog.components[c];
+    let mut new = Vec::new();
+    let j = Join {
+      tables: &self.tables,
+      visits: &self.visits,
     };
-    match lit {
-      Lit::Atom(rel, pats) => {
-        for tuple in self.facts[*rel].keys() {
-          let mut trail = Vec::new();
-          if match_all(pats, tuple, env, &mut trail)? {
-            self.solve(rest, env, out)?;
-          }
-          trail.iter().for_each(|&v| env[v] = None);
-        }
-        Ok(())
-      }
-      Lit::Let(v, e) => {
-        env[*v] = Some(eval(e, env)?);
-        let result = self.solve(rest, env, out);
-        env[*v] = None;
-        result
-      }
-      Lit::Test(t) if test(t, env)? => self.solve(rest, env, out),
-      Lit::NotTest(t) if !test(t, env)? => self.solve(rest, env, out),
-      Lit::Test(_) | Lit::NotTest(_) => Ok(()),
-      Lit::Not(rel, pats) => {
-        for tuple in self.facts[*rel].keys() {
-          let mut trail = Vec::new();
-          let found = match_all(pats, tuple, env, &mut trail)?;
-          trail.iter().for_each(|&v| env[v] = None);
-          if found {
-            return Ok(());
-          }
-        }
-        self.solve(rest, env, out)
-      }
+    for &r in &component.rules {
+      solutions(prog, j, r, None, &mut new)?;
     }
+    let mut fresh = insert(&mut self.tables, new);
+    while component.recursive && !fresh.is_empty() {
+      let added: BTreeMap<usize, Fresh> = fresh
+        .into_iter()
+        .map(|(rel, tuples)| {
+          let indexes = Indexes::default();
+          (rel, Fresh { tuples, indexes })
+        })
+        .collect();
+      let mut new = Vec::new();
+      let j = Join {
+        tables: &self.tables,
+        visits: &self.visits,
+      };
+      for &r in &component.rules {
+        for (at, lit) in prog.rules[r].body.iter().enumerate() {
+          let Lit::Atom(atom) = lit else { continue };
+          if let Some(added) = added.get(&atom.rel) {
+            solutions(prog, j, r, Some((at, added)), &mut new)?;
+          }
+        }
+      }
+      fresh = insert(&mut self.tables, new);
+    }
+    Ok(())
   }
 
   /// Where a fact comes from, for errors.
@@ -370,7 +514,7 @@ impl Runtime {
         continue;
       }
       let mut seen: BTreeMap<Vec<Value>, (&Tuple, Why)> = BTreeMap::new();
-      for (tuple, why) in &self.facts[rel] {
+      for (tuple, why) in &self.tables[rel].facts {
         let key: Vec<Value> = r.key.iter().map(|&i| tuple[i].clone()).collect();
         if let Some((other, first)) = seen.get(&key) {
           let (x, y) = (self.fact_text(rel, other), self.fact_text(rel, tuple));
@@ -390,6 +534,210 @@ impl Runtime {
 pub struct Script {
   pub msg: Option<Value>,
   pub show: Vec<String>,
+}
+
+/// Adds rules' new facts: by relation, those that didn't hold before.
+fn insert(tables: &mut [Table], new: New) -> BTreeMap<usize, Vec<Tuple>> {
+  let mut fresh: BTreeMap<usize, Vec<Tuple>> = BTreeMap::new();
+  for (rel, tuple, r) in new {
+    if tables[rel].derive(&tuple, r) {
+      fresh.entry(rel).or_default().push(tuple);
+    }
+  }
+  fresh
+}
+
+/// Adds rule `r`'s solutions to `new`, as (relation, fact, rule).
+fn solutions(prog: &Program, j: Join, r: usize, delta: Delta, new: &mut New) -> Result<(), String> {
+  let rule = &prog.rules[r];
+  let mut env = vec![None; rule.vars.len()];
+  solve(j, &rule.body, &mut env, delta, &mut |env| {
+    let values = rule
+      .args
+      .iter()
+      .map(|e| eval(e, env))
+      .collect::<Result<Vec<_>, _>>();
+    let values = values.map_err(|e| format!("{e}, in the rule at {}", prog.place(&rule.at)))?;
+    new.push((rule.head, Tuple::from(values), r));
+    Ok(())
+  })
+}
+
+/// Calls `out` with each solution of a body, as the variables' values: its
+/// positive atoms, which come first, joined as [`join`] does; then the rest
+/// in order.
+fn solve(
+  j: Join,
+  body: &[Lit],
+  env: &mut Env,
+  delta: Delta,
+  out: &mut dyn FnMut(&Env) -> Result<(), String>,
+) -> Result<(), String> {
+  let atoms = body
+    .iter()
+    .take_while(|lit| matches!(lit, Lit::Atom(_)))
+    .count();
+  assert!(atoms <= MAX_ATOMS, "the checker limits a body's atoms");
+  // A bit for each atom: all of them are left to join.
+  let left = match atoms {
+    0 => 0,
+    n => u64::MAX >> (MAX_ATOMS - n),
+  };
+  join(j, body, atoms, left, env, delta, out)
+}
+
+/// Joins the first `atoms` parts of a body, the atoms, whose bits are set in
+/// `left`: of those that are ready, it looks each up by the columns bound so
+/// far; fails if one has no facts; and else takes the one with the fewest,
+/// the first written on a tie. Then the rest of the body, in order.
+fn join(
+  j: Join,
+  body: &[Lit],
+  atoms: usize,
+  left: u64,
+  env: &mut Env,
+  delta: Delta,
+  out: &mut dyn FnMut(&Env) -> Result<(), String>,
+) -> Result<(), String> {
+  if left == 0 {
+    return rest(j, body, atoms, env, out);
+  }
+  let alone = left.count_ones() == 1;
+  let mut best: Option<(usize, usize, Bucket)> = None;
+  for at in (0..atoms).filter(|at| left & (1 << at) != 0) {
+    let Lit::Atom(atom) = &body[at] else {
+      unreachable!("a body's atoms come first");
+    };
+    if !atom.needs.iter().all(|&v| env[v].is_some()) {
+      continue;
+    }
+    let cols: Vec<usize> = (0..atom.pats.len())
+      .filter(|&c| known(&atom.pats[c], env))
+      .collect();
+    let fresh = delta.filter(|(place, _)| *place == at).map(|(_, f)| f);
+    let bucket = bucket(j, atom, &cols, env, fresh)?;
+    if alone {
+      best = Some((0, at, bucket));
+      break;
+    }
+    let len = bucket.len();
+    if len == 0 {
+      return Ok(());
+    }
+    match &best {
+      Some((least, ..)) if *least <= len => {}
+      _ => best = Some((len, at, bucket)),
+    }
+  }
+  let (_, at, bucket) = best.expect("the first atom left is ready");
+  let Lit::Atom(atom) = &body[at] else {
+    unreachable!("a body's atoms come first");
+  };
+  for tuple in bucket.tuples() {
+    j.visits.set(j.visits.get() + 1);
+    let mut trail = Vec::new();
+    if match_all(&atom.pats, tuple, env, &mut trail)? {
+      join(j, body, atoms, left & !(1 << at), env, delta, out)?;
+    }
+    trail.iter().for_each(|&v| env[v] = None);
+  }
+  Ok(())
+}
+
+/// The facts that might match an atom, by the columns `cols` whose values
+/// are known: from what a round added, if `fresh` is this atom's, else from
+/// its relation.
+fn bucket<'a>(
+  j: Join<'a>,
+  atom: &Atom,
+  cols: &[usize],
+  env: &Env,
+  fresh: Option<&'a Fresh>,
+) -> Result<Bucket<'a>, String> {
+  if cols.is_empty() {
+    return Ok(match fresh {
+      Some(fresh) => Bucket::Fresh(&fresh.tuples),
+      None => Bucket::Table(&j.tables[atom.rel].facts),
+    });
+  }
+  let key = cols
+    .iter()
+    .map(|&c| value_of(&atom.pats[c], env))
+    .collect::<Result<Vec<_>, _>>()?;
+  let index = match fresh {
+    Some(fresh) => index(&fresh.indexes, cols, fresh.tuples.iter()),
+    None => j.tables[atom.rel].index(cols),
+  };
+  Ok(Bucket::Index(index, key))
+}
+
+/// Whether a pattern's value is known, from the variables bound so far: in
+/// an atom that's ready, an expression's is.
+fn known(pat: &Pat, env: &Env) -> bool {
+  match pat {
+    Pat::Any => false,
+    Pat::Var(v) => env[*v].is_some(),
+    Pat::Const(_) | Pat::Expr(_) => true,
+    Pat::Ctor(_, pats) => pats.iter().all(|pat| known(pat, env)),
+  }
+}
+
+/// The rest of a body, after its atoms, in order: bindings, tests and
+/// negations, each looked up by its key.
+fn rest(
+  j: Join,
+  body: &[Lit],
+  at: usize,
+  env: &mut Env,
+  out: &mut dyn FnMut(&Env) -> Result<(), String>,
+) -> Result<(), String> {
+  let Some(lit) = body.get(at) else {
+    return out(env);
+  };
+  match lit {
+    Lit::Atom(_) => unreachable!("a body's atoms come first"),
+    Lit::Let(v, e) => {
+      env[*v] = Some(eval(e, env)?);
+      let result = rest(j, body, at + 1, env, out);
+      env[*v] = None;
+      result
+    }
+    Lit::Test(t) if test(t, env)? => rest(j, body, at + 1, env, out),
+    Lit::NotTest(t) if !test(t, env)? => rest(j, body, at + 1, env, out),
+    Lit::Test(_) | Lit::NotTest(_) => Ok(()),
+    Lit::Not(atom) => {
+      let bucket = bucket(j, atom, &atom.key, env, None)?;
+      for tuple in bucket.tuples() {
+        j.visits.set(j.visits.get() + 1);
+        let mut trail = Vec::new();
+        let found = match_all(&atom.pats, tuple, env, &mut trail)?;
+        trail.iter().for_each(|&v| env[v] = None);
+        if found {
+          return Ok(());
+        }
+      }
+      rest(j, body, at + 1, env, out)
+    }
+  }
+}
+
+/// A pattern's value, when it's known: a key column's.
+fn value_of(pat: &Pat, env: &Env) -> Result<Value, String> {
+  Ok(match pat {
+    Pat::Const(value) => value.clone(),
+    Pat::Var(v) => env[*v]
+      .clone()
+      .ok_or("a key's variable isn't bound (a bug in lem's checker)")?,
+    Pat::Expr(e) => eval(e, env)?,
+    Pat::Ctor(name, pats) => {
+      let args = pats
+        .iter()
+        .map(|pat| value_of(pat, env))
+        .collect::<Result<Vec<_>, _>>()?;
+      Value::Ctor(name.clone(), args.into())
+    }
+    Pat::Any => return Err("`_` can't be in a key (a bug in lem's checker)".to_string()),
+  })
 }
 
 fn match_all(

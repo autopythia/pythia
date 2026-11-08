@@ -1,0 +1,56 @@
+# Ticks of joins.lem, on lem alone. Each case is a tick on the facts that
+# the cases before it left: `=== title`; lines that assert (`+ Fact`) or
+# retract (`- Fact`) the host's facts, or show a relation's facts after the
+# tick (`? Name`); `---`; then the facts asked for.
+
+=== a triangle, and three edges with no way back
++ E(1, 2)
++ E(2, 3)
++ E(1, 3)
+? Tri
+? OneWay
+---
+Tri(1, 2, 3)
+OneWay(1, 2)
+OneWay(1, 3)
+OneWay(2, 3)
+
+=== a hub, with edges both ways to two of the nodes
++ E(0, 1)
++ E(1, 0)
++ E(0, 2)
++ E(2, 0)
+? Tri
+? OneWay
+---
+Tri(0, 1, 2)
+Tri(1, 0, 2)
+Tri(1, 2, 0)
+Tri(1, 2, 3)
+OneWay(1, 2)
+OneWay(1, 3)
+OneWay(2, 3)
+
+=== an atom that waits for its expression's variable
++ A(1)
++ A(2)
++ A(5)
++ B(3)
++ B(6)
++ B(10)
+? Next
+---
+Next(2)
+Next(5)
+
+=== an atom with no facts: nothing reached
+? Reached
+---
+(nothing to show)
+
+=== once it has one
++ Never(3)
+? Reached
+---
+Reached(0)
+Reached(1)

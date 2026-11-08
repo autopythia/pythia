@@ -3,6 +3,7 @@
 use super::print::quote;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 /// The largest whole number, 2^53 − 1, which is JavaScript's largest safe
@@ -127,6 +128,24 @@ impl PartialEq for Value {
 }
 
 impl Eq for Value {}
+
+/// As equality has it: a Num by its bits, which are one per value, since a
+/// Num is finite and never −0.0.
+impl Hash for Value {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.rank().hash(state);
+    match self {
+      Value::Bool(b) => b.hash(state),
+      Value::Int(n) => n.hash(state),
+      Value::Num(x) => x.to_bits().hash(state),
+      Value::Text(text) => text.hash(state),
+      Value::Ctor(name, args) => {
+        name.hash(state);
+        args.hash(state);
+      }
+    }
+  }
+}
 
 /// As lem writes it: text quoted, and a Num as Rust's `{:?}` writes it, with
 /// a decimal point, and in exponent form below 1e-4 and from 1e16 (`1e-5`,
