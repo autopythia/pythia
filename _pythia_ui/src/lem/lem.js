@@ -358,6 +358,34 @@ var lem = (function () {
     return this.call(this.rels[r].name, tuple, this.rels[r].fields);
   };
 
+  // A value of type `ty` as the host's JSON (src/lem/host.rs): as lem.js
+  // holds it, but a constructor without fields by its name, unless the
+  // type is Any.
+  Program.prototype.valueJson = function (v, ty) {
+    if (!Array.isArray(v)) {
+      return v;
+    }
+    if (v.length === 1 && this.base(ty) !== "Any") {
+      return v[0];
+    }
+    var fields = this.ctor(v[0]).fields;
+    var out = [v[0]];
+    for (var i = 1; i < v.length; i++) {
+      out.push(this.valueJson(v[i], fields[i - 1][1]));
+    }
+    return out;
+  };
+
+  // A relation's fact as the host's JSON: its fields by name.
+  Program.prototype.factJson = function (r, tuple) {
+    var fields = this.rels[r].fields;
+    var out = {};
+    for (var i = 0; i < fields.length; i++) {
+      out[fields[i][0]] = this.valueJson(tuple[i], fields[i][1]);
+    }
+    return out;
+  };
+
   // A value of type `ty` from the host's JSON; `what` names it, for
   // errors (src/lem/host.rs).
   Program.prototype.value = function (ty, j, what) {
@@ -664,6 +692,21 @@ var lem = (function () {
     return this.visited;
   };
 
+  // A relation's facts, by its number, in order, each as {tuple, why}: for
+  // a layer above lem.
+  Runtime.prototype.relFacts = function (r) {
+    var table = this.tables[r];
+    return table.tuples().map(function (tuple) {
+      return { tuple: tuple, why: table.facts.get(key(tuple)).why };
+    });
+  };
+
+  // Drops a relation's facts that `drop` picks: for a layer above lem that
+  // cleans up between ticks.
+  Runtime.prototype.dropFacts = function (r, drop) {
+    this.tables[r].drop(drop);
+  };
+
   // Whether the host may change a relation: only an `input` one.
   Runtime.prototype.input = function (r) {
     var rel = this.prog.rels[r];
@@ -730,10 +773,9 @@ var lem = (function () {
     }
   };
 
-  // Runs a tick given as JSON steps, taking each as it's read, and gives
-  // what it shows: the facts that it asked for, then its effects, a line
-  // each; or "(nothing to show)".
-  Runtime.prototype.run = function (steps) {
+  // Reads a tick given as JSON steps, and takes each as it's read: gives
+  // the script, {msg, show}.
+  Runtime.prototype.readSteps = function (steps) {
     if (!Array.isArray(steps)) {
       fail("a tick is an array of steps, not " + jsonKind(steps));
     }
@@ -741,6 +783,14 @@ var lem = (function () {
     for (var i = 0; i < steps.length; i++) {
       this.step(steps[i], script);
     }
+    return script;
+  };
+
+  // Runs a tick given as JSON steps (readSteps), and gives what it shows:
+  // the facts that it asked for, then its effects, a line each; or
+  // "(nothing to show)".
+  Runtime.prototype.run = function (steps) {
+    var script = this.readSteps(steps);
     var out = this.show(script, this.tick(script.msg));
     return out === "" ? "(nothing to show)" : out;
   };
@@ -1302,6 +1352,7 @@ var lem = (function () {
     Program: Program,
     Runtime: Runtime,
     compare: compare,
+    key: key,
     numText: numText,
     quote: quote
   };

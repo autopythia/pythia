@@ -239,9 +239,9 @@ pub fn script_json(prog: &mut Program, lines: &str) -> Json {
   Json::Array(steps)
 }
 
-/// Runs a tick given as JSON steps, taking each as it's read
-/// ([`Runtime::step`]), and gives what [`Runtime::run`] gives.
-pub fn run(runtime: &mut Runtime, steps: &Json) -> Result<String, String> {
+/// Reads a tick given as JSON steps, and takes each as it's read
+/// ([`Runtime::step`]): gives the message and the relations to show.
+pub fn read_steps(runtime: &mut Runtime, steps: &Json) -> Result<Script, String> {
   let Json::Array(steps) = steps else {
     return Err(format!("a tick is an array of steps, not {}", steps.kind()));
   };
@@ -250,5 +250,12 @@ pub fn run(runtime: &mut Runtime, steps: &Json) -> Result<String, String> {
     let step = step(&runtime.prog, json)?;
     runtime.step(step, &mut script)?;
   }
+  Ok(script)
+}
+
+/// Runs a tick given as JSON steps ([`read_steps`]), and gives what
+/// [`Runtime::run`] gives.
+pub fn run(runtime: &mut Runtime, steps: &Json) -> Result<String, String> {
+  let script = read_steps(runtime, steps)?;
   runtime.run(&script)
 }

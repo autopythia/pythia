@@ -21,7 +21,7 @@ Parent(List, Top)
 Parent(Row("a"), List)
 Parent(Row("b"), List)
 
-=== a draft
+=== a draft, which tells the host
 ! Type("a", "draft")
 ? Draft
 ---
@@ -30,6 +30,7 @@ Screen(Top, title="Tasks")
     Item(Row("a"), text="first", on=Open("a"))
     Item(Row("b"), text="second", on=Open("b"))
 Draft(Row("a"), "draft")
+effect Saved("a", "draft")
 
 === opening its row shows the editor
 ! Open("a")

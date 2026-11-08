@@ -18,9 +18,8 @@ use super::check::load;
 use super::compile::{compile, read};
 use super::eval::Runtime;
 use super::host;
-use super::testing::{cases, read as read_file, report};
+use super::testing::{cases, read as read_file, report, unsafe_in_script, write_web};
 use crate::json::{self, object, Value as Json};
-use std::fmt::Write;
 
 /// lem's test programs, in `lem/test/`, by name.
 const PROGRAMS: [&str; 4] = ["jobs", "numbers", "recursion", "joins"];
@@ -106,69 +105,13 @@ fn ticks_run_on_the_compiled_form() {
       ("cases", Json::Array(cases_json)),
     ]));
   }
-  write_web("lem_tests.js", "LEM_TESTS", &Json::Array(suites));
+  let by = "src/lem/compile_test.rs";
+  write_web("lem_tests.js", "LEM_TESTS", by, &Json::Array(suites));
   report(results);
-}
-
-/// Writes `var NAME = value;` to `target/web/FILE`, for the tests in
-/// JavaScript: in ASCII, each other character as `\uXXXX`, so that every
-/// engine reads it alike.
-fn write_web(file: &str, name: &str, value: &Json) {
-  let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/web");
-  std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("{dir}: {e}"));
-  let mut json = String::new();
-  for c in String::from_utf8(value.to_vec())
-    .expect("JSON text is UTF-8")
-    .chars()
-  {
-    match c.is_ascii() {
-      true => json.push(c),
-      false => {
-        for unit in c.encode_utf16(&mut [0; 2]) {
-          let _ = write!(json, "\\u{unit:04x}");
-        }
-      }
-    }
-  }
-  let text = format!(
-    "// lem's tests for lem.js, written by src/lem/compile_test.rs.\nvar {name} = {json};\n"
-  );
-  let path = format!("{dir}/{file}");
-  std::fs::write(&path, text).unwrap_or_else(|e| panic!("{path}: {e}"));
 }
 
 #[test]
 fn lem_js_is_ascii_writes_no_html_and_runs_no_code() {
-  let js = include_str!("lem.js");
-  assert!(
-    js.is_ascii(),
-    "lem.js is ASCII, so that every engine reads it alike"
-  );
-  let mut found: Vec<String> = [
-    "innerHTML",
-    "outerHTML",
-    "insertAdjacentHTML",
-    "document.write",
-  ]
-  .iter()
-  .filter(|word| js.contains(*word))
-  .map(|word| word.to_string())
-  .collect();
-  for name in ["eval", "Function"] {
-    if calls(js, name) {
-      found.push(format!("{name}("));
-    }
-  }
-  assert!(found.is_empty(), "lem.js uses {found:?}");
-}
-
-/// Whether `js` calls `name`: the name, not the end of a longer one, then
-/// `(`.
-fn calls(js: &str, name: &str) -> bool {
-  js.match_indices(name).any(|(at, _)| {
-    let before = js[..at].chars().next_back();
-    let after = js[at + name.len()..].trim_start().chars().next();
-    let joined = before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
-    !joined && after == Some('(')
-  })
+  let found = unsafe_in_script(include_str!("lem.js"));
+  assert!(found.is_empty(), "lem.js has {found:?}");
 }

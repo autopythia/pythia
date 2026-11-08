@@ -1,0 +1,123 @@
+# The task list (tasks.lem) in a stand-in DOM, through glem.js's view, for
+# the tests in JavaScript alone (tools/glem_test.js). Each case runs on what
+# the cases before it left, from no facts: `=== title`; lines of JSON: the
+# host's steps (src/lem/host.rs), which the view runs as one tick, and what
+# a user does:
+#
+# - `["click", widget]`: a click on a widget's element, by its id as lem
+#   writes it;
+# - `["focus", widget]`, `["blur"]`: the keyboard's focus moves to a
+#   widget's element, or away;
+# - `["key", name]`, `["key", name, modifiers]`: a key, as the DOM names it,
+#   pressed where the focus is, or on the view's root, with modifiers as
+#   {"shiftKey": true};
+#
+# then `---`; then the page, as glem's outline writes the widgets, the
+# Focused fact, if any, and what the host heard: each effect, by its name
+# and its fields as JSON, and each error.
+
+=== two todos
+["+", "Todo", {"id": "b", "title": "second", "at": 20}]
+["+", "Todo", {"id": "a", "title": "first", "at": 10}]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+    Item(Row("b"), text="second", on=Open("b"))
+
+=== typing a draft tells the host
+["!", ["Type", "a", "draft"]]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+    Item(Row("b"), text="second", on=Open("b"))
+effect Saved {"todo":"a","text":"draft"}
+
+=== a click on a row sends its message: its editor opens
+["click", "Row(\"a\")"]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft")
+    Item(Row("b"), text="second", on=Open("b"))
+
+=== typing again changes the editor's text, in its element
+["!", ["Type", "a", "draft 2"]]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+    Item(Row("b"), text="second", on=Open("b"))
+effect Saved {"todo":"a","text":"draft 2"}
+
+=== a row that moves keeps its element
+["+", "Todo", {"id": "b", "title": "second", "at": 5}]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+
+=== the focus on a row
+["focus", "Row(\"b\")"]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+Focused(Row("b"))
+
+=== Escape with Shift is the page's, not a key's
+["key", "Escape", {"shiftKey": true}]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+Focused(Row("b"))
+
+=== with the focus away, Escape sends nothing
+["blur"]
+["key", "Escape"]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+
+=== Return, which no Key fact names, sends nothing
+["focus", "Row(\"a\")"]
+["key", "Enter"]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+Focused(Row("a"))
+
+=== Escape pins the row that has the focus
+["key", "Escape"]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft 2")
+  Line(Footer, text="pinned")
+Focused(Row("a"))
+
+=== the focused row goes, and the focus with it
+["-", "Todo", {"id": "a", "title": "first", "at": 10}]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+  Line(Footer, text="pinned")

@@ -23,7 +23,9 @@
 //! - `components`: the order to run the rules in ([`Component`]);
 //! - `actions`: the sentences of `on` blocks: `at`, `msg`, a pattern;
 //!   `body`; `rel`; `vars`; and `insert`, an expression per column, or
-//!   `delete`, a pattern per column.
+//!   `delete`, a pattern per column;
+//! - then any members that a layer above lem adds ([`compile_with`]), which
+//!   [`read`] leaves alone.
 //!
 //! A body is a list of parts: `["atom", rel, pats, key, needs]`, `["let",
 //! var, expr]`, `["test", op, a, b]`, `["not", rel, pats, key, needs]` and
@@ -55,6 +57,12 @@ pub const VERSION: u64 = 1;
 
 /// The program as its compiled form, JSON text.
 pub fn compile(prog: &Program) -> String {
+  compile_with(prog, &[])
+}
+
+/// The program as its compiled form, with members of a layer above lem
+/// after lem's own, a member to a line.
+pub fn compile_with(prog: &Program, more: &[(&str, Json)]) -> String {
   let files = prog.files.iter().map(|(name, _)| Json::from(&**name));
   let types = prog.types().into_iter().map(|(name, base)| {
     let base = base.map_or(Json::Null, |ty| ty_json(&ty));
@@ -72,6 +80,9 @@ pub fn compile(prog: &Program) -> String {
     prog.components.iter().map(component_json),
   );
   list(&mut out, "actions", prog.actions.iter().map(action_json));
+  for (name, value) in more {
+    member(&mut out, name, value);
+  }
   out.truncate(out.len() - 2);
   out.push_str("}\n");
   out
@@ -266,12 +277,17 @@ fn expr_json(e: &Expr) -> Json {
 /// places are in its rules and actions ([`Rule::place`]).
 pub fn read(text: &str) -> Result<Program, String> {
   let form = json::parse(text).map_err(|e| format!("the compiled form isn't JSON: {e}"))?;
+  read_form(&form)
+}
+
+/// Reads a program's compiled form, as parsed JSON ([`read`]).
+pub fn read_form(form: &Json) -> Result<Program, String> {
   if form.get("lem").and_then(Json::as_u64) != Some(VERSION) {
     return Err(format!(
       "this isn't the compiled form of a lem program, version {VERSION}"
     ));
   }
-  let files = items(&form, "files")?
+  let files = items(form, "files")?
     .iter()
     .map(|file| string(file, "a file").map(Rc::from))
     .collect::<Result<Vec<Rc<str>>, String>>()?;
@@ -285,7 +301,7 @@ pub fn read(text: &str) -> Result<Program, String> {
       .collect(),
     arity: Vec::new(),
   };
-  for ctor in items(&form, "ctors")? {
+  for ctor in items(form, "ctors")? {
     let name = string(get(ctor, "name")?, "a constructor's `name`")?;
     decls
       .arity
@@ -299,24 +315,24 @@ pub fn read(text: &str) -> Result<Program, String> {
     };
     types.push((Rc::from(name.as_str()), base));
   }
-  let rels = items(&form, "rels")?
+  let rels = items(form, "rels")?
     .iter()
     .map(|rel| decls.rel(rel))
     .collect::<Result<Vec<Rel>, String>>()?;
-  let ctors = items(&form, "ctors")?
+  let ctors = items(form, "ctors")?
     .iter()
     .map(|ctor| decls.ctor(ctor))
     .collect::<Result<Vec<Ctor>, String>>()?;
   let mut prog = Program::assemble(files, rels, ctors, types)?;
-  for (i, rule) in items(&form, "rules")?.iter().enumerate() {
+  for (i, rule) in items(form, "rules")?.iter().enumerate() {
     let rule = read_rule(&prog, &decls, rule).map_err(|e| format!("rule {i}: {e}"))?;
     prog.rules.push(rule);
   }
-  for (i, action) in items(&form, "actions")?.iter().enumerate() {
+  for (i, action) in items(form, "actions")?.iter().enumerate() {
     let action = read_action(&prog, &decls, action).map_err(|e| format!("action {i}: {e}"))?;
     prog.actions.push(action);
   }
-  for component in items(&form, "components")? {
+  for component in items(form, "components")? {
     let rels = indexes(get(component, "rels")?, prog.rels.len(), "a relation")?;
     let rules = indexes(get(component, "rules")?, prog.rules.len(), "a rule")?;
     let Some(recursive) = get(component, "recursive")?.as_bool() else {

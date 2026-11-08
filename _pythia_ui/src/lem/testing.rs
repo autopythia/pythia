@@ -3,12 +3,15 @@
 //! printer, and reports in TAP, as zinterp's `parse_test` writes them
 //! (pythia's `_pythia/src/zinterp/parse_test.rs`): `ok 1 - "title"`, or
 //! `not ok 2 - "title"` and why, then `1..N`. Trees compare as S-expressions
-//! without spans ([`mod_sexp`]).
+//! without spans ([`mod_sexp`]). And what the runtimes in JavaScript share:
+//! their tests, which Rust writes ([`write_web`]), and a check of their
+//! scripts ([`unsafe_in_script`]).
 
 use super::check::LoadError;
 use super::parse::{parse, Decl, Mod, Param, Sent, SentRef, Term};
 use super::print::print;
 use super::token::Span;
+use crate::json::Value as Json;
 use std::fmt::Write;
 use std::path::Path;
 
@@ -317,4 +320,67 @@ pub(crate) fn tick_cases(name: &str, mut tick: impl FnMut(&str) -> Result<String
     results.push((title, why));
   }
   report(results);
+}
+
+/// Writes `var NAME = value;` to `target/web/FILE`, for the tests in
+/// JavaScript, which `make js-test` runs: in ASCII, each other character as
+/// `\\uXXXX`, so that every engine reads it alike. `by` names the test that
+/// writes it.
+pub(crate) fn write_web(file: &str, name: &str, by: &str, value: &Json) {
+  let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/web");
+  std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("{dir}: {e}"));
+  let mut json = String::new();
+  for c in String::from_utf8(value.to_vec())
+    .expect("JSON text is UTF-8")
+    .chars()
+  {
+    match c.is_ascii() {
+      true => json.push(c),
+      false => {
+        for unit in c.encode_utf16(&mut [0; 2]) {
+          let _ = write!(json, "\\u{unit:04x}");
+        }
+      }
+    }
+  }
+  let text = format!("// Tests in JavaScript, written by {by}.\nvar {name} = {json};\n");
+  let path = format!("{dir}/{file}");
+  std::fs::write(&path, text).unwrap_or_else(|e| panic!("{path}: {e}"));
+}
+
+/// What a runtime's script mustn't have: anything but ASCII, so that every
+/// engine reads it alike; ways to write HTML; and ways to run code that it's
+/// given. Gives what it finds.
+pub(crate) fn unsafe_in_script(js: &str) -> Vec<String> {
+  let mut found: Vec<String> = Vec::new();
+  if !js.is_ascii() {
+    found.push("a character beyond ASCII".to_string());
+  }
+  for word in [
+    "innerHTML",
+    "outerHTML",
+    "insertAdjacentHTML",
+    "document.write",
+  ] {
+    if js.contains(word) {
+      found.push(word.to_string());
+    }
+  }
+  for name in ["eval", "Function"] {
+    if calls(js, name) {
+      found.push(format!("{name}("));
+    }
+  }
+  found
+}
+
+/// Whether `js` calls `name`: the name, not the end of a longer one, then
+/// `(`.
+fn calls(js: &str, name: &str) -> bool {
+  js.match_indices(name).any(|(at, _)| {
+    let before = js[..at].chars().next_back();
+    let after = js[at + name.len()..].trim_start().chars().next();
+    let joined = before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    !joined && after == Some('(')
+  })
 }

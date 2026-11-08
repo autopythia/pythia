@@ -16,14 +16,19 @@
 //! glem rewrites a program as plain lem ([`lower`]), which lem checks and
 //! runs, and wraps lem's runtime ([`Runtime`]). Which widgets exist, and how
 //! they look, is up to a design language above glem, which also gives the
-//! outline its notes ([`Notes`]).
+//! outline its notes ([`Notes`]). For the web, a program compiles to data
+//! with glem's part ([`compile`]), which `glem.js`, glem's runtime in
+//! JavaScript, runs.
 
+pub mod compile;
+#[cfg(test)]
+mod compile_test;
 pub mod lower;
 #[cfg(test)]
 mod tests;
 
 use crate::lem::check::{self, DeclKind, LoadError};
-use crate::lem::eval::{self, Effect, Tuple, Why};
+use crate::lem::eval::{self, Effect, Script, Tuple, Why};
 use crate::lem::value::{Ty, Value};
 use lower::Kind;
 use std::collections::{BTreeMap, BTreeSet};
@@ -105,12 +110,18 @@ impl Runtime {
   /// effects sent ([`eval::Runtime::show`]).
   pub fn script(&mut self, lines: &str, notes: Notes) -> Result<String, String> {
     let script = self.lem.read_script(lines)?;
+    self.run(&script, notes)
+  }
+
+  /// Runs the tick that a script describes, as lines or JSON give it, and
+  /// gives what [`Runtime::script`] gives.
+  pub fn run(&mut self, script: &Script, notes: Notes) -> Result<String, String> {
     let effects = self.tick(script.msg.as_ref())?;
     let mut out = self.outline(notes)?;
     if out.is_empty() {
       out.push_str("(no widgets)\n");
     }
-    out.push_str(&self.lem.show(&script, &effects));
+    out.push_str(&self.lem.show(script, &effects));
     Ok(out.trim_end().to_string())
   }
 

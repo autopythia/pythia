@@ -47,17 +47,21 @@ bench:
 	$(CARGO) build --release --bin $(BIN) --target $(HOST)
 	$(PYTHON) tools/lem_bench.py target/$(HOST)/release/$(BIN)
 
-# lem's runtime in JavaScript, src/lem/lem.js, on the cases that Rust runs
-# on the compiled form, which lem's tests write to target/web/lem_tests.js:
-# tools/lem_test.js runs them with lem.js, as one script, in JavaScriptCore
-# through osascript on a Mac, or in another engine, as JS=qjs. It reports in
-# TAP, which osascript writes to stderr, and fails if a case does.
+# The runtimes in JavaScript, src/lem/lem.js and src/glem/glem.js, on the
+# cases that Rust runs on the compiled forms, which the Rust tests write to
+# target/web/: tools/lem_test.js and tools/glem_test.js run them, each as
+# one script with what it needs, in JavaScriptCore through osascript on a
+# Mac, or in another engine, as JS=qjs. They report in TAP (tools/tap.js),
+# which osascript writes to stderr, and fail if a case does.
 JS := osascript -l JavaScript
 WEB := target/web
 js-test:
-	$(CARGO) test --target $(HOST) --lib lem::compile_test
-	cat src/lem/lem.js $(WEB)/lem_tests.js tools/lem_test.js > $(WEB)/lem_test_run.js
+	$(CARGO) test --target $(HOST) --lib -- lem::compile_test glem::compile_test
+	cat src/lem/lem.js $(WEB)/lem_tests.js tools/tap.js tools/lem_test.js > $(WEB)/lem_test_run.js
 	$(JS) $(WEB)/lem_test_run.js
+	cat src/lem/lem.js src/glem/glem.js $(WEB)/glem_tests.js tools/tap.js tools/stand_in_dom.js \
+	  tools/glem_test.js > $(WEB)/glem_test_run.js
+	$(JS) $(WEB)/glem_test_run.js
 
 # check and test with the oldest Rust that Cargo.toml's rust-version names,
 # which must be installed:

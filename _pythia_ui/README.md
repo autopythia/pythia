@@ -32,8 +32,9 @@ make test          # the unit tests, on this machine
 make check         # rustfmt; clippy for macOS and for this machine; and
                    # every macOS binary, tests too, linked against the stubs
 make bench         # times lem at the size of a long log, and on a hard join
-make js-test       # lem.js, lem's runtime in JavaScript, on lem's tests, in
-                   # JavaScriptCore; elsewhere with another engine, JS=qjs
+make js-test       # lem.js and glem.js, the runtimes in JavaScript, on the
+                   # tests, in JavaScriptCore; elsewhere with another
+                   # engine, JS=qjs
 make msrv          # check and test with Rust 1.78.0, the oldest supported
 make inspect       # from any host: will the binaries load on macOS?
 make plugin-check  # loads this machine's build of the plugin with ctypes
@@ -198,6 +199,18 @@ names a widget goes with the widget, unless its relation says `keep`.
 glem rewrites a program as plain lem, which lem checks and runs. With
 glem, each tick prints the widget tree first.
 
+On the web, a glem program's compiled form has glem's part too
+(`src/glem/compile.rs`); `pythia-ui lem --compile FILE.lem...` writes it.
+glem's runtime in JavaScript, `src/glem/glem.js`, runs it as
+`src/glem/mod.rs` runs a program, and its view keeps the widgets in the
+DOM: each widget's element comes from a recipe for its kind, from the
+layer above, and stays from tick to tick while the widget does, so that it
+keeps its focus and caret. Recipes send messages from their events; the
+view fills in `Focused`, and sends what `Key` facts give for Escape,
+Return and Tab. `make js-test` runs glem's ticks on `glem.js`, as Rust
+runs them, and the view in a stand-in DOM (`tools/stand_in_dom.js`), with
+the clicks, focus and keys of `lem/test/tasks_dom.txt`.
+
 ### glui
 
 glui (`src/glui/`) is the design language of pythia's GUI, on glem: a
@@ -238,7 +251,9 @@ src/lem/           lem (below): token.rs, parse.rs, print.rs, value.rs,
                    host.rs (its JSON), lem.js (its runtime in JavaScript);
                    and the tests
 src/glem/          glem, lem's GUI layer: lower.rs (the rewrite into plain
-                   lem), mod.rs (the tree), its prelude.lem, and the tests
+                   lem), mod.rs (the tree), its prelude.lem; compile.rs
+                   (its part of the compiled form), glem.js (its runtime and
+                   view in JavaScript); and the tests
 src/glui/          glui, the design language: widgets.lem, theme.lem,
                    themes/, mod.rs (loading them), and the tests
 lem/               the approval example (host.lem, approval.lem), and test/,
@@ -250,7 +265,8 @@ build.rs           the plugin's install name, @rpath/libpythia_ui.dylib
 stub-sdk/          link-time symbol lists (below)
 tools/             macho_info.py (make inspect), gen_tbd.py (make tbd),
                    plugin_check.py (make plugin-check), lem_bench.py
-                   (make bench), lem_test.js (make js-test)
+                   (make bench); lem_test.js, glem_test.js, tap.js and
+                   stand_in_dom.js (make js-test)
 ```
 
 ## Stub SDK

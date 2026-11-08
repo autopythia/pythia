@@ -33,3 +33,15 @@ Line(Row(t), parent=List, text="again") :- Todo(t, "twice", _)
 Line(Stray, parent=Nowhere, text="lost") :- Todo(_, "stray", _)
 Line(Loop(1), parent=Loop(2), text="1") :- Todo(_, "loop", _)
 Line(Loop(2), parent=Loop(1), text="2") :- Todo(_, "loop", _)
+
+-- Escape pins the row that has the keyboard's focus, which glem's runtime in
+-- JavaScript fills in; and typing a draft tells the host.
+Key(Escape, msg=Pin(t)) :- Focused(Row(t))
+effect Saved(todo: Text, text: Text)
+on Type(t, text):
+  Saved(t, text=text)
+
+-- A second widget under the parent that isn't one: the error names the
+-- first, by id.
+id Strayed
+Line(Strayed, parent=Nowhere, text="lost too") :- Todo(_, "stray", _)

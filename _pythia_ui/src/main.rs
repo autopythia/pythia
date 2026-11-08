@@ -16,12 +16,13 @@ usage: pythia-ui              serve: one JSON request per line on stdin, one rep
        pythia-ui screenshot [--display ID] [--capture PATH] [--no-cursor] FILE.png
                               take a screenshot and write it to FILE.png; PATH is
                               auto, screencapturekit or coregraphics
-       pythia-ui lem [--theme THEME] [FILE.lem...]
+       pythia-ui lem [--theme THEME] [--compile] [FILE.lem...]
                               load the lem files after glem's prelude, glui's
                               files and a theme (dark, the default; light; or a
                               FILE.lem), then run ticks from stdin: lines of
                               `+ Fact`, `- Fact`, `! Msg` and `? Name`, a tick
-                              at each blank line
+                              at each blank line; or, with --compile, write the
+                              program's compiled form, JSON, for glem.js
 ";
 
 fn main() -> ExitCode {
@@ -137,12 +138,17 @@ fn screenshot_args(args: &[String]) -> Result<(ScreenshotOptions, String), Strin
 }
 
 /// Loads lem files after the shipped ones, then runs the ticks that stdin
-/// gives, each up to a blank line, and prints what each shows.
+/// gives, each up to a blank line, and prints what each shows; or, with
+/// `--compile`, prints the program's compiled form.
 fn lem(args: &[String]) -> ExitCode {
-  let (name, files) = match args {
-    [flag, name, files @ ..] if flag == "--theme" => (name.as_str(), files),
-    files => (glui::THEMES[0].0, files),
-  };
+  let (mut name, mut compile, mut files) = (glui::THEMES[0].0, false, args);
+  loop {
+    match files {
+      [flag, theme, rest @ ..] if flag == "--theme" => (name, files) = (theme.as_str(), rest),
+      [flag, rest @ ..] if flag == "--compile" => (compile, files) = (true, rest),
+      _ => break,
+    }
+  }
   let (file, theme) = match glui::theme(name) {
     Ok(theme) => theme,
     Err(error) => {
@@ -164,16 +170,22 @@ fn lem(args: &[String]) -> ExitCode {
     .iter()
     .map(|(name, text)| (*name, text.as_str()))
     .collect();
-  let mut runtime = match glui::load((&file, &theme), &files) {
-    Ok(prog) => glem::Runtime::new(prog),
+  let prog = match glui::load((&file, &theme), &files) {
+    Ok(prog) => prog,
     Err(error) => {
       eprintln!("{}", error.text);
       return ExitCode::FAILURE;
     }
   };
+  let form = compile.then(|| glem::compile::compile(&prog));
+  let mut runtime = glem::Runtime::new(prog);
   if let Err(error) = glui::complete(&mut runtime) {
     eprintln!("pythia-ui: {file}: {error}");
     return ExitCode::FAILURE;
+  }
+  if let Some(form) = form {
+    print!("{form}");
+    return ExitCode::SUCCESS;
   }
   let mut tick = String::new();
   let mut run = |tick: &mut String| {
