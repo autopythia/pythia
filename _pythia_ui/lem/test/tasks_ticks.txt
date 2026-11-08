@@ -1,0 +1,101 @@
+# Ticks of tasks.lem, on glem. Each case is a tick that runs on the facts
+# that the cases before it left: `=== title`; lines that assert (`+ Fact`)
+# or retract (`- Fact`) the host's facts, send a message (`! Msg`), or show
+# a relation's facts after the tick (`? Name`); `---`; then the widget
+# tree, the facts asked for, and the effects sent.
+
+=== no todos, no widgets
+---
+(no widgets)
+
+=== two todos, by `order`
++ Todo("b", "second", 20)
++ Todo("a", "first", 10)
+? Parent
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+    Item(Row("b"), text="second", on=Open("b"))
+Parent(List, Top)
+Parent(Row("a"), List)
+Parent(Row("b"), List)
+
+=== a draft
+! Type("a", "draft")
+? Draft
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+    Item(Row("b"), text="second", on=Open("b"))
+Draft(Row("a"), "draft")
+
+=== opening its row shows the editor
+! Open("a")
+? Within
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft")
+    Item(Row("b"), text="second", on=Open("b"))
+Within(Editor("a"), List)
+Within(Editor("a"), Row("a"))
+Within(Editor("a"), Top)
+Within(List, Top)
+Within(Row("a"), List)
+Within(Row("a"), Top)
+Within(Row("b"), List)
+Within(Row("b"), Top)
+
+=== pinning shows the footer
+! Pin("b")
+? Pinned
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft")
+    Item(Row("b"), text="second", on=Open("b"))
+  Line(Footer, text="pinned")
+Pinned(Row("b"))
+
+=== retracting a pinned row keeps its pin
+- Todo("b", "second", 20)
+? Pinned
+? Editing
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft")
+  Line(Footer, text="pinned")
+Pinned(Row("b"))
+Editing(Row("a"))
+
+=== retracting the open row drops its editing state and its draft
+- Todo("a", "first", 10)
+? Editing
+? Draft
+? Pinned
+---
+(no widgets)
+Pinned(Row("b"))
+
+=== one id, two widgets
++ Todo("c", "twice", 30)
+---
+error: the id Row("c") names two widgets: Item (from the rule at lem/test/tasks.lem:19:7) and Line (from the rule at lem/test/tasks.lem:32:1)
+
+=== a parent that isn't a widget
+- Todo("c", "twice", 30)
++ Todo("d", "stray", 40)
+---
+error: Stray's parent, Nowhere, isn't a widget (from the rule at lem/test/tasks.lem:33:1)
+
+=== parents that form a cycle
+- Todo("d", "stray", 40)
++ Todo("e", "loop", 50)
+---
+error: these widgets' parents form a cycle: Loop(1), Loop(2)

@@ -2,9 +2,10 @@
 //!
 //! With no arguments it serves the protocol: one JSON request per line on
 //! stdin, one reply per line on stdout. `info` and `screenshot` are for trying
-//! it by hand, and `lem` for trying the GUI's rule language, lem (src/lem/).
+//! it by hand, and `lem` for trying the GUI's rule language, lem (src/lem/),
+//! with glem's widgets (src/glem/).
 
-use pythia_ui::{json, lem, Failure, ScreenshotOptions};
+use pythia_ui::{glem, json, Failure, ScreenshotOptions};
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
@@ -16,9 +17,9 @@ usage: pythia-ui              serve: one JSON request per line on stdin, one rep
                               take a screenshot and write it to FILE.png; PATH is
                               auto, screencapturekit or coregraphics
        pythia-ui lem [FILE.lem...]
-                              load the lem files, then run ticks from stdin:
-                              lines of `+ Fact`, `- Fact`, `! Msg` and `? Name`,
-                              a tick at each blank line
+                              load the lem files after glem's prelude, then run
+                              ticks from stdin: lines of `+ Fact`, `- Fact`,
+                              `! Msg` and `? Name`, a tick at each blank line
 ";
 
 fn main() -> ExitCode {
@@ -150,8 +151,8 @@ fn lem(files: &[String]) -> ExitCode {
     .iter()
     .map(|(name, text)| (*name, text.as_str()))
     .collect();
-  let mut runtime = match lem::check::load(&all) {
-    Ok(prog) => lem::eval::Runtime::new(prog),
+  let mut runtime = match glem::load(&all) {
+    Ok(prog) => glem::Runtime::new(prog),
     Err(error) => {
       eprintln!("{}", error.text);
       return ExitCode::FAILURE;
@@ -160,7 +161,7 @@ fn lem(files: &[String]) -> ExitCode {
   let mut tick = String::new();
   let mut run = |tick: &mut String| {
     if !tick.is_empty() {
-      match runtime.script(tick) {
+      match runtime.script(tick, &glem::no_notes) {
         Ok(shown) => println!("{shown}\n"),
         Err(error) => eprintln!("{error}\n"),
       }

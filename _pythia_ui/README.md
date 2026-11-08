@@ -171,6 +171,15 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/test/jobs.lem
 and `?` names a relation whose facts to show after the tick. Each tick
 prints those facts, then the effects that it sends.
 
+### glem
+
+glem (`src/glem/`) is lem's GUI layer. It adds `widget` and `surface`
+declarations, blocks that give the widgets inside them their parent and
+order, and the widget tree, which it checks after each tick; state that
+names a widget goes with the widget, unless its relation says `keep`.
+glem rewrites a program as plain lem, which lem checks and runs. With
+glem, each tick prints the widget tree first.
+
 ## Layout
 
 ```
@@ -182,6 +191,8 @@ src/pending.rs     a result that a completion handler hands over, with a deadlin
 src/elsewhere.rs   other systems: info, and screenshots unsupported
 src/lem/           lem (below): token.rs, parse.rs, print.rs, value.rs,
                    check.rs, eval.rs, its prelude.lem, and the tests
+src/glem/          glem, lem's GUI layer: lower.rs (the rewrite into plain
+                   lem), mod.rs (the tree), its prelude.lem, and the tests
 lem/test/          the tests' lem programs and cases
 src/macos/         objc.rs (the Objective-C runtime), block.rs (completion
                    blocks), cf.rs, cg.rs (displays, permissions), png.rs

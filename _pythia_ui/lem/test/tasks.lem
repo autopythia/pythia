@@ -1,0 +1,35 @@
+-- tasks.lem: a task list, for glem's tests, with toy widgets of its own so
+-- that it runs on glem alone.
+surface Screen(title: Text)
+widget Group(title: Text)
+widget Item(text: Text, on: Msg)
+widget Line(text: Text)
+id Top, List, Row(Text), Editor(Text), Footer, Stray, Nowhere, Loop(Int)
+
+input Todo(id: Text, title: Text, at: Time) key id
+-- State that names a widget goes with the widget, unless it says `keep`.
+state Editing(row: Id)
+state Draft(row: Id, text: Text) key row
+state Pinned(row: Id) keep
+msg Open(todo: Text), Pin(todo: Text), Type(todo: Text, text: Text)
+
+Screen(Top, title="Tasks") :- Todo():
+  Group(List, title="Open"):
+    for Todo(t, title, at):
+      Item(Row(t), text=title, order=at, on=Open(t)):
+        Line(Editor(t), text=d) :- Editing(Row(t)), Draft(Row(t), d)
+  Line(Footer, text="pinned") :- Pinned(_)
+
+on Open(t):
+  Editing(Row(t))
+on Pin(t):
+  Pinned(Row(t))
+on Type(t, text):
+  Draft(Row(t), text=text)
+
+-- Broken trees, for the runtime's errors: a second widget with a row's id,
+-- a parent that isn't a widget, and two widgets that parent each other.
+Line(Row(t), parent=List, text="again") :- Todo(t, "twice", _)
+Line(Stray, parent=Nowhere, text="lost") :- Todo(_, "stray", _)
+Line(Loop(1), parent=Loop(2), text="1") :- Todo(_, "loop", _)
+Line(Loop(2), parent=Loop(1), text="2") :- Todo(_, "loop", _)

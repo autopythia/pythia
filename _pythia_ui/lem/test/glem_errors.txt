@@ -1,0 +1,104 @@
+# Errors in glem programs, from glem's rewrite or from lem's checker after
+# it, each a case: `=== title`, the source of t.lem, which loads after
+# glem's prelude, `---`, then the error, as lem shows it.
+
+=== Text where a widget's message goes, as in the design
+id Top, Go
+msg Run
+surface Screen(title: Text)
+widget Press(text: Text, on: Msg)
+Screen(Top, title="Tasks"):
+  Press(Go, text="Run now", on="go")
+---
+t.lem:6:32: Press's `on` is a Msg, but this is a Text:
+  Press(Go, text="Run now", on="go")
+                               ^^^^
+
+=== a widget outside any block
+id W
+widget Line(text: Text)
+Line(W, text="hi")
+---
+t.lem:3:1: Line needs a `parent`: put it in a widget's block, or give `parent=`:
+Line(W, text="hi")
+^^^^
+
+=== a block under a relation
+rel X(c: Text)
+X("a"):
+  X("b")
+---
+t.lem:2:1: only a widget or a surface has a block of what's inside it:
+X("a"):
+^^^^^^
+
+=== a surface in a block
+id Top, Inner
+surface Screen(title: Text)
+Screen(Top, title="a"):
+  Screen(Inner, title="b")
+---
+t.lem:4:3: Screen is a surface, so it can't be inside a block:
+  Screen(Inner, title="b")
+  ^^^^^^
+
+=== a widget without an id
+id Top
+surface Screen
+widget Line(text: Text)
+Screen(Top):
+  Line(text="x")
+---
+t.lem:5:3: Line needs an `id`:
+  Line(text="x")
+  ^^^^
+
+=== a widget's field that glem gives it
+widget Bad(parent: Text)
+---
+t.lem:1:8: every widget has a `parent` of its own:
+widget Bad(parent: Text)
+       ^^^^^^^^^^^^^^^^^
+
+=== a flag on a widget
+widget Line(text: Text) keep
+---
+t.lem:1:25: a widget takes no flags, such as `keep`:
+widget Line(text: Text) keep
+                        ^^^^
+
+=== keep, on what isn't state
+rel X(c: Text) keep
+---
+t.lem:1:16: `keep` is a flag of `state` declarations:
+rel X(c: Text) keep
+               ^^^^
+
+=== an on block inside a block
+id Top
+msg Go
+surface Screen
+Screen(Top):
+  on Go:
+    Screen(Top)
+---
+t.lem:5:3: an `on` block can't be inside another block:
+  on Go:
+  ^^^^^^
+
+=== a declaration inside a block
+id Top
+surface Screen
+Screen(Top):
+  rel X(a: Int)
+---
+t.lem:4:3: a declaration can't be inside a block:
+  rel X(a: Int)
+  ^^^^^^^^^^^^^
+
+=== a name declared twice, with glem's prelude
+rel Parent(id: Id)
+---
+t.lem:1:5: `Parent` is declared twice, first at src/glem/prelude.lem:6:5:
+rel Parent(id: Id)
+    ^^^^^^
