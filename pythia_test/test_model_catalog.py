@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from dataclasses import FrozenInstanceError
 from dataclasses import replace
 import importlib.util
+import json
 import sys
 import unittest
 from unittest import mock
@@ -34,6 +35,8 @@ from pythia.interaction import ResponsesDefaults
 from pythia.interaction import SampleParamDefaults
 from pythia.interaction import SampleParams
 from pythia.interaction import StreamingResponsesEndpoint
+from pythia.interaction import TINKER_CHAT_COMPLETIONS_API_URL
+from pythia.interaction import USER_AGENT
 from pythia.interaction import cli
 from pythia.interaction import demo
 from pythia.interaction import get_model_spec
@@ -43,6 +46,7 @@ from pythia.interaction import model_catalog
 from pythia.interaction import model_config
 from pythia.interaction import responses
 from pythia.interaction.model_config import build_model
+from pythia.interaction.model_config import prepare_namespace
 from pythia.interaction.model_config import supports_account_services
 
 
@@ -157,7 +161,7 @@ class ModelCatalogTests(unittest.TestCase):
             "output_config": {"effort": "max"},
         })
 
-        self.assertEqual(len(list_model_specs()), 28)
+        self.assertEqual(len(list_model_specs()), 29)
         for base_name, preset_name in (("codex-gpt-5.6-sol", "codex-gpt-5.6-sol-medium"),
                                        ("codex-gpt-6-astra", "codex-gpt-6-astra-max"),
                                        ("codex-gpt-6.1-sol", "codex-gpt-6.1-sol-max"),
@@ -223,10 +227,39 @@ class ModelCatalogTests(unittest.TestCase):
                 else:
                     self.assertNotIn("output_config", payload)
 
+    def test_inkling_2_small_is_tinker_s_chat_completions_preset(self):
+        spec = get_model_spec("chat-completions", "inkling-2-small")
+        self.assertEqual(spec.endpoint, EndpointSpec(
+            "chat-completions", TINKER_CHAT_COMPLETIONS_API_URL + "/chat/completions",
+            model="thinkingmachines/Inkling-2-Small", auth="env:TINKER_API_KEY",
+        ))
+        self.assertEqual(spec.endpoint.environment_variable, "TINKER_API_KEY")
+        self.assertEqual(spec.limits, ModelLimits(
+            auto_compaction_context_tokens=872_000, max_context_tokens=1_000_000,
+        ))
+        self.assertIsNone(spec.responses)
+        self.assertEqual(spec.aliases, ())
+        self.assertEqual(model_catalog.thaw_json(spec.extra_sample_params), {})
+        self.assertTrue(spec.source)
+        binding = interaction.BUILTIN_MODEL_CATALOG.bind(None, " inkling-2-small ")
+        self.assertIs(binding.spec, spec)
+        self.assertEqual(binding.endpoint, spec.endpoint)
+        self.assertEqual(binding.origin, "builtin")
+        payload = ChatCompletionsModel(ChatCompletionsEndpoint(
+            binding=binding, api_key="FAKE",
+        ))._build_request_payload(InteractionContext((Message("user", "Hello."),)), (), None)
+        self.assertEqual(payload["model"], "thinkingmachines/Inkling-2-Small")
+        for field in ("max_tokens", "max_completion_tokens", "reasoning_effort", "temperature", "top_p"):
+            self.assertNotIn(field, payload)
+
     def test_unknown_models_and_other_profiles_do_not_inherit_presets(self):
+        self.assertEqual(list_model_specs("responses"), ())
+        self.assertEqual(tuple(spec.name for spec in list_model_specs("chat-completions")),
+                         ("inkling-2-small",))
         for profile in ("responses", "chat-completions"):
-            self.assertEqual(list_model_specs(profile), ())
             for spec in list_model_specs():
+                if spec.endpoint.api == profile:
+                    continue
                 for name in (spec.name, *spec.aliases):
                     self.assertIsNone(get_model_spec(profile, name))
         # Bare wire model IDs are not catalog selectors.
@@ -240,6 +273,10 @@ class ModelCatalogTests(unittest.TestCase):
                      "claude-fable-5-1-high", "codex-gpt-6-astra", "claude-haiku-5-5"):
             self.assertIsNone(get_model_spec("messages", name))
         self.assertIsNone(get_model_spec("codex", "claude-fable-5.1"))
+        for profile in ("codex", "messages"):
+            self.assertIsNone(get_model_spec(profile, "inkling-2-small"))
+        for name in ("thinkingmachines/Inkling-2-Small", "Inkling-2-Small", "inkling-2-small-max"):
+            self.assertIsNone(get_model_spec("chat-completions", name))
 
     def test_generic_responses_and_chat_completions_remain_pass_through(self):
         for spec in list_model_specs():
@@ -257,8 +294,9 @@ class ModelCatalogTests(unittest.TestCase):
                     self.assertIsNone(model.max_context_tokens)
                     self.assertIsNone(model.max_output_tokens)
                     self.assertNotIn("session_id", model._build_headers(state))
-                    chat = ChatCompletionsModel(chat_endpoint("http://localhost", model=name))
-                    self.assertEqual(chat._build_request_payload(context, (), None)["model"], name)
+                    if spec.endpoint.api != "chat-completions":
+                        chat = ChatCompletionsModel(chat_endpoint("http://localhost", model=name))
+                        self.assertEqual(chat._build_request_payload(context, (), None)["model"], name)
 
     def test_catalog_is_immutable_and_rejects_colliding_selectors(self):
         spec = get_model_spec("messages", "claude-fable-5.1")
@@ -313,7 +351,7 @@ class ModelCatalogTests(unittest.TestCase):
                            "urllib.request.urlopen"):
                 stack.enter_context(mock.patch(target, side_effect=AssertionError("unexpected effect")))
             module_spec.loader.exec_module(module)
-            self.assertEqual(len(module.list_model_specs()), 28)
+            self.assertEqual(len(module.list_model_specs()), 29)
             self.assertEqual(
                 module.get_model_spec("codex", "muse-spark-1.3").endpoint.auth,
                 "env:META_API_KEY",
@@ -469,6 +507,35 @@ class CatalogAuthParityTests(unittest.TestCase):
             self.assertIsNone(model.endpoint.api_key)
             self.assertNotIn("anthropic-token", repr(list_model_specs()))
             self.assertNotIn("meta-token", repr(list_model_specs()))
+
+    def test_inkling_2_small_reads_tinker_key_and_sends_tinker_route(self):
+        class Stop(Exception):
+            """Raised by the opener once it has seen a request."""
+
+        seen = []
+
+        def opener(request, **_kwargs):
+            seen.append(request)
+            raise Stop()
+
+        with mock.patch.dict("os.environ", {"TINKER_API_KEY": "tinker-token"}, clear=True):
+            args = prepare_namespace(cli._build_parser().parse_args(["--model", "inkling-2-small"]))
+            self.assertEqual(args.model_api, "chat-completions")
+            model = build_model(args, opener=opener)
+            with self.assertRaises(Stop):
+                model.sample(InteractionContext((Init("session-1"), Message("user", "Hello."))))
+            self.assertNotIn("tinker-token", repr(list_model_specs()))
+        [request] = seen
+        self.assertEqual(request.full_url, TINKER_CHAT_COMPLETIONS_API_URL + "/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer tinker-token")
+        self.assertEqual(request.get_header("User-agent"), USER_AGENT)
+        body = json.loads(request.data)
+        self.assertEqual(body["model"], "thinkingmachines/Inkling-2-Small")
+        self.assertNotIn("max_tokens", body)
+        with mock.patch.dict("os.environ", {}, clear=True):
+            args = prepare_namespace(cli._build_parser().parse_args(["--model", "inkling-2-small"]))
+            with self.assertRaisesRegex(ValueError, "credential is unavailable"):
+                build_model(args)
 
     def test_account_services_require_actual_trusted_route_not_just_model_identity(self):
         parser = cli._build_parser()

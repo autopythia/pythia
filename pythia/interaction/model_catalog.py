@@ -36,6 +36,7 @@ OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1"
 CODEX_RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex"
 META_RESPONSES_API_URL = "https://api.meta.ai/v1"
 ANTHROPIC_MESSAGES_API_URL = "https://api.anthropic.com"
+TINKER_CHAT_COMPLETIONS_API_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
 # Shared protocol constraint for catalog validation and Messages request policy.
 MESSAGES_MIN_COMPACTION_TRIGGER_TOKENS = 50_000
 
@@ -917,6 +918,10 @@ _ANTHROPIC = EndpointSpec(
     "messages", ANTHROPIC_MESSAGES_API_URL + "/v1/messages",
     auth="env:ANTHROPIC_API_KEY",
 )
+_TINKER = EndpointSpec(
+    "chat-completions", TINKER_CHAT_COMPLETIONS_API_URL + "/chat/completions",
+    auth="env:TINKER_API_KEY",
+)
 _PROFILE_DEFAULT_ENDPOINTS = MappingProxyType({
     "claude-relay": EndpointSpec("claude-relay", None, auth="runtime"),
     "codex": _CHATGPT,
@@ -930,58 +935,75 @@ _PROFILE_DEFAULT_ENDPOINTS = MappingProxyType({
     ),
 })
 
-# Shared immutable facts, inherited by effort presets rather than copied.
 _CODEX_LIMITS = ModelLimits(
     auto_compaction_context_tokens=872_000,
     max_context_tokens=1_000_000,
     max_output_tokens=128_000,
 )
+_CLAUDE_LIMITS = ModelLimits(
+    auto_compaction_context_tokens=872_000,
+    max_context_tokens=1_000_000,
+    max_output_tokens=128_000,
+)
+_GPT6_RESPONSES = ResponsesDefaults(reasoning_summary="auto", text_verbosity="low")
+_SUMMARIZED_THINKING = {"thinking": {"type": "adaptive", "display": "summarized"}}
+
 _SOL = ModelSpec(
-    name="codex-gpt-5.6-sol", endpoint=replace(_CHATGPT, model="gpt-5.6-sol"),
-    limits=_CODEX_LIMITS, responses=ResponsesDefaults(),
+    name="codex-gpt-5.6-sol",
+    endpoint=replace(_CHATGPT, model="gpt-5.6-sol"),
+    limits=_CODEX_LIMITS,
+    responses=ResponsesDefaults(),
     source=(
         "codex-latest-20260904/codex-rs/models-manager/models.json; "
         "Pythia auto-compaction/max-context policy override"
     ),
 )
-_ASTRA = replace(
-    _SOL, name="codex-gpt-6-astra",
-    endpoint=replace(_SOL.endpoint, model="gpt-6-astra"),
-    # Pythia deliberately requests summaries; the bundled catalog default is none.
-    responses=ResponsesDefaults(reasoning_summary="auto", text_verbosity="low"),
+_ASTRA = ModelSpec(
+    name="codex-gpt-6-astra",
+    endpoint=replace(_CHATGPT, model="gpt-6-astra"),
+    limits=_CODEX_LIMITS,
+    responses=_GPT6_RESPONSES,
+    source=(
+        "codex-latest-20260904/codex-rs/models-manager/models.json; "
+        "Pythia auto-compaction/max-context policy override"
+    ),
 )
-# GPT-6 siblings match Astra's catalog capacities and summary/verbosity support,
-# so they share its limits and request policy.
-_GPT6_SOL = replace(
-    _ASTRA, name="codex-gpt-6-sol",
-    endpoint=replace(_ASTRA.endpoint, model="gpt-6-sol"),
+_GPT6_SOL = ModelSpec(
+    name="codex-gpt-6-sol",
+    endpoint=replace(_CHATGPT, model="gpt-6-sol"),
+    limits=_CODEX_LIMITS,
+    responses=_GPT6_RESPONSES,
     source=(
         "codex-latest-20260927/codex-rs/models-manager/models.json; "
         "Pythia auto-compaction/max-context policy override"
     ),
 )
-_GPT6_LUNA = replace(
-    _GPT6_SOL, name="codex-gpt-6-luna",
-    endpoint=replace(_GPT6_SOL.endpoint, model="gpt-6-luna"),
+_GPT6_LUNA = ModelSpec(
+    name="codex-gpt-6-luna",
+    endpoint=replace(_CHATGPT, model="gpt-6-luna"),
+    limits=_CODEX_LIMITS,
+    responses=_GPT6_RESPONSES,
+    source=(
+        "codex-latest-20260927/codex-rs/models-manager/models.json; "
+        "Pythia auto-compaction/max-context policy override"
+    ),
 )
-# GPT-6.1 Sol's upstream catalog entry also matches Astra's capacities,
-# summary/verbosity support, and reasoning levels.
-_GPT6_1_SOL = replace(
-    _GPT6_SOL, name="codex-gpt-6.1-sol",
-    endpoint=replace(_GPT6_SOL.endpoint, model="gpt-6.1-sol"),
+_GPT6_1_SOL = ModelSpec(
+    name="codex-gpt-6.1-sol",
+    endpoint=replace(_CHATGPT, model="gpt-6.1-sol"),
+    limits=_CODEX_LIMITS,
+    responses=_GPT6_RESPONSES,
     source=(
         "https://github.com/openai/codex/blob/b1e72963c3b71a9265a551e54beff078384efed9/"
         "codex-rs/models-manager/models.json; "
         "Pythia auto-compaction/max-context policy override"
     ),
 )
-# GPT-6.1 Terra came out after the newest Codex catalog here
-# (codex-latest-20261022), so it takes GPT-6.1 Sol's capacities and request
-# policy until an upstream entry says otherwise. OpenAI's model list has it,
-# and the ChatGPT Codex route answered a request for it on 2026-11-01.
-_GPT6_1_TERRA = replace(
-    _GPT6_1_SOL, name="codex-gpt-6.1-terra",
-    endpoint=replace(_GPT6_1_SOL.endpoint, model="gpt-6.1-terra"),
+_GPT6_1_TERRA = ModelSpec(
+    name="codex-gpt-6.1-terra",
+    endpoint=replace(_CHATGPT, model="gpt-6.1-terra"),
+    limits=_CODEX_LIMITS,
+    responses=_GPT6_RESPONSES,
     source=(
         "OpenAI model list and a ChatGPT Codex request, 2026-11-01; not yet in "
         "codex-rs/models-manager/models.json, so GPT-6.1 Sol's capacities; "
@@ -997,11 +1019,7 @@ _SPARK = ModelSpec(
 _FABLE = ModelSpec(
     name="claude-fable-5.1",
     endpoint=replace(_ANTHROPIC, model="claude-fable-5-1"),
-    limits=ModelLimits(
-        auto_compaction_context_tokens=872_000,
-        max_context_tokens=1_000_000,
-        max_output_tokens=128_000,
-    ),
+    limits=_CLAUDE_LIMITS,
     source=(
         "https://platform.claude.com/docs/en/models/fable-5-1/overview; "
         "https://platform.claude.com/docs/en/build-with-claude/effort"
@@ -1011,112 +1029,75 @@ _FABLE = ModelSpec(
 _OPUS = ModelSpec(
     name="claude-opus-5.5",
     endpoint=replace(_ANTHROPIC, model="claude-opus-5-5"),
-    limits=ModelLimits(
-        auto_compaction_context_tokens=872_000,
-        max_context_tokens=1_000_000,
-        max_output_tokens=128_000,
-    ),
+    limits=_CLAUDE_LIMITS,
     source=(
         "https://platform.claude.com/docs/en/models/opus-5-5/overview; "
         "https://platform.claude.com/docs/en/build-with-claude/effort"
     ),
-    extra_sample_params={"thinking": {"type": "adaptive", "display": "summarized"}},
+    extra_sample_params=_SUMMARIZED_THINKING,
 )
 _SONNET = ModelSpec(
     name="claude-sonnet-5.5",
     endpoint=replace(_ANTHROPIC, model="claude-sonnet-5-5"),
-    limits=ModelLimits(
-        auto_compaction_context_tokens=872_000,
-        max_context_tokens=1_000_000,
-        max_output_tokens=128_000,
-    ),
+    limits=_CLAUDE_LIMITS,
     source=(
         "https://platform.claude.com/docs/en/models/sonnet-5-5/overview; "
         "https://platform.claude.com/docs/en/build-with-claude/effort"
     ),
-    extra_sample_params={"thinking": {"type": "adaptive", "display": "summarized"}},
+    extra_sample_params=_SUMMARIZED_THINKING,
 )
-# Haiku 5.5 matches Sonnet 5.5's capacities, adaptive thinking and effort
-# levels (Anthropic's Models API, 2026-11-01), so it shares Sonnet's limits
-# and request policy.
-_HAIKU = replace(
-    _SONNET, name="claude-haiku-5.5",
-    endpoint=replace(_SONNET.endpoint, model="claude-haiku-5-5"),
+_HAIKU = ModelSpec(
+    name="claude-haiku-5.5",
+    endpoint=replace(_ANTHROPIC, model="claude-haiku-5-5"),
+    limits=_CLAUDE_LIMITS,
     source=(
         "https://platform.claude.com/docs/en/models/haiku-5-5/overview; "
         "https://platform.claude.com/docs/en/build-with-claude/effort"
     ),
+    extra_sample_params=_SUMMARIZED_THINKING,
+)
+_INKLING_2_SMALL = ModelSpec(
+    name="inkling-2-small",
+    endpoint=replace(_TINKER, model="thinkingmachines/Inkling-2-Small"),
+    limits=ModelLimits(
+        auto_compaction_context_tokens=872_000,
+        max_context_tokens=1_000_000,
+    ),
+    source=(
+        "Pythia user model catalog entry, 2026-11-06, and a Tinker Chat Completions "
+        "request, 2026-11-08; Tinker's /v1/models lists no models, so the output "
+        "ceiling is unknown; Pythia auto-compaction/max-context policy"
+    ),
 )
 
 
-def _with_effort(base: ModelSpec, name: str, effort: str) -> ModelSpec:
-    return replace(
-        base, name=name, aliases=(),
+def _efforts(base: ModelSpec, *efforts: str) -> Tuple[ModelSpec, ...]:
+    return (base, *(replace(
+        base, name=f"{base.name}-{effort}", aliases=(),
         responses=replace(base.responses or ResponsesDefaults(), reasoning_effort=effort),
-    )
+    ) for effort in efforts))
 
 
-def _with_messages_effort(
-    base: ModelSpec,
-    name: str,
-    effort: str,
-    *,
-    aliases: Tuple[str, ...] = (),
-) -> ModelSpec:
-    return replace(
-        base,
-        name=name,
-        aliases=aliases,
-        # Keep the base's extra sample params (e.g. thinking) and add Anthropic's effort field.
+def _messages_efforts(base: ModelSpec, *efforts: str) -> Tuple[ModelSpec, ...]:
+    return (base, *(replace(
+        base, name=f"{base.name}-{effort}", aliases=(),
         extra_sample_params={**base.extra_sample_params, "output_config": {"effort": effort}},
-    )
+    ) for effort in efforts))
 
 
 _MODEL_SPECS = (
-    _SOL,
-    _with_effort(_SOL, "codex-gpt-5.6-sol-medium", "medium"),
-    _with_effort(_SOL, "codex-gpt-5.6-sol-max", "max"),
-    _ASTRA,
-    _with_effort(_ASTRA, "codex-gpt-6-astra-medium", "medium"),
-    _with_effort(_ASTRA, "codex-gpt-6-astra-max", "max"),
-    _GPT6_SOL,
-    _with_effort(_GPT6_SOL, "codex-gpt-6-sol-medium", "medium"),
-    _with_effort(_GPT6_SOL, "codex-gpt-6-sol-max", "max"),
-    _GPT6_LUNA,
-    _with_effort(_GPT6_LUNA, "codex-gpt-6-luna-medium", "medium"),
-    _with_effort(_GPT6_LUNA, "codex-gpt-6-luna-max", "max"),
-    _GPT6_1_SOL,
-    _with_effort(_GPT6_1_SOL, "codex-gpt-6.1-sol-medium", "medium"),
-    _with_effort(_GPT6_1_SOL, "codex-gpt-6.1-sol-max", "max"),
-    _GPT6_1_TERRA,
-    _with_effort(_GPT6_1_TERRA, "codex-gpt-6.1-terra-medium", "medium"),
-    _with_effort(_GPT6_1_TERRA, "codex-gpt-6.1-terra-max", "max"),
-    _SPARK,
-    _with_effort(_SPARK, "muse-spark-1.3-xhigh", "xhigh"),
-    _FABLE,
-    _with_messages_effort(
-        _FABLE,
-        "claude-fable-5.1-max",
-        "max",
-    ),
-    _OPUS,
-    _with_messages_effort(
-        _OPUS,
-        "claude-opus-5.5-max",
-        "max",
-    ),
-    _SONNET,
-    _with_messages_effort(
-        _SONNET,
-        "claude-sonnet-5.5-max",
-        "max",
-    ),
-    _HAIKU,
-    _with_messages_effort(
-        _HAIKU,
-        "claude-haiku-5.5-max",
-        "max",
-    ),
+    *_efforts(_SOL, "medium", "max"),
+    *_efforts(_ASTRA, "medium", "max"),
+    *_efforts(_GPT6_SOL, "medium", "max"),
+    *_efforts(_GPT6_LUNA, "medium", "max"),
+    *_efforts(_GPT6_1_SOL, "medium", "max"),
+    *_efforts(_GPT6_1_TERRA, "medium", "max"),
+    *_efforts(_SPARK, "xhigh"),
+    *_messages_efforts(_FABLE, "max"),
+    *_messages_efforts(_OPUS, "max"),
+    *_messages_efforts(_SONNET, "max"),
+    *_messages_efforts(_HAIKU, "max"),
+    _INKLING_2_SMALL,
 )
 
 
@@ -1421,6 +1402,7 @@ __all__ = [
     "CODEX_RESPONSES_API_URL",
     "META_RESPONSES_API_URL",
     "OPENAI_RESPONSES_API_URL",
+    "TINKER_CHAT_COMPLETIONS_API_URL",
     "AFK_FIELDS",
     "AfkDefaults",
     "COMPACTION_DEFAULT_FIELDS",
