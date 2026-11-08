@@ -1,0 +1,51 @@
+-- form.lem: glui's controls, for the tests of its web look (glui.js, in
+-- tools/glui_test.js): a field, a toggle and a list's rows, which send
+-- Edited, Toggled and their messages; links; widgets that Disabled and
+-- Tooltip mark, some through their parent; and Return, which submits the
+-- form unless a control acts on it itself.
+id Top, Form, Title, Name, Hello, Remember, Choices, Choice(Int), Actions
+id Save, Help, Away, Left
+input Option(n: Int, text: Text) key n
+input Due(frac: Num)
+state Typed(field: Id, text: Text) key field
+state Kept(box: Id, value: Bool) key box
+state Picked(n: Int) key n
+msg Pick(n: Int), Submit
+effect Saved(text: Text)
+
+rel Typing(text: Text)
+Typing(t) :- Typed(Name, t)
+Typing("") :- not Typed(field=Name)
+rel Keeping(value: Bool)
+Keeping(v) :- Kept(Remember, v)
+Keeping(False) :- not Kept(box=Remember)
+
+Window(Top, title="A form"):
+  Column(Form):
+    Heading(Title, text="Settings", level=2)
+    Field(Name, text=t) :- Typing(t)
+    Label(Hello, text="Hello, " + t, tone=Dim) :- Typed(Name, t)
+    Toggle(Remember, text="Remember me", value=v) :- Keeping(v)
+    Box(Choices):
+      for Option(n, text):
+        ListRow(Choice(n), text=text, on=Pick(n), order=n)
+    Row(Actions):
+      Button(Save, text="Save", on=Submit)
+      Link(Help, text="Help", to="/help")
+      Link(Away, text="Elsewhere", to="https://example.com/")
+    Progress(Left, frac=f) :- Due(f)
+
+Disabled(Save, why="Type a name first") :- Typing("")
+Disabled(Save, why="Pick an option") :- not Picked()
+Disabled(Choices, why="Remember me first") :- Keeping(False)
+Tooltip(Save, text="Saves the form")
+Key(Return, msg=Submit) :- Focused(f), Within(f, Form), not Disabled(id=Save)
+
+on Edited(Name, t):
+  Typed(Name, t)
+on Toggled(Remember, v):
+  Kept(Remember, v)
+on Pick(n):
+  Picked(n)
+on Submit:
+  Saved(t) :- Typing(t)

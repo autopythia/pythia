@@ -1,14 +1,15 @@
-// tools/stand_in_dom.js: a stand-in DOM, for testing glem.js's view, and
-// later the looks' recipes, in a JavaScript engine without a browser:
-// elements with attributes, children and listeners, and the keyboard's
-// focus; what the view and the tests' recipes use, and no more. It counts
-// the elements that it makes, so that tests can tell which ones stay.
+// tools/stand_in_dom.js: a stand-in DOM, for testing glem.js's view and
+// glui.js's recipes in a JavaScript engine without a browser: elements with
+// attributes, children, listeners and a style, text, and the keyboard's
+// focus; what the view and the recipes use, and no more. It counts the
+// elements that it makes, so that tests can tell which ones stay.
 var standInDom = (function () {
   "use strict";
 
   function Document() {
     this.activeElement = null;
     this.made = 0;
+    this.title = "";
   }
 
   Document.prototype.createElement = function (tag) {
@@ -16,22 +17,37 @@ var standInDom = (function () {
     return new Element(this, tag);
   };
 
-  // An event, as the tests make them, on `target`: its listeners, then its
-  // ancestors', as for events that bubble. `init` adds to the event, as
-  // {key: "Escape"}.
+  Document.prototype.createTextNode = function (data) {
+    return new Text(this, data);
+  };
+
+  // The events that don't bubble, as a browser fires them.
+  var ALONE = ["toggle", "focus", "blur"];
+
+  // An event, as the tests make them, on `target`: its listeners, then,
+  // unless it's one that doesn't bubble or a listener stops it, its
+  // ancestors'. `init` adds to the event, as {key: "Escape"}. A click on a
+  // disabled control fires nothing, as in a browser.
   Document.prototype.fire = function (target, type, init) {
+    if (type === "click" && disabled(target)) {
+      return null;
+    }
     var event = {
       type: type,
       target: target,
       defaultPrevented: false,
+      stopped: ALONE.indexOf(type) >= 0,
       preventDefault: function () {
         event.defaultPrevented = true;
+      },
+      stopPropagation: function () {
+        event.stopped = true;
       }
     };
     Object.keys(init || {}).forEach(function (name) {
       event[name] = init[name];
     });
-    for (var node = target; node; node = node.parentNode) {
+    for (var node = target; node; node = event.stopped ? null : node.parentNode) {
       (node.listeners[type] || []).slice().forEach(function (listener) {
         listener(event);
       });
@@ -40,10 +56,11 @@ var standInDom = (function () {
   };
 
   // The keyboard's focus moves to an element, or away (null): focusout on
-  // the one that had it, then focusin, as a browser fires them.
+  // the one that had it, then focusin, as a browser fires them. A disabled
+  // control takes no focus.
   Document.prototype.focus = function (element) {
     var old = this.activeElement;
-    if (old === element) {
+    if (old === element || (element && disabled(element))) {
       return;
     }
     this.activeElement = element;
@@ -55,14 +72,37 @@ var standInDom = (function () {
     }
   };
 
-  function Element(doc, tag) {
+  // Whether an element is a control that's disabled.
+  function disabled(element) {
+    var controls = ["button", "input", "select", "textarea"];
+    return controls.indexOf(element.localName) >= 0 && element.getAttribute("disabled") !== null;
+  }
+
+  // Text, in an element.
+  function Text(doc, data) {
     this.ownerDocument = doc;
-    this.tagName = tag;
+    this.nodeType = 3;
+    this.data = String(data);
     this.parentNode = null;
     this.childNodes = [];
-    // [name, value] pairs, in the order that they're first set.
+    this.listeners = {};
+  }
+
+  Text.prototype.contains = function (node) {
+    return node === this;
+  };
+
+  function Element(doc, tag) {
+    this.ownerDocument = doc;
+    this.nodeType = 1;
+    this.tagName = tag;
+    this.localName = tag;
+    this.parentNode = null;
+    this.childNodes = [];
+    // {name, value}, in the order that they're first set, as a browser's.
     this.attributes = [];
     this.listeners = {};
+    this.style = new Style();
   }
 
   Element.prototype.insertBefore = function (child, ref) {
@@ -113,21 +153,86 @@ var standInDom = (function () {
   Element.prototype.setAttribute = function (name, value) {
     var value_ = String(value);
     for (var i = 0; i < this.attributes.length; i++) {
-      if (this.attributes[i][0] === name) {
-        this.attributes[i][1] = value_;
+      if (this.attributes[i].name === name) {
+        this.attributes[i].value = value_;
         return;
       }
     }
-    this.attributes.push([name, value_]);
+    this.attributes.push({ name: name, value: value_ });
   };
 
   Element.prototype.getAttribute = function (name) {
     for (var i = 0; i < this.attributes.length; i++) {
-      if (this.attributes[i][0] === name) {
-        return this.attributes[i][1];
+      if (this.attributes[i].name === name) {
+        return this.attributes[i].value;
       }
     }
     return null;
+  };
+
+  Element.prototype.removeAttribute = function (name) {
+    this.attributes = this.attributes.filter(function (attribute) {
+      return attribute.name !== name;
+    });
+  };
+
+  // An element's text, all of it; and, set, the element's only child.
+  Object.defineProperty(Element.prototype, "textContent", {
+    get: function () {
+      return this.childNodes
+        .map(function (node) {
+          return node.nodeType === 3 ? node.data : node.textContent;
+        })
+        .join("");
+    },
+    set: function (text) {
+      var element = this;
+      this.childNodes.slice().forEach(function (node) {
+        element.removeChild(node);
+      });
+      if (String(text) !== "") {
+        this.appendChild(new Text(this.ownerDocument, text));
+      }
+    }
+  });
+
+  // A details element's `open`, which its attribute holds.
+  Object.defineProperty(Element.prototype, "open", {
+    get: function () {
+      return this.getAttribute("open") !== null;
+    },
+    set: function (open) {
+      if (open) {
+        this.setAttribute("open", "");
+      } else {
+        this.removeAttribute("open");
+      }
+    }
+  });
+
+  // An element's style: its properties, as set, in order.
+  function Style() {
+    this.properties = [];
+  }
+
+  Style.prototype.setProperty = function (name, value) {
+    this.removeProperty(name);
+    this.properties.push([name, String(value)]);
+  };
+
+  Style.prototype.removeProperty = function (name) {
+    this.properties = this.properties.filter(function (property) {
+      return property[0] !== name;
+    });
+  };
+
+  Style.prototype.getPropertyValue = function (name) {
+    for (var i = 0; i < this.properties.length; i++) {
+      if (this.properties[i][0] === name) {
+        return this.properties[i][1];
+      }
+    }
+    return "";
   };
 
   Element.prototype.addEventListener = function (type, listener) {

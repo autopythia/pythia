@@ -1,0 +1,243 @@
+# A form of glui's controls (form.lem) through glui's recipes, in a
+# stand-in DOM, for the tests in JavaScript alone (tools/glui_test.js): the
+# steps and what they show, as approval_dom.txt says.
+
+=== the form, with two options, and a task past its due
+["+", "Option", {"n": 1, "text": "one"}]
+["+", "Option", {"n": 2, "text": "two"}]
+["+", "Due", {"frac": 1.5}]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text"
+    label.g-toggle
+      input type="checkbox"
+      span "Remember me"
+    div.g-box.g-disabled title="Remember me first"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "one"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "two"
+    div.g-row
+      button.g-button.g-disabled type="button" title="Saves the form\nPick an option\nType a name first" disabled "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+
+=== a disabled row takes no click
+["click", "Choice(1)"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text"
+    label.g-toggle
+      input type="checkbox"
+      span "Remember me"
+    div.g-box.g-disabled title="Remember me first"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "one"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "two"
+    div.g-row
+      button.g-button.g-disabled type="button" title="Saves the form\nPick an option\nType a name first" disabled "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+
+=== typing a name
+["type", "Name", "Ann"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann"
+    span.g-label.g-tone-dim "Hello, Ann"
+    label.g-toggle
+      input type="checkbox"
+      span "Remember me"
+    div.g-box.g-disabled title="Remember me first"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "one"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "two"
+    div.g-row
+      button.g-button.g-disabled type="button" title="Saves the form\nPick an option" disabled "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+
+=== checking the box enables the rows
+["check", "Remember"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann"
+    span.g-label.g-tone-dim "Hello, Ann"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button.g-disabled type="button" title="Saves the form\nPick an option" disabled "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+
+=== a click on a row picks it, and Save is enabled
+["click", "Choice(2)"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann"
+    span.g-label.g-tone-dim "Hello, Ann"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+
+=== Return on a row is the row's own
+["focus", "Choice(2)"]
+["key", "Enter"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann"
+    span.g-label.g-tone-dim "Hello, Ann"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+Focused(Choice(2))
+
+=== Return in the field submits the form
+["focus", "Name"]
+["key", "Enter"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann"
+    span.g-label.g-tone-dim "Hello, Ann"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+Focused(Name)
+effect Saved {"text":"Ann"}
+
+=== a composition sends nothing while it composes
+["compose", "Name", "Ann K"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann K"
+    span.g-label.g-tone-dim "Hello, Ann"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+Focused(Name)
+
+=== a change from elsewhere leaves the composition as it is
+["!", ["Edited", "Name", "Ann L"]]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann K"
+    span.g-label.g-tone-dim "Hello, Ann L"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+Focused(Name)
+
+=== it sends its text when it ends
+["composed", "Name"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann K"
+    span.g-label.g-tone-dim "Hello, Ann K"
+    label.g-toggle
+      input type="checkbox" :checked
+      span "Remember me"
+    div.g-box
+      button.g-listrow type="button" "one"
+      button.g-listrow type="button" "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+Focused(Name)
+
+=== unchecking the box disables the rows again
+["check", "Remember"]
+---
+page title: "A form"
+main.g-window
+  div.g-column
+    div.g-heading.g-level-2 role="heading" aria-level="2" "Settings"
+    input.g-field type="text" :value="Ann K"
+    span.g-label.g-tone-dim "Hello, Ann K"
+    label.g-toggle
+      input type="checkbox"
+      span "Remember me"
+    div.g-box.g-disabled title="Remember me first"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "one"
+      button.g-listrow.g-disabled type="button" title="Remember me first" disabled "two"
+    div.g-row
+      button.g-button type="button" title="Saves the form" "Save"
+      a.g-link href="/help" "Help"
+      a.g-link.g-refused "Elsewhere"
+    progress.g-progress max="1" value="1"
+Focused(Name)

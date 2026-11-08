@@ -32,9 +32,12 @@ make test          # the unit tests, on this machine
 make check         # rustfmt; clippy for macOS and for this machine; and
                    # every macOS binary, tests too, linked against the stubs
 make bench         # times lem at the size of a long log, and on a hard join
-make js-test       # lem.js and glem.js, the runtimes in JavaScript, on the
-                   # tests, in JavaScriptCore; elsewhere with another
-                   # engine, JS=qjs
+make js-test       # lem.js, glem.js and glui.js, the runtimes in JavaScript,
+                   # on the tests, in JavaScriptCore; elsewhere with
+                   # another engine, JS=qjs
+make web           # what the web look's pages fetch, in target/web/: the
+                   # programs and themes, compiled, and the tests' cases
+make web-serve     # then serves the crate on 127.0.0.1:8000, for a browser
 make msrv          # check and test with Rust 1.78.0, the oldest supported
 make inspect       # from any host: will the binaries load on macOS?
 make plugin-check  # loads this machine's build of the plugin with ctypes
@@ -219,11 +222,10 @@ its widget kinds, among them those that documents need (headings, links,
 tables, a log's entries and code), and `theme.lem` says what a theme
 gives: the colors, sizes and times that a front end draws with.
 `themes/dark.lem`, the default, and `light.lem` give them, after wui's
-log styles. Nothing draws them yet. `pythia-ui lem` loads glui's files
-and a theme first: `--theme light`, or `--theme FILE.lem` for another,
-which it refuses if a value is missing. The example is the countdown
-after approval, `lem/approval.lem`, with what pythia sends and accepts,
-`lem/host.lem`:
+log styles. `pythia-ui lem` loads glui's files and a theme first:
+`--theme light`, or `--theme FILE.lem` for another, which it refuses if
+a value is missing. The example is the countdown after approval,
+`lem/approval.lem`, with what pythia sends and accepts, `lem/host.lem`:
 
 ```sh
 cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/approval.lem
@@ -235,6 +237,29 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/ap
 + Now(3000)
 
 ! Withdraw("toolu_1")
+```
+
+On the web, `src/glui/glui.js` draws them, with a recipe for each kind
+for glem.js's view. It makes each widget a native element (`button`,
+`a`, `details`, `table`, `pre`, `progress`) with classes: `g-` and its
+kind's name, and its flags. Its widgets send `Edited` and `Toggled`, it
+shows `Disabled` and `Tooltip`, and a link goes only to one of the host's
+own paths. It sets a theme's values on the page as CSS variables, `--glui-`
+and a value's name, and a look's stylesheet draws with them, over
+`web/glui.css`: `web/native.css`, the design doc's native look, or
+`web/log.css`, after wui's log. `make js-test` runs its cases in a
+stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
+`lem/test/form.lem`.
+
+In a browser, `make web-serve` serves two pages. `web/demo.html` shows
+the approval HUD, a page of a log, or the form, in either look and any
+theme, with the page as their host. `web/test.html` runs the tests in
+JavaScript, and some of glui's cases in the page's own DOM too. Both pages
+carry the CSP that wui will send its pages, and run only the crate's
+files:
+
+```sh
+make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
 ```
 
 ## Layout
@@ -255,9 +280,12 @@ src/glem/          glem, lem's GUI layer: lower.rs (the rewrite into plain
                    (its part of the compiled form), glem.js (its runtime and
                    view in JavaScript); and the tests
 src/glui/          glui, the design language: widgets.lem, theme.lem,
-                   themes/, mod.rs (loading them), and the tests
+                   themes/, mod.rs (loading them), glui.js (its web look's
+                   recipes), and the tests
 lem/               the approval example (host.lem, approval.lem), and test/,
                    the tests' programs and cases
+web/               the web look's stylesheets, glui.css, native.css and
+                   log.css; and its pages, demo.html and test.html
 src/macos/         objc.rs (the Objective-C runtime), block.rs (completion
                    blocks), cf.rs, cg.rs (displays, permissions), png.rs
                    (ImageIO), capture.rs (the two capture paths)
@@ -265,8 +293,8 @@ build.rs           the plugin's install name, @rpath/libpythia_ui.dylib
 stub-sdk/          link-time symbol lists (below)
 tools/             macho_info.py (make inspect), gen_tbd.py (make tbd),
                    plugin_check.py (make plugin-check), lem_bench.py
-                   (make bench); lem_test.js, glem_test.js, tap.js and
-                   stand_in_dom.js (make js-test)
+                   (make bench); lem_test.js, glem_test.js, glui_test.js,
+                   tap.js and stand_in_dom.js (make js-test)
 ```
 
 ## Stub SDK

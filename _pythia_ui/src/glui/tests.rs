@@ -9,12 +9,30 @@
 //! - glui's files and themes print back;
 //! - the approval HUD and the page, compiled with glem's part
 //!   ([`glem::compile`]) and read back, tick as written too, with each tick
-//!   as JSON steps, as `pythia-ui lem --compile` gives them to the web.
+//!   as JSON steps, as `pythia-ui lem --compile` gives them to the web;
+//! - `glui.js`, the web look, is ASCII, writes no HTML, and runs no code
+//!   that it's given;
+//! - the looks' stylesheets, in `web/`, read only the variables that
+//!   `glui.js` sets from a theme, which `theme.lem` names;
+//! - the web look's pages, `web/demo.html` and `web/test.html`, give
+//!   themselves the CSP that wui will send, and run only the crate's own
+//!   files, and those that `make web` writes: no script or style inline.
+//!
+//! The web look's own cases, which only JavaScript runs, go to
+//! `target/web/glui_tests.js`, which `tools/glui_test.js` runs on `glui.js`
+//! (`make js-test`): the HUD, the page and a form of glui's controls
+//! (`lem/test/form.lem`), compiled, with their cases in a stand-in DOM
+//! (`lem/test/*_dom.txt`); and each theme, compiled, with its values as
+//! CSS (`lem/test/themes_css.txt`).
 
 use super::{complete, load, notes, FILES, THEMES};
 use crate::glem;
+use crate::json::{self, object, Value as Json};
 use crate::lem::host;
-use crate::lem::testing::{read, report, round_trip, tick_cases};
+use crate::lem::testing::{
+  cases, read, report, round_trip, tick_cases, unsafe_in_script, write_web,
+};
+use std::path::Path;
 
 /// The themes in src/glui/themes/, glui's own and any other there: (file,
 /// text).
@@ -132,4 +150,247 @@ fn the_hud_and_the_page_tick_on_their_compiled_forms() {
       runtime.run(&script, &notes)
     });
   }
+}
+
+#[test]
+fn the_web_looks_cases_for_javascript() {
+  let (_, file, text) = THEMES[0];
+  let programs: [(&[&str], &str); 3] = [
+    (&["host.lem", "approval.lem"], "test/approval_dom.txt"),
+    (&["test/page.lem"], "test/page_dom.txt"),
+    (&["test/form.lem"], "test/form_dom.txt"),
+  ];
+  let suites = programs.map(|(files, dom)| {
+    let form = glem::compile::compile(&program((file, text), files));
+    let cases = cases(dom).into_iter().map(|(title, lines, want)| {
+      let steps = lines
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| json::parse(line).unwrap_or_else(|e| panic!("{dom}: {line}: {e}")));
+      object([
+        ("title", Json::from(title.as_str())),
+        ("steps", Json::Array(steps.collect())),
+        ("want", Json::from(want.as_str())),
+      ])
+    });
+    object([
+      ("name", Json::from(dom.trim_start_matches("test/"))),
+      (
+        "program",
+        json::parse(&form).expect("the compiled form is JSON"),
+      ),
+      ("cases", Json::Array(cases.collect())),
+    ])
+  });
+  let wants = cases("test/themes_css.txt");
+  let themes = THEMES.map(|(name, file, text)| {
+    let form = glem::compile::compile(&program((file, text), &[]));
+    let want = wants
+      .iter()
+      .find(|(title, ..)| title == name)
+      .map_or(String::new(), |(_, _, want)| want.clone());
+    object([
+      ("name", Json::from(name)),
+      (
+        "program",
+        json::parse(&form).expect("the compiled form is JSON"),
+      ),
+      ("want", Json::from(want.as_str())),
+    ])
+  });
+  let tests = object([
+    ("suites", Json::Array(suites.into())),
+    ("themes", Json::Array(themes.into())),
+  ]);
+  write_web("glui_tests.js", "GLUI_TESTS", "src/glui/tests.rs", &tests);
+}
+
+#[test]
+fn glui_js_is_ascii_writes_no_html_and_runs_no_code() {
+  let found = unsafe_in_script(include_str!("glui.js"));
+  assert!(found.is_empty(), "glui.js has {found:?}");
+}
+
+/// The web look's stylesheets: (file, text).
+const STYLESHEETS: [(&str, &str); 3] = [
+  ("web/glui.css", include_str!("../../web/glui.css")),
+  ("web/native.css", include_str!("../../web/native.css")),
+  ("web/log.css", include_str!("../../web/log.css")),
+];
+
+/// A name in CamelCase as CSS writes names, as glui.js does: PanelBack,
+/// panel-back.
+fn kebab(name: &str) -> String {
+  let mut css = String::new();
+  for (i, c) in name.chars().enumerate() {
+    if c.is_ascii_uppercase() && i > 0 {
+      css.push('-');
+    }
+    css.push(c.to_ascii_lowercase());
+  }
+  css
+}
+
+#[test]
+fn the_stylesheets_read_only_what_glui_js_gives() {
+  let (_, file, text) = THEMES[0];
+  let prog = program((file, text), &[]);
+  let names = |ty: &str| -> Vec<String> {
+    let ctors = prog.lem.ctors.iter().filter(|c| &*c.ty == ty);
+    ctors.map(|c| kebab(&c.name)).collect()
+  };
+  let mut given: Vec<String> = names("Paint")
+    .into_iter()
+    .chain(names("Metric"))
+    .map(|name| format!("--glui-{name}"))
+    .collect();
+  given.extend(
+    names("Tone")
+      .iter()
+      .map(|name| format!("--glui-{name}-text")),
+  );
+  given.sort();
+  let mut results = Vec::new();
+  // What theme.lem names is what glui.js gives, as themes_css.txt says.
+  for (theme, _, want) in cases("test/themes_css.txt") {
+    let mut set: Vec<String> = want
+      .lines()
+      .filter_map(|line| line.split(':').next())
+      .filter(|name| name.starts_with("--glui-"))
+      .map(str::to_string)
+      .collect();
+    set.sort();
+    let why = (set != given).then(|| format!("glui.js gives\n{set:?}\nnot\n{given:?}"));
+    results.push((format!("themes_css.txt: {theme}"), why));
+  }
+  for (name, css) in STYLESHEETS {
+    let mut unknown: Vec<&str> = Vec::new();
+    for (at, _) in css.match_indices("var(--") {
+      let rest = &css[at + 4..];
+      let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(rest.len());
+      let var = &rest[..end];
+      let known = var.starts_with("--g-") || given.iter().any(|name| name == var);
+      if !known && !unknown.contains(&var) {
+        unknown.push(var);
+      }
+    }
+    let open = css.matches('{').count();
+    let why = if !css.is_ascii() {
+      Some("it has a character beyond ASCII".to_string())
+    } else if open != css.matches('}').count() {
+      Some("its braces don't pair".to_string())
+    } else if !unknown.is_empty() {
+      Some(format!("it reads {unknown:?}, which glui.js doesn't set"))
+    } else {
+      None
+    };
+    results.push((name.to_string(), why));
+  }
+  report(results);
+}
+
+/// The web look's pages, and their own scripts: (file, text).
+const PAGES: [(&str, &str); 2] = [
+  ("web/demo.html", include_str!("../../web/demo.html")),
+  ("web/test.html", include_str!("../../web/test.html")),
+];
+const PAGE_SCRIPTS: [(&str, &str); 2] = [
+  ("web/demo.js", include_str!("../../web/demo.js")),
+  ("web/test.js", include_str!("../../web/test.js")),
+];
+
+/// The CSP that wui will send with the pages that run lem, which the web
+/// look's pages give themselves.
+const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" \
+  content=\"script-src 'self'; connect-src 'self'; style-src 'self'\">";
+
+/// What's wrong with a page: its CSP; script or style inline; and a script
+/// or stylesheet that isn't a file in the crate, or under target/, which
+/// `make web` writes.
+fn page_faults(page: &str) -> Vec<String> {
+  let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/web"));
+  let lower = page.to_ascii_lowercase();
+  let mut faults = Vec::new();
+  if !page.is_ascii() {
+    faults.push("a character beyond ASCII".to_string());
+  }
+  if !page.contains(CSP) {
+    faults.push("not the CSP that wui sends".to_string());
+  }
+  for inline in ["<style", " style=", "javascript:"] {
+    if lower.contains(inline) {
+      faults.push(format!("`{inline}`"));
+    }
+  }
+  for (at, _) in lower.match_indices(" on") {
+    let rest = &lower[at + 3..];
+    let word = rest.len()
+      - rest
+        .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+        .len();
+    if word > 0 && rest[word..].starts_with('=') {
+      faults.push(format!("a handler inline, on{}", &rest[..word]));
+    }
+  }
+  let mut files = Vec::new();
+  for (at, _) in lower.match_indices("<script") {
+    let end = lower[at..]
+      .find("</script>")
+      .map_or(lower.len(), |end| at + end);
+    let tag = &page[at..end];
+    match tag
+      .strip_prefix("<script src=\"")
+      .and_then(|rest| rest.strip_suffix("\">"))
+    {
+      Some(src) if !src.contains('"') => files.push(src),
+      _ => faults.push(format!("a script that isn't a file alone: {tag}")),
+    }
+  }
+  let link = "<link rel=\"stylesheet\" href=\"";
+  for (at, _) in lower.match_indices(link) {
+    let rest = &page[at + link.len()..];
+    files.push(&rest[..rest.find('"').unwrap_or(0)]);
+  }
+  for file in files {
+    if !file.starts_with("../target/") && !dir.join(file).is_file() {
+      faults.push(format!("{file} isn't a file"));
+    }
+  }
+  faults
+}
+
+#[test]
+fn the_web_pages_run_only_the_crates_files() {
+  let mut results = Vec::new();
+  for (name, page) in PAGES {
+    let faults = page_faults(page);
+    results.push((
+      name.to_string(),
+      (!faults.is_empty()).then(|| faults.join("\n")),
+    ));
+  }
+  for (name, script) in PAGE_SCRIPTS {
+    let found = unsafe_in_script(script);
+    results.push((
+      name.to_string(),
+      (!found.is_empty()).then(|| format!("it has {found:?}")),
+    ));
+  }
+  let broken = [
+    "<script>alert(1)</script>",
+    "<script src=\"x.js\" async></script>",
+    "<script src=\"../src/nowhere.js\"></script>",
+    "<link rel=\"stylesheet\" href=\"nowhere.css\">",
+    "<div style=\"color:red\"></div>",
+    "<button onclick=\"go()\">",
+  ];
+  for (i, html) in broken.iter().enumerate() {
+    let page = PAGES[0].1.replace("</body>", &format!("{html}\n</body>"));
+    let faults = page_faults(&page);
+    let why = (faults.len() != 1).then(|| format!("{html} gives {faults:?}"));
+    results.push((format!("a broken page, {}", i + 1), why));
+  }
+  report(results);
 }

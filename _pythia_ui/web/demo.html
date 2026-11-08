@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self'; connect-src 'self'; style-src 'self'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- web/demo.html: glui's demo (demo.js), after `make web`, which `make
+     web-serve` serves, with the CSP that wui will send its pages: they run
+     only the crate's files. -->
+<title>glui</title>
+<link rel="stylesheet" href="glui.css">
+<link rel="stylesheet" href="native.css">
+<link rel="stylesheet" href="log.css">
+<link rel="stylesheet" href="pages.css">
+</head>
+<body>
+<header class="demo-bar">
+<strong>glui</strong>
+<label>Program <select id="program"></select></label>
+<label>Look <select id="look"></select></label>
+<label>Theme <select id="theme"></select></label>
+<span class="demo-actions" id="actions"></span>
+</header>
+<div id="view" class="demo-view"></div>
+<section class="demo-heard">
+<h2>What the host heard</h2>
+<ol id="heard"></ol>
+</section>
+<script src="../src/lem/lem.js"></script>
+<script src="../src/glem/glem.js"></script>
+<script src="../src/glui/glui.js"></script>
+<script src="demo.js"></script>
+</body>
+</html>

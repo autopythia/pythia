@@ -14,7 +14,8 @@ OUT := target/$(TARGET)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 HOST_LIB := target/$(HOST)/release/libpythia_ui.$(if $(findstring apple-darwin,$(HOST)),dylib,so)
 
-.PHONY: all build dev debug rel release test check bench js-test msrv plugin-check tbd inspect clean
+.PHONY: all build dev debug rel release test check bench js-test web web-serve msrv plugin-check tbd \
+  inspect clean
 
 all: build
 
@@ -56,12 +57,40 @@ bench:
 JS := osascript -l JavaScript
 WEB := target/web
 js-test:
-	$(CARGO) test --target $(HOST) --lib -- lem::compile_test glem::compile_test
+	$(CARGO) test --target $(HOST) --lib -- lem::compile_test glem::compile_test glui::tests
 	cat src/lem/lem.js $(WEB)/lem_tests.js tools/tap.js tools/lem_test.js > $(WEB)/lem_test_run.js
 	$(JS) $(WEB)/lem_test_run.js
 	cat src/lem/lem.js src/glem/glem.js $(WEB)/glem_tests.js tools/tap.js tools/stand_in_dom.js \
 	  tools/glem_test.js > $(WEB)/glem_test_run.js
 	$(JS) $(WEB)/glem_test_run.js
+	cat src/lem/lem.js src/glem/glem.js src/glui/glui.js $(WEB)/glui_tests.js tools/tap.js \
+	  tools/stand_in_dom.js tools/glui_test.js > $(WEB)/glui_test_run.js
+	$(JS) $(WEB)/glui_test_run.js
+
+# What the web look's pages, web/demo.html and web/test.html, fetch, in
+# target/web/: the approval HUD, and lem/test's page and form, compiled by
+# pythia-ui lem --compile; each theme in src/glui/themes/, alone, as
+# theme-NAME.json, with their names in themes.json; and, from the tests,
+# their cases for JavaScript. web-serve serves the crate to this machine
+# alone, at 127.0.0.1:PORT, for a browser.
+WEB_BIN := target/$(HOST)/debug/$(BIN)
+WEB_THEMES := $(basename $(notdir $(sort $(wildcard src/glui/themes/*.lem))))
+comma := ,
+web:
+	$(CARGO) build --bin $(BIN) --target $(HOST)
+	$(CARGO) test --target $(HOST) --lib -- lem::compile_test glem::compile_test glui::tests
+	mkdir -p $(WEB)
+	$(WEB_BIN) lem --compile lem/host.lem lem/approval.lem > $(WEB)/approval.json
+	$(WEB_BIN) lem --compile lem/test/page.lem > $(WEB)/page.json
+	$(WEB_BIN) lem --compile lem/test/form.lem > $(WEB)/form.json
+	$(foreach t,$(WEB_THEMES),$(WEB_BIN) lem --theme src/glui/themes/$(t).lem --compile \
+	  > $(WEB)/theme-$(t).json &&) true
+	echo '[$(subst " ","$(comma) ",$(patsubst %,"%",$(WEB_THEMES)))]' > $(WEB)/themes.json
+
+PORT := 8000
+web-serve: web
+	@echo "glui's demo: http://127.0.0.1:$(PORT)/web/demo.html; its tests: /web/test.html"
+	$(PYTHON) -m http.server $(PORT) --bind 127.0.0.1
 
 # check and test with the oldest Rust that Cargo.toml's rust-version names,
 # which must be installed:

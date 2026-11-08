@@ -265,7 +265,8 @@ var glem = (function () {
 
   // A widget in a view: its relation, kind and id; `key`, its id as lem
   // writes it; and its own fields: by name, in `fields`; and in order, in
-  // `names`, `types` and `values`. `made` is what its recipe made.
+  // `names`, `types` and `values`. `state` is what the layer above shows of
+  // it besides its fields (View), and `made` is what its recipe made.
   function Widget(prog, rel, id) {
     var fields = prog.lem.rels[rel].fields;
     var end = prog.widget.get(rel) ? fields.length - 2 : fields.length;
@@ -282,6 +283,7 @@ var glem = (function () {
     }
     this.values = [];
     this.fields = {};
+    this.state = null;
     this.made = null;
   }
 
@@ -318,6 +320,13 @@ var glem = (function () {
   // message with view.send(msg), reading the widget's fields when its event
   // comes, not when it's made.
   //
+  // `state`, if given, is from the layer above too: state(lemRuntime),
+  // after each tick, gives a function of a widget's id, which gives what
+  // the layer above shows of the widget besides its fields, such as why
+  // it's disabled: a value that JSON can write, or null. The view keeps it
+  // in the widget's `state`, and a widget whose state changes is updated,
+  // as one whose fields change is.
+  //
   // The view fills in glem's Focused, the widget whose element holds the
   // keyboard's focus; and on Escape, Return or Tab, without a modifier, and
   // unless a recipe took the key, it sends the messages that glem's Key
@@ -325,7 +334,7 @@ var glem = (function () {
   // host.effects(list) after a tick that sends effects, each as {name,
   // fields}, as JSON (src/lem/host.rs); and host.error(message) after one
   // that fails, which leaves the page as it was.
-  function View(runtime, root, recipes, host) {
+  function View(runtime, root, recipes, host, state) {
     var prog = runtime.prog;
     var view = this;
     prog.kinds.forEach(function (kind) {
@@ -344,6 +353,7 @@ var glem = (function () {
     this.doc = root.ownerDocument;
     this.recipes = recipes;
     this.host = host || {};
+    this.state = state || null;
     // The widgets, by their ids, as lem.key gives them; and by element.
     this.widgets = new Map();
     this.elements = new Map();
@@ -516,11 +526,13 @@ var glem = (function () {
     // widget's id, or "".
     var under = new Map();
     var path = [];
+    var stateOf = this.state === null ? null : this.state(this.runtime.lem);
     var i, w;
     for (i = 0; i < nodes.length; i++) {
       var node = nodes[i];
       var name = lem.key(node.tuple[0]);
       var values = node.tuple.slice(1, prog.widget.get(node.rel) ? node.tuple.length - 2 : node.tuple.length);
+      var state = stateOf === null ? null : stateOf(node.tuple[0]);
       w = this.widgets.get(name);
       if (w !== undefined && w.rel !== node.rel) {
         w = undefined;
@@ -528,9 +540,10 @@ var glem = (function () {
       if (w === undefined) {
         w = new Widget(prog, node.rel, node.tuple[0]);
         w.set(values);
+        w.state = state;
         made.push(w);
-      } else if (lem.compare(w.values, values) !== 0) {
-        changed.push({ widget: w, values: values });
+      } else if (lem.compare(w.values, values) !== 0 || JSON.stringify(w.state) !== JSON.stringify(state)) {
+        changed.push({ widget: w, values: values, state: state });
       }
       next.set(name, w);
       path[node.depth] = name;
@@ -553,6 +566,7 @@ var glem = (function () {
     // Nothing in the page has changed yet; now it does.
     changed.forEach(function (c) {
       c.widget.set(c.values);
+      c.widget.state = c.state;
       update(c.widget);
     });
     made.forEach(update);

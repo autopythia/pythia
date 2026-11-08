@@ -1,0 +1,64 @@
+/* web/glui.css: what the looks of glui's widgets share. glui's recipes
+   (src/glui/glui.js) make each widget a native element, with classes: g-
+   and its kind's name, and its flags, such as g-aligned, g-disabled and
+   its tone's; and glui.js sets the theme on an element above them, as
+   variables: --glui- and a value's name. This lays the widgets out, with
+   the theme's sizes. A look's stylesheet, native.css or log.css, comes
+   after it, and draws them under its class, g-native or g-log, on an
+   element above. */
+
+/* A window is the page, and a HUD floats above it, at its place. */
+.g-window{display:flex;flex-direction:column;gap:var(--glui-gap-down)}
+.g-hud{position:fixed;z-index:10;display:flex;flex-direction:column;gap:var(--glui-gap-down);
+max-width:calc(100vw - 2 * var(--glui-margin))}
+.g-top-left{top:var(--glui-margin);left:var(--glui-margin)}
+.g-top-right{top:var(--glui-margin);right:var(--glui-margin)}
+.g-bottom-left{bottom:var(--glui-margin);left:var(--glui-margin)}
+.g-bottom-right{bottom:var(--glui-margin);right:var(--glui-margin)}
+.g-center{top:50%;left:50%;transform:translate(-50%,-50%)}
+
+/* Containers: a panel, its title, then its body; rows, columns and boxes,
+   with the theme's gaps between their widgets, and none in an aligned
+   one, whose widgets share their edges. A table's row shows each of its
+   widgets as a cell. */
+.g-panel{display:flex;flex-direction:column}
+.g-panel-body,.g-column,.g-box{display:flex;flex-direction:column;gap:var(--glui-gap-down)}
+.g-row{display:flex;align-items:center;gap:var(--glui-gap-across)}
+.g-aligned{gap:0}
+.g-table{border-collapse:collapse}
+.g-tablerow>*{display:table-cell;vertical-align:top}
+
+/* Text: headings by level; code as written, in lines that wrap, and a
+   diff's lines by what they are; and tones: --g-tone is the color of a
+   label's or an entry's, from the theme (TonePaint), which a label takes,
+   and an entry as its look says. */
+.g-heading{margin:0;font-weight:600}
+.g-level-1{font-size:1.25em}
+.g-level-2{font-size:1.1em}
+.g-code{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;
+font:var(--glui-code-size)/var(--glui-code-line) ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.g-diff-add{color:var(--glui-diff-add)}
+.g-diff-del{color:var(--glui-diff-del)}
+.g-diff-hunk{color:var(--glui-diff-hunk)}
+.g-diff-file{font-weight:600}
+.g-label,.g-entry{--g-tone:var(--glui-normal-text)}
+.g-tone-dim{--g-tone:var(--glui-dim-text)}
+.g-tone-strong{--g-tone:var(--glui-strong-text);font-weight:600}
+.g-tone-user{--g-tone:var(--glui-user-text)}
+.g-tone-assistant{--g-tone:var(--glui-assistant-text)}
+.g-tone-tool{--g-tone:var(--glui-tool-text)}
+.g-tone-error{--g-tone:var(--glui-error-text)}
+.g-label{color:var(--g-tone)}
+
+/* A log's entry: its mark, label and text on a line, then its body, with
+   its children, if it has any. */
+.g-entry-mark:not(:empty),.g-entry-label:not(:empty){margin-right:.5em}
+.g-entry-body{display:flex;flex-direction:column;gap:var(--glui-gap-down)}
+.g-entry-body:empty{display:none}
+.g-entry summary{cursor:pointer}
+
+/* What's disabled is at half alpha, once, however deep; a link that's
+   refused or disabled goes nowhere. */
+.g-disabled{opacity:.5}
+.g-disabled .g-disabled{opacity:1}
+.g-refused,.g-link[aria-disabled]{cursor:not-allowed}

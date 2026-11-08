@@ -1,0 +1,75 @@
+/* web/native.css: glui's native look, the visual language that pythia's
+   doc/pythia-ui-gui-design.md adopts ("Visual language"), under g-native:
+   the system's font at the theme's sizes; panels on the theme's
+   backgrounds; controls of one shape, a rounded rectangle with a flat
+   fill, an outline, and an emboss below it; under the pointer, a fill
+   that blends toward the text, which works in light themes too; while
+   pressed, the selection's color; aligned groups that share their edges;
+   and an accent ring around the keyboard's focus. */
+.g-native{font:var(--glui-text-size)/var(--glui-line-height) system-ui,-apple-system,"Segoe UI",sans-serif;
+color:var(--glui-text-normal);background:var(--glui-region)}
+.g-native ::selection{background:var(--glui-selection)}
+.g-native :focus-visible{outline:2px solid var(--glui-accent);outline-offset:1px}
+.g-native .g-window{padding:var(--glui-margin)}
+
+/* Panels; in a HUD, a popup's, with its shadow. */
+.g-native .g-panel{background:var(--glui-panel-back);border:var(--glui-outline) solid var(--glui-panel-line);
+border-radius:var(--glui-radius)}
+.g-native .g-panel-title{display:flex;align-items:center;min-height:var(--glui-panel-header);
+padding:0 var(--glui-panel-padding);font-weight:600;color:var(--glui-text-strong)}
+.g-native .g-panel-body{padding:0 var(--glui-panel-padding) var(--glui-panel-padding)}
+.g-native .g-hud .g-panel{min-width:calc(12 * var(--glui-unit));background:var(--glui-popup-back);
+border-color:var(--glui-popup-line);
+box-shadow:0 calc(var(--glui-shadow) / 4) var(--glui-shadow) var(--glui-shadow-color)}
+
+/* Controls, of one shape; a list's rows are flat until the pointer is on
+   one. */
+.g-native .g-button,.g-native .g-listrow,.g-native .g-field{box-sizing:border-box;margin:0;
+min-height:var(--glui-unit);font:inherit;color:var(--glui-text-normal);
+border:var(--glui-outline) solid var(--glui-control-line);border-radius:var(--glui-radius);
+box-shadow:0 1px 0 var(--glui-emboss)}
+.g-native .g-button,.g-native .g-listrow{padding:0 var(--glui-margin);background:var(--glui-control-back)}
+.g-native .g-listrow{text-align:left;background:transparent;border-color:transparent;box-shadow:none}
+.g-native .g-field{padding:0 var(--glui-padding);background:var(--glui-field-back);
+caret-color:var(--glui-caret)}
+.g-native .g-button:enabled:hover,.g-native .g-listrow:enabled:hover{
+background-color:color-mix(in srgb,var(--glui-control-back) 80%,var(--glui-text-normal))}
+.g-native .g-button:enabled:active,.g-native .g-listrow:enabled:active{
+background-image:linear-gradient(var(--glui-selection),var(--glui-selection))}
+.g-native .g-toggle{display:inline-flex;align-items:center;gap:calc(var(--glui-unit) / 4);
+min-height:var(--glui-unit)}
+.g-native .g-toggle>input{margin:0;accent-color:var(--glui-accent)}
+.g-native .g-progress{-webkit-appearance:none;appearance:none;box-sizing:border-box;width:100%;
+height:calc(var(--glui-unit) / 3);border:var(--glui-outline) solid var(--glui-control-line);
+border-radius:var(--glui-radius);background:var(--glui-field-back);overflow:hidden}
+.g-native .g-progress::-webkit-progress-bar{background:var(--glui-field-back)}
+.g-native .g-progress::-webkit-progress-value{background:var(--glui-accent)}
+.g-native .g-progress::-moz-progress-bar{background:var(--glui-accent)}
+
+/* Aligned groups: their widgets share edges, with square corners where
+   they meet; in a row they share its width, and in a column only the last
+   has the emboss. */
+.g-native .g-row.g-aligned>*{flex:1 1 0}
+.g-native .g-row.g-aligned>:not(:first-child){margin-left:calc(-1 * var(--glui-outline));
+border-top-left-radius:0;border-bottom-left-radius:0}
+.g-native .g-row.g-aligned>:not(:last-child){border-top-right-radius:0;border-bottom-right-radius:0}
+.g-native .g-column.g-aligned>:not(:first-child){margin-top:calc(-1 * var(--glui-outline));
+border-top-left-radius:0;border-top-right-radius:0}
+.g-native .g-column.g-aligned>:not(:last-child){border-bottom-left-radius:0;border-bottom-right-radius:0;
+box-shadow:none}
+
+/* Links, tables, a log's entries, with their labels in their tones, and
+   code. */
+.g-native .g-link{color:var(--glui-text-link);text-decoration:none}
+.g-native .g-link[href]:hover{text-decoration:underline}
+.g-native .g-refused{color:var(--glui-text-dim)}
+.g-native .g-table{font-size:var(--glui-label-size)}
+.g-native .g-tablerow>*{padding:calc(var(--glui-padding) / 2) var(--glui-gap-across);
+border-bottom:var(--glui-outline) solid var(--glui-rule-line)}
+.g-native .g-header>*{font-weight:600;color:var(--glui-text-strong)}
+.g-native .g-entry-mark{font-size:var(--glui-mark-size);color:var(--glui-text-dim);
+font-variant-numeric:tabular-nums}
+.g-native .g-entry-label{font-weight:600;color:var(--g-tone)}
+.g-native .g-entry-body{margin:var(--glui-gap-down) 0 0 var(--glui-margin)}
+.g-native .g-code{padding:var(--glui-padding);background:var(--glui-code-back);
+border-radius:var(--glui-radius)}

@@ -1,0 +1,115 @@
+# The approval HUD (approval.lem, with host.lem) through glui's recipes
+# (src/glui/glui.js) in a stand-in DOM, for the tests in JavaScript alone
+# (tools/glui_test.js). Each case runs on what the cases before it left,
+# from no facts: `=== title`; lines of JSON: the host's steps
+# (src/lem/host.rs), which the view runs as one tick, and what a user does
+# to a widget, named by its id as lem writes it:
+#
+# - `["click", widget]`: a click on its element;
+# - `["check", widget]`: its checkbox, checked or unchecked;
+# - `["type", widget, text]`: text typed into its field;
+# - `["compose", widget, text]`, `["composed", widget]`: text from an input
+#   method while it composes, and the composition's end;
+# - `["open", widget]`, `["close", widget]`: its entry, opened or closed;
+# - `["focus", widget]`, `["blur"]`: the keyboard's focus on its control,
+#   if it has one, else its element; or away;
+# - `["key", name]`, `["key", name, modifiers]`: a key, as the DOM names
+#   it, pressed where the focus is, or on the view's root;
+#
+# then `---`; then the page's title, if it has one; the page, an element a
+# line: its tag and classes, its other attributes, an input's state
+# (`:checked`, `:value`) and its text, with what it holds under it; the
+# Focused fact, if any; and what the host heard: each effect, by its name
+# and its fields as JSON, and each error.
+
+=== a call counts down, before input is allowed
+["+", "Pending", {"call": "toolu_1", "tool": "ui", "summary": "screenshot()", "since": 1000}]
+["+", "Countdown", {"call": "toolu_1", "ends": 5000, "total": 4000}]
+["+", "Now", {"t": 3000}]
+---
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "ui"
+    div.g-panel-body
+      span.g-label "screenshot()"
+      progress.g-progress max="1" value="0.5"
+      div.g-row.g-aligned
+        button.g-button.g-disabled type="button" title="Input isn't allowed yet" disabled "Run now"
+        button.g-button type="button" "Withdraw"
+
+=== a click on Run now does nothing while it's disabled
+["click", "Run(\"toolu_1\")"]
+---
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "ui"
+    div.g-panel-body
+      span.g-label "screenshot()"
+      progress.g-progress max="1" value="0.5"
+      div.g-row.g-aligned
+        button.g-button.g-disabled type="button" title="Input isn't allowed yet" disabled "Run now"
+        button.g-button type="button" "Withdraw"
+
+=== input is allowed: Run now is enabled
+["+", "Allowed", {"what": "Input"}]
+---
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "ui"
+    div.g-panel-body
+      span.g-label "screenshot()"
+      progress.g-progress max="1" value="0.5"
+      div.g-row.g-aligned
+        button.g-button type="button" "Run now"
+        button.g-button type="button" "Withdraw"
+
+=== time passes: the bar shrinks, in its element
+["-", "Now", {"t": 3000}]
+["+", "Now", {"t": 4000}]
+---
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "ui"
+    div.g-panel-body
+      span.g-label "screenshot()"
+      progress.g-progress max="1" value="0.25"
+      div.g-row.g-aligned
+        button.g-button type="button" "Run now"
+        button.g-button type="button" "Withdraw"
+
+=== Escape in the panel withdraws the call
+["focus", "Drop(\"toolu_1\")"]
+["key", "Escape"]
+---
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "ui"
+    div.g-panel-body
+      span.g-label "screenshot()"
+      progress.g-progress max="1" value="0.25"
+      div.g-row.g-aligned
+        button.g-button type="button" "Run now"
+        button.g-button type="button" "Withdraw"
+Focused(Drop("toolu_1"))
+effect Send {"msg":["Deny","toolu_1"]}
+
+=== a click on Run now approves it
+["click", "Run(\"toolu_1\")"]
+---
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "ui"
+    div.g-panel-body
+      span.g-label "screenshot()"
+      progress.g-progress max="1" value="0.25"
+      div.g-row.g-aligned
+        button.g-button type="button" "Run now"
+        button.g-button type="button" "Withdraw"
+Focused(Drop("toolu_1"))
+effect Send {"msg":["Approve","toolu_1"]}
+
+=== the host takes the call away: the HUD goes, and the focus with it
+["-", "Countdown", {"call": "toolu_1", "ends": 5000, "total": 4000}]
+["-", "Pending", {"call": "toolu_1", "tool": "ui", "summary": "screenshot()", "since": 1000}]
+---
+(no widgets)

@@ -1,0 +1,252 @@
+# A page of glui's kinds for documents (page.lem) through glui's recipes,
+# in a stand-in DOM, for the tests in JavaScript alone
+# (tools/glui_test.js): the steps and what they show, as approval_dom.txt
+# says.
+
+=== two contexts, and a log's lines, one of which opens
+["+", "Context", {"id": "ui-0", "name": "ui-0", "size": "13.7 MB", "href": "/c/ui-0"}]
+["+", "Context", {"id": "dev-1", "name": "dev-1", "size": "48.2 MB", "href": "/c/dev-1"}]
+["+", "Line", {"n": 1, "label": "[user]", "text": "Let's start stage 8.", "tone": "User", "fold": false}]
+["+", "Line", {"n": 2, "label": "[tool-call] exec_command", "text": "git diff", "tone": "Tool", "fold": true}]
+["+", "Text_", {"n": 2, "text": "diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n same", "diff": true}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-dim "48.2 MB"
+      tr.g-tablerow
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-user
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-fold.g-tone-tool
+        details
+          summary.g-entry-head
+            span.g-entry-mark "2"
+            span.g-entry-label "[tool-call] exec_command"
+            span.g-entry-text "git diff"
+          div.g-entry-body
+
+=== opening the entry shows its code, as a diff
+["open", "Ent(2)"]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-dim "48.2 MB"
+      tr.g-tablerow
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-user
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-fold.g-tone-tool
+        details open
+          summary.g-entry-head
+            span.g-entry-mark "2"
+            span.g-entry-label "[tool-call] exec_command"
+            span.g-entry-text "git diff"
+          div.g-entry-body
+            pre.g-code.g-diff
+              span.g-diff-file "diff --git a/x b/x\n"
+              span.g-diff-hunk "@@ -1 +1 @@\n"
+              span.g-diff-del "-old\n"
+              span.g-diff-add "+new\n"
+              " same"
+
+=== a line's tone changes, in its element
+["+", "Line", {"n": 1, "label": "[user]", "text": "Let's start stage 8.", "tone": "Dim", "fold": false}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-dim "48.2 MB"
+      tr.g-tablerow
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-dim
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-fold.g-tone-tool
+        details open
+          summary.g-entry-head
+            span.g-entry-mark "2"
+            span.g-entry-label "[tool-call] exec_command"
+            span.g-entry-text "git diff"
+          div.g-entry-body
+            pre.g-code.g-diff
+              span.g-diff-file "diff --git a/x b/x\n"
+              span.g-diff-hunk "@@ -1 +1 @@\n"
+              span.g-diff-del "-old\n"
+              span.g-diff-add "+new\n"
+              " same"
+
+=== closing the entry hides its code
+["close", "Ent(2)"]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-dim "48.2 MB"
+      tr.g-tablerow
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-dim
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-fold.g-tone-tool
+        details
+          summary.g-entry-head
+            span.g-entry-mark "2"
+            span.g-entry-label "[tool-call] exec_command"
+            span.g-entry-text "git diff"
+          div.g-entry-body
+
+=== an entry that stops folding keeps its element
+["+", "Line", {"n": 2, "label": "[tool-call] exec_command", "text": "git diff", "tone": "Tool", "fold": false}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-dim "48.2 MB"
+      tr.g-tablerow
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-dim
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-tone-tool
+        div.g-entry-head
+          span.g-entry-mark "2"
+          span.g-entry-label "[tool-call] exec_command"
+          span.g-entry-text "git diff"
+        div.g-entry-body
+
+=== a link to elsewhere is refused
+["+", "Context", {"id": "ui-0", "name": "ui-0", "size": "13.7 MB", "href": "https://example.com/c/ui-0"}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-dim "48.2 MB"
+      tr.g-tablerow
+        a.g-link.g-refused "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-dim
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-tone-tool
+        div.g-entry-head
+          span.g-entry-mark "2"
+          span.g-entry-label "[tool-call] exec_command"
+          span.g-entry-text "git diff"
+        div.g-entry-body
+
+=== a context goes, and its row with it
+["-", "Context", {"id": "dev-1", "name": "dev-1", "size": "48.2 MB", "href": "/c/dev-1"}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label.g-tone-dim "Size"
+      tr.g-tablerow
+        a.g-link.g-refused "ui-0"
+        span.g-label.g-tone-dim "13.7 MB"
+  section.g-panel
+    div.g-panel-title "Log"
+    div.g-panel-body
+      div.g-entry.g-tone-dim
+        div.g-entry-head
+          span.g-entry-mark "1"
+          span.g-entry-label "[user]"
+          span.g-entry-text "Let's start stage 8."
+        div.g-entry-body
+      div.g-entry.g-tone-tool
+        div.g-entry-head
+          span.g-entry-mark "2"
+          span.g-entry-label "[tool-call] exec_command"
+          span.g-entry-text "git diff"
+        div.g-entry-body

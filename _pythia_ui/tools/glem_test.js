@@ -76,8 +76,8 @@
       node.childNodes.forEach(function (child) {
         var line = new Array(depth + 1).join("  ") + child.tagName + "(" + child.getAttribute("key");
         child.attributes.forEach(function (attribute) {
-          if (attribute[0] !== "key") {
-            line += ", " + attribute[0] + "=" + attribute[1];
+          if (attribute.name !== "key") {
+            line += ", " + attribute.name + "=" + attribute.value;
           }
         });
         lines.push(line + ")");

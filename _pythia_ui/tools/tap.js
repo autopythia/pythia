@@ -1,12 +1,15 @@
 // tools/tap.js: reports of the tests in JavaScript, in TAP, as the Rust
 // tests write them: `ok 1 - "title"`, or `not ok 2 - "title"` and why, a
-// line of `# ` each, then `1..N`.
+// line of `# ` each, then `1..N`. Each runner reports its cases and
+// finishes; the next starts afresh, as in a page that runs several
+// (web/test.html).
 var tap = (function () {
   "use strict";
 
   var lines = [];
   var count = 0;
   var failed = 0;
+  var api = { report: report, error: error, finish: finish, output: null };
 
   // A case's result: `why` it failed, or null.
   function report(title, why) {
@@ -29,22 +32,30 @@ var tap = (function () {
     return e instanceof lem.Error ? "error: " + e.message : "an exception: " + e;
   }
 
-  // Prints the report: with print, in a shell such as qjs's; else with
-  // console.log, which osascript writes to stderr (in a browser, print
-  // would print the page). Then an error, which fails the script, if a case
-  // failed or none ran.
+  // Gives the report: to tap.output(text, cases, failed), if a page sets
+  // it; else with print, in a shell such as qjs's; else with console.log,
+  // which osascript writes to stderr (in a browser, print would print the
+  // page). Then an error, which fails the script, if a case failed or none
+  // ran.
   function finish() {
     lines.push("1.." + count);
     var text = lines.join("\n");
-    if (typeof print === "function" && typeof window === "undefined") {
+    var cases = count;
+    var failures = failed;
+    lines = [];
+    count = 0;
+    failed = 0;
+    if (typeof api.output === "function") {
+      api.output(text, cases, failures);
+    } else if (typeof print === "function" && typeof window === "undefined") {
       print(text);
     } else if (typeof console !== "undefined") {
       console.log(text);
     }
-    if (count === 0 || failed > 0) {
-      throw new Error(count === 0 ? "no cases ran" : failed + " of " + count + " cases failed");
+    if (cases === 0 || failures > 0) {
+      throw new Error(cases === 0 ? "no cases ran" : failures + " of " + cases + " cases failed");
     }
   }
 
-  return { report: report, error: error, finish: finish };
+  return api;
 })();

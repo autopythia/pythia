@@ -1,0 +1,27 @@
+/* web/pages.css: the demo's and the tests' pages' own parts (demo.html,
+   test.html): the demo's bar, with its menus and the host's buttons, its
+   view, and what the host heard; and the tests' reports. The demo's take
+   the theme's colors, which it sets on the page; the tests', the
+   browser's. */
+.demo-bar{display:flex;flex-wrap:wrap;align-items:center;gap:.5em 1em;margin:0 0 .5em;
+padding:.5em var(--glui-margin);font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;
+color:var(--glui-text-dim);background:var(--glui-bar);border-bottom:1px solid var(--glui-rule-line)}
+.demo-bar strong{color:var(--glui-text-strong)}
+.demo-bar select,.demo-bar button{font:inherit}
+.demo-actions{display:flex;flex-wrap:wrap;gap:.4em}
+/* A HUD at the top floats below the bar. */
+.demo-view .g-top-left,.demo-view .g-top-right{top:calc(var(--glui-margin) + 3rem)}
+.demo-heard{margin:1.5em var(--glui-margin);color:var(--glui-text-dim);
+font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.demo-heard h2{margin:0 0 .3em;font:600 13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+.demo-heard ol{margin:0;padding-left:2.5em}
+.demo-error{color:var(--glui-error-text)}
+
+.test-page{color-scheme:light dark;max-width:130ch;margin:1em auto;padding:0 1em;
+font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+.test-page h1{font-size:1.25em}
+.test-page h2{font-size:1em;margin:1em 0 .3em}
+.test-page pre{margin:0;padding:.4em .6em;white-space:pre-wrap;overflow-wrap:anywhere;border-radius:4px;
+background:color-mix(in srgb,CanvasText 6%,Canvas);font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
+.test-pass{color:#1a7f37}
+.test-fail{color:#cf222e}

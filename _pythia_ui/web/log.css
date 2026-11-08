@@ -1,0 +1,57 @@
+/* web/log.css: glui's log look, after wui's Log style (css/log-dark.css in
+   pythia's wui/, whose colors and sizes the dark and light themes give),
+   under g-log: a page of text at the theme's width; tables with rules
+   between their rows; a log's entries, each with a rule beside it in its
+   tone's color, and its mark and label in a monospace font; code in
+   boxes; and plain controls. */
+.g-log{font:var(--glui-text-size)/var(--glui-line-height) system-ui,-apple-system,"Segoe UI",sans-serif;
+color:var(--glui-text-normal);background:var(--glui-stage)}
+.g-log ::selection{background:var(--glui-selection)}
+.g-log :focus-visible{outline:2px solid var(--glui-accent);outline-offset:1px}
+.g-log .g-window{box-sizing:border-box;max-width:var(--glui-page-width);margin:1em auto;padding:0 1em;gap:0}
+.g-log .g-heading{margin:.3em 0 .4em}
+
+/* Links and tables, as wui's index of contexts has them. */
+.g-log .g-link{color:var(--glui-text-link);text-decoration:none}
+.g-log .g-link[href]:hover{text-decoration:underline}
+.g-log .g-refused{color:var(--glui-text-dim)}
+.g-log .g-table{width:100%;font-size:var(--glui-label-size)}
+.g-log .g-tablerow>*{padding:3px var(--glui-gap-across);text-align:left;
+border-bottom:var(--glui-outline) solid var(--glui-rule-line)}
+.g-log .g-header>*{font-weight:600}
+
+/* Panels, as a page's sections; in a HUD, as wui's menu. */
+.g-log .g-panel{margin:.6em 0}
+.g-log .g-panel-title{padding-bottom:.2em;font-weight:600;
+border-bottom:var(--glui-outline) solid var(--glui-rule-line)}
+.g-log .g-panel-body{padding-top:var(--glui-gap-down)}
+.g-log .g-hud .g-panel{margin:0;padding:var(--glui-panel-padding);min-width:calc(12 * var(--glui-unit));
+background:var(--glui-popup-back);border:var(--glui-outline) solid var(--glui-popup-line);
+border-radius:calc(2 * var(--glui-radius));box-shadow:0 6px var(--glui-shadow) var(--glui-shadow-color)}
+
+/* A log's entries: a rule in the tone's color, or the rule's own for a
+   normal one; none for a dim one, which is dim; and an error's label in
+   its color. */
+.g-log .g-entry{margin:var(--glui-gap-down) 0;padding:.1em var(--glui-margin);
+border-left:var(--glui-rule-width) solid var(--glui-rule-line)}
+.g-log .g-entry.g-tone-user,.g-log .g-entry.g-tone-assistant,.g-log .g-entry.g-tone-tool,
+.g-log .g-entry.g-tone-error{border-left-color:var(--g-tone)}
+.g-log .g-entry.g-tone-dim{border-left-color:transparent;color:var(--g-tone)}
+.g-log .g-entry-mark,.g-log .g-entry-label{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.g-log .g-entry-mark{font-size:var(--glui-mark-size);color:var(--glui-text-dim)}
+.g-log .g-entry-label{font-size:var(--glui-label-size);font-weight:600}
+.g-log .g-entry.g-tone-error>.g-entry-head>.g-entry-label,
+.g-log .g-entry.g-tone-error>details>.g-entry-head>.g-entry-label{color:var(--g-tone)}
+.g-log .g-code{margin:.2em 0;padding:var(--glui-padding) .6em;background:var(--glui-code-back);
+border-radius:var(--glui-radius)}
+
+/* Controls: plain, with the rule's color for their outline. */
+.g-log .g-button,.g-log .g-listrow,.g-log .g-field{box-sizing:border-box;margin:0;min-height:var(--glui-unit);
+padding:0 var(--glui-margin);font:inherit;color:inherit;background:var(--glui-control-back);
+border:var(--glui-outline) solid var(--glui-control-line);border-radius:var(--glui-radius)}
+.g-log .g-listrow{text-align:left}
+.g-log .g-field{background:var(--glui-field-back);caret-color:var(--glui-caret)}
+.g-log .g-button:enabled:hover,.g-log .g-listrow:enabled:hover{border-color:var(--glui-text-dim)}
+.g-log .g-toggle{display:inline-flex;align-items:center;gap:.4em}
+.g-log .g-toggle>input,.g-log .g-progress{accent-color:var(--glui-accent)}
+.g-log .g-progress{width:100%}
