@@ -1,0 +1,39 @@
+# Ticks of numbers.lem as JSON steps (src/lem/host.rs): numbers from the
+# host, which every runtime reads alike, as jobs_json.txt's are.
+
+=== a Num, given as a whole number
+["+", "X", {"x": 2}]
+["?", "Squared"]
+---
+Squared(4.0)
+
+=== an Int, written with a point, that's whole
+["-", "X", {"x": 2}]
+["+", "N", {"n": 3.0}]
+["?", "Twice"]
+---
+Twice(6)
+
+=== an Int that isn't whole
+["+", "N", {"n": 2.5}]
+---
+error: N's `n` is an Int, a whole number within ±(2^53 − 1)
+
+=== an Int beyond 53 bits
+["+", "N", {"n": 9007199254740992}]
+---
+error: N's `n` is an Int, a whole number within ±(2^53 − 1)
+
+=== a Num that isn't finite
+["+", "X", {"x": 1e400}]
+---
+error: X's `x` is a Num, a finite number
+
+=== zero below zero is zero
+["-", "N", {"n": 3}]
+["+", "X", {"x": -0.0}]
+["?", "X"]
+["?", "Negated"]
+---
+X(0.0)
+Negated(0.0)

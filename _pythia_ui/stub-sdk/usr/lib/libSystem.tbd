@@ -71,6 +71,7 @@ exports:
                        _memcpy,
                        _memmove,
                        _memset,
+                       _mkdir,
                        _mmap,
                        _mprotect,
                        _munmap,

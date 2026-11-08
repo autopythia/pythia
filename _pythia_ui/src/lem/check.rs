@@ -77,6 +77,17 @@ pub struct At {
   pub span: Span,
 }
 
+impl At {
+  /// Nowhere: where a program read from its compiled form has its parts,
+  /// since it has no source ([`super::compile::read`]).
+  pub fn nowhere() -> At {
+    At {
+      file: 0,
+      span: 0..0,
+    }
+  }
+}
+
 /// An error, as lem shows it ([`super::render`]), and the checker's own line
 /// that raised it.
 #[derive(Clone, Debug)]
@@ -138,11 +149,15 @@ pub enum Expr {
   Const(Value),
   Ctor(Rc<str>, Vec<Expr>),
   Neg(Box<Expr>),
-  Arith(Op, Box<Expr>, Box<Expr>),
+  /// Arithmetic, and its result's type: Int or Time, which compute as
+  /// whole numbers; Num; or Text, which `+` joins. Rust's values say which
+  /// already; the compiled form needs it ([`super::compile`]).
+  Arith(Op, Ty, Box<Expr>, Box<Expr>),
   /// An Int, widened to Num.
   ToNum(Box<Expr>),
-  /// `text(x)`: the value as text ([`Value::text`]).
-  Text(Box<Expr>),
+  /// `text(x)`: the value as text ([`Value::text`]), and the type of `x`,
+  /// which says how to write it where values don't carry their types.
+  Text(Ty, Box<Expr>),
 }
 
 /// What a column, or a constructor's field, matches.
@@ -198,7 +213,11 @@ pub enum Lit {
 /// A rule, lowered: its head's relation, a value per column, and its body.
 #[derive(Debug)]
 pub struct Rule {
+  /// Where it's written; nowhere ([`At::nowhere`]) in a program read from
+  /// its compiled form ([`super::compile::read`]), which has no source.
   pub at: At,
+  /// Where it's written, as `file:line:col`, for errors.
+  pub place: Rc<str>,
   pub head: usize,
   pub args: Vec<Expr>,
   pub body: Vec<Lit>,
@@ -229,7 +248,10 @@ pub enum Change {
 /// solution of the body, a change.
 #[derive(Debug)]
 pub struct Action {
+  /// Where it's written, as a rule's is ([`Rule::at`]).
   pub at: At,
+  /// Where it's written, as `file:line:col`, for errors.
+  pub place: Rc<str>,
   pub msg: Pat,
   pub body: Vec<Lit>,
   pub rel: usize,
@@ -263,6 +285,54 @@ pub struct Program {
 }
 
 impl Program {
+  /// A program from its declarations, as its compiled form gives them
+  /// ([`super::compile::read`]), without rules or `on` blocks yet: its
+  /// files by name, with no text; relations and constructors, which share
+  /// one namespace; and types, as [`Program::types`] gives them.
+  pub(super) fn assemble(
+    files: Vec<Rc<str>>,
+    rels: Vec<Rel>,
+    ctors: Vec<Ctor>,
+    types: Vec<(Rc<str>, Option<Ty>)>,
+  ) -> Result<Program, String> {
+    let mut names = HashMap::new();
+    let rel_names = rels
+      .iter()
+      .enumerate()
+      .map(|(i, r)| (&r.name, Name::Rel(i)));
+    let ctor_names = ctors
+      .iter()
+      .enumerate()
+      .map(|(i, c)| (&c.name, Name::Ctor(i)));
+    for (name, what) in rel_names.chain(ctor_names) {
+      if names.insert(name.clone(), what).is_some() {
+        return Err(format!("{name} is declared twice"));
+      }
+    }
+    Ok(Program {
+      files: files.into_iter().map(|name| (name, "".into())).collect(),
+      rels,
+      ctors,
+      names,
+      types: types.into_iter().collect(),
+      rules: Vec::new(),
+      components: Vec::new(),
+      actions: Vec::new(),
+    })
+  }
+
+  /// The program's types, in order of name: each made with `type`, and what
+  /// it's made from; and each enum, with `Id` and `Msg`, with None.
+  pub fn types(&self) -> Vec<(Rc<str>, Option<Ty>)> {
+    let mut types: Vec<(Rc<str>, Option<Ty>)> = self
+      .types
+      .iter()
+      .map(|(name, base)| (name.clone(), base.clone()))
+      .collect();
+    types.sort_by(|a, b| a.0.cmp(&b.0));
+    types
+  }
+
   pub fn rel(&self, name: &str) -> Option<usize> {
     match self.names.get(name) {
       Some(Name::Rel(i)) => Some(*i),
@@ -315,17 +385,12 @@ impl Program {
       let _ = writeln!(out, "{}{recursive}", names.join(", "));
       for &r in &component.rules {
         let rule = &self.rules[r];
-        let _ = writeln!(
-          out,
-          "  {}: {}",
-          self.place(&rule.at),
-          self.reads(&rule.body)
-        );
+        let _ = writeln!(out, "  {}: {}", rule.place, self.reads(&rule.body));
       }
     }
     for action in &self.actions {
       if let Pat::Ctor(msg, _) = &action.msg {
-        let place = self.place(&action.at);
+        let place = &action.place;
         let _ = writeln!(out, "on {msg}, {place}: {}", self.reads(&action.body));
       }
     }
@@ -1015,7 +1080,7 @@ impl Loader<'_> {
       _ => e,
     };
     let (a, b) = (num(a, &ba), num(b, &bb));
-    Ok((Expr::Arith(op, Box::new(a), Box::new(b)), ty))
+    Ok((Expr::Arith(op, ty.clone(), Box::new(a), Box::new(b)), ty))
   }
 
   /// A call of one of lem's functions: `text(x)`, for now.
@@ -1025,8 +1090,8 @@ impl Loader<'_> {
     };
     match (&**name, &tup[1..]) {
       ("text", [arg]) if !is_named(arg) => {
-        let (e, _) = self.expr(scope, arg)?;
-        Ok((Expr::Text(Box::new(e)), Ty::Text))
+        let (e, ty) = self.expr(scope, arg)?;
+        Ok((Expr::Text(ty, Box::new(e)), Ty::Text))
       }
       ("text", _) => self.fail(term.span(), "`text` takes one value, as in `text(n)`"),
       _ => self.fail(span.clone(), no_function(name)),
@@ -1354,8 +1419,10 @@ impl Loader<'_> {
     if let Some(why) = why {
       return self.fail(head.span(), why);
     }
+    let at = self.at(span);
     self.prog.rules.push(Rule {
-      at: self.at(span),
+      place: self.prog.place(&at).into(),
+      at,
       head: rel,
       args,
       body: lits,
@@ -1473,8 +1540,10 @@ impl Loader<'_> {
         return self.fail(head.span(), message);
       }
     };
+    let at = self.at(span);
     self.prog.actions.push(Action {
-      at: self.at(span),
+      place: self.prog.place(&at).into(),
+      at,
       msg,
       body: lits,
       rel,
@@ -1634,8 +1703,8 @@ fn expr_vars(e: &Expr, out: &mut Vec<usize>) {
     Expr::Var(v) => out.push(*v),
     Expr::Const(_) => {}
     Expr::Ctor(_, args) => args.iter().for_each(|e| expr_vars(e, out)),
-    Expr::Neg(e) | Expr::ToNum(e) | Expr::Text(e) => expr_vars(e, out),
-    Expr::Arith(_, a, b) => {
+    Expr::Neg(e) | Expr::ToNum(e) | Expr::Text(_, e) => expr_vars(e, out),
+    Expr::Arith(_, _, a, b) => {
       expr_vars(a, out);
       expr_vars(b, out);
     }

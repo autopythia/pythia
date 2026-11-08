@@ -14,7 +14,7 @@ OUT := target/$(TARGET)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 HOST_LIB := target/$(HOST)/release/libpythia_ui.$(if $(findstring apple-darwin,$(HOST)),dylib,so)
 
-.PHONY: all build dev debug rel release test check bench msrv plugin-check tbd inspect clean
+.PHONY: all build dev debug rel release test check bench js-test msrv plugin-check tbd inspect clean
 
 all: build
 
@@ -46,6 +46,18 @@ endif
 bench:
 	$(CARGO) build --release --bin $(BIN) --target $(HOST)
 	$(PYTHON) tools/lem_bench.py target/$(HOST)/release/$(BIN)
+
+# lem's runtime in JavaScript, src/lem/lem.js, on the cases that Rust runs
+# on the compiled form, which lem's tests write to target/web/lem_tests.js:
+# tools/lem_test.js runs them with lem.js, as one script, in JavaScriptCore
+# through osascript on a Mac, or in another engine, as JS=qjs. It reports in
+# TAP, which osascript writes to stderr, and fails if a case does.
+JS := osascript -l JavaScript
+WEB := target/web
+js-test:
+	$(CARGO) test --target $(HOST) --lib lem::compile_test
+	cat src/lem/lem.js $(WEB)/lem_tests.js tools/lem_test.js > $(WEB)/lem_test_run.js
+	$(JS) $(WEB)/lem_test_run.js
 
 # check and test with the oldest Rust that Cargo.toml's rust-version names,
 # which must be installed:

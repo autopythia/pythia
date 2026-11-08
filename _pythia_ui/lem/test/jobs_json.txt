@@ -1,0 +1,110 @@
+# Ticks of jobs.lem as JSON steps, as a host sends them (src/lem/host.rs):
+# facts by their fields, messages, and what's wrong with them. Every
+# runtime runs these, from the start, each case on what the cases before
+# it left: `=== title`; a step a line; `---`; then what the tick shows.
+
+=== a fact by its fields, with a constructor by its name
+["+", "Job", {"id": "a", "name": "write", "due": 60000, "priority": "High"}]
+["+", "Now", {"t": 120000}]
+["?", "Job"]
+["?", "Late"]
+---
+Job("a", "write", 60000, High)
+Late("a", 1.0)
+
+=== a field with a default, left out
+["+", "Job", {"id": "b", "name": "read", "due": 180000}]
+["?", "Urgent"]
+["?", "Job"]
+---
+Urgent("a")
+Job("a", "write", 60000, High)
+Job("b", "read", 180000, Low)
+
+=== a message, as an array of its name and its fields
+["!", ["Finish", "a"]]
+["?", "Done"]
+---
+Done("a", 120000)
+effect Tell("finished write")
+
+=== a field of the wrong kind
+["+", "Job", {"id": 1, "name": "x", "due": 0}]
+---
+error: Job's `id` is a JobId, not a number
+
+=== a time that isn't whole
+["+", "Job", {"id": "c", "name": "x", "due": 1.5}]
+---
+error: Job's `due` is a Time, a whole number within ±(2^53 − 1)
+
+=== a field that the relation doesn't have
+["+", "Job", {"id": "c", "nam": "x", "due": 0}]
+---
+error: Job has no field `nam`
+
+=== a field left out, without a default
+["+", "Job", {"id": "c", "due": 0}]
+---
+error: Job needs `name`
+
+=== a constructor that isn't there
+["+", "Job", {"id": "c", "name": "x", "due": 0, "priority": "Medium"}]
+---
+error: there's no constructor `Medium`
+
+=== a constructor of another type
+["!", "High"]
+---
+error: a message is a Msg, but High makes a Priority
+
+=== a constructor with too many fields
+["!", ["Finish", "a", "b"]]
+---
+error: Finish takes 1 value, not 2
+
+=== a constructor without a field that it needs
+["!", "Finish"]
+---
+error: Finish needs `job`
+
+=== a relation that the host doesn't change
+["+", "Done", {"job": "c", "at": 0}]
+---
+error: Done isn't an `input` relation, so the host can't change it
+
+=== a fact that doesn't hold, retracted
+["-", "Job", {"id": "c", "name": "x", "due": 0}]
+---
+error: Job("c", "x", 0, Low) doesn't hold, so it can't be retracted
+
+=== a relation that isn't there
+["?", "Nope"]
+---
+error: there's no relation `Nope`
+
+=== two messages
+["!", ["Finish", "b"]]
+["!", ["Finish", "b"]]
+---
+error: a tick has one message at most
+
+=== a step that isn't one
+["*", "Job"]
+---
+error: a step is ["+", relation, fields], ["-", relation, fields], ["!", message] or ["?", relation]
+
+=== a fact that isn't an object
+["+", "Job", ["c"]]
+---
+error: a fact of Job is an object of its fields, not an array
+
+=== texts order by code point, though the second is two units in UTF-16
+["+", "Job", {"id": "｡", "name": "a halfwidth stop, U+FF61", "due": 0}]
+["+", "Job", {"id": "😀", "name": "a face, U+1F600", "due": 0}]
+["?", "Job"]
+---
+Job("a", "write", 60000, High)
+Job("b", "read", 180000, Low)
+Job("｡", "a halfwidth stop, U+FF61", 0, Low)
+Job("😀", "a face, U+1F600", 0, Low)

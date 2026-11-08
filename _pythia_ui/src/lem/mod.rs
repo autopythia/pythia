@@ -9,7 +9,10 @@
 //! - [`print`]: the printer, whose text parses to the same tree;
 //! - [`value`]: values and types;
 //! - [`check`]: the checker, which lowers files to a [`check::Program`];
-//! - [`eval`]: the runtime, which runs a program's ticks.
+//! - [`eval`]: the runtime, which runs a program's ticks;
+//! - [`compile`]: the compiled form, a checked program as JSON, which lem's
+//!   runtime in JavaScript, `lem.js`, runs too;
+//! - [`host`]: the host's facts and messages, and ticks, as JSON.
 //!
 //! Every program loads lem's prelude ([`PRELUDE`]) first. The tests' files
 //! are in the crate's `lem/test/`.
@@ -18,9 +21,13 @@
 //! what's wrong, then the line with carets under the span.
 
 pub mod check;
+pub mod compile;
+#[cfg(test)]
+mod compile_test;
 pub mod eval;
 #[cfg(test)]
 mod eval_test;
+pub mod host;
 pub mod parse;
 #[cfg(test)]
 mod parse_test;

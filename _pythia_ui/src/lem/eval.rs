@@ -248,12 +248,24 @@ impl Runtime {
     self.tables[rel].facts_mut().retain(|tuple, _| !drop(tuple));
   }
 
-  /// The host's fact, written in lem, such as `Now(1000)`. In a relation
-  /// with a key, it replaces the fact with its key.
+  /// The host's fact, written in lem, such as `Now(1000)`
+  /// ([`Runtime::assert_tuple`]).
   pub fn assert(&mut self, text: &str) -> Result<(), String> {
-    let (rel, tuple) = self.input(text)?;
-    let r = &self.prog.rels[rel];
-    let key: Vec<usize> = r.key.clone();
+    let (rel, values) = self.prog.fact(text)?;
+    self.assert_tuple(rel, values.into())
+  }
+
+  /// Retracts the host's fact, written in lem; whether it held.
+  pub fn retract(&mut self, text: &str) -> Result<bool, String> {
+    let (rel, values) = self.prog.fact(text)?;
+    self.retract_tuple(rel, &values.into())
+  }
+
+  /// The host's fact, in an `input` relation. In a relation with a key, it
+  /// replaces the fact with its key.
+  pub fn assert_tuple(&mut self, rel: usize, tuple: Tuple) -> Result<(), String> {
+    self.input(rel)?;
+    let key: Vec<usize> = self.prog.rels[rel].key.clone();
     let facts = self.tables[rel].facts_mut();
     if !key.is_empty() {
       facts.retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
@@ -262,14 +274,14 @@ impl Runtime {
     Ok(())
   }
 
-  /// Retracts the host's fact, written in lem; whether it held.
-  pub fn retract(&mut self, text: &str) -> Result<bool, String> {
-    let (rel, tuple) = self.input(text)?;
-    Ok(self.tables[rel].facts_mut().remove(&tuple).is_some())
+  /// Retracts the host's fact; whether it held.
+  pub fn retract_tuple(&mut self, rel: usize, tuple: &Tuple) -> Result<bool, String> {
+    self.input(rel)?;
+    Ok(self.tables[rel].facts_mut().remove(tuple).is_some())
   }
 
-  fn input(&mut self, text: &str) -> Result<(usize, Tuple), String> {
-    let (rel, values) = self.prog.fact(text)?;
+  /// Whether the host may change a relation: only an `input` one.
+  fn input(&self, rel: usize) -> Result<(), String> {
     let r = &self.prog.rels[rel];
     if r.kind != DeclKind::Input {
       return Err(format!(
@@ -277,7 +289,7 @@ impl Runtime {
         r.name
       ));
     }
-    Ok((rel, values.into()))
+    Ok(())
   }
 
   /// A message, written in lem, such as `Finish("job_1")`.
@@ -285,37 +297,46 @@ impl Runtime {
     self.prog.value(text, &Ty::Named("Msg".into()))
   }
 
-  /// Reads a tick written as lines, as the tests' files and `pythia-ui lem`
-  /// give them: `+ Fact` asserts the host's fact, `- Fact` retracts it,
-  /// `! Msg` is the tick's message, and `? Name` asks for a relation's facts
-  /// after the tick. Asserts and retracts as the lines say, and gives the
-  /// message and the relations to show.
+  /// Reads a tick written as lines ([`read_step`]), as the tests' files and
+  /// `pythia-ui lem` give them, and takes each step as it's read
+  /// ([`Runtime::step`]): gives the message and the relations to show.
   pub fn read_script(&mut self, lines: &str) -> Result<Script, String> {
-    let (mut msg, mut show) = (None, Vec::new());
+    let mut script = Script::default();
     for line in lines.lines() {
-      if let Some(fact) = line.strip_prefix("+ ") {
-        self.assert(fact)?;
-      } else if let Some(fact) = line.strip_prefix("- ") {
-        if !self.retract(fact)? {
-          return Err(format!("{fact} doesn't hold, so it can't be retracted"));
-        }
-      } else if let Some(text) = line.strip_prefix("! ") {
-        if msg.is_some() {
-          return Err("a tick has one message at most".to_string());
-        }
-        msg = Some(self.msg(text)?);
-      } else if let Some(rel) = line.strip_prefix("? ") {
-        if self.prog.rel(rel.trim()).is_none() {
-          return Err(format!("there's no relation `{}`", rel.trim()));
-        }
-        show.push(rel.trim().to_string());
-      } else if !line.trim().is_empty() {
-        return Err(format!(
-          "a tick's lines start with `+ `, `- `, `! ` or `? `, not {line:?}"
-        ));
+      if let Some(step) = read_step(&mut self.prog, line)? {
+        self.step(step, &mut script)?;
       }
     }
-    Ok(Script { msg, show })
+    Ok(script)
+  }
+
+  /// Takes a step of a tick: asserts or retracts the host's fact at once,
+  /// or notes the tick's message, or a relation to show after it. Steps
+  /// come from lines ([`read_step`]) or from JSON ([`super::host`]), and
+  /// every runtime takes them alike.
+  pub fn step(&mut self, step: Step, script: &mut Script) -> Result<(), String> {
+    match step {
+      Step::Assert(rel, tuple) => self.assert_tuple(rel, tuple),
+      Step::Retract(rel, tuple) => match self.retract_tuple(rel, &tuple)? {
+        true => Ok(()),
+        false => Err(format!(
+          "{} doesn't hold, so it can't be retracted",
+          self.fact_text(rel, &tuple)
+        )),
+      },
+      Step::Msg(_) if script.msg.is_some() => Err("a tick has one message at most".to_string()),
+      Step::Msg(msg) => {
+        script.msg = Some(msg);
+        Ok(())
+      }
+      Step::Show(rel) if self.prog.rel(&rel).is_none() => {
+        Err(format!("there's no relation `{rel}`"))
+      }
+      Step::Show(rel) => {
+        script.show.push(rel);
+        Ok(())
+      }
+    }
   }
 
   /// The facts of the relations that a script asked for, then the effects,
@@ -334,11 +355,17 @@ impl Runtime {
   }
 
   /// Runs a tick written as lines ([`Runtime::read_script`]), and gives
-  /// what [`Runtime::show`] gives, or `(nothing to show)`.
+  /// what [`Runtime::show`] gives ([`Runtime::run`]).
   pub fn script(&mut self, lines: &str) -> Result<String, String> {
     let script = self.read_script(lines)?;
+    self.run(&script)
+  }
+
+  /// Runs the tick that a script describes, and gives what
+  /// [`Runtime::show`] gives, or `(nothing to show)`.
+  pub fn run(&mut self, script: &Script) -> Result<String, String> {
     let effects = self.tick(script.msg.as_ref())?;
-    let out = self.show(&script, &effects);
+    let out = self.show(script, &effects);
     Ok(match out.trim_end() {
       "" => "(nothing to show)".to_string(),
       out => out.to_string(),
@@ -441,7 +468,7 @@ impl Runtime {
       }
     }
     for c in 0..self.prog.components.len() {
-      self.run(c)?;
+      self.component(c)?;
     }
     Ok(())
   }
@@ -449,7 +476,7 @@ impl Runtime {
   /// Runs a component's rules: once on every fact; then, if it's recursive,
   /// again for each of their atoms on its relations, joining just what the
   /// last round added there, until a round adds nothing.
-  fn run(&mut self, c: usize) -> Result<(), String> {
+  fn component(&mut self, c: usize) -> Result<(), String> {
     let prog = &self.prog;
     let component = &prog.components[c];
     let mut new = Vec::new();
@@ -491,14 +518,8 @@ impl Runtime {
   pub fn why(&self, why: Why) -> String {
     match why {
       Why::Host => "from the host".to_string(),
-      Why::Action(a) => format!(
-        "from the `on` block at {}",
-        self.prog.place(&self.prog.actions[a].at)
-      ),
-      Why::Rule(r) => format!(
-        "from the rule at {}",
-        self.prog.place(&self.prog.rules[r].at)
-      ),
+      Why::Action(a) => format!("from the `on` block at {}", self.prog.actions[a].place),
+      Why::Rule(r) => format!("from the rule at {}", self.prog.rules[r].place),
     }
   }
 
@@ -536,6 +557,41 @@ pub struct Script {
   pub show: Vec<String>,
 }
 
+/// A step of a tick, as a line or JSON gives it: the host asserts or
+/// retracts a fact, the tick's message, or a relation whose facts to show
+/// after the tick ([`Runtime::step`]).
+#[derive(Clone, Debug)]
+pub enum Step {
+  Assert(usize, Tuple),
+  Retract(usize, Tuple),
+  Msg(Value),
+  Show(String),
+}
+
+/// Reads a line of a tick: `+ Fact` asserts the host's fact, `- Fact`
+/// retracts it, `! Msg` is the tick's message, and `? Name` asks for a
+/// relation's facts after the tick. A blank line is no step.
+pub fn read_step(prog: &mut Program, line: &str) -> Result<Option<Step>, String> {
+  let step = if let Some(fact) = line.strip_prefix("+ ") {
+    let (rel, values) = prog.fact(fact)?;
+    Step::Assert(rel, values.into())
+  } else if let Some(fact) = line.strip_prefix("- ") {
+    let (rel, values) = prog.fact(fact)?;
+    Step::Retract(rel, values.into())
+  } else if let Some(text) = line.strip_prefix("! ") {
+    Step::Msg(prog.value(text, &Ty::Named("Msg".into()))?)
+  } else if let Some(rel) = line.strip_prefix("? ") {
+    Step::Show(rel.trim().to_string())
+  } else if line.trim().is_empty() {
+    return Ok(None);
+  } else {
+    return Err(format!(
+      "a tick's lines start with `+ `, `- `, `! ` or `? `, not {line:?}"
+    ));
+  };
+  Ok(Some(step))
+}
+
 /// Adds rules' new facts: by relation, those that didn't hold before.
 fn insert(tables: &mut [Table], new: New) -> BTreeMap<usize, Vec<Tuple>> {
   let mut fresh: BTreeMap<usize, Vec<Tuple>> = BTreeMap::new();
@@ -557,7 +613,7 @@ fn solutions(prog: &Program, j: Join, r: usize, delta: Delta, new: &mut New) -> 
       .iter()
       .map(|e| eval(e, env))
       .collect::<Result<Vec<_>, _>>();
-    let values = values.map_err(|e| format!("{e}, in the rule at {}", prog.place(&rule.at)))?;
+    let values = values.map_err(|e| format!("{e}, in the rule at {}", rule.place))?;
     new.push((rule.head, Tuple::from(values), r));
     Ok(())
   })
@@ -814,8 +870,8 @@ fn eval(e: &Expr, env: &Env) -> Result<Value, String> {
       Value::Int(n) => Value::Num(n as f64),
       v => v,
     },
-    Expr::Arith(op, a, b) => arith(*op, eval(a, env)?, eval(b, env)?)?,
-    Expr::Text(e) => Value::Text(eval(e, env)?.text()),
+    Expr::Arith(op, _, a, b) => arith(*op, eval(a, env)?, eval(b, env)?)?,
+    Expr::Text(_, e) => Value::Text(eval(e, env)?.text()),
   })
 }
 
