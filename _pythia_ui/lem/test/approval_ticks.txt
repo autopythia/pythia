@@ -1,0 +1,95 @@
+# Ticks of approval.lem and host.lem, after glem's prelude, glui's files
+# (widgets.lem, theme.lem) and a theme. Each case is a tick that runs on
+# the facts that the cases before it left: `=== title`; lines that
+# assert (`+ Fact`) or retract (`- Fact`) the host's facts, send a message
+# (`! Msg`), or show a relation's facts after the tick (`? Name`); `---`;
+# then the widget tree, the facts asked for, and the effects sent.
+
+=== a call counts down, before input is allowed
++ Pending("toolu_1", "ui", "screenshot()", 1000)
++ Countdown("toolu_1", 5000, 4000)
++ Now(3000)
+---
+Hud(Approvals, place=TopRight)
+  Panel(Approval("toolu_1"), title="ui")
+    Label(Summary("toolu_1"), text="screenshot()", tone=Normal)
+    Progress(Left("toolu_1"), frac=0.5)
+    Row(Actions("toolu_1"), aligned=True)
+      Button(Run("toolu_1"), text="Run now", on=RunNow("toolu_1")) -- disabled: Input isn't allowed yet
+      Button(Drop("toolu_1"), text="Withdraw", on=Withdraw("toolu_1"))
+
+=== an earlier call, without a countdown, sorts first
++ Pending("toolu_2", "ui", "click(10, 20)", 500)
+---
+Hud(Approvals, place=TopRight)
+  Panel(Approval("toolu_2"), title="ui")
+    Label(Summary("toolu_2"), text="click(10, 20)", tone=Normal)
+    Row(Actions("toolu_2"), aligned=True)
+      Button(Drop("toolu_2"), text="Withdraw", on=Withdraw("toolu_2"))
+  Panel(Approval("toolu_1"), title="ui")
+    Label(Summary("toolu_1"), text="screenshot()", tone=Normal)
+    Progress(Left("toolu_1"), frac=0.5)
+    Row(Actions("toolu_1"), aligned=True)
+      Button(Run("toolu_1"), text="Run now", on=RunNow("toolu_1")) -- disabled: Input isn't allowed yet
+      Button(Drop("toolu_1"), text="Withdraw", on=Withdraw("toolu_1"))
+
+=== time passes, and focus in a panel gives Escape to it
+- Now(3000)
++ Now(4000)
++ Focused(Run("toolu_1"))
+? Key
+---
+Hud(Approvals, place=TopRight)
+  Panel(Approval("toolu_2"), title="ui")
+    Label(Summary("toolu_2"), text="click(10, 20)", tone=Normal)
+    Row(Actions("toolu_2"), aligned=True)
+      Button(Drop("toolu_2"), text="Withdraw", on=Withdraw("toolu_2"))
+  Panel(Approval("toolu_1"), title="ui")
+    Label(Summary("toolu_1"), text="screenshot()", tone=Normal)
+    Progress(Left("toolu_1"), frac=0.25)
+    Row(Actions("toolu_1"), aligned=True)
+      Button(Run("toolu_1"), text="Run now", on=RunNow("toolu_1")) -- disabled: Input isn't allowed yet
+      Button(Drop("toolu_1"), text="Withdraw", on=Withdraw("toolu_1"))
+Key(Escape, Withdraw("toolu_1"))
+
+=== withdrawing sends Deny, and the panel stays until the host retracts it
+! Withdraw("toolu_2")
+---
+Hud(Approvals, place=TopRight)
+  Panel(Approval("toolu_2"), title="ui")
+    Label(Summary("toolu_2"), text="click(10, 20)", tone=Normal)
+    Row(Actions("toolu_2"), aligned=True)
+      Button(Drop("toolu_2"), text="Withdraw", on=Withdraw("toolu_2"))
+  Panel(Approval("toolu_1"), title="ui")
+    Label(Summary("toolu_1"), text="screenshot()", tone=Normal)
+    Progress(Left("toolu_1"), frac=0.25)
+    Row(Actions("toolu_1"), aligned=True)
+      Button(Run("toolu_1"), text="Run now", on=RunNow("toolu_1")) -- disabled: Input isn't allowed yet
+      Button(Drop("toolu_1"), text="Withdraw", on=Withdraw("toolu_1"))
+effect Send(Deny("toolu_2"))
+
+=== the host retracts it; input is allowed, and the user runs the other now
+- Pending("toolu_2", "ui", "click(10, 20)", 500)
++ Allowed(Input)
+! RunNow("toolu_1")
+---
+Hud(Approvals, place=TopRight)
+  Panel(Approval("toolu_1"), title="ui")
+    Label(Summary("toolu_1"), text="screenshot()", tone=Normal)
+    Progress(Left("toolu_1"), frac=0.25)
+    Row(Actions("toolu_1"), aligned=True)
+      Button(Run("toolu_1"), text="Run now", on=RunNow("toolu_1"))
+      Button(Drop("toolu_1"), text="Withdraw", on=Withdraw("toolu_1"))
+effect Send(Approve("toolu_1"))
+
+=== the host retracts the last call, and the HUD goes
+- Pending("toolu_1", "ui", "screenshot()", 1000)
+- Countdown("toolu_1", 5000, 4000)
+? Key
+---
+(no widgets)
+
+=== a message for a call that isn't pending sends nothing
+! RunNow("toolu_1")
+---
+(no widgets)

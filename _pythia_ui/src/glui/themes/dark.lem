@@ -1,0 +1,60 @@
+-- themes/dark.lem: the dark theme, the default, after wui's Log dark
+-- style (wui/css/log-dark.css, and base.css for its menu). Colors go by the
+-- names that wui's stylesheet gives them; sizes are its own, in its
+-- pixels, which are points, and the rest for widgets, which wui doesn't
+-- have.
+Color(Stage, 0x0d1117ff)        -- bg
+Color(Region, 0x0d1117ff)       -- bg
+Color(Bar, 0x161b22ff)          -- box
+Color(PanelBack, 0x161b22ff)    -- box
+Color(PanelLine, 0x30363dff)    -- rule
+Color(RuleLine, 0x30363dff)     -- rule
+Color(ControlBack, 0x161b22ff)  -- box
+Color(ControlLine, 0x30363dff)  -- rule
+Color(FieldBack, 0x0d1117ff)    -- bg
+Color(CodeBack, 0x161b22ff)     -- box
+Color(PopupBack, 0x0d1117ff)    -- the menu's
+Color(PopupLine, 0x30363dff)    -- rule
+Color(TextNormal, 0xe6edf3ff)   -- fg
+Color(TextDim, 0x8d96a0ff)      -- dim
+Color(TextStrong, 0xe6edf3ff)   -- fg
+Color(TextMenu, 0xe6edf3ff)     -- fg
+Color(TextLink, 0x4493f8ff)     -- a
+Color(Accent, 0x4493f8ff)       -- a
+Color(Caret, 0x4493f8ff)        -- a
+Color(Selection, 0x4493f866)    -- a, at 40%
+Color(Attention, 0xf2cc60ff)    -- escfg
+Color(Emboss, 0x00000000)       -- none
+Color(ShadowColor, 0x00000033)  -- the menu's shadow, black at 20%
+Color(ToneUser, 0x4493f8ff)     -- user
+Color(ToneAssistant, 0x3fb950ff)-- asst
+Color(ToneTool, 0xa371f7ff)     -- tool
+Color(ToneError, 0xf85149ff)    -- err
+Color(EscapeBack, 0x4d3800ff)   -- esc
+Color(EscapeText, 0xf2cc60ff)   -- escfg
+Color(DiffAdd, 0x3fb950ff)      -- add
+Color(DiffDel, 0xf85149ff)      -- del
+Color(DiffHunk, 0x4493f8ff)     -- hunk
+Size(Unit, 24)                  -- a control's height
+Size(TextSize, 14)              -- the body
+Size(LineHeight, 20)            -- 1.45
+Size(CodeSize, 13)              -- pre
+Size(CodeLine, 18)              -- 1.4
+Size(LabelSize, 13)             -- a label, .lb
+Size(MarkSize, 11)              -- a line number, .ln
+Size(Margin, 10)                -- an item's .7em
+Size(Padding, 5)                -- pre's .35em
+Size(Icon, 16)
+Size(GapAcross, 7)              -- a cell's 7px
+Size(GapDown, 6)                -- an item's .45em
+Size(Radius, 4)                 -- pre's
+Size(Outline, 1)
+Size(RuleWidth, 3)              -- an item's rule
+Size(PanelHeader, 28)
+Size(PanelPadding, 10)
+Size(MenuRow, 28)               -- the menu's items
+Size(Separator, 9)
+Size(Shadow, 24)                -- the menu's shadow
+Size(PageWidth, 1000)           -- 130ch
+Size(TooltipDelay, 500)
+Size(Collapse, 0)               -- details open at once

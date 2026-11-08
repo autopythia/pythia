@@ -1,0 +1,28 @@
+-- page.lem: glui's kinds for documents, for its tests: a heading, a
+-- table with links, and a log's entries, one of which opens.
+id Top, Title, Rows, Head, Col(Int), Item(Text), Name(Text), Bytes(Text)
+id Log, Ent(Int), Body(Int)
+input Context(id: Text, name: Text, size: Text, href: Text) key id
+input Line(n: Int, label: Text, text: Text, tone: Tone, fold: Bool) key n
+input Text_(n: Int, text: Text, diff: Bool) key n
+state Opened(n: Int) key n
+
+Window(Top, title="Contexts"):
+  Heading(Title, text="Contexts")
+  Table(Rows):
+    TableRow(Head, header=True):
+      Label(Col(0), text="Context")
+      Label(Col(1), text="Size", tone=Dim)
+    for Context(c, name, size, href):
+      TableRow(Item(c), order=name):
+        Link(Name(c), text=name, to=href)
+        Label(Bytes(c), text=size, tone=Dim)
+  Panel(Log, title="Log"):
+    for Line(n, label, text, tone, fold):
+      Entry(Ent(n), label=label, text=text, mark=text(n), tone=tone, fold=fold, order=n):
+        Code(Body(n), text=t, diff=d) :- Opened(n), Text_(n, t, d)
+
+on Toggled(Ent(n), True):
+  Opened(n)
+on Toggled(Ent(n), False):
+  del Opened(n)

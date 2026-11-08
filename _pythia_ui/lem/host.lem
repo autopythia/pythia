@@ -1,0 +1,18 @@
+-- host.lem: what pythia sends (input relations) and accepts (HostMsg).
+-- Both sides read this file.
+
+type CallId = Text
+
+enum Permission:
+  Capture
+  Input
+
+input Pending(call: CallId, tool: Text, summary: Text, since: Time) key call
+input Countdown(call: CallId, ends: Time, total: Int) key call
+input Allowed(what: Permission)
+
+enum HostMsg:
+  Approve(call: CallId)
+  Deny(call: CallId)
+
+effect Send(msg: HostMsg)

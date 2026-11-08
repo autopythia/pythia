@@ -3,9 +3,9 @@
 //! With no arguments it serves the protocol: one JSON request per line on
 //! stdin, one reply per line on stdout. `info` and `screenshot` are for trying
 //! it by hand, and `lem` for trying the GUI's rule language, lem (src/lem/),
-//! with glem's widgets (src/glem/).
+//! with glem's widgets (src/glem/), and glui's kinds and themes (src/glui/).
 
-use pythia_ui::{glem, json, Failure, ScreenshotOptions};
+use pythia_ui::{glem, glui, json, Failure, ScreenshotOptions};
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
@@ -16,10 +16,12 @@ usage: pythia-ui              serve: one JSON request per line on stdin, one rep
        pythia-ui screenshot [--display ID] [--capture PATH] [--no-cursor] FILE.png
                               take a screenshot and write it to FILE.png; PATH is
                               auto, screencapturekit or coregraphics
-       pythia-ui lem [FILE.lem...]
-                              load the lem files after glem's prelude, then run
-                              ticks from stdin: lines of `+ Fact`, `- Fact`,
-                              `! Msg` and `? Name`, a tick at each blank line
+       pythia-ui lem [--theme THEME] [FILE.lem...]
+                              load the lem files after glem's prelude, glui's
+                              files and a theme (dark, the default; light; or a
+                              FILE.lem), then run ticks from stdin: lines of
+                              `+ Fact`, `- Fact`, `! Msg` and `? Name`, a tick
+                              at each blank line
 ";
 
 fn main() -> ExitCode {
@@ -136,7 +138,18 @@ fn screenshot_args(args: &[String]) -> Result<(ScreenshotOptions, String), Strin
 
 /// Loads lem files after the shipped ones, then runs the ticks that stdin
 /// gives, each up to a blank line, and prints what each shows.
-fn lem(files: &[String]) -> ExitCode {
+fn lem(args: &[String]) -> ExitCode {
+  let (name, files) = match args {
+    [flag, name, files @ ..] if flag == "--theme" => (name.as_str(), files),
+    files => (glui::THEMES[0].0, files),
+  };
+  let (file, theme) = match glui::theme(name) {
+    Ok(theme) => theme,
+    Err(error) => {
+      eprintln!("pythia-ui: {error}");
+      return ExitCode::FAILURE;
+    }
+  };
   let mut texts = Vec::new();
   for name in files {
     match std::fs::read_to_string(name) {
@@ -147,21 +160,25 @@ fn lem(files: &[String]) -> ExitCode {
       }
     }
   }
-  let all: Vec<(&str, &str)> = texts
+  let files: Vec<(&str, &str)> = texts
     .iter()
     .map(|(name, text)| (*name, text.as_str()))
     .collect();
-  let mut runtime = match glem::load(&all) {
+  let mut runtime = match glui::load((&file, &theme), &files) {
     Ok(prog) => glem::Runtime::new(prog),
     Err(error) => {
       eprintln!("{}", error.text);
       return ExitCode::FAILURE;
     }
   };
+  if let Err(error) = glui::complete(&mut runtime) {
+    eprintln!("pythia-ui: {file}: {error}");
+    return ExitCode::FAILURE;
+  }
   let mut tick = String::new();
   let mut run = |tick: &mut String| {
     if !tick.is_empty() {
-      match runtime.script(tick, &glem::no_notes) {
+      match runtime.script(tick, &glui::notes) {
         Ok(shown) => println!("{shown}\n"),
         Err(error) => eprintln!("{error}\n"),
       }

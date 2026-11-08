@@ -181,6 +181,32 @@ names a widget goes with the widget, unless its relation says `keep`.
 glem rewrites a program as plain lem, which lem checks and runs. With
 glem, each tick prints the widget tree first.
 
+### glui
+
+glui (`src/glui/`) is the design language of pythia's GUI, on glem: a
+library in lem, with no syntax or meaning of its own. `widgets.lem` has
+its widget kinds, among them those that documents need (headings, links,
+tables, a log's entries and code), and `theme.lem` says what a theme
+gives: the colors, sizes and times that a front end draws with.
+`themes/dark.lem`, the default, and `light.lem` give them, after wui's
+log styles. Nothing draws them yet. `pythia-ui lem` loads glui's files
+and a theme first: `--theme light`, or `--theme FILE.lem` for another,
+which it refuses if a value is missing. The example is the countdown
+after approval, `lem/approval.lem`, with what pythia sends and accepts,
+`lem/host.lem`:
+
+```sh
+cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/approval.lem
+```
+
+```
++ Pending("toolu_1", "ui", "screenshot()", 1000)
++ Countdown("toolu_1", 5000, 4000)
++ Now(3000)
+
+! Withdraw("toolu_1")
+```
+
 ## Layout
 
 ```
@@ -194,7 +220,10 @@ src/lem/           lem (below): token.rs, parse.rs, print.rs, value.rs,
                    check.rs, eval.rs, its prelude.lem, and the tests
 src/glem/          glem, lem's GUI layer: lower.rs (the rewrite into plain
                    lem), mod.rs (the tree), its prelude.lem, and the tests
-lem/test/          the tests' lem programs and cases
+src/glui/          glui, the design language: widgets.lem, theme.lem,
+                   themes/, mod.rs (loading them), and the tests
+lem/               the approval example (host.lem, approval.lem), and test/,
+                   the tests' programs and cases
 src/macos/         objc.rs (the Objective-C runtime), block.rs (completion
                    blocks), cf.rs, cg.rs (displays, permissions), png.rs
                    (ImageIO), capture.rs (the two capture paths)

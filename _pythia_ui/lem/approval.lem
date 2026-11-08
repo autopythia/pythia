@@ -1,0 +1,21 @@
+-- approval.lem: a panel per pending call, while any is pending.
+id Approvals, Approval(CallId), Summary(CallId), Left(CallId)
+id Actions(CallId), Run(CallId), Drop(CallId)
+msg RunNow(call: CallId), Withdraw(call: CallId)
+
+Hud(Approvals, place=TopRight) :- Pending():
+  for Pending(c, tool, summary, since):
+    Panel(Approval(c), title=tool, order=since):
+      Label(Summary(c), text=summary)
+      Progress(Left(c), frac=(ends - t) / total) :- Countdown(c, ends, total), Now(t)
+      Row(Actions(c), aligned=True):
+        Button(Run(c), text="Run now", on=RunNow(c)) :- Countdown(call=c)
+        Button(Drop(c), text="Withdraw", on=Withdraw(c))
+
+Disabled(Run(c), why="Input isn't allowed yet") :- Countdown(call=c), not Allowed(Input)
+Key(Escape, msg=Withdraw(c)) :- Focused(f), Within(f, Approval(c))
+
+on RunNow(c):
+  Send(Approve(c)) :- Pending(call=c)
+on Withdraw(c):
+  Send(Deny(c))

@@ -6,3 +6,6 @@ test/jobs.lem
 test/numbers.lem
 test/recursion.lem
 test/joins.lem
+host.lem
+approval.lem
+test/page.lem

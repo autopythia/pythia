@@ -1,0 +1,45 @@
+-- theme.lem: what every theme gives, the colors, sizes and times that a
+-- front end draws the widgets with. Rules never name them. A program loads
+-- one theme, a file of these facts: themes/dark.lem, the default, or
+-- themes/light.lem, both after wui's log styles; or a theme from a file.
+
+-- Colors, by what they paint: backgrounds (the stage behind everything, a
+-- region, a bar, a panel, controls, fields, code and popups) and lines;
+-- texts; marks (the accent, for selection and progress; the caret;
+-- selected text; what needs attention; a control's emboss; and a popup's
+-- shadow); the tones of a log's entries; and escapes and diffs in code.
+enum Paint:
+  Stage, Region, Bar, PanelBack, PanelLine, RuleLine
+  ControlBack, ControlLine, FieldBack, CodeBack, PopupBack, PopupLine
+  TextNormal, TextDim, TextStrong, TextMenu, TextLink
+  Accent, Caret, Selection, Attention, Emboss, ShadowColor
+  ToneUser, ToneAssistant, ToneTool, ToneError
+  EscapeBack, EscapeText, DiffAdd, DiffDel, DiffHunk
+
+-- Sizes, in points at scale 1: the unit, a control's height; text, code,
+-- labels and marks (such as line numbers), with their lines; margins and
+-- padding; icons; gaps between widgets; a corner's radius, an outline's
+-- width, and the rule beside a log's entry; a panel's header and padding; a
+-- menu's row and separator; a shadow's size; and a page's width, 0 for
+-- none. Times, in milliseconds: before a tooltip shows, and a panel's
+-- collapse.
+enum Metric:
+  Unit, TextSize, LineHeight, CodeSize, CodeLine, LabelSize, MarkSize
+  Margin, Padding, Icon, GapAcross, GapDown, Radius, Outline, RuleWidth
+  PanelHeader, PanelPadding, MenuRow, Separator, Shadow, PageWidth
+  TooltipDelay, Collapse
+
+-- A theme gives every paint a color, as 0xRRGGBBAA, and every metric a
+-- size.
+rel Color(paint: Paint, rgba: Int) key paint
+rel Size(metric: Metric, value: Num) key metric
+
+-- The paint of each tone of text (widgets.lem), in every theme.
+rel TonePaint(tone: Tone, paint: Paint) key tone
+TonePaint(Normal, TextNormal)
+TonePaint(Dim, TextDim)
+TonePaint(Strong, TextStrong)
+TonePaint(User, ToneUser)
+TonePaint(Assistant, ToneAssistant)
+TonePaint(Tool, ToneTool)
+TonePaint(Error, ToneError)

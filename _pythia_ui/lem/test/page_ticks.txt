@@ -1,0 +1,87 @@
+# Ticks of page.lem, after glem's prelude, glui's files and a theme. Each
+# case is a tick that runs on the facts that the cases before it left:
+# `=== title`; lines that assert (`+ Fact`) or retract (`- Fact`) the host's
+# facts, send a message (`! Msg`), or show a relation's facts after the
+# tick (`? Name`); `---`; then the widget tree, the facts asked for, and the
+# effects sent.
+
+=== two contexts, and two of a log's entries
++ Context("ui-0", "ui-0", "0.7 MB", "/c/ui-0")
++ Context("dev-1", "dev-1", "13.7 MB", "/c/dev-1")
++ Line(3, "[user]", "Let's review the UI", User, False)
++ Line(6, "[tool-call] exec_command", "pwd; ls -la", Tool, True)
++ Text_(6, "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new", True)
+---
+Window(Top, title="Contexts")
+  Heading(Title, text="Contexts", level=1)
+  Table(Rows)
+    TableRow(Head, header=True)
+      Label(Col(0), text="Context", tone=Normal)
+      Label(Col(1), text="Size", tone=Dim)
+    TableRow(Item("dev-1"), header=False)
+      Link(Name("dev-1"), text="dev-1", to="/c/dev-1")
+      Label(Bytes("dev-1"), text="13.7 MB", tone=Dim)
+    TableRow(Item("ui-0"), header=False)
+      Link(Name("ui-0"), text="ui-0", to="/c/ui-0")
+      Label(Bytes("ui-0"), text="0.7 MB", tone=Dim)
+  Panel(Log, title="Log")
+    Entry(Ent(3), label="[user]", text="Let's review the UI", mark="3", tone=User, fold=False)
+    Entry(Ent(6), label="[tool-call] exec_command", text="pwd; ls -la", mark="6", tone=Tool, fold=True)
+
+=== opening an entry shows its code
+! Toggled(Ent(6), True)
+? Opened
+---
+Window(Top, title="Contexts")
+  Heading(Title, text="Contexts", level=1)
+  Table(Rows)
+    TableRow(Head, header=True)
+      Label(Col(0), text="Context", tone=Normal)
+      Label(Col(1), text="Size", tone=Dim)
+    TableRow(Item("dev-1"), header=False)
+      Link(Name("dev-1"), text="dev-1", to="/c/dev-1")
+      Label(Bytes("dev-1"), text="13.7 MB", tone=Dim)
+    TableRow(Item("ui-0"), header=False)
+      Link(Name("ui-0"), text="ui-0", to="/c/ui-0")
+      Label(Bytes("ui-0"), text="0.7 MB", tone=Dim)
+  Panel(Log, title="Log")
+    Entry(Ent(3), label="[user]", text="Let's review the UI", mark="3", tone=User, fold=False)
+    Entry(Ent(6), label="[tool-call] exec_command", text="pwd; ls -la", mark="6", tone=Tool, fold=True)
+      Code(Body(6), text="--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new", diff=True)
+Opened(6)
+
+=== closing it hides it again
+! Toggled(Ent(6), False)
+? Opened
+---
+Window(Top, title="Contexts")
+  Heading(Title, text="Contexts", level=1)
+  Table(Rows)
+    TableRow(Head, header=True)
+      Label(Col(0), text="Context", tone=Normal)
+      Label(Col(1), text="Size", tone=Dim)
+    TableRow(Item("dev-1"), header=False)
+      Link(Name("dev-1"), text="dev-1", to="/c/dev-1")
+      Label(Bytes("dev-1"), text="13.7 MB", tone=Dim)
+    TableRow(Item("ui-0"), header=False)
+      Link(Name("ui-0"), text="ui-0", to="/c/ui-0")
+      Label(Bytes("ui-0"), text="0.7 MB", tone=Dim)
+  Panel(Log, title="Log")
+    Entry(Ent(3), label="[user]", text="Let's review the UI", mark="3", tone=User, fold=False)
+    Entry(Ent(6), label="[tool-call] exec_command", text="pwd; ls -la", mark="6", tone=Tool, fold=True)
+
+=== a context goes, and its row with it
+- Context("ui-0", "ui-0", "0.7 MB", "/c/ui-0")
+---
+Window(Top, title="Contexts")
+  Heading(Title, text="Contexts", level=1)
+  Table(Rows)
+    TableRow(Head, header=True)
+      Label(Col(0), text="Context", tone=Normal)
+      Label(Col(1), text="Size", tone=Dim)
+    TableRow(Item("dev-1"), header=False)
+      Link(Name("dev-1"), text="dev-1", to="/c/dev-1")
+      Label(Bytes("dev-1"), text="13.7 MB", tone=Dim)
+  Panel(Log, title="Log")
+    Entry(Ent(3), label="[user]", text="Let's review the UI", mark="3", tone=User, fold=False)
+    Entry(Ent(6), label="[tool-call] exec_command", text="pwd; ls -la", mark="6", tone=Tool, fold=True)

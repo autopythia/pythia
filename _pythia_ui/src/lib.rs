@@ -14,7 +14,8 @@
 //! for its tests: there `info` answers, and screenshots are unsupported.
 //!
 //! The crate also holds a prototype of the rule language for pythia's GUI:
-//! [`lem`], and [`glem`], its GUI layer (README.md).
+//! [`lem`]; [`glem`], its GUI layer; and [`glui`], widgets and themes on
+//! glem (README.md).
 
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 compile_error!(
@@ -24,6 +25,7 @@ compile_error!(
 
 mod base64;
 pub mod glem;
+pub mod glui;
 pub mod json;
 pub mod lem;
 // Only the macOS code waits for completion handlers; the tests run anywhere.

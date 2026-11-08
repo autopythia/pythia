@@ -1,0 +1,58 @@
+-- widgets.lem: glui's widgets: the surfaces, the widget kinds, and the
+-- flags that change how a widget acts. glem gives each widget its `id`,
+-- `parent` and `order`. How they look is up to a theme (theme.lem) and a
+-- front end, which draws each kind with a recipe, and will check this
+-- file's kinds against them.
+
+-- Surfaces, the roots of widget trees: a window, or a HUD, which floats
+-- without taking focus from other apps.
+enum Place:
+  TopLeft, TopRight, BottomLeft, BottomRight, Center
+surface Window(title: Text)
+surface Hud(place: Place)
+
+-- Containers. An aligned row or column shows its widgets as one group. A
+-- table's children are its rows, and a row's children are its cells, one
+-- widget each.
+widget Panel(title: Text)
+widget Row(aligned: Bool = False)
+widget Column(aligned: Bool = False)
+widget Box
+widget Table
+widget TableRow(header: Bool = False)
+
+-- Text's tones: normal, dim or strong; or the role of a log's entry. A
+-- theme gives each its paint (theme.lem).
+enum Tone:
+  Normal, Dim, Strong, User, Assistant, Tool, Error
+
+-- Widgets. Each also has an `id`, a `parent` and an `order`, which a block
+-- gives its children.
+widget Label(text: Text, tone: Tone = Normal)
+widget Heading(text: Text, level: Int = 1)
+widget Button(text: Text, on: Msg)
+widget Toggle(text: Text, value: Bool)
+widget Field(text: Text)
+widget ListRow(text: Text, on: Msg)
+widget Progress(frac: Num)
+
+-- A link, to one of the host's own paths, which a front end opens; it
+-- refuses any other.
+widget Link(text: Text, to: Text)
+
+-- A log's entry: its label, such as `[tool-call] exec_command`; its text;
+-- a mark beside it, such as its line; and its tone. With `fold`, its
+-- children show once it's opened, and opening or closing it sends
+-- `Toggled`. Code is text kept as written, whose lines, with `diff`, show
+-- as a diff's.
+widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False)
+widget Code(text: Text, diff: Bool = False)
+
+-- What widgets that hold a value send.
+msg Edited(id: Id, text: Text), Toggled(id: Id, value: Bool)
+
+-- A widget may be disabled for several reasons, which a front end shows,
+-- as in its tooltip; its children are disabled with it.
+rel Disabled(id: Id, why: Text)
+rel Tooltip(id: Id, text: Text) key id
+Disabled(w, why) :- Parent(w, p), Disabled(p, why)
