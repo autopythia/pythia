@@ -14,8 +14,8 @@ OUT := target/$(TARGET)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 HOST_LIB := target/$(HOST)/release/libpythia_ui.$(if $(findstring apple-darwin,$(HOST)),dylib,so)
 
-.PHONY: all build dev debug rel release test check bench js-test web web-serve msrv plugin-check tbd \
-  inspect clean
+.PHONY: all build dev debug rel release test check bench js-test js-bench web web-serve compiled msrv \
+  plugin-check tbd inspect clean
 
 all: build
 
@@ -48,11 +48,12 @@ bench:
 	$(CARGO) build --release --bin $(BIN) --target $(HOST)
 	$(PYTHON) tools/lem_bench.py target/$(HOST)/release/$(BIN)
 
-# The runtimes in JavaScript, src/lem/lem.js and src/glem/glem.js, on the
-# cases that Rust runs on the compiled forms, which the Rust tests write to
-# target/web/: tools/lem_test.js and tools/glem_test.js run them, each as
-# one script with what it needs, in JavaScriptCore through osascript on a
-# Mac, or in another engine, as JS=qjs. They report in TAP (tools/tap.js),
+# The runtimes in JavaScript, src/lem/lem.js, src/glem/glem.js and
+# src/glui/glui.js, and the contexts' page script, web/contexts.js, on the
+# cases that the Rust tests write to target/web/: tools/lem_test.js,
+# glem_test.js, glui_test.js and contexts_test.js run them, each as one
+# script with what it needs, in JavaScriptCore through osascript on a Mac,
+# or in another engine, as JS=qjs. They report in TAP (tools/tap.js),
 # which osascript writes to stderr, and fail if a case does.
 JS := osascript -l JavaScript
 WEB := target/web
@@ -66,13 +67,18 @@ js-test:
 	cat src/lem/lem.js src/glem/glem.js src/glui/glui.js $(WEB)/glui_tests.js tools/tap.js \
 	  tools/stand_in_dom.js tools/glui_test.js > $(WEB)/glui_test_run.js
 	$(JS) $(WEB)/glui_test_run.js
+	cat src/lem/lem.js src/glem/glem.js src/glui/glui.js web/contexts.js $(WEB)/contexts_tests.js \
+	  tools/tap.js tools/stand_in_dom.js tools/contexts_test.js > $(WEB)/contexts_test_run.js
+	$(JS) $(WEB)/contexts_test_run.js
 
 # What the web look's pages, web/demo.html and web/test.html, fetch, in
 # target/web/: the approval HUD, and lem/test's page and form, compiled by
 # pythia-ui lem --compile; each theme in src/glui/themes/, alone, as
-# theme-NAME.json, with their names in themes.json; and, from the tests,
-# their cases for JavaScript. web-serve serves the crate to this machine
-# alone, at 127.0.0.1:PORT, for a browser.
+# theme-NAME.json, with their names in themes.json; from the tests, their
+# cases for JavaScript; and, for the contexts' sample pages,
+# web/contexts-index.html and web/contexts-log.html, a sample of their
+# facts (tools/contexts_sample.py). web-serve serves the crate to this
+# machine alone, at 127.0.0.1:PORT, for a browser.
 WEB_BIN := target/$(HOST)/debug/$(BIN)
 WEB_THEMES := $(basename $(notdir $(sort $(wildcard src/glui/themes/*.lem))))
 comma := ,
@@ -86,11 +92,32 @@ web:
 	$(foreach t,$(WEB_THEMES),$(WEB_BIN) lem --theme src/glui/themes/$(t).lem --compile \
 	  > $(WEB)/theme-$(t).json &&) true
 	echo '[$(subst " ","$(comma) ",$(patsubst %,"%",$(WEB_THEMES)))]' > $(WEB)/themes.json
+	$(PYTHON) tools/contexts_sample.py $(WEB)/sample
+
+# The compiled programs that the contexts' pages fetch, which wui will
+# serve: lem/contexts.lem, and glui's themes, each alone, in web/compiled/.
+# A test compiles them again and compares (src/glui/tests.rs): after a
+# change to what they're compiled from, this writes them anew.
+compiled:
+	$(CARGO) build --bin $(BIN) --target $(HOST)
+	mkdir -p web/compiled
+	$(WEB_BIN) lem --compile lem/contexts.lem > web/compiled/contexts.json
+	$(foreach t,dark light,$(WEB_BIN) lem --theme $(t) --compile > web/compiled/theme-$(t).json &&) true
 
 PORT := 8000
 web-serve: web
-	@echo "glui's demo: http://127.0.0.1:$(PORT)/web/demo.html; its tests: /web/test.html"
+	@echo "glui's demo: http://127.0.0.1:$(PORT)/web/demo.html; its tests: /web/test.html;"
+	@echo "pythia's contexts, a sample: /web/contexts-index.html"
 	$(PYTHON) -m http.server $(PORT) --bind 127.0.0.1
+
+# Times pythia's contexts in JavaScript at the size of a long log
+# (tools/contexts_bench.js), in JavaScriptCore through osascript on a Mac,
+# or in another engine, as JS=qjs.
+js-bench:
+	$(CARGO) test --target $(HOST) --lib -- glui::tests::the_compiled_files_are_up_to_date
+	cat src/lem/lem.js src/glem/glem.js src/glui/glui.js $(WEB)/contexts_tests.js tools/stand_in_dom.js \
+	  tools/contexts_bench.js > $(WEB)/contexts_bench_run.js
+	$(JS) $(WEB)/contexts_bench_run.js
 
 # check and test with the oldest Rust that Cargo.toml's rust-version names,
 # which must be installed:

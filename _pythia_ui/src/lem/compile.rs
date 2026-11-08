@@ -14,7 +14,7 @@
 //!   and each enum, with `Id` and `Msg`, as null;
 //! - `rels`: each relation's `name`, `kind` (`input`, `state`, `rel` or
 //!   `effect`), `fields`, each `[name, type]` or `[name, type, default]`,
-//!   and `key`, its columns;
+//!   and `key`, its columns; and `lazy`, true, for a lazy one;
 //! - `ctors`: each constructor's `name`, `type`, the type that it makes,
 //!   and `fields`, whose names may be null;
 //! - `rules`: each rule's place, `at`; its `head`, a relation by number;
@@ -147,12 +147,16 @@ fn fields_json(fields: &[Field]) -> Json {
 }
 
 fn rel_json(rel: &Rel) -> Json {
-  object([
+  let mut members = vec![
     ("name", Json::from(&*rel.name)),
     ("kind", Json::from(rel.kind.word())),
     ("fields", fields_json(&rel.fields)),
     ("key", numbers(&rel.key)),
-  ])
+  ];
+  if rel.lazy {
+    members.push(("lazy", Json::from(true)));
+  }
+  object(members)
 }
 
 fn ctor_json(ctor: &Ctor) -> Json {
@@ -472,11 +476,17 @@ impl Decls {
     };
     let fields = self.fields(get(value, "fields")?)?;
     let key = indexes(get(value, "key")?, fields.len(), "a column")?;
+    let lazy = match value.get("lazy") {
+      None => false,
+      Some(Json::Bool(true)) if kind == DeclKind::Rel => true,
+      Some(_) => return Err(format!("{name}'s `lazy` is true, and only a `rel` is lazy")),
+    };
     Ok(Rel {
       name: name.into(),
       kind,
       fields,
       key,
+      lazy,
       at: At::nowhere(),
     })
   }

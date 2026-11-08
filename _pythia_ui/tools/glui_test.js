@@ -5,8 +5,9 @@
 // target/web/glui_tests.js: programs of glui's widgets, compiled, each with
 // the cases of its file in lem/test/, which run through glui's recipes in a
 // stand-in DOM (tools/stand_in_dom.js): the approval HUD
-// (approval_dom.txt), a page of the kinds for documents (page_dom.txt) and
-// a form of glui's controls (form_dom.txt); and glui's themes, compiled,
+// (approval_dom.txt), a page of the kinds for documents (page_dom.txt), a
+// form of glui's controls (form_dom.txt) and pythia's contexts
+// (contexts_dom.txt); and glui's themes, compiled,
 // with their values as CSS variables (themes_css.txt). In a browser
 // (web/test.html), each program's first cases run in the page's own DOM
 // too, up to the first that needs what that can't do at once (AT_ONCE),

@@ -104,6 +104,20 @@ t.lem:1:25: there's no flag `keep` in lem:
 state Draft(text: Text) keep
                         ^^^^
 
+=== lazy, on what isn't a rel
+input Draft(text: Text) lazy
+---
+t.lem:1:25: only a `rel` is `lazy`, not an `input` relation:
+input Draft(text: Text) lazy
+                        ^^^^
+
+=== lazy twice
+rel Seen(n: Int) lazy lazy
+---
+t.lem:1:23: `lazy` comes once:
+rel Seen(n: Int) lazy lazy
+                      ^^^^
+
 === constructors with a key
 id Top key x
 ---

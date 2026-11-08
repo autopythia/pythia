@@ -53,6 +53,8 @@ font:var(--glui-code-size)/var(--glui-code-line) ui-monospace,SFMono-Regular,Men
 /* A log's entry: its mark, label and text on a line, then its body, with
    its children, if it has any. */
 .g-entry-mark:not(:empty),.g-entry-label:not(:empty){margin-right:.5em}
+.g-entry-mark{text-decoration:none}
+.g-entry-mark[href]:hover{text-decoration:underline}
 .g-entry-body{display:flex;flex-direction:column;gap:var(--glui-gap-down)}
 .g-entry-body:empty{display:none}
 .g-entry summary{cursor:pointer}

@@ -1,0 +1,283 @@
+# pythia's contexts (contexts.lem) through glui's recipes, in a stand-in
+# DOM, for the tests in JavaScript alone (tools/glui_test.js): the steps
+# and what they show, as approval_dom.txt says. The host here is the test:
+# it hears Load, and answers with Body or Failed in the next case's steps.
+
+=== a log: its turns and items, each mark linking to its item's page
+["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line="}]
+["+", "Nav", {"n": 0, "text": "Contexts", "to": "/"}]
+["+", "Turn", {"n": 0, "title": "The start"}]
+["+", "Turn", {"n": 1, "title": "Turn 1: Plan the GUI"}]
+["+", "Item", {"line": 1, "turn": 0, "tone": "Dim", "label": "[init]", "gist": "model opus", "body": false}]
+["+", "Item", {"line": 2, "turn": 1, "tone": "User", "label": "[user]", "gist": "Plan the GUI", "body": false}]
+["+", "Item", {"line": 3, "turn": 1, "tone": "Tool", "label": "[tool-call] exec_command", "gist": "git diff", "body": true}]
+["+", "Item", {"line": 4, "turn": 1, "tone": "Tool", "label": "[tool-ret] exec_command [ok]", "gist": "3 lines", "body": true}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    section.g-panel
+      div.g-panel-title "The start"
+      div.g-panel-body
+        div.g-entry.g-tone-dim
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=1" "1"
+            span.g-entry-label "[init]"
+            span.g-entry-text "model opus"
+          div.g-entry-body
+    section.g-panel
+      div.g-panel-title "Turn 1: Plan the GUI"
+      div.g-panel-body
+        div.g-entry.g-tone-user
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=2" "2"
+            span.g-entry-label "[user]"
+            span.g-entry-text "Plan the GUI"
+          div.g-entry-body
+        div.g-entry.g-fold.g-tone-tool
+          details
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=3" "3"
+              span.g-entry-label "[tool-call] exec_command"
+              span.g-entry-text "git diff"
+            div.g-entry-body
+        div.g-entry.g-fold.g-tone-tool
+          details
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=4" "4"
+              span.g-entry-label "[tool-ret] exec_command [ok]"
+              span.g-entry-text "3 lines"
+            div.g-entry-body
+
+=== opening an entry asks the host for its body
+["open", "Ent(3)"]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    section.g-panel
+      div.g-panel-title "The start"
+      div.g-panel-body
+        div.g-entry.g-tone-dim
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=1" "1"
+            span.g-entry-label "[init]"
+            span.g-entry-text "model opus"
+          div.g-entry-body
+    section.g-panel
+      div.g-panel-title "Turn 1: Plan the GUI"
+      div.g-panel-body
+        div.g-entry.g-tone-user
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=2" "2"
+            span.g-entry-label "[user]"
+            span.g-entry-text "Plan the GUI"
+          div.g-entry-body
+        div.g-entry.g-fold.g-tone-tool
+          details open
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=3" "3"
+              span.g-entry-label "[tool-call] exec_command"
+              span.g-entry-text "git diff"
+            div.g-entry-body
+              span.g-label.g-tone-dim "loading"
+        div.g-entry.g-fold.g-tone-tool
+          details
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=4" "4"
+              span.g-entry-label "[tool-ret] exec_command [ok]"
+              span.g-entry-text "3 lines"
+            div.g-entry-body
+effect Load {"line":3}
+
+=== its body comes, in parts, one of them a diff
+["+", "Body", {"line": 3, "part": 0, "text": "git diff", "diff": false}]
+["+", "Body", {"line": 3, "part": 1, "text": "@@ -1 +1 @@\n-old\n+new", "diff": true}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    section.g-panel
+      div.g-panel-title "The start"
+      div.g-panel-body
+        div.g-entry.g-tone-dim
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=1" "1"
+            span.g-entry-label "[init]"
+            span.g-entry-text "model opus"
+          div.g-entry-body
+    section.g-panel
+      div.g-panel-title "Turn 1: Plan the GUI"
+      div.g-panel-body
+        div.g-entry.g-tone-user
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=2" "2"
+            span.g-entry-label "[user]"
+            span.g-entry-text "Plan the GUI"
+          div.g-entry-body
+        div.g-entry.g-fold.g-tone-tool
+          details open
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=3" "3"
+              span.g-entry-label "[tool-call] exec_command"
+              span.g-entry-text "git diff"
+            div.g-entry-body
+              pre.g-code "git diff"
+              pre.g-code.g-diff
+                span.g-diff-hunk "@@ -1 +1 @@\n"
+                span.g-diff-del "-old\n"
+                span.g-diff-add "+new"
+        div.g-entry.g-fold.g-tone-tool
+          details
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=4" "4"
+              span.g-entry-label "[tool-ret] exec_command [ok]"
+              span.g-entry-text "3 lines"
+            div.g-entry-body
+
+=== closing it and opening it again asks for nothing
+["close", "Ent(3)"]
+["open", "Ent(3)"]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    section.g-panel
+      div.g-panel-title "The start"
+      div.g-panel-body
+        div.g-entry.g-tone-dim
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=1" "1"
+            span.g-entry-label "[init]"
+            span.g-entry-text "model opus"
+          div.g-entry-body
+    section.g-panel
+      div.g-panel-title "Turn 1: Plan the GUI"
+      div.g-panel-body
+        div.g-entry.g-tone-user
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=2" "2"
+            span.g-entry-label "[user]"
+            span.g-entry-text "Plan the GUI"
+          div.g-entry-body
+        div.g-entry.g-fold.g-tone-tool
+          details open
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=3" "3"
+              span.g-entry-label "[tool-call] exec_command"
+              span.g-entry-text "git diff"
+            div.g-entry-body
+              pre.g-code "git diff"
+              pre.g-code.g-diff
+                span.g-diff-hunk "@@ -1 +1 @@\n"
+                span.g-diff-del "-old\n"
+                span.g-diff-add "+new"
+        div.g-entry.g-fold.g-tone-tool
+          details
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=4" "4"
+              span.g-entry-label "[tool-ret] exec_command [ok]"
+              span.g-entry-text "3 lines"
+            div.g-entry-body
+
+=== the host couldn't send another's body: its entry says why
+["open", "Ent(4)"]
+["+", "Failed", {"line": 4, "why": "404 Not Found"}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    section.g-panel
+      div.g-panel-title "The start"
+      div.g-panel-body
+        div.g-entry.g-tone-dim
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=1" "1"
+            span.g-entry-label "[init]"
+            span.g-entry-text "model opus"
+          div.g-entry-body
+    section.g-panel
+      div.g-panel-title "Turn 1: Plan the GUI"
+      div.g-panel-body
+        div.g-entry.g-tone-user
+          div.g-entry-head
+            a.g-entry-mark href="/c/ui-0?line=2" "2"
+            span.g-entry-label "[user]"
+            span.g-entry-text "Plan the GUI"
+          div.g-entry-body
+        div.g-entry.g-fold.g-tone-tool
+          details open
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=3" "3"
+              span.g-entry-label "[tool-call] exec_command"
+              span.g-entry-text "git diff"
+            div.g-entry-body
+              pre.g-code "git diff"
+              pre.g-code.g-diff
+                span.g-diff-hunk "@@ -1 +1 @@\n"
+                span.g-diff-del "-old\n"
+                span.g-diff-add "+new"
+        div.g-entry.g-fold.g-tone-tool
+          details open
+            summary.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=4" "4"
+              span.g-entry-label "[tool-ret] exec_command [ok]"
+              span.g-entry-text "3 lines"
+            div.g-entry-body
+              span.g-label.g-tone-error "couldn't load it: 404 Not Found"
+effect Load {"line":4}
+
+=== the index, in place of the log
+["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line="}]
+["-", "Turn", {"n": 0, "title": "The start"}]
+["-", "Turn", {"n": 1, "title": "Turn 1: Plan the GUI"}]
+["+", "Page", {"title": "Contexts"}]
+["+", "Context", {"id": "ui-0", "title": "Plan the GUI", "model": "opus", "turns": 12, "lines": 2563, "size": "13.7 MB", "changed": "5 min ago", "rank": 0, "to": "/c/ui-0"}]
+["+", "Context", {"id": "dev-1", "title": "Let us start", "model": "opus", "turns": 3, "lines": 120, "size": "1.2 MB", "changed": "2 h ago", "rank": 1, "to": "/c/dev-1"}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "Context"
+        span.g-label "Title"
+        span.g-label "Model"
+        span.g-label "Turns"
+        span.g-label "Lines"
+        span.g-label "Size"
+        span.g-label "Changed"
+      tr.g-tablerow
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label "Plan the GUI"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "12"
+        span.g-label "2563"
+        span.g-label "13.7 MB"
+        span.g-label.g-tone-dim "5 min ago"
+      tr.g-tablerow
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label "Let us start"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "3"
+        span.g-label "120"
+        span.g-label "1.2 MB"
+        span.g-label.g-tone-dim "2 h ago"

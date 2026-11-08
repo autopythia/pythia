@@ -35,9 +35,12 @@ make bench         # times lem at the size of a long log, and on a hard join
 make js-test       # lem.js, glem.js and glui.js, the runtimes in JavaScript,
                    # on the tests, in JavaScriptCore; elsewhere with
                    # another engine, JS=qjs
+make js-bench      # times pythia's contexts in JavaScript, at log size
 make web           # what the web look's pages fetch, in target/web/: the
-                   # programs and themes, compiled, and the tests' cases
+                   # programs and themes, compiled, the tests' cases, and
+                   # a sample of pythia's contexts
 make web-serve     # then serves the crate on 127.0.0.1:8000, for a browser
+make compiled      # web/compiled/: the contexts and the themes, compiled
 make msrv          # check and test with Rust 1.78.0, the oldest supported
 make inspect       # from any host: will the binaries load on macOS?
 make plugin-check  # loads this machine's build of the plugin with ctypes
@@ -178,6 +181,10 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/test/jobs.lem
 and `?` names a relation whose facts to show after the tick. Each tick
 prints those facts, then the effects that it sends.
 
+A `rel` declared `lazy`, lem's one flag, is derived only when something
+reads it: a rule of a relation that's derived, an `on` block, or the host,
+with `?`. glem's `Within` is lazy, since few programs read it.
+
 For the web, a checked program can be written as data, its compiled form
 (`src/lem/compile.rs`): JSON, which lem's runtime in JavaScript,
 `src/lem/lem.js`, runs as `src/lem/eval.rs` runs a program. The host's
@@ -251,15 +258,40 @@ and a value's name, and a look's stylesheet draws with them, over
 stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
 `lem/test/form.lem`.
 
-In a browser, `make web-serve` serves two pages. `web/demo.html` shows
-the approval HUD, a page of a log, or the form, in either look and any
-theme, with the page as their host. `web/test.html` runs the tests in
-JavaScript, and some of glui's cases in the page's own DOM too. Both pages
-carry the CSP that wui will send its pages, and run only the crate's
-files:
+In a browser, `make web-serve` serves the web look's two pages.
+`web/demo.html` shows the approval HUD, a page of a log, or the form, in
+either look and any theme, with the page as their host. `web/test.html` runs
+the tests in JavaScript, and some of glui's cases in the page's own DOM too.
+Both pages carry the CSP that wui will send its pages, and run only the
+crate's files:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
+```
+
+### The contexts
+
+`lem/contexts.lem` shows pythia's contexts, as wui will serve them: its
+index of contexts, and one context's log, a page each, in glui's widgets.
+The host, wui, sends a page's facts: `Context` for each context; or
+`Turn` and `Item` for a log. An item's body comes when its entry is first
+opened: the program sends `Load(line)`, and the host answers with `Body`
+facts, or `Failed(line, why)`. `lem/test/contexts_ticks.txt` and
+`contexts_dom.txt` test it.
+
+In a browser, `web/contexts.js` is the host's part. A page names its
+facts on its `html` element, `data-facts`, and, for a log, where an
+item's body is, `data-body`, with `{line}`; the script fetches the
+program and the themes, compiled, from `web/compiled/`, which `make
+compiled` writes, and a test checks against the files they're compiled
+from. Its bar picks the look and the theme, which the browser remembers.
+`make web` writes a sample, an index and a log of 13,394 items, the most
+that one of pythia's contexts has had, for two pages that show it as
+wui's will:
+
+```sh
+make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html
+make js-bench      # the same log in JavaScriptCore, here as JS=qjs
 ```
 
 ## Layout
@@ -282,10 +314,13 @@ src/glem/          glem, lem's GUI layer: lower.rs (the rewrite into plain
 src/glui/          glui, the design language: widgets.lem, theme.lem,
                    themes/, mod.rs (loading them), glui.js (its web look's
                    recipes), and the tests
-lem/               the approval example (host.lem, approval.lem), and test/,
-                   the tests' programs and cases
+lem/               the approval example (host.lem, approval.lem), the
+                   contexts (contexts.lem), and test/, the tests' programs
+                   and cases
 web/               the web look's stylesheets, glui.css, native.css and
-                   log.css; and its pages, demo.html and test.html
+                   log.css; its pages, demo.html and test.html; the
+                   contexts' script and stylesheet, contexts.js and
+                   contexts.css, their sample pages, and compiled/
 src/macos/         objc.rs (the Objective-C runtime), block.rs (completion
                    blocks), cf.rs, cg.rs (displays, permissions), png.rs
                    (ImageIO), capture.rs (the two capture paths)
@@ -294,7 +329,9 @@ stub-sdk/          link-time symbol lists (below)
 tools/             macho_info.py (make inspect), gen_tbd.py (make tbd),
                    plugin_check.py (make plugin-check), lem_bench.py
                    (make bench); lem_test.js, glem_test.js, glui_test.js,
-                   tap.js and stand_in_dom.js (make js-test)
+                   contexts_test.js, tap.js and stand_in_dom.js (make
+                   js-test); contexts_bench.js (make js-bench); and
+                   contexts_sample.py (make web)
 ```
 
 ## Stub SDK

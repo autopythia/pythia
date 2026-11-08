@@ -41,11 +41,11 @@ widget Progress(frac: Num)
 widget Link(text: Text, to: Text)
 
 -- A log's entry: its label, such as `[tool-call] exec_command`; its text;
--- a mark beside it, such as its line; and its tone. With `fold`, its
--- children show once it's opened, and opening or closing it sends
--- `Toggled`. Code is text kept as written, whose lines, with `diff`, show
--- as a diff's.
-widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False)
+-- a mark beside it, such as its line, which links to `to`, one of the
+-- host's own paths, if it's given; and its tone. With `fold`, its children
+-- show once it's opened, and opening or closing it sends `Toggled`. Code
+-- is text kept as written, whose lines, with `diff`, show as a diff's.
+widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False, to: Text = "")
 widget Code(text: Text, diff: Bool = False)
 
 -- What widgets that hold a value send.

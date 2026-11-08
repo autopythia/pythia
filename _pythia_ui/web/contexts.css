@@ -1,0 +1,11 @@
+/* web/contexts.css: the bar of pythia's contexts' pages (contexts.js), at
+   the top right: the look's and the theme's menus, and a line of status,
+   in the theme's colors. */
+.contexts-bar{position:fixed;top:.5rem;right:.75rem;z-index:20;display:flex;flex-wrap:wrap;align-items:center;
+gap:.3em .8em;max-width:calc(100vw - 1.5rem);padding:.2rem .7rem;
+font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--glui-text-dim);
+background:var(--glui-popup-back);border:1px solid var(--glui-popup-line);border-radius:999px}
+.contexts-bar select{font:inherit}
+.contexts-status:empty{display:none}
+.contexts-wrong{color:var(--glui-error-text)}
+@media print{.contexts-bar{display:none}}

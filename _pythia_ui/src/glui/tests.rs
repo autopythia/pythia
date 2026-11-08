@@ -2,28 +2,35 @@
 //!
 //! - every theme in `src/glui/themes/` gives every value, and a theme that
 //!   lacks one is refused;
-//! - pythia's approval HUD (`lem/approval.lem`, with `lem/host.lem`) and a
-//!   page of the kinds that documents need (`lem/test/page.lem`) tick as
-//!   `lem/test/approval_ticks.txt` and `lem/test/page_ticks.txt` say, in
-//!   every theme, since rules never read one;
+//! - pythia's approval HUD (`lem/approval.lem`, with `lem/host.lem`), a
+//!   page of the kinds that documents need (`lem/test/page.lem`), and
+//!   pythia's contexts (`lem/contexts.lem`) tick as
+//!   `lem/test/approval_ticks.txt`, `lem/test/page_ticks.txt` and
+//!   `lem/test/contexts_ticks.txt` say, in every theme, since rules never
+//!   read one;
 //! - glui's files and themes print back;
-//! - the approval HUD and the page, compiled with glem's part
-//!   ([`glem::compile`]) and read back, tick as written too, with each tick
-//!   as JSON steps, as `pythia-ui lem --compile` gives them to the web;
+//! - the three, compiled with glem's part ([`glem::compile`]) and read
+//!   back, tick as written too, with each tick as JSON steps, as
+//!   `pythia-ui lem --compile` gives them to the web;
 //! - `glui.js`, the web look, is ASCII, writes no HTML, and runs no code
 //!   that it's given;
 //! - the looks' stylesheets, in `web/`, read only the variables that
 //!   `glui.js` sets from a theme, which `theme.lem` names;
-//! - the web look's pages, `web/demo.html` and `web/test.html`, give
-//!   themselves the CSP that wui will send, and run only the crate's own
-//!   files, and those that `make web` writes: no script or style inline.
+//! - the web look's pages, `web/demo.html` and `web/test.html`, and the
+//!   contexts' sample pages, give themselves the CSP that wui will send,
+//!   and run only the crate's own files, and those that `make web` writes:
+//!   no script or style inline;
+//! - the compiled programs in `web/compiled/`, which the contexts' pages
+//!   fetch, are what their files compile to now; and the contexts,
+//!   compiled, go to `target/web/contexts_tests.js`, for
+//!   `tools/contexts_test.js`, which tests `web/contexts.js`.
 //!
 //! The web look's own cases, which only JavaScript runs, go to
 //! `target/web/glui_tests.js`, which `tools/glui_test.js` runs on `glui.js`
-//! (`make js-test`): the HUD, the page and a form of glui's controls
-//! (`lem/test/form.lem`), compiled, with their cases in a stand-in DOM
-//! (`lem/test/*_dom.txt`); and each theme, compiled, with its values as
-//! CSS (`lem/test/themes_css.txt`).
+//! (`make js-test`): the HUD, the page, a form of glui's controls
+//! (`lem/test/form.lem`) and the contexts, compiled, with their cases in a
+//! stand-in DOM (`lem/test/*_dom.txt`); and each theme, compiled, with its
+//! values as CSS (`lem/test/themes_css.txt`).
 
 use super::{complete, load, notes, FILES, THEMES};
 use crate::glem;
@@ -115,6 +122,16 @@ fn the_page_ticks_as_written_in_every_theme() {
 }
 
 #[test]
+fn the_contexts_tick_as_written_in_every_theme() {
+  for (_, file, text) in THEMES {
+    let mut runtime = runtime((file, text), &["contexts.lem"]);
+    tick_cases("test/contexts_ticks.txt", |lines| {
+      runtime.script(lines, &notes)
+    });
+  }
+}
+
+#[test]
 fn gluis_files_and_themes_print_back() {
   let files = FILES
     .iter()
@@ -130,11 +147,12 @@ fn gluis_files_and_themes_print_back() {
 }
 
 #[test]
-fn the_hud_and_the_page_tick_on_their_compiled_forms() {
+fn the_hud_the_page_and_the_contexts_tick_on_their_compiled_forms() {
   let (_, file, text) = THEMES[0];
-  let programs: [(&[&str], &str); 2] = [
+  let programs: [(&[&str], &str); 3] = [
     (&["host.lem", "approval.lem"], "test/approval_ticks.txt"),
     (&["test/page.lem"], "test/page_ticks.txt"),
+    (&["contexts.lem"], "test/contexts_ticks.txt"),
   ];
   for (files, ticks) in programs {
     let form = glem::compile::compile(&program((file, text), files));
@@ -155,10 +173,11 @@ fn the_hud_and_the_page_tick_on_their_compiled_forms() {
 #[test]
 fn the_web_looks_cases_for_javascript() {
   let (_, file, text) = THEMES[0];
-  let programs: [(&[&str], &str); 3] = [
+  let programs: [(&[&str], &str); 4] = [
     (&["host.lem", "approval.lem"], "test/approval_dom.txt"),
     (&["test/page.lem"], "test/page_dom.txt"),
     (&["test/form.lem"], "test/form_dom.txt"),
+    (&["contexts.lem"], "test/contexts_dom.txt"),
   ];
   let suites = programs.map(|(files, dom)| {
     let form = glem::compile::compile(&program((file, text), files));
@@ -211,11 +230,13 @@ fn glui_js_is_ascii_writes_no_html_and_runs_no_code() {
   assert!(found.is_empty(), "glui.js has {found:?}");
 }
 
-/// The web look's stylesheets: (file, text).
-const STYLESHEETS: [(&str, &str); 3] = [
+/// The web look's stylesheets, and its pages': (file, text).
+const STYLESHEETS: [(&str, &str); 5] = [
   ("web/glui.css", include_str!("../../web/glui.css")),
   ("web/native.css", include_str!("../../web/native.css")),
   ("web/log.css", include_str!("../../web/log.css")),
+  ("web/pages.css", include_str!("../../web/pages.css")),
+  ("web/contexts.css", include_str!("../../web/contexts.css")),
 ];
 
 /// A name in CamelCase as CSS writes names, as glui.js does: PanelBack,
@@ -291,14 +312,24 @@ fn the_stylesheets_read_only_what_glui_js_gives() {
   report(results);
 }
 
-/// The web look's pages, and their own scripts: (file, text).
-const PAGES: [(&str, &str); 2] = [
+/// The web look's pages, and the contexts' sample pages; and their own
+/// scripts: (file, text).
+const PAGES: [(&str, &str); 4] = [
   ("web/demo.html", include_str!("../../web/demo.html")),
   ("web/test.html", include_str!("../../web/test.html")),
+  (
+    "web/contexts-index.html",
+    include_str!("../../web/contexts-index.html"),
+  ),
+  (
+    "web/contexts-log.html",
+    include_str!("../../web/contexts-log.html"),
+  ),
 ];
-const PAGE_SCRIPTS: [(&str, &str); 2] = [
+const PAGE_SCRIPTS: [(&str, &str); 3] = [
   ("web/demo.js", include_str!("../../web/demo.js")),
   ("web/test.js", include_str!("../../web/test.js")),
+  ("web/contexts.js", include_str!("../../web/contexts.js")),
 ];
 
 /// The CSP that wui will send with the pages that run lem, which the web
@@ -392,5 +423,40 @@ fn the_web_pages_run_only_the_crates_files() {
     let why = (faults.len() != 1).then(|| format!("{html} gives {faults:?}"));
     results.push((format!("a broken page, {}", i + 1), why));
   }
+  report(results);
+}
+
+#[test]
+fn the_compiled_files_are_up_to_date() {
+  let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/web/compiled");
+  let (_, file, text) = THEMES[0];
+  let contexts = glem::compile::compile(&program((file, text), &["contexts.lem"]));
+  let form = json::parse(&contexts).expect("the compiled form is JSON");
+  let tests = object([("program", form)]);
+  write_web(
+    "contexts_tests.js",
+    "CONTEXTS_TESTS",
+    "src/glui/tests.rs",
+    &tests,
+  );
+  let mut files = vec![("contexts.json".to_string(), contexts)];
+  for (name, file, text) in THEMES {
+    let form = glem::compile::compile(&program((file, text), &[]));
+    files.push((format!("theme-{name}.json"), form));
+  }
+  let results = files
+    .into_iter()
+    .map(|(name, want)| {
+      let path = format!("{dir}/{name}");
+      let why = match std::fs::read_to_string(&path) {
+        Err(e) => Some(format!("{path}: {e}; `make compiled` writes it")),
+        Ok(got) if got != want => {
+          Some("it's out of date: `make compiled` writes it anew".to_string())
+        }
+        Ok(_) => None,
+      };
+      (format!("web/compiled/{name}"), why)
+    })
+    .collect();
   report(results);
 }

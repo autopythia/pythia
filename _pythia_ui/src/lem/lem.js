@@ -598,7 +598,18 @@ var lem = (function () {
     this.facts = new Map();
     this.sorted = null;
     this.indexes = new Map();
+    // For the host's facts in a relation with a key, the facts by their
+    // key's values (putKeyed), which only the host's changes keep.
+    this.keyed = null;
   }
+
+  // How many facts it has: a join's bucket can be a whole table, whose
+  // size counts before it's walked, which sorts it.
+  Object.defineProperty(Table.prototype, "length", {
+    get: function () {
+      return this.facts.size;
+    }
+  });
 
   // The facts, in order.
   Table.prototype.tuples = function () {
@@ -639,11 +650,49 @@ var lem = (function () {
     return true;
   };
 
-  // The facts themselves, to change otherwise: so the indexes go.
+  // The facts themselves, to change otherwise: so the indexes go, and the
+  // facts by key.
   Table.prototype.change = function () {
     this.indexes = new Map();
     this.sorted = null;
+    this.keyed = null;
     return this.facts;
+  };
+
+  // The host's fact, in place of the one with its values in the columns
+  // `cols`, the relation's key. The facts by key, made once, find that
+  // one, so that the host's facts take time linear in their number.
+  Table.prototype.putKeyed = function (tuple, cols) {
+    var keyed = this.keyed;
+    if (keyed === null) {
+      keyed = new Map();
+      this.facts.forEach(function (entry) {
+        keyed.set(key(project(entry.tuple, cols)), entry.tuple);
+      });
+    }
+    var k = key(project(tuple, cols));
+    var old = keyed.get(k);
+    var facts = this.change();
+    if (old !== undefined) {
+      facts.delete(key(old));
+    }
+    facts.set(key(tuple), { tuple: tuple, why: HOST });
+    keyed.set(k, tuple);
+    this.keyed = keyed;
+  };
+
+  // Removes the host's fact from a relation whose key is `cols`, and from
+  // the facts by key: whether it held.
+  Table.prototype.removeKeyed = function (tuple, cols) {
+    var keyed = this.keyed;
+    var held = this.change().delete(key(tuple));
+    if (keyed !== null) {
+      if (held) {
+        keyed.delete(key(project(tuple, cols)));
+      }
+      this.keyed = keyed;
+    }
+    return held;
   };
 
   // A fact, and why it holds, in place of one with its values.
@@ -684,6 +733,53 @@ var lem = (function () {
       return new Table();
     });
     this.visited = 0;
+    // The components that a tick skips, unless the host asks for one of
+    // their relations, which the next tick derives: `asked`.
+    this.skip = skipped(prog, []);
+    this.asked = [];
+  }
+
+  // The components that a tick skips: those whose relations are all lazy,
+  // and that nothing derived reads: no rule of a relation that's derived,
+  // no `on` block, and not the host, which asks for the relations `asked`.
+  // Their relations have no facts.
+  function skipped(prog, asked) {
+    var read = prog.rels.map(function (rel) {
+      return rel.lazy !== true;
+    });
+    asked.forEach(function (r) {
+      read[r] = true;
+    });
+    var todo = [];
+    read.forEach(function (yes, r) {
+      if (yes) {
+        todo.push(r);
+      }
+    });
+    function reads(body) {
+      body.forEach(function (lit) {
+        if ((lit.tag === "atom" || lit.tag === "not") && !read[lit.rel]) {
+          read[lit.rel] = true;
+          todo.push(lit.rel);
+        }
+      });
+    }
+    prog.actions.forEach(function (action) {
+      reads(action.body);
+    });
+    while (todo.length > 0) {
+      var r = todo.pop();
+      prog.rules.forEach(function (rule) {
+        if (rule.head === r) {
+          reads(rule.body);
+        }
+      });
+    }
+    return prog.components.map(function (c) {
+      return c.rels.every(function (rel) {
+        return !read[rel];
+      });
+    });
   }
 
   // The facts that the last tick's joins visited: a measure of its work,
@@ -721,15 +817,17 @@ var lem = (function () {
     this.input(r);
     var cols = this.prog.rels[r].key;
     if (cols.length > 0) {
-      this.tables[r].dropKey(tuple, cols);
+      this.tables[r].putKeyed(tuple, cols);
+    } else {
+      this.tables[r].put(tuple, HOST);
     }
-    this.tables[r].put(tuple, HOST);
   };
 
   // Retracts the host's fact: whether it held.
   Runtime.prototype.retractTuple = function (r, tuple) {
     this.input(r);
-    return this.tables[r].remove(tuple);
+    var cols = this.prog.rels[r].key;
+    return cols.length > 0 ? this.tables[r].removeKeyed(tuple, cols) : this.tables[r].remove(tuple);
   };
 
   // A message, from JSON.
@@ -762,6 +860,7 @@ var lem = (function () {
       if (prog.rel(items[1]) < 0) {
         fail("there's no relation `" + items[1] + "`");
       }
+      this.asked.push(prog.rel(items[1]));
       script.show.push(items[1]);
     } else if (items.length === 2 && named && tag === "error") {
       fail(items[1]);
@@ -917,8 +1016,17 @@ var lem = (function () {
         self.tables[r].change().clear();
       }
     });
-    for (var c = 0; c < this.prog.components.length; c++) {
-      this.component(c);
+    var prog = this.prog;
+    var asked = this.asked;
+    this.asked = [];
+    var lazy = asked.some(function (r) {
+      return prog.rels[r].lazy === true;
+    });
+    var skip = lazy ? skipped(prog, asked) : this.skip;
+    for (var c = 0; c < prog.components.length; c++) {
+      if (!skip[c]) {
+        this.component(c);
+      }
     }
   };
 
@@ -1010,8 +1118,10 @@ var lem = (function () {
   // Joins the first `atoms` parts of a body, the atoms, `left` of which
   // aren't `taken`: of those that are ready, it looks each up by the
   // columns bound so far; fails if one has no facts; and else takes the
-  // one with the fewest, the first written on a tie. Then the rest of the
-  // body, in order.
+  // one with the fewest, the first written on a tie. An atom that binds no
+  // variable is a test, which it takes as soon as it's ready: the join
+  // goes on once if a fact matches it, rather than once for each fact.
+  // Then the rest of the body, in order.
   Runtime.prototype.join = function (body, atoms, taken, left, env, delta, out) {
     if (left === 0) {
       this.rest(body, atoms, env, out);
@@ -1032,6 +1142,14 @@ var lem = (function () {
       }
       var fresh = delta !== null && delta.at === at ? delta.fresh : null;
       var tuples = this.bucket(atom, cols, env, fresh);
+      if (!bindsAny(atom.pats, env)) {
+        if (this.matchesOne(atom.pats, tuples, env)) {
+          taken[at] = true;
+          this.join(body, atoms, taken, left - 1, env, delta, out);
+          taken[at] = false;
+        }
+        return;
+      }
       if (left === 1) {
         best = at;
         bucket = tuples;
@@ -1049,6 +1167,9 @@ var lem = (function () {
       fail("no atom is ready to join (a bug in lem's checker)");
     }
     var pats = body[best].pats;
+    if (bucket instanceof Table) {
+      bucket = bucket.tuples();
+    }
     taken[best] = true;
     for (var i = 0; i < bucket.length; i++) {
       this.visited++;
@@ -1059,6 +1180,52 @@ var lem = (function () {
       unbind(env, trail);
     }
     taken[best] = false;
+  };
+
+  // Whether a pattern binds a variable: one that isn't bound yet.
+  function binds(pat, env) {
+    switch (pat[0]) {
+      case "var":
+        return env[pat[1]] === undefined;
+      case "ctor":
+        return bindsAny(pat[2], env);
+    }
+    return false;
+  }
+
+  function bindsAny(pats, env) {
+    for (var i = 0; i < pats.length; i++) {
+      if (binds(pats[i], env)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Whether one of `tuples` matches an atom's patterns, which bind no
+  // variable, visiting them in order, up to the first that does: of a
+  // whole table's, which patterns of `_` alone all match, the first.
+  Runtime.prototype.matchesOne = function (pats, tuples, env) {
+    if (tuples instanceof Table) {
+      var any = pats.every(function (pat) {
+        return pat[0] === "any";
+      });
+      if (any && tuples.length > 0) {
+        this.visited++;
+        return true;
+      }
+      tuples = tuples.tuples();
+    }
+    for (var i = 0; i < tuples.length; i++) {
+      this.visited++;
+      var trail = [];
+      var matched = this.matchAll(pats, tuples[i], env, trail);
+      unbind(env, trail);
+      if (matched) {
+        return true;
+      }
+    }
+    return false;
   };
 
   // Whether the variables `needs` are bound.
@@ -1092,7 +1259,7 @@ var lem = (function () {
   // from its relation.
   Runtime.prototype.bucket = function (atom, cols, env, fresh) {
     if (cols.length === 0) {
-      return fresh !== null ? fresh.tuples : this.tables[atom.rel].tuples();
+      return fresh !== null ? fresh.tuples : this.tables[atom.rel];
     }
     var values = [];
     for (var i = 0; i < cols.length; i++) {
@@ -1135,17 +1302,9 @@ var lem = (function () {
         }
         return;
       case "not":
-        var tuples = this.bucket(lit, lit.key, env, null);
-        for (var i = 0; i < tuples.length; i++) {
-          this.visited++;
-          var trail = [];
-          var found = this.matchAll(lit.pats, tuples[i], env, trail);
-          unbind(env, trail);
-          if (found) {
-            return;
-          }
+        if (!this.matchesOne(lit.pats, this.bucket(lit, lit.key, env, null), env)) {
+          this.rest(body, at + 1, env, out);
         }
-        this.rest(body, at + 1, env, out);
         return;
     }
     fail("a body's atoms come first (a bug in lem's checker)");

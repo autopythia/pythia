@@ -54,3 +54,10 @@ Next(5)
 ---
 Reached(0)
 Reached(1)
+
+=== an atom that binds nothing, checked once
+? Edged
+---
+Edged(1)
+Edged(2)
+Edged(5)

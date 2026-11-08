@@ -260,13 +260,15 @@ var glui = (function () {
     }
   }
 
-  // A log's entry: its mark, label and text, then its children. With
-  // `fold`, it's a details element, whose summary shows the first three,
-  // and which sends Toggled when it opens or closes; its children show
-  // when it's open.
+  // A log's entry: its mark, label and text, then its children. Its mark
+  // links to `to`, if that's one of the host's own paths, as a link does;
+  // and to nothing for "". With `fold`, it's a details element, whose
+  // summary shows the first three, and which sends Toggled when it opens or
+  // closes; its children show when it's open.
   function entry(w, view) {
     var e = element(view, "div");
-    var mark = element(view, "span", "g-entry-mark");
+    var mark = element(view, "a");
+    takesReturn(mark);
     var label_ = element(view, "span", "g-entry-label");
     var gist = element(view, "span", "g-entry-text");
     var body = element(view, "div", "g-entry-body");
@@ -299,7 +301,10 @@ var glui = (function () {
       if (folds !== w.fields.fold) {
         build(w.fields.fold);
       }
+      var to = w.fields.to;
       text(mark, w.fields.mark);
+      attr(mark, "class", to === "" || own(to) ? "g-entry-mark" : "g-entry-mark g-refused");
+      attr(mark, "href", to !== "" && own(to) ? to : null);
       text(label_, w.fields.label);
       text(gist, w.fields.text);
       return ["g-entry"].concat(w.fields.fold ? ["g-fold"] : [], tone(w.fields.tone));

@@ -1,0 +1,65 @@
+-- contexts.lem: pythia's contexts, as wui serves them (wui/ in pythia): the
+-- index of contexts, or one context's log, a page each, in glui's widgets.
+-- The host sends a page's facts; an entry's body comes once it's opened,
+-- when the program asks for it (Load). In a browser, web/contexts.js is
+-- the host's part.
+type CtxId = Text
+
+-- A page: its title; for a log, where each item has a page of its own:
+-- `items`, then its line; and links to other pages, in order.
+input Page(title: Text, items: Text = "")
+input Nav(n: Int, text: Text, to: Text) key n
+
+-- The index: each context, by `rank`, the last changed first.
+input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text) key id
+
+-- A log: its turns; its items, by line, each in a turn, with its tone, its
+-- label and gist, and whether it has a body; and for an item that was
+-- opened, its body's parts, or why the host couldn't send them.
+input Turn(n: Int, title: Text) key n
+input Item(line: Int, turn: Int, tone: Tone, label: Text, gist: Text, body: Bool) key line
+input Body(line: Int, part: Int, text: Text, diff: Bool) key line, part
+input Failed(line: Int, why: Text) key line
+
+-- What the program asks the host for: an item's body, when it's opened.
+effect Load(line: Int)
+state Asked(line: Int) key line
+
+id Top, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
+id Log, TurnBox(Int), Ent(Int), Part(Int, Int), Wait(Int)
+
+Window(Top, title=t) :- Page(t, items):
+  Heading(Title, text=t)
+  Row(Crumbs) :- Nav():
+    for Nav(n, text, to):
+      Link(Crumb(n), text=text, to=to, order=n)
+  Table(Rows) :- Context():
+    TableRow(Head, header=True, order=-1):
+      Label(Col(0), text="Context")
+      Label(Col(1), text="Title")
+      Label(Col(2), text="Model")
+      Label(Col(3), text="Turns")
+      Label(Col(4), text="Lines")
+      Label(Col(5), text="Size")
+      Label(Col(6), text="Changed")
+    for Context(c, title, model, turns, lines, size, changed, rank, to):
+      TableRow(Ctx(c), order=rank):
+        Link(Cell(c, 0), text=text(c), to=to)
+        Label(Cell(c, 1), text=title)
+        Label(Cell(c, 2), text=model, tone=Dim)
+        Label(Cell(c, 3), text=text(turns))
+        Label(Cell(c, 4), text=text(lines))
+        Label(Cell(c, 5), text=size)
+        Label(Cell(c, 6), text=changed, tone=Dim)
+  Box(Log) :- Turn():
+    for Turn(n, title):
+      Panel(TurnBox(n), title=title, order=n):
+        for Item(l, n, tone, label, gist, body):
+          Entry(Ent(l), label=label, text=gist, mark=text(l), tone=tone, fold=body, to=items + text(l), order=l):
+            Code(Part(l, k), text=b, diff=d, order=k) :- Body(l, k, b, d)
+            Label(Wait(l), text="loading", tone=Dim) :- Asked(l), not Body(line=l), not Failed(line=l)
+            Label(Wait(l), text="couldn't load it: " + why, tone=Error) :- Failed(l, why), not Body(line=l)
+
+on Toggled(Ent(l), True):
+  Asked(l) :- Item(line=l, body=True), not Body(line=l)
+  Load(l) :- Item(line=l, body=True), not Body(line=l)

@@ -14,7 +14,8 @@
 //! - `lem/test/joins_ticks.txt` runs `lem/test/joins.lem`: bodies that the
 //!   runtime joins in the order that their facts ask for.
 //!
-//! And a join's work, as the facts it visits, where the order matters.
+//! And a join's work, as the facts it visits, where the order matters, and
+//! where an atom binds nothing; and the work that a lazy relation saves.
 
 use super::check::load;
 use super::eval::Runtime;
@@ -81,6 +82,52 @@ fn a_join_takes_the_smallest_bucket_first() {
   runtime.tick(None).unwrap();
   assert!(runtime.facts("Tri").is_empty());
   assert_eq!(runtime.visits(), 4 * n);
+}
+
+#[test]
+fn an_atom_that_binds_nothing_is_a_test() {
+  // A block's head, such as `Window(Top) :- Page():`, gives each widget in
+  // it an atom that binds no variable. The join checks that atom once, and
+  // doesn't walk its facts for each solution: n facts take n + 1 visits,
+  // not n² + n. And an `on` block sends its effect once, not once a fact.
+  let src = "input A(n: Int)\nrel B(n: Int)\nB(n) :- A(), A(n)\n\
+             msg Go\neffect Went(n: Int)\non Go:\n  Went(1) :- A()\n";
+  let prog = load(&[("test.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  let n = 1000;
+  for i in 0..n {
+    runtime.assert(&format!("A({i})")).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.facts("B").len() as u64, n);
+  assert_eq!(runtime.visits(), n + 1);
+  let shown = runtime.script("! Go").unwrap();
+  assert_eq!(shown.matches("effect Went(1)").count(), 1, "{shown}");
+}
+
+#[test]
+fn a_lazy_relation_is_derived_only_when_something_reads_it() {
+  // A tick skips `Far`, which is lazy, and which nothing reads, unless the
+  // host asks for it; it derives `Near`, which is lazy, for `Seen`.
+  let src = "input E(a: Int, b: Int)\n\
+             rel Far(a: Int, b: Int) lazy\nFar(a, c) :- E(a, b), E(b, c)\n\
+             rel Near(a: Int) lazy\nNear(a) :- E(a, b)\n\
+             rel Seen(a: Int)\nSeen(a) :- Near(a)\n";
+  let prog = load(&[("lazy.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  for i in 0..10 {
+    runtime.assert(&format!("E({i}, {})", i + 1)).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  assert!(runtime.facts("Far").is_empty());
+  assert_eq!(runtime.facts("Seen").len(), 10);
+  let skipping = runtime.visits();
+  let shown = runtime.script("? Far").unwrap();
+  assert_eq!(shown.lines().count(), 9, "{shown}");
+  assert!(runtime.visits() > skipping);
+  runtime.tick(None).unwrap();
+  assert!(runtime.facts("Far").is_empty());
+  assert_eq!(runtime.visits(), skipping);
 }
 
 #[test]

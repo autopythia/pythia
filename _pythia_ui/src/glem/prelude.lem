@@ -2,9 +2,10 @@
 -- `Parent` for every widget; the runtime around glem fills in where the
 -- pointer and the keyboard are, and sends what keys say.
 
--- The tree: each widget's parent, and what each is within.
+-- The tree: each widget's parent, and what each is within, which only a
+-- program that reads it derives (`lazy`).
 rel Parent(id: Id, parent: Id) key id
-rel Within(id: Id, outer: Id)
+rel Within(id: Id, outer: Id) lazy
 Within(w, p) :- Parent(w, p)
 Within(w, a) :- Parent(w, p), Within(p, a)
 

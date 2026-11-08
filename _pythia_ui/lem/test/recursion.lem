@@ -25,3 +25,14 @@ Pick(0, n) :- Pick(1, n)
 Pick(1, n) :- Seed(n)
 Pick(0, 5) :- Seed(5)
 Pick(0, 6) :- Seed(6)
+
+-- Lazy relations: a tick derives one only when something derived reads it,
+-- or the host asks for it. Nothing reads Reach; Loop, which isn't lazy,
+-- reads Back.
+rel Reach(a: Int, b: Int) lazy
+Reach(a, b) :- Path(a, b)
+Reach(a, a) :- Edge(a, b)
+rel Back(a: Int, b: Int) lazy
+Back(b, a) :- Edge(a, b)
+rel Loop(a: Int)
+Loop(a) :- Edge(a, b), Back(a, b)

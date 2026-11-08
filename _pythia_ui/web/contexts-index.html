@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" data-facts="../target/web/sample/index.json">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self'; connect-src 'self'; style-src 'self'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- web/contexts-index.html: a sample of the index of pythia's contexts, as wui will
+     serve it: contexts.js shows the facts that the html element names,
+     which `make web` writes (tools/contexts_sample.py); `make web-serve`
+     serves it. -->
+<title>Contexts</title>
+<link rel="stylesheet" href="glui.css">
+<link rel="stylesheet" href="native.css">
+<link rel="stylesheet" href="log.css">
+<link rel="stylesheet" href="contexts.css">
+</head>
+<body>
+<script src="../src/lem/lem.js"></script>
+<script src="../src/glem/glem.js"></script>
+<script src="../src/glui/glui.js"></script>
+<script src="contexts.js"></script>
+</body>
+</html>

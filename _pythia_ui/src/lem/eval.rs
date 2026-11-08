@@ -92,10 +92,13 @@ fn index<'a>(
 
 /// A relation's facts, and why each holds; and indexes on them, which only
 /// [`Table::derive`] keeps as facts change: every other change drops them.
+/// And, for the host's facts in a relation with a key, the facts by their
+/// key's values ([`Table::put_keyed`]), which only the host's changes keep.
 #[derive(Default)]
 struct Table {
   facts: BTreeMap<Tuple, Why>,
   indexes: Indexes,
+  keyed: Option<HashMap<Vec<Value>, Tuple>>,
 }
 
 impl Table {
@@ -127,10 +130,46 @@ impl Table {
     }
   }
 
-  /// The facts themselves, to change otherwise: so the indexes go.
+  /// The facts themselves, to change otherwise: so the indexes go, and the
+  /// facts by key.
   fn facts_mut(&mut self) -> &mut BTreeMap<Tuple, Why> {
     self.indexes.get_mut().clear();
+    self.keyed = None;
     &mut self.facts
+  }
+
+  /// The host's fact, in place of the one with its values in the columns
+  /// `cols`, the relation's key. The facts by key, made once, find that
+  /// one, so that the host's facts take time linear in their number.
+  fn put_keyed(&mut self, tuple: Tuple, cols: &[usize]) {
+    let mut keyed = match self.keyed.take() {
+      Some(keyed) => keyed,
+      None => self
+        .facts
+        .keys()
+        .map(|t| (project(t, cols), t.clone()))
+        .collect(),
+    };
+    let facts = self.facts_mut();
+    if let Some(old) = keyed.insert(project(&tuple, cols), tuple.clone()) {
+      facts.remove(&old);
+    }
+    facts.insert(tuple, Why::Host);
+    self.keyed = Some(keyed);
+  }
+
+  /// Removes the host's fact from a relation whose key is `cols`, and from
+  /// the facts by key: whether it held.
+  fn remove_keyed(&mut self, tuple: &Tuple, cols: &[usize]) -> bool {
+    let keyed = self.keyed.take();
+    let held = self.facts_mut().remove(tuple).is_some();
+    if let Some(mut keyed) = keyed {
+      if held {
+        keyed.remove(&project(tuple, cols));
+      }
+      self.keyed = Some(keyed);
+    }
+    held
   }
 }
 
@@ -206,16 +245,23 @@ pub struct Runtime {
   tables: Vec<Table>,
   /// The facts that the last tick's joins visited.
   visits: Cell<u64>,
+  /// The components that a tick skips ([`skipped`]), unless the host asks
+  /// for one of their relations, which the next tick derives: `asked`.
+  skip: Vec<bool>,
+  asked: Vec<usize>,
 }
 
 impl Runtime {
   pub fn new(prog: Program) -> Runtime {
     let tables = prog.rels.iter().map(|_| Table::default()).collect();
     let visits = Cell::new(0);
+    let skip = skipped(&prog, &[]);
     Runtime {
       prog,
       tables,
       visits,
+      skip,
+      asked: Vec::new(),
     }
   }
 
@@ -265,19 +311,22 @@ impl Runtime {
   /// replaces the fact with its key.
   pub fn assert_tuple(&mut self, rel: usize, tuple: Tuple) -> Result<(), String> {
     self.input(rel)?;
-    let key: Vec<usize> = self.prog.rels[rel].key.clone();
-    let facts = self.tables[rel].facts_mut();
-    if !key.is_empty() {
-      facts.retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
+    let key = &self.prog.rels[rel].key;
+    match key.is_empty() {
+      true => _ = self.tables[rel].facts_mut().insert(tuple, Why::Host),
+      false => self.tables[rel].put_keyed(tuple, key),
     }
-    facts.insert(tuple, Why::Host);
     Ok(())
   }
 
   /// Retracts the host's fact; whether it held.
   pub fn retract_tuple(&mut self, rel: usize, tuple: &Tuple) -> Result<bool, String> {
     self.input(rel)?;
-    Ok(self.tables[rel].facts_mut().remove(tuple).is_some())
+    let key = &self.prog.rels[rel].key;
+    Ok(match key.is_empty() {
+      true => self.tables[rel].facts_mut().remove(tuple).is_some(),
+      false => self.tables[rel].remove_keyed(tuple, key),
+    })
   }
 
   /// Whether the host may change a relation: only an `input` one.
@@ -333,6 +382,7 @@ impl Runtime {
         Err(format!("there's no relation `{rel}`"))
       }
       Step::Show(rel) => {
+        self.asked.extend(self.prog.rel(&rel));
         script.show.push(rel);
         Ok(())
       }
@@ -467,8 +517,15 @@ impl Runtime {
         table.facts_mut().clear();
       }
     }
-    for c in 0..self.prog.components.len() {
-      self.component(c)?;
+    let asked = std::mem::take(&mut self.asked);
+    let skip = match asked.iter().any(|&r| self.prog.rels[r].lazy) {
+      true => skipped(&self.prog, &asked),
+      false => self.skip.clone(),
+    };
+    for (c, skip) in skip.into_iter().enumerate() {
+      if !skip {
+        self.component(c)?;
+      }
     }
     Ok(())
   }
@@ -603,6 +660,36 @@ fn insert(tables: &mut [Table], new: New) -> BTreeMap<usize, Vec<Tuple>> {
   fresh
 }
 
+/// The components that a tick skips: those whose relations are all lazy,
+/// and that nothing derived reads: no rule of a relation that's derived, no
+/// `on` block, and not the host, which asks for the relations `asked`.
+/// Their relations have no facts.
+fn skipped(prog: &Program, asked: &[usize]) -> Vec<bool> {
+  let mut read: Vec<bool> = prog.rels.iter().map(|rel| !rel.lazy).collect();
+  asked.iter().for_each(|&r| read[r] = true);
+  let mut todo: Vec<usize> = (0..prog.rels.len()).filter(|&r| read[r]).collect();
+  let reads = |body: &[Lit], read: &mut Vec<bool>, todo: &mut Vec<usize>| {
+    for lit in body {
+      if let Lit::Atom(atom) | Lit::Not(atom) = lit {
+        if !read[atom.rel] {
+          read[atom.rel] = true;
+          todo.push(atom.rel);
+        }
+      }
+    }
+  };
+  for action in &prog.actions {
+    reads(&action.body, &mut read, &mut todo);
+  }
+  while let Some(r) = todo.pop() {
+    for rule in prog.rules.iter().filter(|rule| rule.head == r) {
+      reads(&rule.body, &mut read, &mut todo);
+    }
+  }
+  let comps = prog.components.iter();
+  comps.map(|c| c.rels.iter().all(|&r| !read[r])).collect()
+}
+
 /// Adds rule `r`'s solutions to `new`, as (relation, fact, rule).
 fn solutions(prog: &Program, j: Join, r: usize, delta: Delta, new: &mut New) -> Result<(), String> {
   let rule = &prog.rules[r];
@@ -645,7 +732,10 @@ fn solve(
 /// Joins the first `atoms` parts of a body, the atoms, whose bits are set in
 /// `left`: of those that are ready, it looks each up by the columns bound so
 /// far; fails if one has no facts; and else takes the one with the fewest,
-/// the first written on a tie. Then the rest of the body, in order.
+/// the first written on a tie. An atom that binds no variable is a test,
+/// which it takes as soon as it's ready: the join goes on once if a fact
+/// matches it, rather than once for each fact. Then the rest of the body, in
+/// order.
 fn join(
   j: Join,
   body: &[Lit],
@@ -672,6 +762,12 @@ fn join(
       .collect();
     let fresh = delta.filter(|(place, _)| *place == at).map(|(_, f)| f);
     let bucket = bucket(j, atom, &cols, env, fresh)?;
+    if !atom.pats.iter().any(|pat| binds(pat, env)) {
+      if !matches_one(j, atom, &bucket, env)? {
+        return Ok(());
+      }
+      return join(j, body, atoms, left & !(1 << at), env, delta, out);
+    }
     if alone {
       best = Some((0, at, bucket));
       break;
@@ -727,6 +823,30 @@ fn bucket<'a>(
   Ok(Bucket::Index(index, key))
 }
 
+/// Whether a pattern binds a variable: one that isn't bound yet.
+fn binds(pat: &Pat, env: &Env) -> bool {
+  match pat {
+    Pat::Var(v) => env[*v].is_none(),
+    Pat::Ctor(_, pats) => pats.iter().any(|pat| binds(pat, env)),
+    Pat::Any | Pat::Const(_) | Pat::Expr(_) => false,
+  }
+}
+
+/// Whether a fact in a bucket matches an atom that binds no variable, or a
+/// negation's, visiting them in order, up to the first that does.
+fn matches_one(j: Join, atom: &Atom, bucket: &Bucket, env: &mut Env) -> Result<bool, String> {
+  for tuple in bucket.tuples() {
+    j.visits.set(j.visits.get() + 1);
+    let mut trail = Vec::new();
+    let matched = match_all(&atom.pats, tuple, env, &mut trail)?;
+    trail.iter().for_each(|&v| env[v] = None);
+    if matched {
+      return Ok(true);
+    }
+  }
+  Ok(false)
+}
+
 /// Whether a pattern's value is known, from the variables bound so far: in
 /// an atom that's ready, an expression's is.
 fn known(pat: &Pat, env: &Env) -> bool {
@@ -763,16 +883,10 @@ fn rest(
     Lit::Test(_) | Lit::NotTest(_) => Ok(()),
     Lit::Not(atom) => {
       let bucket = bucket(j, atom, &atom.key, env, None)?;
-      for tuple in bucket.tuples() {
-        j.visits.set(j.visits.get() + 1);
-        let mut trail = Vec::new();
-        let found = match_all(&atom.pats, tuple, env, &mut trail)?;
-        trail.iter().for_each(|&v| env[v] = None);
-        if found {
-          return Ok(());
-        }
+      match matches_one(j, atom, &bucket, env)? {
+        true => Ok(()),
+        false => rest(j, body, at + 1, env, out),
       }
-      rest(j, body, at + 1, env, out)
     }
   }
 }

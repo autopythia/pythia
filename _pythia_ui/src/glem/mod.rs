@@ -79,11 +79,13 @@ pub struct Node {
   pub why: Why,
 }
 
-/// A glem program's runtime: lem's, and the widget tree.
+/// A glem program's runtime: lem's, and the widget tree, as the last tick
+/// left it.
 pub struct Runtime {
   pub lem: eval::Runtime,
   kinds: Vec<(usize, Kind)>,
   keep: Vec<usize>,
+  nodes: Vec<Node>,
 }
 
 impl Runtime {
@@ -92,15 +94,16 @@ impl Runtime {
       lem: eval::Runtime::new(prog.lem),
       kinds: prog.kinds,
       keep: prog.keep,
+      nodes: Vec::new(),
     }
   }
 
   /// One tick: lem's ([`eval::Runtime::tick`]), then the tree's checks,
   /// then dropping the state whose widget is gone. Gives the effects that
-  /// the `on` blocks sent.
+  /// the `on` blocks sent, and keeps the tree, which the outline shows.
   pub fn tick(&mut self, msg: Option<&Value>) -> Result<Vec<Effect>, String> {
     let effects = self.lem.tick(msg)?;
-    self.tree()?;
+    self.nodes = self.tree()?;
     self.drop_orphans();
     Ok(effects)
   }
@@ -117,7 +120,7 @@ impl Runtime {
   /// gives what [`Runtime::script`] gives.
   pub fn run(&mut self, script: &Script, notes: Notes) -> Result<String, String> {
     let effects = self.tick(script.msg.as_ref())?;
-    let mut out = self.outline(notes)?;
+    let mut out = self.outline(notes);
     if out.is_empty() {
       out.push_str("(no widgets)\n");
     }
@@ -202,11 +205,12 @@ impl Runtime {
     Ok(out)
   }
 
-  /// The widget tree as text: a widget a line, indented under its parent,
-  /// with its own fields by name, then its notes, if any.
-  pub fn outline(&self, notes: Notes) -> Result<String, String> {
+  /// The widget tree, as the last tick left it, as text: a widget a line,
+  /// indented under its parent, with its own fields by name, then its
+  /// notes, if any.
+  pub fn outline(&self, notes: Notes) -> String {
     let mut out = String::new();
-    for node in self.tree()? {
+    for node in &self.nodes {
       let r = &self.lem.prog.rels[node.rel];
       let n = r.fields.len();
       let own = if self.is_widget(node.rel) {
@@ -227,16 +231,13 @@ impl Runtime {
       }
       out.push('\n');
     }
-    Ok(out)
+    out
   }
 
   /// Drops the `state` facts that name a widget that's gone, unless their
-  /// relation says `keep`.
+  /// relation says `keep`. Only state that names a widget, and has facts,
+  /// asks for the widgets' ids.
   fn drop_orphans(&mut self) {
-    let mut live = BTreeSet::new();
-    for &(rel, _) in &self.kinds {
-      live.extend(self.lem.rel_facts(rel).map(|(tuple, _)| tuple[0].clone()));
-    }
     let id = Ty::Named("Id".into());
     let rels = &self.lem.prog.rels;
     let doomed: Vec<(usize, Vec<usize>)> = (0..rels.len())
@@ -248,12 +249,20 @@ impl Runtime {
           (0..fields.len()).filter(|&i| fields[i].ty == id).collect(),
         )
       })
+      .filter(|(rel, columns): &(usize, Vec<usize>)| {
+        !columns.is_empty() && self.lem.rel_facts(*rel).next().is_some()
+      })
       .collect();
+    if doomed.is_empty() {
+      return;
+    }
+    let mut live = BTreeSet::new();
+    for &(rel, _) in &self.kinds {
+      live.extend(self.lem.rel_facts(rel).map(|(tuple, _)| tuple[0].clone()));
+    }
     for (rel, columns) in doomed {
-      if !columns.is_empty() {
-        let gone = |tuple: &Tuple| columns.iter().any(|&i| !live.contains(&tuple[i]));
-        self.lem.drop_facts(rel, gone);
-      }
+      let gone = |tuple: &Tuple| columns.iter().any(|&i| !live.contains(&tuple[i]));
+      self.lem.drop_facts(rel, gone);
     }
   }
 }

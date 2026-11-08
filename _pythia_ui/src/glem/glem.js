@@ -83,10 +83,12 @@ var glem = (function () {
     return j;
   }
 
-  // A glem program's runtime: lem's (lem.Runtime), and the widget tree.
+  // A glem program's runtime: lem's (lem.Runtime), and the widget tree, as
+  // the last tick left it, in `nodes`.
   function Runtime(prog) {
     this.prog = prog;
     this.lem = new lem.Runtime(prog.lem);
+    this.nodes = [];
   }
 
   // One tick: lem's, then the tree's checks, then dropping the state whose
@@ -94,7 +96,7 @@ var glem = (function () {
   // {rel, tuple}.
   Runtime.prototype.tick = function (msg) {
     var effects = this.lem.tick(msg);
-    this.tree();
+    this.nodes = this.tree();
     this.dropOrphans();
     return effects;
   };
@@ -205,13 +207,14 @@ var glem = (function () {
     return out;
   };
 
-  // The widget tree as lines of text: a widget a line, indented under its
-  // parent, with its own fields by name, then its notes, if any, which
-  // notes(lemRuntime, id), from the layer above, gives as a list.
+  // The widget tree, as the last tick left it, as lines of text: a widget a
+  // line, indented under its parent, with its own fields by name, then its
+  // notes, if any, which notes(lemRuntime, id), from the layer above, gives
+  // as a list.
   Runtime.prototype.outline = function (notes) {
     var prog = this.prog;
     var runtime = this.lem;
-    return this.tree().map(function (node) {
+    return this.nodes.map(function (node) {
       var rel = prog.lem.rels[node.rel];
       var fields = rel.fields;
       var end = prog.widget.get(node.rel) ? fields.length - 2 : fields.length;
@@ -227,16 +230,12 @@ var glem = (function () {
 
   // Drops the `state` facts that name a widget that's gone, unless their
   // relation says `keep`: those with a value of type Id that isn't a
-  // widget's or a surface's.
+  // widget's or a surface's. Only state that names a widget, and has
+  // facts, asks for the widgets' ids.
   Runtime.prototype.dropOrphans = function () {
     var runtime = this.lem;
-    var live = new Set();
-    this.prog.kinds.forEach(function (kind) {
-      runtime.relFacts(kind.rel).forEach(function (fact) {
-        live.add(lem.key(fact.tuple[0]));
-      });
-    });
     var keep = this.prog.keep;
+    var doomed = [];
     this.prog.lem.rels.forEach(function (rel, r) {
       if (rel.kind !== "state" || keep.indexOf(r) >= 0) {
         return;
@@ -247,13 +246,25 @@ var glem = (function () {
           cols.push(i);
         }
       });
-      if (cols.length > 0) {
-        runtime.dropFacts(r, function (tuple) {
-          return cols.some(function (i) {
-            return !live.has(lem.key(tuple[i]));
-          });
-        });
+      if (cols.length > 0 && runtime.tables[r].facts.size > 0) {
+        doomed.push({ rel: r, cols: cols });
       }
+    });
+    if (doomed.length === 0) {
+      return;
+    }
+    var live = new Set();
+    this.prog.kinds.forEach(function (kind) {
+      runtime.relFacts(kind.rel).forEach(function (fact) {
+        live.add(lem.key(fact.tuple[0]));
+      });
+    });
+    doomed.forEach(function (d) {
+      runtime.dropFacts(d.rel, function (tuple) {
+        return d.cols.some(function (i) {
+          return !live.has(lem.key(tuple[i]));
+        });
+      });
     });
   };
 
@@ -518,7 +529,7 @@ var glem = (function () {
   // it.
   View.prototype.render = function () {
     var prog = this.runtime.prog;
-    var nodes = this.runtime.tree();
+    var nodes = this.runtime.nodes;
     var next = new Map();
     var made = [];
     var changed = [];

@@ -21,3 +21,8 @@ OneWay(a, b) :- E(a, b), not E(b, a)
 input Never(n: Int)
 rel Reached(a: Int)
 Reached(a) :- E(a, b), E(b, c), Never(c)
+
+-- An atom that binds nothing is a test: the join checks it once, rather
+-- than once for each of its facts.
+rel Edged(n: Int)
+Edged(n) :- E(), A(n)

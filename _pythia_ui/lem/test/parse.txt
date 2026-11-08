@@ -8,5 +8,6 @@ test/recursion.lem
 test/joins.lem
 host.lem
 approval.lem
+contexts.lem
 test/page.lem
 test/form.lem

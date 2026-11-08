@@ -99,6 +99,6 @@ t.lem:4:3: a declaration can't be inside a block:
 === a name declared twice, with glem's prelude
 rel Parent(id: Id)
 ---
-t.lem:1:5: `Parent` is declared twice, first at src/glem/prelude.lem:6:5:
+t.lem:1:5: `Parent` is declared twice, first at src/glem/prelude.lem:7:5:
 rel Parent(id: Id)
     ^^^^^^
