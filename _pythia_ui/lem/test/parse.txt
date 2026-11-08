@@ -1,0 +1,5 @@
+# The files that lem's parse test reads, from lem/, as zinterp's
+# data/test/zinterp_mach.txt lists its own. Each must parse, and print as
+# text that parses to the same tree. (The test reads lem's prelude too.)
+test/syntax.lem
+test/jobs.lem

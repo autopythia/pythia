@@ -1,0 +1,29 @@
+-- Every form of sentence and term, some written loosely: the printer
+-- tidies them.
+type Count=Int
+enum Shape:
+  Dot, Line(length: Num)
+  Ring(Num, width: Num = 1.5)
+state Draft(field: Id, text: Text) key field keep
+input Seen(a: Int, b: Text, c: Time) key a, b
+rel Flag
+effect Beep
+
+Flag :- Seen(a=1)
+Out(x, y) :- In(x, y), not Gone(x), x /= y, x < 2, y >= -3, not x = 1
+Sum(n=a + b * c - -d / (e - f)) :- Nums(a, b, c, d, e, f)
+Quoted(t="tab\there \"quoted\" \\ é \u00e9") :- Flag
+Long(a, b, c) \
+  :- Wide(a, b,
+          c)
+Queried(x)?
+Qualified(x) :- Theme.Color(x)
+Root(R):
+  for A(x), B(x, _):
+    Child(C(x), order=-x)
+    Inner(I(x)) :- not D(x):
+      Leaf(L(x))
+on Go(x):
+  Draft(field=F, text="")
+  Send(Gone(x)) :- Seen(a=x)
+  del Draft(F, _) :- Done(x)

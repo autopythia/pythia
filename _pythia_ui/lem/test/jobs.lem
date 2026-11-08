@@ -1,0 +1,52 @@
+-- jobs.lem: a job queue, for lem's tests. It has no widgets, so that it
+-- runs on lem alone.
+type JobId = Text
+enum Priority:
+  Low, High
+input Job(id: JobId, name: Text, due: Time, priority: Priority = Low) key id
+input After(job: JobId, first: JobId)
+state Done(job: JobId, at: Time) key job
+state Note(job: JobId, text: Text) key job
+effect Tell(text: Text)
+msg Finish(job: JobId), Reopen(job: JobId), Annotate(job: JobId, text: Text)
+msg Twice(job: JobId), Redo(job: JobId)
+
+-- A job waits for the jobs before it, and for theirs (recursion). It's
+-- ready when it's open and nothing that it waits for is (negation).
+rel Waits(job: JobId, first: JobId)
+Waits(j, f) :- After(j, f)
+Waits(j, g) :- After(j, f), Waits(f, g)
+rel Open(job: JobId)
+Open(j) :- Job(id=j), not Done(job=j)
+rel Blocked(job: JobId)
+Blocked(j) :- Waits(j, f), Open(f)
+rel Ready(job: JobId)
+Ready(j) :- Open(j), not Blocked(j)
+
+-- How late an open job is, in minutes: `m = …` binds m.
+rel Late(job: JobId, minutes: Num)
+Late(j, m) :- Open(j), Job(id=j, due=d), Now(t), t > d, m = (t - d) / 60000
+
+-- Urgent: of high priority, and ready or late. `for` gives its body to
+-- each rule inside it.
+rel Urgent(job: JobId)
+for Job(id=j, priority=High):
+  Urgent(j) :- Ready(j)
+  Urgent(j) :- Late(j, _)
+
+on Finish(j):
+  Done(j, at=t) :- Now(t), Open(j)
+  Tell(text="finished " + name) :- Job(id=j, name=name), Open(j)
+on Reopen(j):
+  del Done(job=j)
+on Annotate(j, text):
+  Note(j, text=text)
+
+-- Errors: two notes for one job in one tick, and one fact both added and
+-- deleted.
+on Twice(j):
+  Note(j, text="one")
+  Note(j, text="two")
+on Redo(j):
+  Done(j, at=t) :- Done(job=j, at=t)
+  del Done(job=j)

@@ -1,0 +1,168 @@
+# Errors that lem's checker finds, each a case: `=== title`, the source of
+# t.lem, which loads after lem's prelude alone, `---`, then the error, as lem
+# shows it.
+
+=== a value of the wrong type, as in the design
+msg Go
+rel Choice(text: Text, on: Msg)
+Choice(text="Run now", on="go")
+---
+t.lem:3:27: Choice's `on` is a Msg, but this is a Text:
+Choice(text="Run now", on="go")
+                          ^^^^
+
+=== an unknown relation
+rel X(c: Text)
+X(c) :- Pnding(c)
+---
+t.lem:2:9: there's no relation `Pnding`:
+X(c) :- Pnding(c)
+        ^^^^^^
+
+=== a head's variable that no atom binds
+input Job(id: Text, name: Text)
+rel X(c: Text)
+X(c) :- Job()
+---
+t.lem:3:3: `c` isn't bound: an atom in the body must bind it:
+X(c) :- Job()
+  ^
+
+=== a variable only in a negation
+input Job(id: Text), Due(job: Text, at: Time)
+rel X(c: Text)
+X(c) :- Job(c), not Due(c, at)
+---
+t.lem:3:28: `at` isn't bound by an atom: write `_` to match anything:
+X(c) :- Job(c), not Due(c, at)
+                           ^^
+
+=== negation through recursion
+input Job(id: Text)
+rel A(c: Text), B(c: Text)
+A(c) :- Job(c), not B(c)
+B(c) :- A(c)
+---
+t.lem:3:1: A depends on `not B`, which depends on A, so lem can't order them:
+A(c) :- Job(c), not B(c)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+=== a rule that derives the host's facts
+input Job(id: Text)
+Job("a")
+---
+t.lem:2:1: the host sends `input` facts, so rules don't derive them:
+Job("a")
+^^^^^^^^
+
+=== a missing field
+input Job(id: Text)
+rel X(c: Text, n: Int)
+X(c) :- Job(c)
+---
+t.lem:3:1: X needs `n`:
+X(c) :- Job(c)
+^
+
+=== an unknown field
+input Job(id: Text)
+rel X(c: Text)
+X(d=c) :- Job(c)
+---
+t.lem:3:3: X has no field `d`:
+X(d=c) :- Job(c)
+  ^
+
+=== by position after by name
+rel X(a: Int, b: Int)
+X(a=1, 2)
+---
+t.lem:2:8: arguments by position come before those by name:
+X(a=1, 2)
+       ^
+
+=== a block, which lem gives no meaning
+rel X(c: Text)
+X("a"):
+  X("b")
+---
+t.lem:2:1: lem itself gives a block no meaning:
+X("a"):
+^^^^^^^
+
+=== a declaration word that lem doesn't know
+widget Label(text: Text)
+---
+t.lem:1:1: lem's declarations are `input`, `state`, `rel`, `effect`, `id` and `msg`, not `widget`:
+widget Label(text: Text)
+^^^^^^
+
+=== a flag that lem doesn't know
+state Draft(text: Text) keep
+---
+t.lem:1:25: there's no flag `keep` in lem:
+state Draft(text: Text) keep
+                        ^^^^
+
+=== constructors with a key
+id Top key x
+---
+t.lem:1:1: `id` declares constructors, which have no key or flags:
+id Top key x
+^^^^^^^^^^^^
+
+=== an on block that changes the host's facts
+input Allowed(what: Text)
+msg Go
+on Go:
+  Allowed("input")
+---
+t.lem:4:3: an `on` block adds `state` facts and sends effects, and Allowed is an `input` relation:
+  Allowed("input")
+  ^^^^^^^^^^^^^^^^
+
+=== a comparison of two types
+input Job(id: Text, due: Time)
+rel X(c: Text)
+X(c) :- Job(c, due), due = c
+---
+t.lem:3:22: this compares a Time with a Text:
+X(c) :- Job(c, due), due = c
+                     ^^^^^^^
+
+=== a type made with type doesn't mix with its base
+type JobId = Text
+input Job(id: JobId)
+rel X(t: Text)
+X(c) :- Job(c)
+---
+t.lem:4:3: X's `t` is a Text, but this is a JobId:
+X(c) :- Job(c)
+  ^
+
+=== an order on an enum
+enum Speed:
+  Fast, Slow
+input Set(speed: Speed)
+rel X(s: Speed)
+X(s) :- Set(s), s < Slow
+---
+t.lem:5:17: only numbers, times and text are ordered, not a Speed:
+X(s) :- Set(s), s < Slow
+                ^^^^^^^^
+
+=== arithmetic on text
+input Job(id: Text)
+rel X(n: Int)
+X(n=c + 1) :- Job(c)
+---
+t.lem:3:5: `+` doesn't take a Text and an Int:
+X(n=c + 1) :- Job(c)
+    ^^^^^
+
+=== a name declared twice, with lem's prelude
+rel Now(t: Int)
+---
+t.lem:1:5: `Now` is declared twice, first at src/lem/prelude.lem:4:7:
+rel Now(t: Int)
+    ^^^

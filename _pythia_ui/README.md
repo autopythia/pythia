@@ -145,6 +145,32 @@ void pythia_plugin_free(uint8_t *reply, size_t reply_len);
   (as `rsync`, `mv` and `install.py` do), never by writing into it: macOS can
   kill a process whose loaded library changes underneath it.
 
+## lem
+
+lem is a prototype of the rule language for pythia's GUI that
+`doc/pythia-ui-gui-design.md` designs: a typed, Datalog-like language.
+Rules derive facts from facts, with negation and recursion, and `on`
+blocks turn messages into state changes and effects, as Elm's update does.
+Its frontend follows the conventions of zinterp's Pratt parser
+(`_pythia/src/zinterp/parse.rs`). It runs on any system: `make test`
+checks it with the programs and cases in `lem/test/`, and the program
+runs ticks given on stdin, a tick at each blank line:
+
+```sh
+target/aarch64-apple-darwin/debug/pythia-ui lem lem/test/jobs.lem   # on the Mac
+cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/test/jobs.lem
+```
+
+```
++ Job("a", "write", 60000)
++ Now(120000)
+? Late
+```
+
+`+` asserts a fact for the host, `-` retracts one, `!` sends a message,
+and `?` names a relation whose facts to show after the tick. Each tick
+prints those facts, then the effects that it sends.
+
 ## Layout
 
 ```
@@ -154,6 +180,9 @@ src/json.rs        a small JSON reader and writer
 src/base64.rs      base64, for the PNG
 src/pending.rs     a result that a completion handler hands over, with a deadline
 src/elsewhere.rs   other systems: info, and screenshots unsupported
+src/lem/           lem (below): token.rs, parse.rs, print.rs, value.rs,
+                   check.rs, eval.rs, its prelude.lem, and the tests
+lem/test/          the tests' lem programs and cases
 src/macos/         objc.rs (the Objective-C runtime), block.rs (completion
                    blocks), cf.rs, cg.rs (displays, permissions), png.rs
                    (ImageIO), capture.rs (the two capture paths)

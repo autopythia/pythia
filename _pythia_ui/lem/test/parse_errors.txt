@@ -1,0 +1,134 @@
+# Parse errors, each a case: `=== title`, the source of t.lem, `---`, then
+# the error, as lem shows it.
+
+=== an unclosed call
+A(x
+---
+t.lem:1:2: this `(` has no matching `)`:
+A(x
+ ^
+
+=== chained comparisons
+X :- Y(a), a < 1 < 2
+---
+t.lem:1:18: comparisons don't chain: write `a < b, b < c`:
+X :- Y(a), a < 1 < 2
+                 ^
+
+=== an indent without a block
+A
+  B
+---
+t.lem:2:3: this line is indented more than the line before, which doesn't open a block:
+  B
+  ^
+
+=== a dedent to no level
+A:
+    B
+  C
+---
+t.lem:3:3: this line's indent matches no line above it:
+  C
+  ^
+
+=== an empty block
+A:
+B
+---
+t.lem:1:2: this `:` opens a block, so the lines after it must be indented more:
+A:
+ ^
+
+=== a block on the same line
+for A(x): B(x)
+---
+t.lem:1:11: expected the end of the line after `:`, not the name `B`:
+for A(x): B(x)
+          ^
+
+=== a rule in a for
+for A(x) :- B(x):
+  C(x)
+---
+t.lem:1:10: expected `,` or `:`, not `:-`:
+for A(x) :- B(x):
+         ^^
+
+=== equality as in Python
+X :- Y(a), a == 1
+---
+t.lem:1:14: `==` is reserved: lem compares with `=`:
+X :- Y(a), a == 1
+             ^^
+
+=== negation with !
+X :- !Y
+---
+t.lem:1:6: `!` is reserved: lem negates with `not`:
+X :- !Y
+     ^
+
+=== a reserved word
+X :- Y(a), a in Z
+---
+t.lem:1:14: `in` is a reserved word:
+X :- Y(a), a in Z
+             ^^
+
+=== a missing type
+input Pending(call: , tool: Text)
+---
+t.lem:1:21: expected a type, not `,`:
+input Pending(call: , tool: Text)
+                    ^
+
+=== keep before key
+state Draft(field: Id, text: Text) keep key field
+---
+t.lem:1:41: `key` comes once, before any flags:
+state Draft(field: Id, text: Text) keep key field
+                                        ^^^
+
+=== two terms on a line
+Button(Run(c) text="Run now")
+---
+t.lem:1:15: expected `,` or `)`, not the name `text`:
+Button(Run(c) text="Run now")
+              ^^^^
+
+=== a body without a head
+:- A
+---
+t.lem:1:1: expected a term, not `:-`:
+:- A
+^^
+
+=== an unclosed text
+Label(L, text="Run now)
+---
+t.lem:1:15: this text has no closing `"` on its line (`"""` spans lines):
+Label(L, text="Run now)
+              ^^^^^^^^^
+
+=== a reserved operator
+X :- Y(a); Z(a)
+---
+t.lem:1:10: `;` is a reserved operator:
+X :- Y(a); Z(a)
+         ^
+
+=== a call that runs on
+A(x
+B
+---
+t.lem:1:2: this `(` has no matching `)`:
+A(x
+ ^
+
+=== a stray backslash
+A :- B \ C
+---
+t.lem:1:8: a `\` joins the next line to this one, so it must end the line:
+A :- B \ C
+       ^

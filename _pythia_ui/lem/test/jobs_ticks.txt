@@ -1,0 +1,105 @@
+# Ticks of jobs.lem, on lem alone. Each case is a tick that runs on the
+# facts that the cases before it left: `=== title`; lines that assert
+# (`+ Fact`) or retract (`- Fact`) the host's facts, send a message
+# (`! Msg`), or show a relation's facts after the tick (`? Name`); `---`;
+# then the facts asked for, and the effects sent.
+
+=== two jobs, one waiting for the other
++ Job("a", "write", 60000)
++ Job("b", "review", 0, High)
++ After("a", "b")
++ Now(0)
+? Waits
+? Ready
+? Blocked
+---
+Waits("a", "b")
+Ready("b")
+Blocked("a")
+
+=== time passes: both are late, and the high one is urgent
+- Now(0)
++ Now(120000)
+? Late
+? Urgent
+---
+Late("a", 1.0)
+Late("b", 2.0)
+Urgent("b")
+
+=== finishing a job tells the host, and unblocks the other
+! Finish("b")
+? Done
+? Ready
+? Urgent
+---
+Done("b", 120000)
+Ready("a")
+effect Tell("finished review")
+
+=== finishing it again changes nothing
+! Finish("b")
+? Done
+---
+Done("b", 120000)
+
+=== reopening deletes what's done
+! Reopen("b")
+? Done
+? Ready
+---
+Ready("b")
+
+=== a note, by key
+! Annotate("a", "first")
+? Note
+---
+Note("a", "first")
+
+=== another note replaces it
+! Annotate("a", "second")
+? Note
+---
+Note("a", "second")
+
+=== the host's fact replaces by key too
++ Job("a", "rewrite", 60000)
+? Job
+---
+Job("a", "rewrite", 60000, Low)
+Job("b", "review", 0, High)
+
+=== a tick with nothing to show
+- Now(120000)
++ Now(180000)
+---
+(nothing to show)
+
+=== a message that the program doesn't have
+! Nope("a")
+---
+error: value:1:1: there's no constructor `Nope`:
+Nope("a")
+^^^^
+
+=== a relation that the program doesn't have
+? Nope
+---
+error: there's no relation `Nope`
+
+=== two notes for one job in one tick
+! Twice("a")
+---
+error: one key, two facts: Note("a", "one") (from the `on` block at lem/test/jobs.lem:48:3) and Note("a", "two") (from the `on` block at lem/test/jobs.lem:49:3)
+
+=== finishing the review again
+! Finish("b")
+? Done
+---
+Done("b", 180000)
+effect Tell("finished review")
+
+=== one fact both added and deleted
+! Redo("b")
+---
+error: Done("b", 180000) is both added (from the `on` block at lem/test/jobs.lem:51:3) and deleted (from the `on` block at lem/test/jobs.lem:52:3)

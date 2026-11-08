@@ -2,9 +2,9 @@
 //!
 //! With no arguments it serves the protocol: one JSON request per line on
 //! stdin, one reply per line on stdout. `info` and `screenshot` are for trying
-//! it by hand.
+//! it by hand, and `lem` for trying the GUI's rule language, lem (src/lem/).
 
-use pythia_ui::{json, Failure, ScreenshotOptions};
+use pythia_ui::{json, lem, Failure, ScreenshotOptions};
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
@@ -15,6 +15,10 @@ usage: pythia-ui              serve: one JSON request per line on stdin, one rep
        pythia-ui screenshot [--display ID] [--capture PATH] [--no-cursor] FILE.png
                               take a screenshot and write it to FILE.png; PATH is
                               auto, screencapturekit or coregraphics
+       pythia-ui lem [FILE.lem...]
+                              load the lem files, then run ticks from stdin:
+                              lines of `+ Fact`, `- Fact`, `! Msg` and `? Name`,
+                              a tick at each blank line
 ";
 
 fn main() -> ExitCode {
@@ -27,6 +31,7 @@ fn main() -> ExitCode {
       ExitCode::SUCCESS
     }
     Some("screenshot") => screenshot(&args[1..]),
+    Some("lem") => lem(&args[1..]),
     Some("-h" | "--help") => {
       print!("{USAGE}");
       ExitCode::SUCCESS
@@ -126,4 +131,55 @@ fn screenshot_args(args: &[String]) -> Result<(ScreenshotOptions, String), Strin
   }
   let path = path.ok_or("screenshot needs a file to write, such as shot.png")?;
   Ok((options, path))
+}
+
+/// Loads lem files after the shipped ones, then runs the ticks that stdin
+/// gives, each up to a blank line, and prints what each shows.
+fn lem(files: &[String]) -> ExitCode {
+  let mut texts = Vec::new();
+  for name in files {
+    match std::fs::read_to_string(name) {
+      Ok(text) => texts.push((name.as_str(), text)),
+      Err(error) => {
+        eprintln!("pythia-ui: {name}: {error}");
+        return ExitCode::FAILURE;
+      }
+    }
+  }
+  let all: Vec<(&str, &str)> = texts
+    .iter()
+    .map(|(name, text)| (*name, text.as_str()))
+    .collect();
+  let mut runtime = match lem::check::load(&all) {
+    Ok(prog) => lem::eval::Runtime::new(prog),
+    Err(error) => {
+      eprintln!("{}", error.text);
+      return ExitCode::FAILURE;
+    }
+  };
+  let mut tick = String::new();
+  let mut run = |tick: &mut String| {
+    if !tick.is_empty() {
+      match runtime.script(tick) {
+        Ok(shown) => println!("{shown}\n"),
+        Err(error) => eprintln!("{error}\n"),
+      }
+      tick.clear();
+    }
+  };
+  for line in std::io::stdin().lock().lines() {
+    match line {
+      Ok(line) if line.trim().is_empty() => run(&mut tick),
+      Ok(line) => {
+        tick.push_str(&line);
+        tick.push('\n');
+      }
+      Err(error) => {
+        eprintln!("pythia-ui: reading stdin: {error}");
+        return ExitCode::FAILURE;
+      }
+    }
+  }
+  run(&mut tick);
+  ExitCode::SUCCESS
 }
