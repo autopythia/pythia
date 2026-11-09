@@ -115,7 +115,7 @@ Reach(2, 3)
 Far(1)
 Far(2)
 
-=== a third edge: Path runs whole, as Reach does
+=== a third edge: Path follows it at both of its E's; Reach runs whole
 + E(3, 4)
 ? Path
 ? Far
@@ -383,3 +383,87 @@ Early(10)
 ? Moded
 ---
 (nothing to show)
+
+=== A and B come in one tick: AB(20), by two of A's facts
++ A(20, 1)
++ A(20, 2)
++ B(20)
+? AB
+---
+AB(2)
+AB(20)
+
+=== B(20) goes as A(20, 3) comes: AB(20) goes
+- B(20)
++ A(20, 3)
+? AB
+---
+AB(2)
+
+=== B(20) comes back as A(20, 1) goes: AB(20), by two
++ B(20)
+- A(20, 1)
+? AB
+---
+AB(2)
+AB(20)
+
+=== two edges in one tick: Path follows them at both of its E's
++ E(20, 21)
++ E(21, 22)
+? Path
+---
+Path(20, 22)
+
+=== both edges go in one tick: the path goes
+- E(20, 21)
+- E(21, 22)
+? Path
+---
+(nothing to show)
+
+=== three of W's facts for 30, and R3(31), so that R3 has a fact to keep
++ W(30, 1)
++ W(30, 2)
++ W(30, 3)
++ V(31, 1)
++ V(31, 2)
++ D(31)
++ W(31, 1)
+? R3
+---
+R3(31)
+
+=== D(30) and five of V's facts for 30 come in one tick: R3(30)
++ D(30)
++ V(30, 1)
++ V(30, 2)
++ V(30, 3)
++ V(30, 4)
++ V(30, 5)
+? R3
+---
+R3(30)
+R3(31)
+
+=== A(40, 1), A(40, 2) and B(40): AB(40), by two
++ A(40, 1)
++ A(40, 2)
++ B(40)
+? AB
+---
+AB(2)
+AB(20)
+AB(40)
+
+=== B(40) goes as five of A's facts come: B as it was, whole, is the smaller
+- B(40)
++ A(40, 3)
++ A(41, 1)
++ A(42, 1)
++ A(43, 1)
++ A(44, 1)
+? AB
+---
+AB(2)
+AB(20)

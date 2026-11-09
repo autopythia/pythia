@@ -645,6 +645,41 @@ var lem = (function () {
     return tuples;
   }
 
+  // What a relation had before the tick's changes, from its log (Log), for
+  // the joins that follow several changes at once (Runtime.follow): its
+  // facts now, but those that came, and with those that went, in order of
+  // their values, so that both runtimes take them alike; with indexes on
+  // those that came and on those that went, as joins ask for them.
+  function Old(log) {
+    this.came = log.came;
+    this.went = listed(log.went).sort(compareLists);
+    this.cameIndexes = new Map();
+    this.wentIndexes = new Map();
+  }
+
+  // What a relation had before the tick's changes (Old), whole or at a
+  // key's values: its facts now, `now`, a table or a bucket, but those that
+  // came, then those that went, `went`; and how many (length), which a
+  // join compares before it takes them (tuples).
+  function OldBucket(now, old, went, length) {
+    this.now = now;
+    this.old = old;
+    this.went = went;
+    this.length = length;
+  }
+
+  OldBucket.prototype.tuples = function () {
+    var now = this.now instanceof Table ? this.now.tuples() : this.now;
+    var came = this.old.came;
+    var out = [];
+    for (var i = 0; i < now.length; i++) {
+      if (!came.has(key(now[i]))) {
+        out.push(now[i]);
+      }
+    }
+    return out.concat(this.went);
+  };
+
   // A relation's facts, and why each holds, by their values as text; the
   // facts in order, once asked for; and indexes on them, which it keeps as
   // facts come and go. Its version moves on with each change to its facts
@@ -942,6 +977,9 @@ var lem = (function () {
     // What the last tick changed, by relation, and how many ticks have
     // ended (settle).
     this.changes = null;
+    // What relations had before the tick's changes, by relation (Old),
+    // while follow joins.
+    this.olds = null;
     this.settled = 0;
   }
 
@@ -1603,19 +1641,20 @@ var lem = (function () {
     }
   };
 
-  // Follows what changed, since component `c` last ran, in what its rules
-  // read, unless that has the versions that it had then: in place, by how
-  // many ways each rule derives each fact (counts). A rule heeds only the
-  // atoms and negations that what changed could make match otherwise (plan,
-  // unchanged). A rule with one such atom, which it follows (followed), joins
-  // there just the facts that came, and those that went, in the order that
-  // they did, with the rest of its body as it is; one with more, or with such
-  // a negation, or with such an atom that it doesn't follow, runs whole; one
-  // with none does nothing. Every rule joins before any count changes. A fact
-  // whose counts change holds if a rule derives it, by the lowest-numbered of
-  // them (place); the facts that it adds come in the order that the rules'
-  // solutions first gave them, so that both runtimes' indexes keep them in
-  // one order.
+  // Follows what changed, since component `c` last ran, in what its rules read,
+  // unless that has the versions that it had then: in place, by how many ways
+  // each rule derives each fact (counts). A rule heeds only the atoms and
+  // negations that what changed could make match otherwise (plan, unchanged). A
+  // rule that follows each such atom (followed) joins, at each in turn, just
+  // the facts that came there, in the order that they came, and those that
+  // went, in order of their values, with its atoms before that one as they are
+  // now and those after it as they were before the tick (Old), so that each way
+  // to derive a fact that comes or goes counts once; one with such a negation,
+  // or with such an atom that it doesn't follow, runs whole; one with none does
+  // nothing. Every rule joins before any count changes. A fact whose counts
+  // change holds if a rule derives it, by the lowest-numbered of them (place);
+  // the facts that it adds come in the order that the rules' solutions first
+  // gave them, so that both runtimes' indexes keep them in one order.
   Runtime.prototype.follow = function (c) {
     var self = this;
     var prog = this.prog;
@@ -1627,32 +1666,60 @@ var lem = (function () {
       return;
     }
     var rules = prog.components[c].rules;
+    var plans = rules.map(function (r) {
+      return self.plan(r);
+    });
+    // What the relations at the places after a rule's first that changed
+    // had before the tick, for the terms of the places before them.
+    var olds = new Map();
+    plans.forEach(function (plan, i) {
+      if (plan !== null && plan !== -1) {
+        plan.slice(1).forEach(function (at) {
+          var rel = prog.rules[rules[i]].body[at].rel;
+          if (!olds.has(rel)) {
+            olds.set(rel, new Old(tables[rel].log));
+          }
+        });
+      }
+    });
     // Each rule's change: its counts anew ({whole: true}), or by how many
     // ways more, or fewer, it derives each fact; or null, for none.
-    var changes = rules.map(function (r) {
-      var at = self.plan(r);
-      var found = [];
-      if (at === null) {
-        return null;
-      }
-      if (at < 0) {
-        self.solutions(r, null, found);
-        return { whole: true, counts: tallied(found, 1, new Map()) };
-      }
-      var log = tables[prog.rules[r].body[at].rel].log;
-      var by = new Map();
-      [
-        [log.came, 1],
-        [log.went, -1]
-      ].forEach(function (pair) {
-        if (pair[0].size > 0) {
-          found = [];
-          self.solutions(r, { at: at, fresh: { tuples: listed(pair[0]), indexes: new Map() } }, found);
-          tallied(found, pair[1], by);
+    var changes;
+    this.olds = olds;
+    try {
+      changes = rules.map(function (r, i) {
+        var plan = plans[i];
+        var found = [];
+        if (plan === null) {
+          return null;
         }
+        if (plan === -1) {
+          self.solutions(r, null, found);
+          return { whole: true, counts: tallied(found, 1, new Map()) };
+        }
+        var by = new Map();
+        plan.forEach(function (at, m) {
+          var old = [];
+          plan.slice(m + 1).forEach(function (place) {
+            old[place] = true;
+          });
+          var log = tables[prog.rules[r].body[at].rel].log;
+          [
+            [listed(log.came), 1],
+            [listed(log.went).sort(compareLists), -1]
+          ].forEach(function (pair) {
+            if (pair[0].length > 0) {
+              found = [];
+              self.solutions(r, { at: at, fresh: { tuples: pair[0], indexes: new Map() }, old: old }, found);
+              tallied(found, pair[1], by);
+            }
+          });
+        });
+        return { whole: false, counts: by };
       });
-      return { whole: false, counts: by };
-    });
+    } finally {
+      this.olds = null;
+    }
     // The facts whose counts change, by relation; and the counts.
     var touched = new Map();
     rules.forEach(function (r, i) {
@@ -1693,25 +1760,23 @@ var lem = (function () {
   };
 
   // What a tick does for rule `r`, by the atoms and negations in its body
-  // that what changed in their relations changes (unchanged): nothing
-  // (null); join just what came and went at an atom that it follows (the
-  // atom's place); or run whole (-1).
+  // that what changed in their relations changes (unchanged): nothing (null);
+  // join just what came and went at each such atom, which it follows (an
+  // array of their places); or run whole (-1).
   Runtime.prototype.plan = function (r) {
     var body = this.prog.rules[r].body;
-    var at = -1;
-    var changes = 0;
+    var places = [];
     for (var i = 0; i < body.length; i++) {
       var lit = body[i];
       var reads = lit.tag === "atom" || lit.tag === "not";
       if (reads && this.tables[lit.rel].log.changed() && !this.unchanged(lit)) {
-        changes += lit.tag === "atom" && this.followed[r][i] ? 1 : 2;
-        at = i;
+        if (lit.tag !== "atom" || !this.followed[r][i]) {
+          return -1;
+        }
+        places.push(i);
       }
     }
-    if (changes === 0) {
-      return null;
-    }
-    return changes === 1 ? at : -1;
+    return places.length === 0 ? null : places;
   };
 
   // Whether what changed in the relation of a rule's atom or negation, since
@@ -1877,7 +1942,8 @@ var lem = (function () {
         }
       }
       var fresh = delta !== null && delta.at === at ? delta.fresh : null;
-      var tuples = this.bucket(atom, cols, env, fresh);
+      var old = delta !== null && delta.old !== undefined && delta.old[at] === true ? this.olds.get(atom.rel) : null;
+      var tuples = this.bucket(atom, cols, env, fresh, old);
       if (!bindsAny(atom.pats, env)) {
         if (this.matchesOne(atom.pats, tuples, env)) {
           taken[at] = true;
@@ -1903,7 +1969,7 @@ var lem = (function () {
       fail("no atom is ready to join (a bug in lem's checker)");
     }
     var pats = body[best].pats;
-    if (bucket instanceof Table) {
+    if (bucket instanceof Table || bucket instanceof OldBucket) {
       bucket = bucket.tuples();
     }
     taken[best] = true;
@@ -1942,7 +2008,7 @@ var lem = (function () {
   // variable, visiting them in order, up to the first that does: of a
   // whole table's, which patterns of `_` alone all match, the first.
   Runtime.prototype.matchesOne = function (pats, tuples, env) {
-    if (tuples instanceof Table) {
+    if (tuples instanceof Table || tuples instanceof OldBucket) {
       var any = pats.every(function (pat) {
         return pat[0] === "any";
       });
@@ -1993,24 +2059,45 @@ var lem = (function () {
   // The facts that might match an atom, by the columns `cols` whose values
   // are known: from what a round added, if `fresh` is this atom's, else
   // from its relation.
-  Runtime.prototype.bucket = function (atom, cols, env, fresh) {
+  Runtime.prototype.bucket = function (atom, cols, env, fresh, old) {
+    var table = this.tables[atom.rel];
+    old = old === undefined ? null : old;
     if (cols.length === 0) {
-      return fresh !== null ? fresh.tuples : this.tables[atom.rel];
+      if (fresh !== null) {
+        return fresh.tuples;
+      }
+      if (old !== null) {
+        return new OldBucket(table, old, old.went, table.length - old.came.size + old.went.length);
+      }
+      return table;
     }
     var values = [];
     for (var i = 0; i < cols.length; i++) {
       values.push(this.keyValue(atom.pats[cols[i]], env));
     }
+    var k = key(values);
     var map;
     if (fresh !== null) {
       map = indexOn(fresh.indexes, cols, function () {
         return fresh.tuples;
       });
     } else {
-      map = this.tables[atom.rel].index(cols);
+      map = table.index(cols);
     }
-    var bucket = map.get(key(values));
-    return bucket === undefined ? NONE : bucket;
+    var bucket = map.get(k);
+    bucket = bucket === undefined ? NONE : bucket;
+    if (fresh !== null || old === null) {
+      return bucket;
+    }
+    var came = indexOn(old.cameIndexes, cols, function () {
+      return listed(old.came);
+    }).get(k);
+    var went = indexOn(old.wentIndexes, cols, function () {
+      return old.went;
+    }).get(k);
+    came = came === undefined ? NONE : came;
+    went = went === undefined ? NONE : went;
+    return new OldBucket(bucket, old, went, bucket.length - came.length + went.length);
   };
 
   // The rest of a body, after its atoms, in order: bindings, tests and

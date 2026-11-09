@@ -24,8 +24,8 @@
 //! And a join's work, as the facts it visits, where the order matters, and
 //! where an atom binds nothing; the work that a lazy relation saves; and the
 //! work that a tick saves where what rules read hasn't changed, and where it
-//! follows what changed, skips what a change leaves as it was, or starts
-//! over.
+//! follows what changed, in one relation or several, skips what a change
+//! leaves as it was, or starts over.
 
 use super::check::load;
 use super::eval::Runtime;
@@ -281,6 +281,35 @@ fn a_change_that_leaves_a_literal_as_it_was_runs_nothing_for_it() {
   assert_eq!(runtime.facts("E").len(), 1);
   assert!(runtime.facts("U").is_empty());
   assert_eq!(runtime.facts("V").len(), 10);
+}
+
+#[test]
+fn a_rule_follows_two_changes_at_once() {
+  // J reads A and B, which change in one tick: it joins what came to A,
+  // with B as it was before the tick, and what came to B, with A as it is
+  // now, so that each new way to derive a fact counts once, and a tick costs
+  // what changed rather than what the relations hold.
+  let src = "input A(n: Int)\ninput B(n: Int)\nrel J(n: Int)\nJ(n) :- A(n), B(n)\n";
+  let prog = load(&[("two.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  for i in 0..1000 {
+    runtime.assert(&format!("A({i})")).unwrap();
+    runtime.assert(&format!("B({i})")).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 2000);
+  // A(1000), finding no B(1000) as B was; then B(1000), finding A(1000).
+  runtime.assert("A(1000)").unwrap();
+  runtime.assert("B(1000)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 3);
+  assert_eq!(runtime.facts("J").len(), 1001);
+  // A(5) went, finding B(5) as B was; then B(5), finding no A(5) now.
+  assert!(runtime.retract("A(5)").unwrap());
+  assert!(runtime.retract("B(5)").unwrap());
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 3);
+  assert_eq!(runtime.facts("J").len(), 1000);
 }
 
 #[test]

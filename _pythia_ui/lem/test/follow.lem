@@ -30,7 +30,7 @@ Both(n) :- B(n), A(n, _)
 rel Any(n: Int)
 Any(n) :- B(n), C(_)
 
--- Path reads E twice; Reach is recursive, and Far follows it.
+-- Path reads E twice, and follows both; Reach is recursive; Far follows it.
 rel Path(a: Int, c: Int)
 Path(a, c) :- E(a, b), E(b, c)
 rel Reach(a: Int, b: Int)
@@ -107,3 +107,18 @@ Moded(w) :- Said(w, _), Mode(1, _)
 -- E(a, b) could match each.
 rel Self(a: Int)
 Self(a) :- E(a, a)
+
+-- Both of AB's relations change in one tick: it follows each, with the
+-- other as it is now before it, and as it was after it, so that each way
+-- to derive a fact that comes or goes counts once.
+rel AB(n: Int)
+AB(n) :- A(n, m), B(n)
+
+-- R3's D and V change in one tick. Following what came to D, with V as it
+-- was, the join compares V's bucket for 30, as it was, with W's: V's facts
+-- for 30 all came, so V had none, and the join stops there, before W's.
+input D(n: Int)
+input V(n: Int, m: Int)
+input W(n: Int, m: Int)
+rel R3(n: Int)
+R3(n) :- D(n), V(n, m), W(n, k)

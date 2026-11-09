@@ -19,17 +19,18 @@
 //! A component that isn't recursive follows what changed instead
 //! (`Runtime::follow`), once it has run: for each rule, it keeps how many ways
 //! the rule derives each fact, and each table logs the facts that came and went
-//! since the last tick (`Log`). A rule that reads one relation that changed
-//! joins there just those facts, with the rest of its body as it is, where that
-//! counts exactly (`followed`); else it runs whole. A change counts for an atom
-//! or a negation only if a fact that came or went could match it, and, for a
-//! test that binds nothing, such as the `Turn()` that a block's condition gives
-//! each rule inside it, only if the test's truth changed
-//! (`Runtime::unchanged`). The relation's facts change in place, by the counts,
-//! and keep their indexes. Keys are checked by a count of each relation's facts
-//! by its key's values, which the tables keep (`Table::key_count`). A component
-//! that has no facts to keep, and most of whose inputs are new, starts over
-//! instead, running whole as on its first tick (`Runtime::starts_over`).
+//! since the last tick (`Log`). A rule joins just those facts at each atom
+//! whose relation changed, with its atoms before that one as they are and those
+//! after it as they were (`Old`), where that counts exactly (`followed`); else
+//! it runs whole. A change counts for an atom or a negation only if a fact that
+//! came or went could match it, and, for a test that binds nothing, such as the
+//! `Turn()` that a block's condition gives each rule inside it, only if the
+//! test's truth changed (`Runtime::unchanged`). The relation's facts change in
+//! place, by the counts, and keep their indexes. Keys are checked by a count of
+//! each relation's facts by its key's values, which the tables keep
+//! (`Table::key_count`). A component that has no facts to keep, and most of
+//! whose inputs are new, starts over instead, running whole as on its first
+//! tick (`Runtime::starts_over`).
 //!
 //! An error while the rules run leaves the relations derived after the failing
 //! component without facts, as every tick that derived everything left them,
@@ -56,7 +57,7 @@ use super::parse::Cmp;
 use super::value::{int_fits, Ty, Value, MAX_INT};
 use std::cell::{Cell, RefCell};
 use std::collections::btree_map::{self, Entry};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::rc::Rc;
 
@@ -459,10 +460,12 @@ struct Fresh {
   indexes: Indexes,
 }
 
-/// The facts that a lookup gives: all of a relation's, or a key's.
+/// The facts that a lookup gives: all of a relation's, or a key's; or what
+/// a relation had before the tick's changes ([`Old`]).
 enum Tuples<'a> {
   All(btree_map::Keys<'a, Tuple, Why>),
   Some(std::slice::Iter<'a, Tuple>),
+  Old(Box<dyn Iterator<Item = &'a Tuple> + 'a>),
 }
 
 impl<'a> Iterator for Tuples<'a> {
@@ -472,6 +475,7 @@ impl<'a> Iterator for Tuples<'a> {
     match self {
       Tuples::All(tuples) => tuples.next(),
       Tuples::Some(tuples) => tuples.next(),
+      Tuples::Old(tuples) => tuples.next(),
     }
   }
 }
@@ -484,6 +488,13 @@ enum Bucket<'a> {
   Fresh(&'a [Tuple]),
   /// Those with a key's values, in an index on its columns.
   Index(Rc<Index>, Vec<Value>),
+  /// All that a relation had before the tick's changes ([`Old`]): no column
+  /// is bound.
+  OldTable(&'a BTreeMap<Tuple, Why>, &'a Old),
+  /// Those with a key's values that a relation had before the tick's
+  /// changes: by the indexes on its columns of its facts now, of those that
+  /// came, and of those that went.
+  OldIndex(Rc<Index>, Rc<Index>, Rc<Index>, Vec<Value>, &'a Old),
 }
 
 impl Bucket<'_> {
@@ -492,6 +503,11 @@ impl Bucket<'_> {
       Bucket::Table(facts) => facts.len(),
       Bucket::Fresh(tuples) => tuples.len(),
       Bucket::Index(index, key) => index.get(key).map_or(0, Vec::len),
+      Bucket::OldTable(facts, old) => facts.len() - old.came.len() + old.went.len(),
+      Bucket::OldIndex(now, came, went, key, _) => {
+        let count = |index: &Index| index.get(key).map_or(0, Vec::len);
+        count(now) - count(came) + count(went)
+      }
     }
   }
 
@@ -502,17 +518,69 @@ impl Bucket<'_> {
       Bucket::Index(index, key) => {
         Tuples::Some(index.get(key).map_or([].iter(), |tuples| tuples.iter()))
       }
+      Bucket::OldTable(facts, old) => {
+        let now = facts.keys().filter(move |t| !old.came.contains(*t));
+        Tuples::Old(Box::new(now.chain(old.went.iter())))
+      }
+      Bucket::OldIndex(now, _, went, key, old) => {
+        let now = now.get(key).map_or([].iter(), |tuples| tuples.iter());
+        let went = went.get(key).map_or([].iter(), |tuples| tuples.iter());
+        Tuples::Old(Box::new(
+          now.filter(move |t| !old.came.contains(*t)).chain(went),
+        ))
+      }
     }
   }
 }
 
-/// A recursive round's new facts, for the atom at a place in a body.
-type Delta<'a> = Option<(usize, &'a Fresh)>;
+/// What a join takes, at the place `at` in a body, in place of the atom's
+/// relation: `fresh`, what a recursive round added, or what came or went
+/// since the last tick ([`Runtime::follow`]); and the places, as bits, at
+/// which it takes what a relation had before the tick's changes ([`Old`]).
+#[derive(Clone, Copy)]
+struct Delta<'a> {
+  at: usize,
+  fresh: &'a Fresh,
+  old: u64,
+}
 
-/// What a join reads, the tables, and where it counts the facts it visits.
+/// What a relation had before the tick's changes, for the joins that follow
+/// several changes at once ([`Runtime::follow`]): its facts now, but those
+/// that came, and with those that went, in order of their values, so that
+/// both runtimes take them alike; with indexes on each, as joins ask for
+/// them.
+struct Old {
+  came: HashSet<Tuple>,
+  went: Vec<Tuple>,
+  came_indexes: Indexes,
+  went_indexes: Indexes,
+}
+
+impl Old {
+  fn of(log: &Log) -> Old {
+    Old {
+      came: log.came.iter().map(|(tuple, _)| tuple.clone()).collect(),
+      went: sorted(&log.went),
+      came_indexes: Indexes::default(),
+      went_indexes: Indexes::default(),
+    }
+  }
+}
+
+/// The facts that a log's `went` holds, in order of their values.
+fn sorted(went: &Ordered<()>) -> Vec<Tuple> {
+  let mut tuples: Vec<Tuple> = went.iter().map(|(tuple, _)| tuple.clone()).collect();
+  tuples.sort();
+  tuples
+}
+
+/// What a join reads: the tables, and, when it follows several changes at
+/// once, what relations had before them; and where it counts the facts it
+/// visits.
 #[derive(Clone, Copy)]
 struct Join<'a> {
   tables: &'a [Table],
+  olds: Option<&'a BTreeMap<usize, Old>>,
   visits: &'a Cell<u64>,
 }
 
@@ -520,11 +588,11 @@ struct Join<'a> {
 type New = Vec<(usize, Tuple, usize)>;
 
 /// What a tick does for a rule of a component that it follows
-/// ([`Runtime::follow`]): nothing; join just what came and went at the atom
-/// in a place in its body; or run whole.
+/// ([`Runtime::follow`]): nothing; join just what came and went at each of
+/// the atoms in some places in its body; or run whole.
 enum Plan {
   Nothing,
-  At(usize),
+  Atoms(Vec<usize>),
   Whole,
 }
 
@@ -823,6 +891,7 @@ impl Runtime {
   fn update(&self, msg: &Value) -> Result<(New, New), String> {
     let j = Join {
       tables: &self.tables,
+      olds: None,
       visits: &self.visits,
     };
     let (mut inserts, mut deletes) = (Vec::new(), Vec::new());
@@ -995,6 +1064,7 @@ impl Runtime {
     let mut new = Vec::new();
     let j = Join {
       tables: &self.tables,
+      olds: None,
       visits: &self.visits,
     };
     for &r in &component.rules {
@@ -1027,13 +1097,24 @@ impl Runtime {
       let mut new = Vec::new();
       let j = Join {
         tables: &self.tables,
+        olds: None,
         visits: &self.visits,
       };
       for &r in &component.rules {
         for (at, lit) in prog.rules[r].body.iter().enumerate() {
           let Lit::Atom(atom) = lit else { continue };
           if let Some(added) = added.get(&atom.rel) {
-            solutions(prog, j, r, Some((at, added)), &mut new)?;
+            solutions(
+              prog,
+              j,
+              r,
+              Some(Delta {
+                at,
+                fresh: added,
+                old: 0,
+              }),
+              &mut new,
+            )?;
           }
         }
       }
@@ -1049,13 +1130,15 @@ impl Runtime {
   /// read, unless that has the versions that it had then: in place, by how many
   /// ways each rule derives each fact (`counts`). A rule heeds only the atoms
   /// and negations that what changed could make match otherwise
-  /// ([`Runtime::plan`], [`Runtime::unchanged`]). A rule with one such atom,
-  /// which it follows ([`followed`]), joins there just the facts that came, and
-  /// those that went, with the rest of its body as it is; one with more, or
-  /// with such a negation, or with such an atom that it doesn't follow, runs
-  /// whole; one with none does nothing. Every rule joins before any count
-  /// changes. A fact whose counts change holds if a rule derives it, by the
-  /// lowest-numbered of them ([`Runtime::place`]).
+  /// ([`Runtime::plan`], [`Runtime::unchanged`]). A rule that follows each such
+  /// atom ([`followed`]) joins, at each in turn, just the facts that came
+  /// there, and those that went, with its atoms before that one as they are now
+  /// and those after it as they were before the tick ([`Old`]), so that each
+  /// way to derive a fact that comes or goes counts once; one with such a
+  /// negation, or with such an atom that it doesn't follow, runs whole; one
+  /// with none does nothing. Every rule joins before any count changes. A fact
+  /// whose counts change holds if a rule derives it, by the lowest-numbered of
+  /// them ([`Runtime::place`]).
   fn follow(&mut self, c: usize) -> Result<(), String> {
     let read: Vec<u64> = (self.reads[c].iter())
       .map(|&r| self.tables[r].version)
@@ -1064,36 +1147,56 @@ impl Runtime {
       return Ok(());
     }
     let prog = &self.prog;
+    let plans: Vec<(usize, Plan)> = (prog.components[c].rules.iter())
+      .map(|&r| (r, self.plan(r)))
+      .collect();
+    // What the relations at the places after a rule's first that changed
+    // had before the tick, for the terms of the places before them.
+    let mut olds = BTreeMap::new();
+    for (r, plan) in &plans {
+      if let Plan::Atoms(places) = plan {
+        for &at in &places[1..] {
+          let rel = atom_at(&prog.rules[*r].body[at]).rel;
+          olds.entry(rel).or_insert_with(|| Old::of(self.log(rel)));
+        }
+      }
+    }
     let j = Join {
       tables: &self.tables,
+      olds: Some(&olds),
       visits: &self.visits,
     };
     // Each rule's change: its counts anew (whole), or by how many ways more,
     // or fewer, it derives each fact.
     let mut changes = Vec::new();
-    for &r in &prog.components[c].rules {
+    for (r, plan) in plans {
       let mut found = Vec::new();
-      let change = match self.plan(r) {
+      let change = match plan {
         Plan::Nothing => continue,
         Plan::Whole => {
           solutions(prog, j, r, None, &mut found)?;
           (true, tallied(found, 1, Ordered::default()))
         }
-        Plan::At(at) => {
-          let Lit::Atom(atom) = &prog.rules[r].body[at] else {
-            unreachable!("a rule joins what came and went at an atom");
-          };
-          let log = self.log(atom.rel);
+        Plan::Atoms(places) => {
           let mut by = Ordered::default();
-          for (facts, sign) in [(&log.came, 1), (&log.went, -1)] {
-            if !facts.is_empty() {
-              let tuples = facts.iter().map(|(tuple, _)| tuple.clone()).collect();
-              let fresh = Fresh {
-                tuples,
-                indexes: Indexes::default(),
-              };
-              solutions(prog, j, r, Some((at, &fresh)), &mut found)?;
-              by = tallied(std::mem::take(&mut found), sign, by);
+          for (m, &at) in places.iter().enumerate() {
+            let old = (places[m + 1..].iter()).fold(0, |bits, &p| bits | (1u64 << p));
+            let log = self.log(atom_at(&prog.rules[r].body[at]).rel);
+            let came: Vec<Tuple> = log.came.iter().map(|(tuple, _)| tuple.clone()).collect();
+            for (tuples, sign) in [(came, 1), (sorted(&log.went), -1)] {
+              if !tuples.is_empty() {
+                let fresh = Fresh {
+                  tuples,
+                  indexes: Indexes::default(),
+                };
+                let delta = Delta {
+                  at,
+                  fresh: &fresh,
+                  old,
+                };
+                solutions(prog, j, r, Some(delta), &mut found)?;
+                by = tallied(std::mem::take(&mut found), sign, by);
+              }
             }
           }
           (false, by)
@@ -1141,23 +1244,21 @@ impl Runtime {
   /// its body that what changed in their relations changes
   /// ([`Runtime::unchanged`]).
   fn plan(&self, r: usize) -> Plan {
-    let (mut at, mut changes) = (0, 0);
+    let mut places = Vec::new();
     for (i, lit) in self.prog.rules[r].body.iter().enumerate() {
       let (Lit::Atom(atom) | Lit::Not(atom)) = lit else {
         continue;
       };
       if self.log(atom.rel).changed() && !self.unchanged(atom) {
-        changes += match lit {
-          Lit::Atom(_) if self.followed[r][i] => 1,
-          _ => 2,
-        };
-        at = i;
+        match lit {
+          Lit::Atom(_) if self.followed[r][i] => places.push(i),
+          _ => return Plan::Whole,
+        }
       }
     }
-    match changes {
-      0 => Plan::Nothing,
-      1 => Plan::At(at),
-      _ => Plan::Whole,
+    match places.is_empty() {
+      true => Plan::Nothing,
+      false => Plan::Atoms(places),
     }
   }
 
@@ -1334,6 +1435,14 @@ fn insert(tables: &mut [Table], new: New) -> BTreeMap<usize, Vec<Tuple>> {
   fresh
 }
 
+/// The atom that a body's part is, where a tick follows what changed.
+fn atom_at(lit: &Lit) -> &Atom {
+  match lit {
+    Lit::Atom(atom) => atom,
+    _ => unreachable!("a rule follows what changed at its atoms"),
+  }
+}
+
 /// Counts a fact `by` more ways, or fewer, in `counts`: one that's counted
 /// no ways goes.
 fn tally(counts: &mut Ordered<i64>, tuple: &Tuple, by: i64) {
@@ -1499,7 +1608,13 @@ fn skipped(prog: &Program, asked: &[usize]) -> Vec<bool> {
 }
 
 /// Adds rule `r`'s solutions to `new`, as (relation, fact, rule).
-fn solutions(prog: &Program, j: Join, r: usize, delta: Delta, new: &mut New) -> Result<(), String> {
+fn solutions(
+  prog: &Program,
+  j: Join,
+  r: usize,
+  delta: Option<Delta>,
+  new: &mut New,
+) -> Result<(), String> {
   let rule = &prog.rules[r];
   let mut env = vec![None; rule.vars.len()];
   solve(j, &rule.body, &mut env, delta, &mut |env| {
@@ -1521,7 +1636,7 @@ fn solve(
   j: Join,
   body: &[Lit],
   env: &mut Env,
-  delta: Delta,
+  delta: Option<Delta>,
   out: &mut dyn FnMut(&Env) -> Result<(), String>,
 ) -> Result<(), String> {
   let atoms = body
@@ -1550,7 +1665,7 @@ fn join(
   atoms: usize,
   left: u64,
   env: &mut Env,
-  delta: Delta,
+  delta: Option<Delta>,
   out: &mut dyn FnMut(&Env) -> Result<(), String>,
 ) -> Result<(), String> {
   if left == 0 {
@@ -1568,8 +1683,12 @@ fn join(
     let cols: Vec<usize> = (0..atom.pats.len())
       .filter(|&c| known(&atom.pats[c], env))
       .collect();
-    let fresh = delta.filter(|(place, _)| *place == at).map(|(_, f)| f);
-    let bucket = bucket(j, atom, &cols, env, fresh)?;
+    let fresh = delta.filter(|d| d.at == at).map(|d| d.fresh);
+    let old = match (delta, j.olds) {
+      (Some(d), Some(olds)) if d.old & (1 << at) != 0 => olds.get(&atom.rel),
+      _ => None,
+    };
+    let bucket = bucket(j, atom, &cols, env, fresh, old)?;
     if !atom.pats.iter().any(|pat| binds(pat, env)) {
       if !matches_one(j, atom, &bucket, env)? {
         return Ok(());
@@ -1605,30 +1724,39 @@ fn join(
 }
 
 /// The facts that might match an atom, by the columns `cols` whose values
-/// are known: from what a round added, if `fresh` is this atom's, else from
-/// its relation.
+/// are known: from what a round added, or what came or went, if `fresh` is
+/// this atom's; from what its relation had before the tick's changes, if
+/// `old` is; else from its relation.
 fn bucket<'a>(
   j: Join<'a>,
   atom: &Atom,
   cols: &[usize],
   env: &Env,
   fresh: Option<&'a Fresh>,
+  old: Option<&'a Old>,
 ) -> Result<Bucket<'a>, String> {
   if cols.is_empty() {
-    return Ok(match fresh {
-      Some(fresh) => Bucket::Fresh(&fresh.tuples),
-      None => Bucket::Table(&j.tables[atom.rel].facts),
+    return Ok(match (fresh, old) {
+      (Some(fresh), _) => Bucket::Fresh(&fresh.tuples),
+      (None, Some(old)) => Bucket::OldTable(&j.tables[atom.rel].facts, old),
+      (None, None) => Bucket::Table(&j.tables[atom.rel].facts),
     });
   }
   let key = cols
     .iter()
     .map(|&c| value_of(&atom.pats[c], env))
     .collect::<Result<Vec<_>, _>>()?;
-  let index = match fresh {
-    Some(fresh) => index(&fresh.indexes, cols, fresh.tuples.iter()),
-    None => j.tables[atom.rel].index(cols),
-  };
-  Ok(Bucket::Index(index, key))
+  Ok(match (fresh, old) {
+    (Some(fresh), _) => Bucket::Index(index(&fresh.indexes, cols, fresh.tuples.iter()), key),
+    (None, Some(old)) => Bucket::OldIndex(
+      j.tables[atom.rel].index(cols),
+      index(&old.came_indexes, cols, old.came.iter()),
+      index(&old.went_indexes, cols, old.went.iter()),
+      key,
+      old,
+    ),
+    (None, None) => Bucket::Index(j.tables[atom.rel].index(cols), key),
+  })
 }
 
 /// Whether a pattern binds a variable: one that isn't bound yet.
@@ -1690,7 +1818,7 @@ fn rest(
     Lit::NotTest(t) if !test(t, env)? => rest(j, body, at + 1, env, out),
     Lit::Test(_) | Lit::NotTest(_) => Ok(()),
     Lit::Not(atom) => {
-      let bucket = bucket(j, atom, &atom.key, env, None)?;
+      let bucket = bucket(j, atom, &atom.key, env, None, None)?;
       match matches_one(j, atom, &bucket, env)? {
         true => Ok(()),
         false => rest(j, body, at + 1, env, out),
