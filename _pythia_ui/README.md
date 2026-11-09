@@ -187,8 +187,15 @@ with `?`. glem's `Within` is lazy, since few programs read it.
 
 A tick runs a relation's rules only when a relation that they read has changed
 since they last ran; if its facts come out the same, what reads it doesn't run
-either. The facts, effects and errors are those of a tick that derives
-everything anew, which the tests run too, and compare (`lem/test/rerun.lem`).
+either. Once its rules have run, a relation that isn't recursive follows what
+changed: each rule keeps how many ways it derives each fact, and joins just
+the facts that came to, or went from, a relation that it reads, where that
+counts exactly; a rule that reads such a relation in a negation, or reads two
+that changed, runs whole. A relation that has no facts to keep, and most of
+whose inputs are new, starts over: it runs whole, as on its first tick. The
+facts, effects and errors are those of a tick that derives everything anew,
+which the tests run too, and compare (`lem/test/rerun.lem`,
+`lem/test/follow.lem`); and both runtimes' joins visit the same facts.
 
 For the web, a checked program can be written as data, its compiled form
 (`src/lem/compile.rs`): JSON, which lem's runtime in JavaScript,

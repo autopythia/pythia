@@ -563,7 +563,7 @@ var lem = (function () {
 
   // An index maps the values of some columns to the facts that have them,
   // in the order that they came: those there when it was built, in order,
-  // then those that rules derived since.
+  // then those added since, each in its place until it goes.
   function addTo(map, cols, tuple) {
     var k = key(project(tuple, cols));
     var bucket = map.get(k);
@@ -571,6 +571,20 @@ var lem = (function () {
       map.set(k, [tuple]);
     } else {
       bucket.push(tuple);
+    }
+  }
+
+  // Takes a fact, as its table holds it, out of an index.
+  function takeFrom(map, cols, tuple) {
+    var k = key(project(tuple, cols));
+    var bucket = map.get(k) || NONE;
+    var at = bucket.indexOf(tuple);
+    if (at < 0) {
+      fail("an index lost a fact of its table (a bug in lem.js)");
+    }
+    bucket.splice(at, 1);
+    if (bucket.length === 0) {
+      map.delete(k);
     }
   }
 
@@ -591,13 +605,53 @@ var lem = (function () {
     return index.map;
   }
 
+  // What came to a relation, and what went from it, since the last tick
+  // that ran the rules (Runtime.settle), and none before the first, when
+  // nothing follows what changed yet: facts by their values as text, in
+  // the order that they came or went. Rust's runtime keeps the facts that
+  // came in the same order, which sets the order of what follows them in
+  // the indexes (Runtime.follow): a whole run notes those that it adds in
+  // the order that its rules first derived them, which a new table's facts
+  // keep (Runtime.rerun). The order of those that went matters to nothing,
+  // since an index keeps the rest in their order.
+  function Log() {
+    this.came = new Map();
+    this.went = new Map();
+  }
+
+  // Notes that a fact came, or went: one that went and comes back, or came
+  // and goes again, is no change.
+  Log.prototype.note = function (k, tuple, came) {
+    var to = came ? this.came : this.went;
+    var from = came ? this.went : this.came;
+    if (from.has(k)) {
+      from.delete(k);
+    } else {
+      to.set(k, tuple);
+    }
+  };
+
+  // Whether anything came or went.
+  Log.prototype.changed = function () {
+    return this.came.size > 0 || this.went.size > 0;
+  };
+
+  // The facts that came, or went, in the order that they did.
+  function listed(facts) {
+    var tuples = [];
+    facts.forEach(function (tuple) {
+      tuples.push(tuple);
+    });
+    return tuples;
+  }
+
   // A relation's facts, and why each holds, by their values as text; the
-  // facts in order, once asked for; and indexes on them, which only
-  // derive() keeps as facts change: every other change drops them. Its
-  // version moves on with every change to its facts but a rule's (change):
-  // a table that rules fill is new, a version on from the one that it
-  // replaces (Runtime.rerun).
-  function Table() {
+  // facts in order, once asked for; and indexes on them, which it keeps as
+  // facts come and go. Its version moves on with each change to its facts
+  // but a rule's (bump): a table that rules fill is new, a version on from
+  // the one that it replaces (Runtime.rerun). Its log (Log) notes what
+  // comes and goes; a table that rules fill has none until it replaces one.
+  function Table(log) {
     this.version = 0;
     this.facts = new Map();
     this.sorted = null;
@@ -605,6 +659,11 @@ var lem = (function () {
     // For the host's facts in a relation with a key, the facts by their
     // key's values (putKeyed), which only the host's changes keep.
     this.keyed = null;
+    // For a relation with a key, how many facts have each of its values, and
+    // how many of those values more than one fact has (keyCount), which it
+    // keeps as facts come and go, once asked for.
+    this.keys = null;
+    this.log = log;
   }
 
   // How many facts it has: a join's bucket can be a whole table, whose
@@ -627,18 +686,40 @@ var lem = (function () {
     return this.sorted;
   };
 
-  // The index on `cols`, which mustn't be empty.
+  // The index on `cols`, which mustn't be empty. Its buckets hold their
+  // facts in order, as Rust's runtime builds them from its sorted facts:
+  // from the facts in order, if the table has them so; else each bucket is
+  // sorted, which costs least where a bucket holds one fact.
   Table.prototype.index = function (cols) {
-    var table = this;
-    return indexOn(this.indexes, cols, function () {
-      return table.tuples();
-    });
+    var name = cols.join(",");
+    var index = this.indexes.get(name);
+    if (index === undefined) {
+      var map = new Map();
+      if (this.sorted !== null) {
+        this.sorted.forEach(function (tuple) {
+          addTo(map, cols, tuple);
+        });
+      } else {
+        this.facts.forEach(function (entry) {
+          addTo(map, cols, entry.tuple);
+        });
+        map.forEach(function (bucket) {
+          if (bucket.length > 1) {
+            bucket.sort(compareLists);
+          }
+        });
+      }
+      index = { cols: cols, map: map };
+      this.indexes.set(name, index);
+    }
+    return index.map;
   };
 
   // A fact that rule `r` derives, into the indexes too: whether it's new.
-  // One that holds already keeps the lowest-numbered of its rules.
-  Table.prototype.derive = function (tuple, r) {
-    var k = key(tuple);
+  // One that holds already keeps the lowest-numbered of its rules. `known`
+  // is the fact's key, if it's known already.
+  Table.prototype.derive = function (tuple, r, known) {
+    var k = known === undefined ? key(tuple) : known;
     var entry = this.facts.get(k);
     if (entry !== undefined) {
       if (has(entry.why, "rule") && r < entry.why.rule) {
@@ -651,17 +732,52 @@ var lem = (function () {
     this.indexes.forEach(function (index) {
       addTo(index.map, index.cols, tuple);
     });
+    if (this.keys !== null) {
+      countKey(this.keys, tuple, true);
+    }
     return true;
   };
 
-  // The facts themselves, to change otherwise: so the indexes go, and the
-  // facts by key, and the version moves on.
-  Table.prototype.change = function () {
-    this.version += 1;
-    this.indexes = new Map();
+  // Adds a fact that doesn't hold, and why it holds: to the indexes too,
+  // and to the log.
+  Table.prototype.add = function (tuple, why) {
+    var k = key(tuple);
+    this.facts.set(k, { tuple: tuple, why: why });
     this.sorted = null;
+    this.indexes.forEach(function (index) {
+      addTo(index.map, index.cols, tuple);
+    });
+    if (this.keys !== null) {
+      countKey(this.keys, tuple, true);
+    }
+    if (this.log !== null) {
+      this.log.note(k, tuple, true);
+    }
+  };
+
+  // Takes away the fact whose values, as text, are `k`, which holds: from
+  // the indexes too, and notes it in the log.
+  Table.prototype.cut = function (k) {
+    var tuple = this.facts.get(k).tuple;
+    this.facts.delete(k);
+    this.sorted = null;
+    this.indexes.forEach(function (index) {
+      takeFrom(index.map, index.cols, tuple);
+    });
+    if (this.keys !== null) {
+      countKey(this.keys, tuple, false);
+    }
+    if (this.log !== null) {
+      this.log.note(k, tuple, false);
+    }
+  };
+
+  // The facts changed otherwise than by the host's facts with a key
+  // (putKeyed), which no longer finds them by key; and the version moves
+  // on.
+  Table.prototype.changed = function () {
     this.keyed = null;
-    return this.facts;
+    this.version += 1;
   };
 
   // The host's fact, in place of the one with its values in the columns
@@ -677,37 +793,41 @@ var lem = (function () {
     }
     var k = key(project(tuple, cols));
     var old = keyed.get(k);
-    var facts = this.change();
     if (old !== undefined) {
-      facts.delete(key(old));
+      this.cut(key(old));
     }
-    facts.set(key(tuple), { tuple: tuple, why: HOST });
+    this.add(tuple, HOST);
     keyed.set(k, tuple);
     this.keyed = keyed;
+    this.version += 1;
   };
 
-  // Removes the host's fact from a relation whose key is `cols`, and from
-  // the facts by key: whether it held.
+  // Removes the host's fact, which holds, from a relation whose key is
+  // `cols`, and from the facts by key.
   Table.prototype.removeKeyed = function (tuple, cols) {
-    var keyed = this.keyed;
-    var held = this.change().delete(key(tuple));
-    if (keyed !== null) {
-      if (held) {
-        keyed.delete(key(project(tuple, cols)));
-      }
-      this.keyed = keyed;
+    this.cut(key(tuple));
+    if (this.keyed !== null) {
+      this.keyed.delete(key(project(tuple, cols)));
     }
-    return held;
+    this.version += 1;
   };
 
-  // A fact, and why it holds, in place of one with its values.
+  // A fact that doesn't hold, and why it holds.
   Table.prototype.put = function (tuple, why) {
-    this.change().set(key(tuple), { tuple: tuple, why: why });
+    this.add(tuple, why);
+    this.changed();
   };
 
-  // Removes a fact: whether it held.
+  // Removes a fact: whether it held. One that doesn't hold changes
+  // nothing.
   Table.prototype.remove = function (tuple) {
-    return this.change().delete(key(tuple));
+    var k = key(tuple);
+    if (!this.facts.has(k)) {
+      return false;
+    }
+    this.cut(k);
+    this.changed();
+    return true;
   };
 
   // Drops the facts that `drop` picks. If it picks none, nothing changes,
@@ -722,10 +842,10 @@ var lem = (function () {
     if (gone.length === 0) {
       return;
     }
-    var facts = this.change();
     for (var i = 0; i < gone.length; i++) {
-      facts.delete(gone[i]);
+      this.cut(gone[i]);
     }
+    this.changed();
   };
 
   // Drops the facts that agree with `tuple` in the columns `cols`.
@@ -735,11 +855,62 @@ var lem = (function () {
     });
   };
 
+  // Takes away every fact, if it has any, noting each in the log; so its
+  // indexes go.
+  Table.prototype.clear = function () {
+    if (this.facts.size === 0) {
+      return;
+    }
+    var log = this.log;
+    if (log !== null) {
+      this.facts.forEach(function (entry, k) {
+        log.note(k, entry.tuple, false);
+      });
+    }
+    this.facts = new Map();
+    this.sorted = null;
+    this.indexes = new Map();
+    this.keys = null;
+    this.changed();
+  };
+
+  // The facts by their values in the columns `cols`, the relation's key:
+  // {cols, counts, clashes}, how many facts have each of the key's values,
+  // and how many values more than one fact has. Made once, without sorting,
+  // and kept as facts come and go.
+  Table.prototype.keyCount = function (cols) {
+    if (this.keys === null) {
+      var keys = { cols: cols, counts: new Map(), clashes: 0 };
+      this.facts.forEach(function (entry) {
+        countKey(keys, entry.tuple, true);
+      });
+      this.keys = keys;
+    }
+    return this.keys;
+  };
+
+  // Counts a fact's key's values once more, or once less.
+  function countKey(keys, tuple, more) {
+    var k = key(project(tuple, keys.cols));
+    var n = keys.counts.get(k) || 0;
+    if (more) {
+      keys.clashes += n === 1 ? 1 : 0;
+      keys.counts.set(k, n + 1);
+    } else {
+      keys.clashes -= n === 2 ? 1 : 0;
+      if (n === 1) {
+        keys.counts.delete(k);
+      } else {
+        keys.counts.set(k, n - 1);
+      }
+    }
+  }
+
   // A runtime for a program (Program), as src/lem/eval.rs's Runtime.
   function Runtime(prog) {
     this.prog = prog;
     this.tables = prog.rels.map(function () {
-      return new Table();
+      return new Table(null);
     });
     this.visited = 0;
     // The components that a tick skips, unless the host asks for one of
@@ -758,8 +929,71 @@ var lem = (function () {
     this.held = prog.rels.map(function () {
       return null;
     });
+    // For each rule, of a component that isn't recursive, how many ways it
+    // derives each fact, as its component last ran, by the fact's key, each
+    // as {tuple, n} (follow); and for each of its atoms, whether a tick
+    // follows a change to that atom's relation alone (followed).
+    this.counts = prog.rules.map(function () {
+      return null;
+    });
+    this.followed = prog.rules.map(followed);
     // Whether the next tick derives every relation anew (forget).
     this.anew = false;
+  }
+
+  // The variables that a pattern binds, into `out`.
+  function patVars(pat, out) {
+    if (pat[0] === "var") {
+      out.push(pat[1]);
+    } else if (pat[0] === "ctor") {
+      pat[2].forEach(function (p) {
+        patVars(p, out);
+      });
+    }
+  }
+
+  // Whether a pattern has `_`.
+  function loose(pat) {
+    return pat[0] === "any" || (pat[0] === "ctor" && pat[2].some(loose));
+  }
+
+  // For each of a rule's atoms, whether a tick follows a change to its
+  // relation alone by joining there just the facts that came and went
+  // (Runtime.follow). A rule's solutions must count the same whatever order
+  // its join takes: a solution counts each fact of an atom with `_` that
+  // binds a variable that no other atom binds, and once an atom without
+  // `_`, which matches one fact at most; an atom with `_` and no variable
+  // is a test, which counts once, so a change there isn't followed. But an
+  // atom with `_` whose variables other atoms bind counts one fact or each,
+  // by the order of the join: then no change to the rule is followed.
+  function followed(rule) {
+    var atoms = [];
+    for (var i = 0; i < rule.body.length && rule.body[i].tag === "atom"; i++) {
+      atoms.push(rule.body[i]);
+    }
+    var vars = atoms.map(function (atom) {
+      var out = [];
+      atom.pats.forEach(function (pat) {
+        patVars(pat, out);
+      });
+      return out;
+    });
+    function own(i) {
+      return vars[i].some(function (v) {
+        return vars.every(function (others, j) {
+          return j === i || others.indexOf(v) < 0;
+        });
+      });
+    }
+    var ok = atoms.map(function (atom, i) {
+      return !atom.pats.some(loose) || own(i);
+    });
+    var counts = ok.every(function (yes, i) {
+      return yes || vars[i].length === 0;
+    });
+    return ok.map(function (yes) {
+      return counts && yes;
+    });
   }
 
   // What each component's rules read, as atoms or negations: the relations
@@ -891,7 +1125,11 @@ var lem = (function () {
       return false;
     }
     var cols = this.prog.rels[r].key;
-    return cols.length > 0 ? this.tables[r].removeKeyed(tuple, cols) : this.tables[r].remove(tuple);
+    if (cols.length > 0) {
+      this.tables[r].removeKeyed(tuple, cols);
+      return true;
+    }
+    return this.tables[r].remove(tuple);
   };
 
   // A message, from JSON.
@@ -986,9 +1224,21 @@ var lem = (function () {
       var changes = this.update(msg);
       this.apply(changes.inserts, changes.deletes, effects);
     }
-    this.derive();
-    this.checkKeys();
+    try {
+      this.derive();
+      this.checkKeys();
+    } finally {
+      this.settle();
+    }
     return effects;
+  };
+
+  // The end of a tick that ran the rules, whether or not they failed: each
+  // relation's log begins again.
+  Runtime.prototype.settle = function () {
+    for (var r = 0; r < this.tables.length; r++) {
+      this.tables[r].log = new Log();
+    }
   };
 
   // What the `on` blocks of a message would add and delete, each as {rel,
@@ -1072,8 +1322,11 @@ var lem = (function () {
   };
 
   // Runs the rules from the input and state facts, component by component,
-  // in the checker's order: each only if what it reads has changed
-  // (rerun). A component that the tick skips has no facts. If a
+  // in the checker's order: each only if what it reads has changed. A
+  // component that isn't recursive, and has run since the rules last
+  // failed, follows what changed (follow), unless it starts over
+  // (startsOver); one that fails to follow runs again whole, as any other
+  // does (rerun). A component that the tick skips has no facts. If a
   // component's rules fail, those after it have no facts, as when every
   // tick cleared them first, and the next tick runs every rule.
   Runtime.prototype.derive = function () {
@@ -1083,7 +1336,7 @@ var lem = (function () {
       this.anew = false;
       prog.rels.forEach(function (rel, r) {
         if (rel.kind === "rel") {
-          tables[r].change().clear();
+          tables[r].clear();
         }
       });
     }
@@ -1098,8 +1351,18 @@ var lem = (function () {
         if (skip[c]) {
           this.ran[c] = null;
           this.clear(c);
-        } else {
+        } else if (prog.components[c].recursive || this.ran[c] === null || this.startsOver(c)) {
           this.rerun(c);
+        } else {
+          try {
+            this.follow(c);
+          } catch (e) {
+            if (!(e instanceof LemError)) {
+              throw e;
+            }
+            this.ran[c] = null;
+            this.rerun(c);
+          }
         }
       } catch (e) {
         this.ran = this.ran.map(function () {
@@ -1118,9 +1381,7 @@ var lem = (function () {
   Runtime.prototype.clear = function (c) {
     var rels = this.prog.components[c].rels;
     for (var i = 0; i < rels.length; i++) {
-      if (this.tables[rels[i]].facts.size > 0) {
-        this.tables[rels[i]].change().clear();
-      }
+      this.tables[rels[i]].clear();
     }
   };
 
@@ -1128,25 +1389,20 @@ var lem = (function () {
   // the versions that they had when it last ran. Each of its relations gets
   // a new table, a version on from the old one; but a relation whose facts
   // come out the same keeps the old table, with its version, indexes and
-  // order, and why each fact holds now.
+  // order, and why each fact holds now. A new table takes the old one's
+  // log, and notes there what came and went.
   Runtime.prototype.rerun = function (c) {
     var tables = this.tables;
     var read = this.reads[c].map(function (r) {
       return tables[r].version;
     });
-    var ran = this.ran[c];
-    if (
-      ran !== null &&
-      read.every(function (version, i) {
-        return version === ran[i];
-      })
-    ) {
+    if (same(read, this.ran[c])) {
       return;
     }
     var rels = this.prog.components[c].rels;
     var olds = rels.map(function (r) {
       var old = tables[r];
-      tables[r] = new Table();
+      tables[r] = new Table(null);
       tables[r].version = old.version + 1;
       return old;
     });
@@ -1159,10 +1415,64 @@ var lem = (function () {
           old.facts.get(k).why = entry.why;
         });
         tables[r] = old;
+        return;
       }
+      var log = old.log;
+      now.log = log;
+      if (log === null) {
+        return;
+      }
+      old.facts.forEach(function (entry, k) {
+        if (!now.facts.has(k)) {
+          log.note(k, entry.tuple, false);
+        }
+      });
+      now.facts.forEach(function (entry, k) {
+        if (!old.facts.has(k)) {
+          log.note(k, entry.tuple, true);
+        }
+      });
     });
     this.ran[c] = read;
   };
+
+  // Whether component `c` starts over this tick, running whole as in its
+  // first tick, rather than following what changed (follow): when its
+  // relations have no facts to keep, and more of what it reads came or
+  // went since the last tick than stayed. Following such a change would
+  // join about as much as a whole run does, and keep more for each fact,
+  // where a whole run fills new tables with nothing to compare: it's
+  // semi-naive evaluation's first round, where every fact is new, which is
+  // naive. Both runtimes decide alike, from the logs and the sizes of the
+  // tables, so that their joins visit the same facts.
+  Runtime.prototype.startsOver = function (c) {
+    var tables = this.tables;
+    var empty = this.prog.components[c].rels.every(function (r) {
+      return tables[r].facts.size === 0;
+    });
+    if (!empty) {
+      return false;
+    }
+    var changed = 0;
+    var stayed = 0;
+    this.reads[c].forEach(function (r) {
+      var log = tables[r].log;
+      changed += log.came.size + log.went.size;
+      stayed += tables[r].facts.size - log.came.size;
+    });
+    return changed > stayed;
+  };
+
+  // Whether the versions that a component read are those that it read when
+  // it last ran, if it has.
+  function same(read, ran) {
+    return (
+      ran !== null &&
+      read.every(function (version, i) {
+        return version === ran[i];
+      })
+    );
+  }
 
   // Whether two tables have the same facts.
   function sameFacts(a, b) {
@@ -1178,7 +1488,8 @@ var lem = (function () {
 
   // Runs a component's rules: once on every fact; then, if it's recursive,
   // again for each of their atoms on its relations, joining just what the
-  // last round added there, until a round adds nothing.
+  // last round added there, until a round adds nothing. Of one that isn't,
+  // it counts how many ways each rule derives each fact (follow).
   Runtime.prototype.component = function (c) {
     var prog = this.prog;
     var component = prog.components[c];
@@ -1186,6 +1497,16 @@ var lem = (function () {
     var i;
     for (i = 0; i < component.rules.length; i++) {
       this.solutions(component.rules[i], null, found);
+    }
+    if (!component.recursive) {
+      var counts = this.counts;
+      component.rules.forEach(function (r) {
+        counts[r] = new Map();
+      });
+      for (i = 0; i < found.length; i++) {
+        found[i].k = key(found[i].tuple);
+        tally(counts[found[i].n], found[i].k, found[i].tuple, 1);
+      }
     }
     var fresh = this.insert(found);
     while (component.recursive && fresh.size > 0) {
@@ -1206,6 +1527,168 @@ var lem = (function () {
       fresh = this.insert(found);
     }
   };
+
+  // Follows what changed, since component `c` last ran, in what its rules
+  // read, unless that has the versions that it had then: in place, by how
+  // many ways each rule derives each fact (counts). A rule that reads one
+  // relation that changed, at an atom that it follows (followed), joins
+  // there just the facts that came, and those that went, in the order that
+  // they did, with the rest of its body as it is; one that reads more that
+  // changed, or reads one in a negation, or at an atom that it doesn't
+  // follow, runs whole. Every rule joins before any count changes. A fact
+  // whose counts change holds if a rule derives it, by the lowest-numbered
+  // of them (place); the facts that it adds come in the order that the
+  // rules' solutions first gave them, so that both runtimes' indexes keep
+  // them in one order.
+  Runtime.prototype.follow = function (c) {
+    var self = this;
+    var prog = this.prog;
+    var tables = this.tables;
+    var read = this.reads[c].map(function (r) {
+      return tables[r].version;
+    });
+    if (same(read, this.ran[c])) {
+      return;
+    }
+    var rules = prog.components[c].rules;
+    // Each rule's change: its counts anew ({whole: true}), or by how many
+    // ways more, or fewer, it derives each fact; or null, for none.
+    var changes = rules.map(function (r) {
+      var at = self.plan(r);
+      var found = [];
+      if (at === null) {
+        return null;
+      }
+      if (at < 0) {
+        self.solutions(r, null, found);
+        return { whole: true, counts: tallied(found, 1, new Map()) };
+      }
+      var log = tables[prog.rules[r].body[at].rel].log;
+      var by = new Map();
+      [
+        [log.came, 1],
+        [log.went, -1]
+      ].forEach(function (pair) {
+        if (pair[0].size > 0) {
+          found = [];
+          self.solutions(r, { at: at, fresh: { tuples: listed(pair[0]), indexes: new Map() } }, found);
+          tallied(found, pair[1], by);
+        }
+      });
+      return { whole: false, counts: by };
+    });
+    // The facts whose counts change, by relation; and the counts.
+    var touched = new Map();
+    rules.forEach(function (r, i) {
+      var change = changes[i];
+      if (change === null) {
+        return;
+      }
+      var head = prog.rules[r].head;
+      if (!touched.has(head)) {
+        touched.set(head, new Map());
+      }
+      var heads = touched.get(head);
+      var counts = self.counts[r];
+      if (change.whole) {
+        counts.forEach(function (entry, k) {
+          heads.set(k, entry.tuple);
+        });
+        change.counts.forEach(function (entry, k) {
+          heads.set(k, entry.tuple);
+        });
+        self.counts[r] = change.counts;
+        return;
+      }
+      change.counts.forEach(function (entry, k) {
+        heads.set(k, entry.tuple);
+        tally(counts, k, entry.tuple, entry.n);
+        if (counts.has(k) && counts.get(k).n < 0) {
+          fail("a rule derives a fact fewer than no ways (a bug in lem.js)");
+        }
+      });
+    });
+    prog.components[c].rels.forEach(function (rel) {
+      if (touched.has(rel)) {
+        self.place(c, rel, touched.get(rel));
+      }
+    });
+    this.ran[c] = read;
+  };
+
+  // What a tick does for rule `r`, by the relations in its body whose logs
+  // aren't empty: nothing (null); join just what came and went at an atom
+  // that it follows (the atom's place); or run whole (-1).
+  Runtime.prototype.plan = function (r) {
+    var body = this.prog.rules[r].body;
+    var at = -1;
+    var changes = 0;
+    for (var i = 0; i < body.length; i++) {
+      var lit = body[i];
+      if ((lit.tag === "atom" || lit.tag === "not") && this.tables[lit.rel].log.changed()) {
+        changes += lit.tag === "atom" && this.followed[r][i] ? 1 : 2;
+        at = i;
+      }
+    }
+    if (changes === 0) {
+      return null;
+    }
+    return changes === 1 ? at : -1;
+  };
+
+  // Brings relation `rel`, of component `c`, up to its rules' counts, at the
+  // facts `heads`, by their keys, in their order: a fact holds if a rule
+  // derives it, by the lowest-numbered of them.
+  Runtime.prototype.place = function (c, rel, heads) {
+    var prog = this.prog;
+    var counts = this.counts;
+    var rules = prog.components[c].rules.filter(function (r) {
+      return prog.rules[r].head === rel;
+    });
+    var table = this.tables[rel];
+    var changed = false;
+    heads.forEach(function (tuple, k) {
+      var by = -1;
+      for (var i = 0; i < rules.length && by < 0; i++) {
+        by = counts[rules[i]].has(k) ? rules[i] : -1;
+      }
+      var entry = table.facts.get(k);
+      if (by < 0 && entry !== undefined) {
+        table.cut(k);
+        changed = true;
+      } else if (by >= 0 && entry === undefined) {
+        table.add(tuple, byRule(by));
+        changed = true;
+      } else if (by >= 0) {
+        entry.why = byRule(by);
+      }
+    });
+    if (changed) {
+      table.changed();
+    }
+  };
+
+  // Counts a fact, whose key is `k`, `by` more ways, or fewer, in `counts`,
+  // each as {tuple, n}: one that's counted no ways goes.
+  function tally(counts, k, tuple, by) {
+    var entry = counts.get(k);
+    if (entry === undefined) {
+      counts.set(k, { tuple: tuple, n: by });
+    } else if (entry.n + by === 0) {
+      counts.delete(k);
+    } else {
+      entry.n += by;
+    }
+  }
+
+  // Counts the facts of rules' solutions, `found`, `by` more ways each, or
+  // fewer, in `counts`.
+  function tallied(found, by, counts) {
+    for (var i = 0; i < found.length; i++) {
+      tally(counts, key(found[i].tuple), found[i].tuple, by);
+    }
+    return counts;
+  }
 
   // Adds rule `r`'s solutions to `found`, as {rel, tuple, n}. `delta` is
   // null, or a round's new facts, {tuples, indexes}, for the atom at a
@@ -1234,7 +1717,7 @@ var lem = (function () {
     var fresh = new Map();
     for (var i = 0; i < found.length; i++) {
       var f = found[i];
-      if (this.tables[f.rel].derive(f.tuple, f.n)) {
+      if (this.tables[f.rel].derive(f.tuple, f.n, f.k)) {
         var tuples = fresh.get(f.rel);
         if (tuples === undefined) {
           fresh.set(f.rel, [f.tuple]);
@@ -1601,8 +2084,9 @@ var lem = (function () {
   };
 
   // Facts that agree on their relation's key agree on the rest: checked
-  // where the relation's version has moved since its keys last held. Of a
-  // relation whose don't, the error names the first two that clash, in
+  // where the relation's version has moved since its keys last held, by
+  // how many of its key's values more than one fact has (Table.keyCount).
+  // Of a relation whose don't, the error names the first two that clash, in
   // order, as Rust's does.
   Runtime.prototype.checkKeys = function () {
     var rels = this.prog.rels;
@@ -1611,25 +2095,16 @@ var lem = (function () {
       if (rels[r].key.length === 0 || this.held[r] === version) {
         continue;
       }
-      if (!this.keysHold(r, rels[r].key)) {
+      if (this.tables[r].keyCount(rels[r].key).clashes > 0) {
         this.keyError(r, rels[r].key);
       }
       this.held[r] = version;
     }
   };
 
-  // Whether no two of a relation's facts share a key, by `cols`.
-  Runtime.prototype.keysHold = function (r, cols) {
-    var seen = new Set();
-    var holds = true;
-    this.tables[r].facts.forEach(function (entry) {
-      var k = key(project(entry.tuple, cols));
-      holds = holds && !seen.has(k);
-      seen.add(k);
-    });
-    return holds;
-  };
-
+  // The error for a relation whose key `cols` doesn't hold: its first two
+  // facts, in order, that clash; or, if none do, the count of its key's
+  // values that said so is wrong.
   Runtime.prototype.keyError = function (r, cols) {
     var table = this.tables[r];
     var seen = new Map();
@@ -1643,6 +2118,7 @@ var lem = (function () {
       }
       seen.set(k, { tuple: tuples[i], why: why });
     }
+    fail("the facts of " + this.prog.rels[r].name + " by their key were miscounted (a bug in lem.js)");
   };
 
   // Where a fact comes from, for errors.

@@ -10,18 +10,32 @@
 //! [`Runtime::drop_facts`].
 //!
 //! A tick runs a component's rules only if a relation that they read has
-//! changed since they last ran ([`Runtime::rerun`]). Each relation's table
-//! has a version, which every change to its facts moves on, and each
-//! component keeps the versions of what it read when it last ran. When it
-//! runs again, a relation whose facts come out the same keeps its table,
-//! version and all, so that what reads it needn't run again either. An
-//! error while the rules run leaves the relations derived after the failing
-//! component without facts, as every tick that derived everything left
-//! them, and forgets those versions, so that the next tick runs every rule.
-//! A relation's keys are checked only when its version has moved since they
-//! last held. The facts, the effects and the errors are those of a tick
-//! that derives everything anew, which [`Runtime::forget`] makes the next
-//! tick do, for the tests that compare the two.
+//! changed since they last ran. Each relation's table has a version, which
+//! every change to its facts moves on, and each component keeps the versions of
+//! what it read when it last ran. A recursive component runs again whole
+//! ([`Runtime::rerun`]): a relation whose facts come out the same keeps its
+//! table, version and all, so that what reads it needn't run either.
+//!
+//! A component that isn't recursive follows what changed instead
+//! (`Runtime::follow`), once it has run: for each rule, it keeps how many ways
+//! the rule derives each fact, and each table logs the facts that came and went
+//! since the last tick (`Log`). A rule that reads one relation that changed
+//! joins there just those facts, with the rest of its body as it is, where that
+//! counts exactly (`followed`); else it runs whole. The relation's facts change
+//! in place, by the counts, and keep their indexes. Keys are checked by a count
+//! of each relation's facts by its key's values, which the tables keep
+//! (`Table::key_count`). A component that has no facts to keep, and most of
+//! whose inputs are new, starts over instead, running whole as on its first
+//! tick (`Runtime::starts_over`).
+//!
+//! An error while the rules run leaves the relations derived after the failing
+//! component without facts, as every tick that derived everything left them,
+//! and forgets what each component read, so that the next tick runs every rule;
+//! a component that fails to follow what changed runs again whole, so that it
+//! fails as such a tick does. The facts, the effects and the errors are those
+//! of a tick that derives everything anew, which [`Runtime::forget`] makes the
+//! next tick do, for the tests that compare the two. Both runtimes' joins
+//! visit the same facts, since they take the facts that came in one order.
 //!
 //! The rules run cheaply. A body's positive atoms join in the order that
 //! their facts ask for, after meringue's joins
@@ -34,7 +48,7 @@
 //! results are the same, so the runtimes agree; only an error in an atom's
 //! expression may come at another step.
 
-use super::check::{Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Test, MAX_ATOMS};
+use super::check::{Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Rule, Test, MAX_ATOMS};
 use super::parse::Cmp;
 use super::value::{int_fits, Ty, Value, MAX_INT};
 use std::cell::{Cell, RefCell};
@@ -104,19 +118,165 @@ fn index<'a>(
   index
 }
 
-/// A relation's facts, and why each holds; and indexes on them, which only
-/// [`Table::derive`] keeps as facts change: every other change drops them.
-/// And, for the host's facts in a relation with a key, the facts by their
-/// key's values ([`Table::put_keyed`]), which only the host's changes keep.
-/// Its version moves on with every change to its facts but a rule's
-/// ([`Table::facts_mut`]): a table that rules fill is new, a version on from
-/// the one that it replaces ([`Runtime::rerun`]).
+/// Facts in the order that they came, each with a value, as a JavaScript
+/// `Map` keeps its keys, so that both runtimes take them in one order: a
+/// fact that's set again keeps its place; one that goes, and comes back,
+/// comes last. Each fact's place is found by a map made only once a fact
+/// is looked up among others, so that facts that only come cost no hashing.
+struct Ordered<V> {
+  order: Vec<Option<(Tuple, V)>>,
+  at: Option<HashMap<Tuple, usize>>,
+  len: usize,
+}
+
+impl<V> Default for Ordered<V> {
+  fn default() -> Self {
+    Ordered {
+      order: Vec::new(),
+      at: None,
+      len: 0,
+    }
+  }
+}
+
+impl<V> Ordered<V> {
+  fn is_empty(&self) -> bool {
+    self.len == 0
+  }
+
+  /// Each fact's place in `order`, made the first time it's asked for.
+  fn places(&mut self) -> &mut HashMap<Tuple, usize> {
+    let order = &self.order;
+    self.at.get_or_insert_with(|| {
+      let held = order.iter().enumerate();
+      held
+        .filter_map(|(i, kept)| Some((kept.as_ref()?.0.clone(), i)))
+        .collect()
+    })
+  }
+
+  fn get_mut(&mut self, tuple: &Tuple) -> Option<&mut V> {
+    if self.len == 0 {
+      return None;
+    }
+    let &i = self.places().get(tuple)?;
+    self.order[i].as_mut().map(|(_, value)| value)
+  }
+
+  /// Sets a fact's value: in its place, if it's here; else last.
+  fn insert(&mut self, tuple: Tuple, value: V) {
+    let at = match self.len {
+      0 => None,
+      _ => self.places().get(&tuple).copied(),
+    };
+    match at {
+      Some(i) => self.order[i] = Some((tuple, value)),
+      None => self.push(tuple, value),
+    }
+  }
+
+  /// Puts last a fact that isn't here.
+  fn push(&mut self, tuple: Tuple, value: V) {
+    if let Some(at) = &mut self.at {
+      at.insert(tuple.clone(), self.order.len());
+    }
+    self.order.push(Some((tuple, value)));
+    self.len += 1;
+  }
+
+  fn remove(&mut self, tuple: &Tuple) -> Option<V> {
+    if self.len == 0 {
+      return None;
+    }
+    let i = self.places().remove(tuple)?;
+    self.len -= 1;
+    self.order[i].take().map(|(_, value)| value)
+  }
+
+  fn iter(&self) -> impl Iterator<Item = (&Tuple, &V)> {
+    self
+      .order
+      .iter()
+      .flatten()
+      .map(|(tuple, value)| (tuple, value))
+  }
+}
+
+/// What came to a relation, and what went from it, since the last tick that
+/// ran the rules ([`Runtime::settle`]), and none before the first, when
+/// nothing follows what changed yet: in the order that they did. `lem.js`
+/// keeps the facts that came in the same order, which sets the order of
+/// what follows them in the indexes ([`Runtime::follow`]): a whole run notes
+/// those that it adds in the order that its rules first derived them
+/// ([`Runtime::rerun`]). The order of those that went matters to nothing,
+/// since an index keeps the rest in their order.
+#[derive(Default)]
+struct Log {
+  came: Ordered<()>,
+  went: Ordered<()>,
+}
+
+impl Log {
+  /// Notes that a fact came, or went: one that went and comes back, or came
+  /// and goes again, is no change.
+  fn note(&mut self, tuple: &Tuple, came: bool) {
+    let (to, from) = match came {
+      true => (&mut self.came, &mut self.went),
+      false => (&mut self.went, &mut self.came),
+    };
+    if from.remove(tuple).is_none() {
+      to.push(tuple.clone(), ());
+    }
+  }
+
+  /// Whether anything came or went.
+  fn changed(&self) -> bool {
+    !self.came.is_empty() || !self.went.is_empty()
+  }
+}
+
+/// How many of a relation's facts have each of its key's values, and how
+/// many of those values more than one fact has ([`Table::key_count`]).
+struct Keys {
+  cols: Vec<usize>,
+  counts: HashMap<Vec<Value>, u32>,
+  clashes: usize,
+}
+
+impl Keys {
+  /// Counts a fact's key's values once more, or once less.
+  fn count(&mut self, tuple: &Tuple, more: bool) {
+    let k = project(tuple, &self.cols);
+    let n = self.counts.get(&k).copied().unwrap_or(0);
+    if more {
+      self.clashes += usize::from(n == 1);
+      self.counts.insert(k, n + 1);
+    } else {
+      self.clashes -= usize::from(n == 2);
+      match n {
+        1 => _ = self.counts.remove(&k),
+        _ => _ = self.counts.insert(k, n - 1),
+      }
+    }
+  }
+}
+
+/// A relation's facts, and why each holds; and indexes on them, which it
+/// keeps as facts come and go. And, for the host's facts in a relation with
+/// a key, the facts by their key's values ([`Table::put_keyed`]), which only
+/// the host's changes keep. Its version moves on with each change to its
+/// facts but a rule's ([`Table::changed`]): a table that rules fill is new,
+/// a version on from the one that it replaces ([`Runtime::rerun`]). Its log
+/// ([`Log`]) notes what comes and goes; and, once asked for, it counts the
+/// facts by their key's values ([`Table::key_count`]).
 #[derive(Default)]
 struct Table {
   facts: BTreeMap<Tuple, Why>,
   indexes: Indexes,
   keyed: Option<HashMap<Vec<Value>, Tuple>>,
   version: u64,
+  log: Option<Log>,
+  keys: Option<Keys>,
 }
 
 impl Table {
@@ -143,18 +303,120 @@ impl Table {
             .or_default()
             .push(tuple.clone());
         }
+        if let Some(keys) = &mut self.keys {
+          keys.count(tuple, true);
+        }
         true
       }
     }
   }
 
-  /// The facts themselves, to change otherwise: so the indexes go, and the
-  /// facts by key, and the version moves on.
-  fn facts_mut(&mut self) -> &mut BTreeMap<Tuple, Why> {
-    self.version += 1;
-    self.indexes.get_mut().clear();
+  /// Adds a fact that doesn't hold, and why it holds: to the indexes too,
+  /// and to the log.
+  fn add(&mut self, tuple: Tuple, why: Why) {
+    for (cols, index) in self.indexes.get_mut().iter_mut() {
+      Rc::make_mut(index)
+        .entry(project(&tuple, cols))
+        .or_default()
+        .push(tuple.clone());
+    }
+    if let Some(keys) = &mut self.keys {
+      keys.count(&tuple, true);
+    }
+    if let Some(log) = &mut self.log {
+      log.note(&tuple, true);
+    }
+    self.facts.insert(tuple, why);
+  }
+
+  /// Takes away a fact that holds: from the indexes too, where the rest keep
+  /// their order, and notes it in the log.
+  fn cut(&mut self, tuple: &Tuple) {
+    self.facts.remove(tuple);
+    for (cols, index) in self.indexes.get_mut().iter_mut() {
+      let index = Rc::make_mut(index);
+      let key = project(tuple, cols);
+      let bucket = index.get_mut(&key).expect("an index has its table's facts");
+      let at = bucket.iter().position(|t| t == tuple);
+      bucket.remove(at.expect("an index has its table's facts"));
+      if bucket.is_empty() {
+        index.remove(&key);
+      }
+    }
+    if let Some(keys) = &mut self.keys {
+      keys.count(tuple, false);
+    }
+    if let Some(log) = &mut self.log {
+      log.note(tuple, false);
+    }
+  }
+
+  /// The facts changed otherwise than by the host's facts with a key
+  /// ([`Table::put_keyed`]), which no longer finds them by key; and the
+  /// version moves on.
+  fn changed(&mut self) {
     self.keyed = None;
-    &mut self.facts
+    self.version += 1;
+  }
+
+  /// A fact that doesn't hold, and why it holds.
+  fn put(&mut self, tuple: Tuple, why: Why) {
+    self.add(tuple, why);
+    self.changed();
+  }
+
+  /// Removes a fact: whether it held. One that doesn't hold changes nothing.
+  fn remove(&mut self, tuple: &Tuple) -> bool {
+    if !self.facts.contains_key(tuple) {
+      return false;
+    }
+    self.cut(tuple);
+    self.changed();
+    true
+  }
+
+  /// Drops the facts that `drop` picks. If it picks none, nothing changes,
+  /// so the table keeps its version.
+  fn drop_where(&mut self, mut drop: impl FnMut(&Tuple) -> bool) {
+    let gone: Vec<Tuple> = self.facts.keys().filter(|t| drop(t)).cloned().collect();
+    if gone.is_empty() {
+      return;
+    }
+    for tuple in &gone {
+      self.cut(tuple);
+    }
+    self.changed();
+  }
+
+  /// Takes away every fact, if it has any, noting each in the log; so its
+  /// indexes go.
+  fn clear(&mut self) {
+    if self.facts.is_empty() {
+      return;
+    }
+    let facts = std::mem::take(&mut self.facts);
+    if let Some(log) = &mut self.log {
+      facts.into_keys().for_each(|tuple| log.note(&tuple, false));
+    }
+    self.indexes.get_mut().clear();
+    self.keys = None;
+    self.changed();
+  }
+
+  /// The facts counted by their values in the columns `cols`, the relation's
+  /// key ([`Keys`]): counted once, without sorting, and kept as facts come
+  /// and go.
+  fn key_count(&mut self, cols: &[usize]) -> &Keys {
+    let facts = &self.facts;
+    self.keys.get_or_insert_with(|| {
+      let mut keys = Keys {
+        cols: cols.to_vec(),
+        counts: HashMap::new(),
+        clashes: 0,
+      };
+      facts.keys().for_each(|tuple| keys.count(tuple, true));
+      keys
+    })
   }
 
   /// The host's fact, in place of the one with its values in the columns
@@ -169,26 +431,22 @@ impl Table {
         .map(|t| (project(t, cols), t.clone()))
         .collect(),
     };
-    let facts = self.facts_mut();
     if let Some(old) = keyed.insert(project(&tuple, cols), tuple.clone()) {
-      facts.remove(&old);
+      self.cut(&old);
     }
-    facts.insert(tuple, Why::Host);
+    self.add(tuple, Why::Host);
     self.keyed = Some(keyed);
+    self.version += 1;
   }
 
-  /// Removes the host's fact from a relation whose key is `cols`, and from
-  /// the facts by key: whether it held.
-  fn remove_keyed(&mut self, tuple: &Tuple, cols: &[usize]) -> bool {
-    let keyed = self.keyed.take();
-    let held = self.facts_mut().remove(tuple).is_some();
-    if let Some(mut keyed) = keyed {
-      if held {
-        keyed.remove(&project(tuple, cols));
-      }
-      self.keyed = Some(keyed);
+  /// Removes the host's fact, which holds, from a relation whose key is
+  /// `cols`, and from the facts by key.
+  fn remove_keyed(&mut self, tuple: &Tuple, cols: &[usize]) {
+    self.cut(tuple);
+    if let Some(keyed) = &mut self.keyed {
+      keyed.remove(&project(tuple, cols));
     }
-    held
+    self.version += 1;
   }
 }
 
@@ -258,6 +516,15 @@ struct Join<'a> {
 /// A relation's new facts, from (relation, fact, rule) triples.
 type New = Vec<(usize, Tuple, usize)>;
 
+/// What a tick does for a rule of a component that it follows
+/// ([`Runtime::follow`]): nothing; join just what came and went at the atom
+/// in a place in its body; or run whole.
+enum Plan {
+  Nothing,
+  At(usize),
+  Whole,
+}
+
 pub struct Runtime {
   pub prog: Program,
   /// Each relation's facts and indexes.
@@ -276,6 +543,12 @@ pub struct Runtime {
   ran: Vec<Option<Vec<u64>>>,
   /// For each relation, the version at which its keys last held, if any.
   held: Vec<Option<u64>>,
+  /// For each rule, of a component that isn't recursive, how many ways it
+  /// derives each fact, as its component last ran ([`Runtime::follow`]);
+  /// and for each of its atoms, whether a tick follows a change to that
+  /// atom's relation alone ([`followed`]).
+  counts: Vec<HashMap<Tuple, u64>>,
+  followed: Vec<Vec<bool>>,
   /// Whether the next tick derives every relation anew ([`Runtime::forget`]).
   anew: bool,
 }
@@ -288,6 +561,8 @@ impl Runtime {
     let reads = reads(&prog);
     let ran = vec![None; prog.components.len()];
     let held = vec![None; prog.rels.len()];
+    let counts = vec![HashMap::new(); prog.rules.len()];
+    let followed = prog.rules.iter().map(followed).collect();
     Runtime {
       prog,
       tables,
@@ -297,6 +572,8 @@ impl Runtime {
       reads,
       ran,
       held,
+      counts,
+      followed,
       anew: false,
     }
   }
@@ -338,14 +615,7 @@ impl Runtime {
   /// cleans up between ticks. If it picks none, nothing changes, so the
   /// relation keeps its version.
   pub fn drop_facts(&mut self, rel: usize, mut drop: impl FnMut(&Tuple) -> bool) {
-    let table = &mut self.tables[rel];
-    let gone: Vec<Tuple> = table.facts.keys().filter(|t| drop(t)).cloned().collect();
-    if !gone.is_empty() {
-      let facts = table.facts_mut();
-      for tuple in &gone {
-        facts.remove(tuple);
-      }
-    }
+    self.tables[rel].drop_where(|t| drop(t));
   }
 
   /// The host's fact, written in lem, such as `Now(1000)`
@@ -371,7 +641,7 @@ impl Runtime {
     }
     let key = &self.prog.rels[rel].key;
     match key.is_empty() {
-      true => _ = self.tables[rel].facts_mut().insert(tuple, Why::Host),
+      true => self.tables[rel].put(tuple, Why::Host),
       false => self.tables[rel].put_keyed(tuple, key),
     }
     Ok(())
@@ -385,10 +655,11 @@ impl Runtime {
       return Ok(false);
     }
     let key = &self.prog.rels[rel].key;
-    Ok(match key.is_empty() {
-      true => self.tables[rel].facts_mut().remove(tuple).is_some(),
+    match key.is_empty() {
+      true => _ = self.tables[rel].remove(tuple),
       false => self.tables[rel].remove_keyed(tuple, key),
-    })
+    }
+    Ok(true)
   }
 
   /// Whether the host may change a relation: only an `input` one.
@@ -499,7 +770,7 @@ impl Runtime {
         }
       }
       for (rel, tuple, _) in deletes {
-        self.tables[rel].facts_mut().remove(&tuple);
+        self.tables[rel].remove(&tuple);
       }
       let mut added: BTreeMap<(usize, Vec<Value>), (Tuple, usize)> = BTreeMap::new();
       for (rel, tuple, a) in inserts {
@@ -524,15 +795,24 @@ impl Runtime {
             return Err(format!("one key, two facts: {x} ({at}) and {y} ({other})"));
           }
         }
-        let facts = self.tables[rel].facts_mut();
-        facts.retain(|t, _| key.iter().any(|&i| t[i] != tuple[i]));
-        facts.insert(tuple.clone(), Why::Action(a));
+        let table = &mut self.tables[rel];
+        table.drop_where(|t| key.iter().all(|&i| t[i] == tuple[i]));
+        table.put(tuple.clone(), Why::Action(a));
         added.insert((rel, k), (tuple, a));
       }
     }
-    self.derive()?;
-    self.check_keys()?;
+    let ran = self.derive().and_then(|()| self.check_keys());
+    self.settle();
+    ran?;
     Ok(effects)
+  }
+
+  /// The end of a tick that ran the rules, whether or not they failed: each
+  /// relation's log begins again.
+  fn settle(&mut self) {
+    for table in &mut self.tables {
+      table.log = Some(Log::default());
+    }
   }
 
   /// What the `on` blocks of a message would add and delete: (relation,
@@ -572,15 +852,19 @@ impl Runtime {
   }
 
   /// Runs the rules from the input and state facts, component by component,
-  /// in the checker's order: each only if what it reads has changed
-  /// ([`Runtime::rerun`]). A component that the tick skips has no facts. If
-  /// a component's rules fail, those after it have no facts, as when every
-  /// tick cleared them first, and the next tick runs every rule.
+  /// in the checker's order: each only if what it reads has changed. A
+  /// component that isn't recursive, and has run since the rules last
+  /// failed, follows what changed ([`Runtime::follow`]), unless it starts
+  /// over ([`Runtime::starts_over`]); one that fails to follow runs again
+  /// whole, as any other does ([`Runtime::rerun`]). A component that the
+  /// tick skips has no facts. If a component's rules fail, those after it
+  /// have no facts, as when every tick cleared them first, and the next tick
+  /// runs every rule.
   fn derive(&mut self) -> Result<(), String> {
     if std::mem::take(&mut self.anew) {
       for (table, rel) in self.tables.iter_mut().zip(&self.prog.rels) {
         if rel.kind == DeclKind::Rel {
-          table.facts_mut().clear();
+          table.clear();
         }
       }
     }
@@ -590,13 +874,18 @@ impl Runtime {
       false => self.skip.clone(),
     };
     for (c, skip) in skip.into_iter().enumerate() {
-      let ran = match skip {
-        true => {
+      let whole = self.prog.components[c].recursive || self.ran[c].is_none() || self.starts_over(c);
+      let ran = match (skip, whole) {
+        (true, _) => {
           self.ran[c] = None;
           self.clear(c);
           Ok(())
         }
-        false => self.rerun(c),
+        (false, true) => self.rerun(c),
+        (false, false) => self.follow(c).or_else(|_| {
+          self.ran[c] = None;
+          self.rerun(c)
+        }),
       };
       if let Err(e) = ran {
         self.ran.fill(None);
@@ -609,13 +898,34 @@ impl Runtime {
     Ok(())
   }
 
+  /// Whether component `c` starts over this tick, running whole as in its
+  /// first tick, rather than following what changed ([`Runtime::follow`]):
+  /// when its relations have no facts to keep, and more of what it reads
+  /// came or went since the last tick than stayed. Following such a change
+  /// would join about as much as a whole run does, and keep more for each
+  /// fact, where a whole run fills new tables with nothing to compare: it's
+  /// semi-naive evaluation's first round, where every fact is new, which is
+  /// naive. Both runtimes decide alike, from the logs and the sizes of the
+  /// tables, so that their joins visit the same facts.
+  fn starts_over(&self, c: usize) -> bool {
+    let rels = &self.prog.components[c].rels;
+    if !rels.iter().all(|&r| self.tables[r].facts.is_empty()) {
+      return false;
+    }
+    let (mut changed, mut stayed) = (0, 0);
+    for &r in &self.reads[c] {
+      let log = self.log(r);
+      changed += log.came.len + log.went.len;
+      stayed += self.tables[r].facts.len() - log.came.len;
+    }
+    changed > stayed
+  }
+
   /// Clears component `c`'s relations: those that have facts, so that one
-  /// without keeps its version.
+  /// without keeps its version ([`Table::clear`]).
   fn clear(&mut self, c: usize) {
     for &r in &self.prog.components[c].rels {
-      if !self.tables[r].facts.is_empty() {
-        self.tables[r].facts_mut().clear();
-      }
+      self.tables[r].clear();
     }
   }
 
@@ -623,7 +933,9 @@ impl Runtime {
   /// the versions that they had when it last ran. Each of its relations gets
   /// a new table, a version on from the old one; but a relation whose facts
   /// come out the same keeps the old table, with its version and indexes,
-  /// and why each fact holds now.
+  /// and why each fact holds now. A new table takes the old one's log, and
+  /// notes there what came and went: what came in the order that the rules
+  /// first derived it ([`Runtime::component`]).
   fn rerun(&mut self, c: usize) -> Result<(), String> {
     let read: Vec<u64> = self.reads[c]
       .iter()
@@ -642,15 +954,27 @@ impl Runtime {
         std::mem::replace(&mut self.tables[r], new)
       })
       .collect();
-    self.component(c)?;
+    let derived = self.component(c)?;
     for (&r, mut old) in self.prog.components[c].rels.iter().zip(olds) {
-      let new = &self.tables[r];
+      let new = &mut self.tables[r];
       if new.facts.len() == old.facts.len() && new.facts.keys().eq(old.facts.keys()) {
         for (why, &now) in old.facts.values_mut().zip(new.facts.values()) {
           *why = now;
         }
         self.tables[r] = old;
+        continue;
       }
+      let mut log = old.log.take();
+      if let Some(log) = &mut log {
+        for tuple in old.facts.keys().filter(|t| !new.facts.contains_key(*t)) {
+          log.note(tuple, false);
+        }
+        let order = derived.get(&r).into_iter().flatten();
+        for tuple in order.filter(|t| !old.facts.contains_key(*t)) {
+          log.note(tuple, true);
+        }
+      }
+      new.log = log;
     }
     self.ran[c] = Some(read);
     Ok(())
@@ -658,8 +982,11 @@ impl Runtime {
 
   /// Runs a component's rules: once on every fact; then, if it's recursive,
   /// again for each of their atoms on its relations, joining just what the
-  /// last round added there, until a round adds nothing.
-  fn component(&mut self, c: usize) -> Result<(), String> {
+  /// last round added there, until a round adds nothing. Of one that isn't,
+  /// it counts how many ways each rule derives each fact
+  /// ([`Runtime::follow`]). Gives the facts that it derived, by relation, in
+  /// the order that it first derived them.
+  fn component(&mut self, c: usize) -> Result<BTreeMap<usize, Vec<Tuple>>, String> {
     let prog = &self.prog;
     let component = &prog.components[c];
     let mut new = Vec::new();
@@ -670,8 +997,23 @@ impl Runtime {
     for &r in &component.rules {
       solutions(prog, j, r, None, &mut new)?;
     }
+    if !component.recursive {
+      for &r in &component.rules {
+        self.counts[r].clear();
+      }
+      for (_, tuple, r) in &new {
+        *self.counts[*r].entry(tuple.clone()).or_default() += 1;
+      }
+    }
+    let mut derived: BTreeMap<usize, Vec<Tuple>> = BTreeMap::new();
     let mut fresh = insert(&mut self.tables, new);
     while component.recursive && !fresh.is_empty() {
+      for (&rel, tuples) in &fresh {
+        derived
+          .entry(rel)
+          .or_default()
+          .extend(tuples.iter().cloned());
+      }
       let added: BTreeMap<usize, Fresh> = fresh
         .into_iter()
         .map(|(rel, tuples)| {
@@ -694,7 +1036,162 @@ impl Runtime {
       }
       fresh = insert(&mut self.tables, new);
     }
+    for (rel, tuples) in fresh {
+      derived.entry(rel).or_default().extend(tuples);
+    }
+    Ok(derived)
+  }
+
+  /// Follows what changed, since component `c` last ran, in what its rules
+  /// read, unless that has the versions that it had then: in place, by how
+  /// many ways each rule derives each fact (`counts`). A rule that reads
+  /// one relation that changed, at an atom that it follows ([`followed`]),
+  /// joins there just the facts that came, and those that went, with the
+  /// rest of its body as it is; one that reads more that changed, or reads
+  /// one in a negation, or at an atom that it doesn't follow, runs whole.
+  /// Every rule joins before any count changes. A fact whose counts change
+  /// holds if a rule derives it, by the lowest-numbered of them
+  /// ([`Runtime::place`]).
+  fn follow(&mut self, c: usize) -> Result<(), String> {
+    let read: Vec<u64> = (self.reads[c].iter())
+      .map(|&r| self.tables[r].version)
+      .collect();
+    if self.ran[c].as_ref() == Some(&read) {
+      return Ok(());
+    }
+    let prog = &self.prog;
+    let j = Join {
+      tables: &self.tables,
+      visits: &self.visits,
+    };
+    // Each rule's change: its counts anew (whole), or by how many ways more,
+    // or fewer, it derives each fact.
+    let mut changes = Vec::new();
+    for &r in &prog.components[c].rules {
+      let mut found = Vec::new();
+      let change = match self.plan(r) {
+        Plan::Nothing => continue,
+        Plan::Whole => {
+          solutions(prog, j, r, None, &mut found)?;
+          (true, tallied(found, 1, Ordered::default()))
+        }
+        Plan::At(at) => {
+          let Lit::Atom(atom) = &prog.rules[r].body[at] else {
+            unreachable!("a rule joins what came and went at an atom");
+          };
+          let log = self.log(atom.rel);
+          let mut by = Ordered::default();
+          for (facts, sign) in [(&log.came, 1), (&log.went, -1)] {
+            if !facts.is_empty() {
+              let tuples = facts.iter().map(|(tuple, _)| tuple.clone()).collect();
+              let fresh = Fresh {
+                tuples,
+                indexes: Indexes::default(),
+              };
+              solutions(prog, j, r, Some((at, &fresh)), &mut found)?;
+              by = tallied(std::mem::take(&mut found), sign, by);
+            }
+          }
+          (false, by)
+        }
+      };
+      changes.push((r, change));
+    }
+    // The facts whose counts change, by relation, in the order that the
+    // rules first gave them; and the counts.
+    let mut touched: BTreeMap<usize, Ordered<()>> = BTreeMap::new();
+    for (r, (whole, change)) in changes {
+      let heads = touched.entry(self.prog.rules[r].head).or_default();
+      let counts = &mut self.counts[r];
+      if whole {
+        counts
+          .keys()
+          .for_each(|tuple| heads.insert(tuple.clone(), ()));
+        change
+          .iter()
+          .for_each(|(tuple, _)| heads.insert(tuple.clone(), ()));
+        *counts = (change.iter())
+          .map(|(tuple, n)| (tuple.clone(), n.unsigned_abs()))
+          .collect();
+        continue;
+      }
+      for (tuple, &by) in change.iter() {
+        let n = counts.get(tuple).copied().unwrap_or(0);
+        let now = n.checked_add_signed(by);
+        let now = now.expect("a rule derives a fact no fewer than no ways");
+        heads.insert(tuple.clone(), ());
+        match now {
+          0 => _ = counts.remove(tuple),
+          _ => _ = counts.insert(tuple.clone(), now),
+        }
+      }
+    }
+    for (rel, heads) in touched {
+      self.place(c, rel, heads);
+    }
+    self.ran[c] = Some(read);
     Ok(())
+  }
+
+  /// What a tick does for rule `r`, by the relations in its body whose logs
+  /// aren't empty ([`Plan`]).
+  fn plan(&self, r: usize) -> Plan {
+    let (mut at, mut changes) = (0, 0);
+    for (i, lit) in self.prog.rules[r].body.iter().enumerate() {
+      let (Lit::Atom(atom) | Lit::Not(atom)) = lit else {
+        continue;
+      };
+      if self.log(atom.rel).changed() {
+        changes += match lit {
+          Lit::Atom(_) if self.followed[r][i] => 1,
+          _ => 2,
+        };
+        at = i;
+      }
+    }
+    match changes {
+      0 => Plan::Nothing,
+      1 => Plan::At(at),
+      _ => Plan::Whole,
+    }
+  }
+
+  /// A relation's log, which a tick that follows what changed has: rules
+  /// follow only after a tick has run them ([`Runtime::settle`]).
+  fn log(&self, rel: usize) -> &Log {
+    let log = self.tables[rel].log.as_ref();
+    log.expect("a relation has a log once a tick has run the rules")
+  }
+
+  /// Brings relation `rel`, of component `c`, up to its rules' counts, at
+  /// the facts `heads`, in their order: a fact holds if a rule derives it,
+  /// by the lowest-numbered of them.
+  fn place(&mut self, c: usize, rel: usize, heads: Ordered<()>) {
+    let rules: Vec<usize> = (self.prog.components[c].rules.iter())
+      .copied()
+      .filter(|&r| self.prog.rules[r].head == rel)
+      .collect();
+    let table = &mut self.tables[rel];
+    let mut changed = false;
+    for (tuple, _) in heads.iter() {
+      let by = rules.iter().find(|&&r| self.counts[r].contains_key(tuple));
+      let held = table.facts.contains_key(tuple);
+      match by {
+        Some(&r) if held => _ = table.facts.insert(tuple.clone(), Why::Rule(r)),
+        Some(&r) => {
+          table.add(tuple.clone(), Why::Rule(r));
+          changed = true;
+        }
+        None if held => {
+          table.cut(tuple);
+          changed = true;
+        }
+        None => {}
+      }
+    }
+    if changed {
+      table.changed();
+    }
   }
 
   /// Where a fact comes from, for errors.
@@ -712,26 +1209,44 @@ impl Runtime {
   }
 
   /// Facts that agree on their relation's key agree on the rest: checked
-  /// where the relation's version has moved since its keys last held.
+  /// where the relation's version has moved since its keys last held, by
+  /// how many of its key's values more than one fact has
+  /// ([`Table::key_count`]). Of a relation whose keys don't hold, the error
+  /// names the first two facts that clash ([`Runtime::key_clash`]); if none
+  /// do, the count that said so is wrong.
   fn check_keys(&mut self) -> Result<(), String> {
     for (rel, r) in self.prog.rels.iter().enumerate() {
       let version = self.tables[rel].version;
       if r.key.is_empty() || self.held[rel] == Some(version) {
         continue;
       }
-      let mut seen: BTreeMap<Vec<Value>, (&Tuple, Why)> = BTreeMap::new();
-      for (tuple, why) in &self.tables[rel].facts {
-        let key: Vec<Value> = r.key.iter().map(|&i| tuple[i].clone()).collect();
-        if let Some((other, first)) = seen.get(&key) {
-          let (x, y) = (self.fact_text(rel, other), self.fact_text(rel, tuple));
-          let (at, other) = (self.why(*first), self.why(*why));
-          return Err(format!("one key, two facts: {x} ({at}) and {y} ({other})"));
-        }
-        seen.insert(key, (tuple, *why));
+      if self.tables[rel].key_count(&r.key).clashes > 0 {
+        let miscounted = || {
+          let name = &self.prog.rels[rel].name;
+          format!("the facts of {name} by their key were miscounted (a bug in lem's runtime)")
+        };
+        return Err(self.key_clash(rel).unwrap_or_else(miscounted));
       }
       self.held[rel] = Some(version);
     }
     Ok(())
+  }
+
+  /// The first two of a relation's facts, in order, that agree on its key
+  /// and not on the rest, as an error; or none.
+  fn key_clash(&self, rel: usize) -> Option<String> {
+    let key = &self.prog.rels[rel].key;
+    let mut seen: BTreeMap<Vec<Value>, (&Tuple, Why)> = BTreeMap::new();
+    for (tuple, why) in &self.tables[rel].facts {
+      let k = project(tuple, key);
+      if let Some((other, first)) = seen.get(&k) {
+        let (x, y) = (self.fact_text(rel, other), self.fact_text(rel, tuple));
+        let (at, other) = (self.why(*first), self.why(*why));
+        return Some(format!("one key, two facts: {x} ({at}) and {y} ({other})"));
+      }
+      seen.insert(k, (tuple, *why));
+    }
+    None
   }
 }
 
@@ -787,6 +1302,81 @@ fn insert(tables: &mut [Table], new: New) -> BTreeMap<usize, Vec<Tuple>> {
     }
   }
   fresh
+}
+
+/// Counts a fact `by` more ways, or fewer, in `counts`: one that's counted
+/// no ways goes.
+fn tally(counts: &mut Ordered<i64>, tuple: &Tuple, by: i64) {
+  let n = counts.get_mut(tuple).map(|n| {
+    *n += by;
+    *n
+  });
+  match n {
+    None => counts.insert(tuple.clone(), by),
+    Some(0) => _ = counts.remove(tuple),
+    Some(_) => {}
+  }
+}
+
+/// Counts the facts of rules' solutions, `found`, `by` more ways each, or
+/// fewer, in `counts`.
+fn tallied(found: New, by: i64, mut counts: Ordered<i64>) -> Ordered<i64> {
+  for (_, tuple, _) in &found {
+    tally(&mut counts, tuple, by);
+  }
+  counts
+}
+
+/// The variables that a pattern binds, into `out`.
+fn pat_vars(pat: &Pat, out: &mut Vec<usize>) {
+  match pat {
+    Pat::Var(v) => out.push(*v),
+    Pat::Ctor(_, pats) => pats.iter().for_each(|pat| pat_vars(pat, out)),
+    Pat::Any | Pat::Const(_) | Pat::Expr(_) => {}
+  }
+}
+
+/// Whether a pattern has `_`.
+fn loose(pat: &Pat) -> bool {
+  match pat {
+    Pat::Any => true,
+    Pat::Ctor(_, pats) => pats.iter().any(loose),
+    Pat::Var(_) | Pat::Const(_) | Pat::Expr(_) => false,
+  }
+}
+
+/// For each of a rule's atoms, whether a tick follows a change to its
+/// relation alone by joining there just the facts that came and went
+/// ([`Runtime::follow`]). A rule's solutions must count the same whatever
+/// order its join takes: a solution counts each fact of an atom with `_`
+/// that binds a variable that no other atom binds, and once an atom without
+/// `_`, which matches one fact at most; an atom with `_` and no variable is
+/// a test, which counts once, so a change there isn't followed. But an atom
+/// with `_` whose variables other atoms bind counts one fact or each, by the
+/// order of the join: then no change to the rule is followed.
+fn followed(rule: &Rule) -> Vec<bool> {
+  let atoms: Vec<&Atom> = (rule.body.iter())
+    .map_while(|lit| match lit {
+      Lit::Atom(atom) => Some(atom),
+      _ => None,
+    })
+    .collect();
+  let vars: Vec<Vec<usize>> = (atoms.iter())
+    .map(|atom| {
+      let mut out = Vec::new();
+      atom.pats.iter().for_each(|pat| pat_vars(pat, &mut out));
+      out
+    })
+    .collect();
+  let own = |i: usize| {
+    let alone = |v: &usize| (vars.iter().enumerate()).all(|(j, vs)| j == i || !vs.contains(v));
+    vars[i].iter().any(alone)
+  };
+  let ok: Vec<bool> = (atoms.iter().enumerate())
+    .map(|(i, atom)| !atom.pats.iter().any(loose) || own(i))
+    .collect();
+  let counts = (ok.iter().zip(&vars)).all(|(&yes, vs)| yes || vs.is_empty());
+  ok.into_iter().map(|yes| counts && yes).collect()
 }
 
 /// What each component's rules read, as atoms or negations: the relations of

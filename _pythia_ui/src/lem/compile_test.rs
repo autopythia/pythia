@@ -26,12 +26,13 @@ const PROGRAMS: [&str; 4] = ["jobs", "numbers", "recursion", "joins"];
 
 /// Files of ticks, each on a program from its start: (program, file in
 /// `lem/test/`, whether its lines are JSON steps rather than lem).
-const SUITES: [(&str, &str, bool); 7] = [
+const SUITES: [(&str, &str, bool); 8] = [
   ("jobs", "jobs_ticks.txt", false),
   ("numbers", "numbers_ticks.txt", false),
   ("recursion", "recursion_ticks.txt", false),
   ("joins", "joins_ticks.txt", false),
   ("rerun", "rerun_ticks.txt", false),
+  ("follow", "follow_ticks.txt", false),
   ("jobs", "jobs_json.txt", true),
   ("numbers", "numbers_json.txt", true),
 ];

@@ -15,13 +15,16 @@
 //!   runtime joins in the order that their facts ask for;
 //! - `lem/test/rerun_ticks.txt` runs `lem/test/rerun.lem`: what a tick runs
 //!   again, and what it keeps, through negations, a lazy relation, keys that
-//!   don't hold, and a rule that fails.
+//!   don't hold, and a rule that fails;
+//! - `lem/test/follow_ticks.txt` runs `lem/test/follow.lem`: how a tick
+//!   follows what came and went, and where a rule runs whole.
 //!
 //! Each tick file also runs on a runtime that forgets, before each tick,
 //! what its rules read, so that every rule runs: the facts must be the same.
 //! And a join's work, as the facts it visits, where the order matters, and
 //! where an atom binds nothing; the work that a lazy relation saves; and the
-//! work that a tick saves where what rules read hasn't changed.
+//! work that a tick saves where what rules read hasn't changed, and where it
+//! follows what changed, or starts over.
 
 use super::check::load;
 use super::eval::Runtime;
@@ -77,6 +80,15 @@ fn ticks_of_what_runs_again() {
     .unwrap_or_else(|e| panic!("{}\n(raised at {})", e.text, e.loc));
   let mut runtime = Runtime::new(prog);
   tick_cases("test/rerun_ticks.txt", |lines| runtime.script(lines));
+}
+
+#[test]
+fn ticks_of_what_a_tick_follows() {
+  let src = read("test/follow.lem");
+  let prog = load(&[("lem/test/follow.lem", &src)])
+    .unwrap_or_else(|e| panic!("{}\n(raised at {})", e.text, e.loc));
+  let mut runtime = Runtime::new(prog);
+  tick_cases("test/follow_ticks.txt", |lines| runtime.script(lines));
 }
 
 #[test]
@@ -158,7 +170,8 @@ fn a_lazy_relation_is_derived_only_when_something_reads_it() {
 fn a_tick_runs_only_the_rules_whose_reads_changed() {
   // Two chains: B, then C, from A; and Y from X. A tick runs a component's
   // rules only if what they read has changed; and if their facts come out
-  // the same, what reads them doesn't run either.
+  // the same, what reads them doesn't run either. Once they've run, a tick
+  // follows what came and went: each such fact is a visit.
   let src = "input A(n: Int, m: Int)\nrel B(n: Int)\nB(n) :- A(n, m)\n\
              rel C(n: Int)\nC(n) :- B(n)\n\
              input X(n: Int)\nrel Y(n: Int)\nY(n) :- X(n)\n";
@@ -174,17 +187,17 @@ fn a_tick_runs_only_the_rules_whose_reads_changed() {
   assert_eq!(runtime.visits(), 0);
   runtime.assert("X(10)").unwrap();
   runtime.tick(None).unwrap();
-  assert_eq!(runtime.visits(), 11); // Y's alone
+  assert_eq!(runtime.visits(), 1); // X(10), for Y
   assert_eq!(runtime.facts("Y").len(), 11);
   runtime.assert("A(3, 1)").unwrap();
   runtime.tick(None).unwrap();
-  assert_eq!(runtime.visits(), 11); // B's: the same facts, so C doesn't run
+  assert_eq!(runtime.visits(), 1); // A(3, 1), for B: the same facts, so C doesn't run
   assert!(runtime.retract("A(3, 0)").unwrap());
   runtime.tick(None).unwrap();
-  assert_eq!(runtime.visits(), 10);
+  assert_eq!(runtime.visits(), 1); // B(3) holds still, by A(3, 1)
   assert!(runtime.retract("A(3, 1)").unwrap());
   runtime.tick(None).unwrap();
-  assert_eq!(runtime.visits(), 9 + 9); // B's, then C's: B lost B(3)
+  assert_eq!(runtime.visits(), 2); // A(3, 1), for B, which loses B(3), for C
   assert_eq!(runtime.facts("C").len(), 9);
   // Retracting a fact that doesn't hold, or asserting one that does,
   // changes nothing.
@@ -192,6 +205,41 @@ fn a_tick_runs_only_the_rules_whose_reads_changed() {
   runtime.assert("X(10)").unwrap();
   runtime.tick(None).unwrap();
   assert_eq!(runtime.visits(), 0);
+}
+
+#[test]
+fn a_component_with_nothing_to_keep_starts_over_when_most_of_what_it_reads_is_new() {
+  // Over has no facts while A holds none over 99. A tick that brings more of
+  // A than stayed starts it over, running its rule whole as its first tick
+  // did, and visits all of A's facts; one that brings fewer follows what
+  // came, and visits just that. Once Over has facts to keep, a tick follows
+  // however much came.
+  let src = "input A(n: Int)\nrel Over(n: Int)\nOver(n) :- A(n), n > 99\n";
+  let prog = load(&[("over.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  for i in 0..10 {
+    runtime.assert(&format!("A({i})")).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 10); // the first tick runs whole
+  runtime.assert("A(100)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 1); // 1 came, 10 stayed: it follows
+  assert!(runtime.retract("A(100)").unwrap());
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 1); // Over(100) to keep: it follows
+  for i in 100..120 {
+    runtime.assert(&format!("A({i})")).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 30); // 20 came, 10 stayed, nothing to keep
+  assert_eq!(runtime.facts("Over").len(), 20);
+  for i in 200..240 {
+    runtime.assert(&format!("A({i})")).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 40); // 40 came, 30 stayed, but 20 to keep
+  assert_eq!(runtime.facts("Over").len(), 60);
 }
 
 #[test]
@@ -216,7 +264,7 @@ fn a_key_that_doesnt_hold_fails_each_tick_until_it_does() {
 
 #[test]
 fn ticks_remembering_what_rules_read_are_ticks_that_forget_it() {
-  for name in ["jobs", "numbers", "recursion", "joins", "rerun"] {
+  for name in ["jobs", "numbers", "recursion", "joins", "rerun", "follow"] {
     let src = read(&format!("test/{name}.lem"));
     let file = format!("lem/test/{name}.lem");
     let runtime = || {

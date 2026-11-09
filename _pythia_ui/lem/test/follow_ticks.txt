@@ -1,0 +1,317 @@
+# Ticks of follow.lem, on lem alone. Each case is a tick on the facts that
+# the cases before it left: `=== title`; lines that assert (`+ Fact`) or
+# retract (`- Fact`) the host's facts, or show a relation's facts after the
+# tick (`? Name`); `---`; then the facts asked for, or the tick's error. A
+# runtime that forgets, before each tick, what its rules read, and so
+# derives every relation anew, must come to the same facts, and why each
+# holds (src/lem/eval_test.rs, tools/lem_test.js).
+
+=== P, PP and Q from A; P and PP from B
++ A(1, 1)
++ A(2, 1)
++ B(3)
+? P
+? PP
+? Q
+---
+P(1)
+P(2)
+P(3)
+PP(1)
+PP(2)
+PP(3)
+Q(1)
+Q(2)
+
+=== a second of A's facts for P(1), which P's first rule now derives twice
++ A(1, 2)
+? P
+? Q
+---
+P(1)
+P(2)
+P(3)
+Q(1)
+Q(2)
+
+=== the first goes: P's first rule derives P(1) once
+- A(1, 1)
+? P
+? PP
+---
+P(1)
+P(2)
+P(3)
+PP(1)
+PP(2)
+PP(3)
+
+=== B(1): both of P's rules derive P(1); Q runs whole, and Both
++ B(1)
+? P
+? Q
+? Both
+---
+P(1)
+P(2)
+P(3)
+Q(2)
+Both(1)
+
+=== A(1, 2) goes: P's second rule alone derives P(1); Both runs whole
+- A(1, 2)
+? P
+? Both
+---
+P(1)
+P(2)
+P(3)
+
+=== B(1) goes: P(1) goes, and PP(1) with it; Q runs whole
+- B(1)
+? P
+? PP
+? Q
+---
+P(2)
+P(3)
+PP(2)
+PP(3)
+Q(2)
+
+=== B(2): Both(2), by B(2) and A(2, 1); Q runs whole
++ B(2)
+? Both
+? Q
+---
+Both(2)
+
+=== A(2, 2): Both runs whole, and Both(2) holds by either of A's facts
++ A(2, 2)
+? Both
+---
+Both(2)
+
+=== A(2, 1) goes: Both(2) holds still, by A(2, 2)
+- A(2, 1)
+? Both
+? P
+---
+Both(2)
+P(2)
+P(3)
+
+=== two edges: a path, and Reach, which Far follows
++ E(1, 2)
++ E(2, 3)
+? Path
+? Reach
+? Far
+---
+Path(1, 3)
+Reach(1, 2)
+Reach(1, 3)
+Reach(2, 3)
+Far(1)
+Far(2)
+
+=== a third edge: Path runs whole, as Reach does
++ E(3, 4)
+? Path
+? Far
+---
+Path(1, 3)
+Path(2, 4)
+Far(1)
+Far(2)
+Far(3)
+
+=== an edge goes
+- E(2, 3)
+? Path
+? Reach
+? Far
+---
+Reach(1, 2)
+Reach(3, 4)
+Far(1)
+Far(3)
+
+=== C(1): Any runs whole, by its test; Twice binds and tests
++ C(1)
+? Any
+? Huge
+? Twice
+? K
+---
+Any(2)
+Any(3)
+Huge(1000000000000000)
+K(0, 1)
+
+=== C(3): K's key doesn't hold
++ C(3)
+---
+error: one key, two facts: K(0, 1) (from the rule at lem/test/follow.lem:49:1) and K(0, 3) (from the rule at lem/test/follow.lem:49:1)
+
+=== C(1) goes: K's key holds again
+- C(1)
+? Any
+? Twice
+? K
+---
+Any(2)
+Any(3)
+Twice(3, 6)
+K(0, 3)
+
+=== C(10) and C(4): Huge overflows
++ C(10)
++ C(4)
+---
+error: `*` overflowed: a whole number stays within ±9007199254740991 (2^53 − 1), in the rule at lem/test/follow.lem:45:1
+
+=== C(10) goes: every rule runs again, with C(3) and C(4)
+- C(10)
+? Any
+? Huge
+? Twice
+? K
+? P
+---
+Any(2)
+Any(3)
+Huge(3000000000000000)
+Huge(4000000000000000)
+Twice(3, 6)
+Twice(4, 8)
+K(0, 3)
+P(2)
+P(3)
+
+=== C(3) goes: Any(2) and Any(3) hold still, by C(4)
+- C(3)
+? Any
+? Twice
+? K
+---
+Any(2)
+Any(3)
+Twice(4, 8)
+
+=== A(5, 1) comes and goes in one tick: nothing changes
++ A(5, 1)
+- A(5, 1)
+? P
+---
+P(2)
+P(3)
+
+=== A(2, 2) goes and comes back in one tick: nothing changes
+- A(2, 2)
++ A(2, 2)
+? P
+---
+P(2)
+P(3)
+
+=== three of A's facts come and two go, in one tick: A(7, 2) came
++ A(7, 1)
++ A(7, 2)
+- A(7, 1)
++ A(7, 3)
+- A(7, 3)
+? P
+? Q
+---
+P(2)
+P(3)
+P(7)
+Q(7)
+
+=== G's facts for 2, a Big last, and J(2): H tests them in order
++ G(2, Small(1))
++ G(2, Small(2))
++ G(2, Big(3))
++ J(2)
+? H
+---
+H(2)
+
+=== three of N's facts, none over 99: Over has none
++ N(1)
++ N(2)
++ N(3)
+? Over
+---
+(nothing to show)
+
+=== N(100): fewer came than stayed, so Over follows what came
++ N(100)
+? Over
+---
+Over(100)
+
+=== N(100) goes: Over has a fact to keep, so it follows
+- N(100)
+? Over
+---
+(nothing to show)
+
+=== four over 99: more came than stayed, and Over has nothing to keep: it starts over
++ N(101)
++ N(102)
++ N(103)
++ N(104)
+? Over
+---
+Over(101)
+Over(102)
+Over(103)
+Over(104)
+
+=== eight more over 99: more came than stayed, but Over has facts to keep
++ N(201)
++ N(202)
++ N(203)
++ N(204)
++ N(205)
++ N(206)
++ N(207)
++ N(208)
+? Over
+---
+Over(101)
+Over(102)
+Over(103)
+Over(104)
+Over(201)
+Over(202)
+Over(203)
+Over(204)
+Over(205)
+Over(206)
+Over(207)
+Over(208)
+
+=== a small size kept for 7, and a probe of 7: Found has none
++ Kept(7, Small(0))
++ Probe(7)
+? Sizes
+? Found
+---
+Sizes(7, Small(0))
+
+=== seeds for 7, one small, one big: Sized starts over, and Sizes follows
++ Seed(7, 1)
++ Seed(7, 9)
+? Sized
+? Sizes
+? Found
+---
+Sized(7, Big(9))
+Sized(7, Small(1))
+Sizes(7, Big(9))
+Sizes(7, Small(0))
+Sizes(7, Small(1))
+Found(7)

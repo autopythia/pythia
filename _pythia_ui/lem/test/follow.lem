@@ -1,0 +1,83 @@
+-- follow.lem: how a tick follows what changed (src/lem/eval.rs). A rule
+-- that reads one relation that changed, at an atom that it follows, joins
+-- there just the facts that came and went; one that reads it in a negation,
+-- or reads more than one that changed, or has an atom that counts one fact
+-- or each by the order of the join, runs whole. A fact holds by the
+-- lowest-numbered rule that derives it.
+input A(n: Int, m: Int)
+input B(n: Int)
+input C(n: Int)
+input E(a: Int, b: Int)
+
+-- P(n) by each of A's facts for n, and by B(n).
+rel P(n: Int)
+P(n) :- A(n, _)
+P(n) :- B(n)
+
+-- PP follows P's changes, which P's rules make.
+rel PP(n: Int)
+PP(n) :- P(n)
+
+-- Q reads B in a negation.
+rel Q(n: Int)
+Q(n) :- A(n, m), not B(n)
+
+-- Both's A(n, _) counts one fact or each, by the order of the join.
+rel Both(n: Int)
+Both(n) :- B(n), A(n, _)
+
+-- Any's C(_) is a test.
+rel Any(n: Int)
+Any(n) :- B(n), C(_)
+
+-- Path reads E twice; Reach is recursive, and Far follows it.
+rel Path(a: Int, c: Int)
+Path(a, c) :- E(a, b), E(b, c)
+rel Reach(a: Int, b: Int)
+Reach(a, b) :- E(a, b)
+Reach(a, c) :- Reach(a, b), E(b, c)
+rel Far(a: Int)
+Far(a) :- Reach(a, _)
+
+-- Huge overflows for C(10), and the relations derived after it then have no
+-- facts; Twice binds and tests; K's key clashes for two of C's facts below 4.
+rel Huge(n: Int)
+Huge(n * 1000000000000000) :- C(n)
+rel Twice(n: Int, t: Int)
+Twice(n, t) :- C(n), t = n * 2, t > 2
+rel K(k: Int, n: Int) key k
+K(0, n) :- C(n), n < 4
+
+-- The order of facts in an index: a test of G(n, Big(_)) visits G's facts
+-- for n in their order, up to the first Big, which both runtimes keep alike,
+-- whichever order the facts came in.
+enum Size:
+  Big(n: Int), Small(n: Int)
+input G(n: Int, size: Size)
+input J(n: Int)
+rel H(n: Int)
+H(n) :- J(n), G(n, Big(_))
+
+-- Over has no facts to keep while N holds none over 99: a tick that brings
+-- more of N than stayed starts it over, running its rule whole as its first
+-- tick did; one that brings fewer follows what came.
+input N(n: Int)
+rel Over(n: Int)
+Over(n) :- N(n), n > 99
+
+-- The order in which a whole run notes the facts that it adds: as its rules
+-- derive them, Small's rule before Big's, though Big's facts come first in
+-- value. Sizes, which has facts to keep, follows them in that order, into
+-- its index, which Found's rule then walks to the first Big: so the order
+-- sets how many facts it visits, which both runtimes must agree on.
+input Seed(n: Int, k: Int)
+rel Sized(n: Int, size: Size)
+Sized(n, Small(k)) :- Seed(n, k), k < 5
+Sized(n, Big(k)) :- Seed(n, k), k > 4
+input Kept(n: Int, size: Size)
+rel Sizes(n: Int, size: Size)
+Sizes(n, s) :- Sized(n, s)
+Sizes(n, s) :- Kept(n, s)
+input Probe(n: Int)
+rel Found(n: Int)
+Found(n) :- Probe(n), Sizes(n, Big(_))
