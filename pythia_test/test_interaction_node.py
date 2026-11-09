@@ -1406,8 +1406,10 @@ class ViewTests(WorkspaceTest):
         # Nothing that its policy refuses: no script but those, no style in the page.
         self.assertEqual(index.body.count("<script"), len(view.SCRIPTS))
         self.assertNotRegex(index.body, r"<style|style=|javascript:")
+        tabs = (f'data-index="/{TOKEN}/lem/facts/" data-tab="/{TOKEN}/lem/tab/{{id}}" '
+                f'data-log="/{TOKEN}/lem/c/{{id}}" data-home="/{TOKEN}/lem/"')
         for shown in (f'<html lang=en data-facts="/{TOKEN}/lem/facts/" '
-                      f'data-store="/{TOKEN}/lem/store/session">',
+                      f'data-store="/{TOKEN}/lem/store/session" {tabs}>',
                       "<title>root contexts · node</title>",
                       f'<noscript><p>The glui view runs in JavaScript; <a href="/{TOKEN}/">the '
                       "plain pages</a> need none.</p></noscript>"):
@@ -1415,7 +1417,7 @@ class ViewTests(WorkspaceTest):
         log = self.get("lem/c/1")
         self.assertEqual((log.status, log.csp), (200, view.PAGE_CSP))
         for shown in (f'<html lang=en data-facts="/{TOKEN}/lem/facts/c/1" '
-                      f'data-store="/{TOKEN}/lem/store/session" '
+                      f'data-store="/{TOKEN}/lem/store/session" {tabs} data-open="1" '
                       f'data-before="/{TOKEN}/lem/rows/1/before/{{line}}" '
                       f'data-after="/{TOKEN}/lem/rows/1/after/{{line}}" '
                       f'data-around="/{TOKEN}/lem/rows/1/around/{{line}}" '
@@ -1591,6 +1593,25 @@ class ViewTests(WorkspaceTest):
             self.assertEqual(forward, whole)
             self.assertEqual(self.facts(self.steps("lem/rows/1/after/63"), "Chunk"),
                              [{"first": 64, "last": 63}])
+
+    def test_a_tab_names_its_logs_urls_as_its_page_does(self):
+        response = self.get("lem/tab/1")
+        self.assertEqual((response.status, response.content_type, response.csp),
+                         (200, "application/json", view.DATA_CSP))
+        tab = json.loads(response.body)
+        # Each request here reads the registry anew, so a log's index, whose generation
+        # names its growth, is new each time.
+        page = re.sub(r"/grow/1/[0-9]+/", "/grow/1/G/", self.get("lem/c/1").body)
+        tab["grow"] = re.sub(r"/grow/1/[0-9]+/", "/grow/1/G/", tab["grow"])
+        for name in ("facts", "before", "after", "around", "run", "body", "grow", "stars",
+                     "pins"):
+            self.assertIn(f'data-{name}="{html.escape(tab[name])}"', page, name)
+        self.assertEqual((tab["id"], tab["title"], tab["plain"]),
+                         ("1", "local-0 (1)", f"/{TOKEN}/c/1"))
+        self.assertEqual(sorted(tab), ["after", "around", "before", "body", "facts", "grow",
+                                       "id", "pins", "plain", "run", "stars", "title"])
+        for cid in ("99", "", "x", REPLACED):
+            self.assertEqual(self.get(f"lem/tab/{cid}").status, 404, cid)
 
     def test_rows_around_a_line_keep_its_row_whole(self):
         # Line 6 is inside turn 1's run, lines 5 to 17: the rows around it start with the

@@ -3,19 +3,21 @@
 Its two pages, ``/TOKEN/lem/`` for the roots and ``/TOKEN/lem/c/N`` for root
 N's log, each load glui's scripts and stylesheets, and the program that shows
 them, ``lem/contexts.lem`` compiled, from ``_pythia_ui/`` beside the package
-(``Files``), at ``/TOKEN/lem/files/NAME``. A page's facts come as JSON steps
-(``_pythia_ui/src/lem/host.rs``), from ``/TOKEN/lem/facts/`` and
-``/TOKEN/lem/facts/c/N``: for a log, its turns, each with the line where it
-starts, and its last rows. A log's rows are its messages, each with its text,
-and its runs, the other items between two messages within a turn, each with
-what's in it. More rows come as either end of those on the page comes near the
-screen, from ``/TOKEN/lem/rows/N/before/LINE`` and
-``/TOKEN/lem/rows/N/after/LINE``, so that a page holds what's been scrolled
-through, and those around a line that the page jumps to, from
-``/TOKEN/lem/rows/N/around/LINE``; a run's items when it's opened, from
-``/TOKEN/lem/run/N/LINE``; and an item's body when its entry opens, from
-``/TOKEN/lem/body/N/LINE``. A log that grows says so, to a page that asks
-every few seconds what it gained since it had LINES lines, from
+(``Files``), at ``/TOKEN/lem/files/NAME``. Each also names what a page with
+tabs needs: the index's facts, where a root's tab finds its log's URLs,
+``/TOKEN/lem/tab/N``, and, for a log, the tab that it opens. A page's facts
+come as JSON steps (``_pythia_ui/src/lem/host.rs``), from
+``/TOKEN/lem/facts/`` and ``/TOKEN/lem/facts/c/N``: for a log, its turns, each
+with the line where it starts, and its last rows. A log's rows are its
+messages, each with its text, and its runs, the other items between two
+messages within a turn, each with what's in it. More rows come as either end
+of those on the page comes near the screen, from
+``/TOKEN/lem/rows/N/before/LINE`` and ``/TOKEN/lem/rows/N/after/LINE``, so
+that a page holds what's been scrolled through, and those around a line that
+the page jumps to, from ``/TOKEN/lem/rows/N/around/LINE``; a run's items when
+it's opened, from ``/TOKEN/lem/run/N/LINE``; and an item's body when its entry
+opens, from ``/TOKEN/lem/body/N/LINE``. A log that grows says so, to a page
+that asks every few seconds what it gained since it had LINES lines, from
 ``/TOKEN/lem/grow/N/GENERATION/LINES``: its length, and the turns that
 changed; its later rows then come as others do, the run that it ended with
 whole, if it went on. A log's facts hold the lines starred in it, which a page
@@ -298,6 +300,8 @@ class View:
             return self.run(pages, cid, line)
         if what == "pins":
             return self.pins(pages, name)
+        if what == "tab":
+            return self.tab(pages, name)
         if what == "grow":
             cid, _, rest = name.partition("/")
             generation, _, lines = rest.partition("/")
@@ -314,20 +318,27 @@ class View:
     def _page(self, pages: Pages, title: str, facts: str, body: Optional[str] = None, *,
               rows: Optional[str] = None, run: Optional[str] = None,
               grow: Optional[str] = None, stars: Optional[str] = None,
-              pins: Optional[str] = None, plain: Optional[str] = None) -> Response:
+              pins: Optional[str] = None, plain: Optional[str] = None,
+              opens: Optional[str] = None) -> Response:
         """A page of the view: the URLs of its facts, its rows before a line, after one and
         around one (``rows``, with ``{way}`` for ``before``, ``after`` or ``around``), its
         runs' items, its bodies, what its log gained since it had ``{lines}`` lines
         (``grow``), where it keeps a star (``stars``) and its panel's pins (``pins``); the
-        settings that the server keeps for the view (``store.py``); what it loads; and, for
-        a browser without script, a link to the same in the plain pages, ``plain``."""
+        settings that the server keeps for the view (``store.py``); for its tabs, the URLs
+        of the index's facts, of a context's tab (``tab``) and its page, by its number, and
+        of the view's first page; the tab that it opens (``opens``), a log's; what it
+        loads; and, for a browser without script, a link to the same in the plain pages,
+        ``plain``."""
         missing = self.files.missing()
         if missing:
             return pages.not_found(f"The glui view needs files that aren't in "
                                    f"{shown_path(self.files.directory)}/: "
                                    f"{', '.join(missing)}.")
         files = f"{pages.base}/lem/files/"
-        data = f' data-facts="{h(facts)}" data-store="{h(pages.base)}/lem/store/session"'
+        lem = f"{h(pages.base)}/lem/"
+        data = (f' data-facts="{h(facts)}" data-store="{lem}store/session"'
+                f' data-index="{lem}facts/" data-tab="{lem}tab/{{id}}" data-log="{lem}c/{{id}}"'
+                f' data-home="{lem}"' + ("" if opens is None else f' data-open="{h(opens)}"'))
         if rows is not None:
             data += "".join(f' data-{way}="{h(rows.replace("{way}", way))}"'
                             for way in ("before", "after", "around"))
@@ -356,19 +367,41 @@ class View:
             if entry is not None and entry.first is not None:  # another number of a root
                 return Response(303, location=f"{pages.base}/lem/c/{entry.first}")
             return pages.context(cid, {})  # why there's no such root here
+        urls = self._log_urls(pages, context)
+        rows = urls["before"].replace("/before/", "/{way}/")
+        return self._page(pages, context.label, urls["facts"], urls["body"], rows=rows,
+                          run=urls["run"], grow=urls["grow"], stars=urls["stars"],
+                          pins=urls["pins"], plain=urls["plain"], opens=context.id)
+
+    @staticmethod
+    def _log_urls(pages: Pages, context: Context) -> Dict[str, str]:
+        """The URLs of root ``context``'s log, as its page names them: its facts, its rows
+        before a line, after one and around one, its runs' items, its bodies, what it gained
+        since it had ``{lines}`` lines, its stars, its pins, and its plain page."""
         number = quote(context.id)
         try:
             generation = context.refresh().index.generation
         except OSError:
             generation = 0  # its facts say why; growing, it asks again
-        return self._page(pages, context.label, f"{pages.base}/lem/facts/c/{number}",
-                          f"{pages.base}/lem/body/{number}/{{line}}",
-                          rows=f"{pages.base}/lem/rows/{number}/{{way}}/{{line}}",
-                          run=f"{pages.base}/lem/run/{number}/{{run}}",
-                          grow=f"{pages.base}/lem/grow/{number}/{generation}/{{lines}}",
-                          stars=f"{pages.base}/lem/stars/{number}",
-                          pins=f"{pages.base}/lem/pins/{number}",
-                          plain=f"{pages.base}/c/{number}")
+        lem = f"{pages.base}/lem"
+        return {"facts": f"{lem}/facts/c/{number}",
+                **{way: f"{lem}/rows/{number}/{way}/{{line}}"
+                   for way in ("before", "after", "around")},
+                "run": f"{lem}/run/{number}/{{run}}", "body": f"{lem}/body/{number}/{{line}}",
+                "grow": f"{lem}/grow/{number}/{generation}/{{lines}}",
+                "stars": f"{lem}/stars/{number}", "pins": f"{lem}/pins/{number}",
+                "plain": f"{pages.base}/c/{number}"}
+
+    def tab(self, pages: Pages, cid: str) -> Response:
+        """Root ``cid``'s tab, for a page of the view with tabs: its number, its title, and
+        the URLs of its log, as its own page names them (``_log_urls``)."""
+        context = pages.roots.get(cid)
+        if context is None:
+            return _plain(404, "There's no such root context here.")
+        value = {"id": context.id, "title": safe_text(context.label),
+                 **self._log_urls(pages, context)}
+        return Response(200, json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                        content_type="application/json", csp=DATA_CSP)
 
     # The facts.
 
