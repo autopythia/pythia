@@ -9,13 +9,13 @@ first written. `make web` writes it, and `make web-serve` serves the pages.
 usage: contexts_sample.py DIR [ITEMS]
 
 In DIR: index.json and log.json, each page's facts as JSON steps
-(src/lem/host.rs), the log's its turns, its last rows, and two lines
-starred, with its panel's pins; before/LINE.json, the rows before line
-LINE, which the log's page asks for as its top comes near the screen;
-run/LINE.json, the items of the run that starts at line LINE, which it
-asks for when the run opens; and body/LINE.json, the body of each item
-that has one, as Body facts, which it asks for when the item's entry
-opens.
+(src/lem/host.rs), with what each context is doing; the log's its turns,
+its last rows, and two lines starred, with its panel's pins;
+before/LINE.json, the rows before line LINE, which the log's page asks
+for as its top comes near the screen; run/LINE.json, the items of the
+run that starts at line LINE, which it asks for when the run opens; and
+body/LINE.json, the body of each item that has one, as Body facts, which
+it asks for when the item's entry opens.
 """
 
 import json
@@ -41,6 +41,9 @@ CYCLE = (
     ("Assistant", "[assistant]", "Item {n} is changed.", None),
     ("Dim", "[sample]", "1,234 in, 56 out", None),
 )
+
+# What the sample log's context is doing, for its dot.
+RUNNING = ("Green", "Running: sampling.")
 
 LOG_PAGE = "/web/contexts-log.html"
 INDEX_PAGE = "/web/contexts-index.html"
@@ -93,17 +96,22 @@ def main():
         os.makedirs(os.path.join(out, sub))
     size = f"{items * 820 / 1e6:.1f} MB"
     index = [["+", "Page", {"title": "Contexts"}]]
-    for rank, (cid, title, model, changed) in enumerate((
-            ("sample-0", "A sample log", "opus", "now"),
-            ("sample-1", "The same log, by another name", "opus", "5 min ago"),
-            ("sample-2", "And again", "sonnet", "2 h ago"))):
+    for rank, (cid, title, model, changed, hue, why) in enumerate((
+            ("sample-0", "A sample log", "opus", "now", *RUNNING),
+            ("sample-1", "The same log, by another name", "opus", "5 min ago",
+             "Yellow", "Waiting: the CLI waits for input."),
+            ("sample-2", "And again", "sonnet", "2 h ago",
+             "Gray", "Inactive: no CLI runs on it."))):
         index.append(["+", "Context", {
             "id": cid, "title": title, "model": model, "turns": turns,
             "lines": items, "size": size, "changed": changed, "rank": rank,
             "to": LOG_PAGE}])
+        index.append(["+", "Activity", {"id": cid, "hue": hue, "why": why}])
     write(os.path.join(out, "index.json"), index)
     log = [["+", "Page", {"title": f"A sample log: {items:,} items",
-                          "items": LOG_PAGE + "#L", "turns": LOG_PAGE + "#T", "first": 1}],
+                          "items": LOG_PAGE + "#L", "turns": LOG_PAGE + "#T", "first": 1,
+                          "id": "sample-0"}],
+           ["+", "Activity", {"id": "sample-0", "hue": RUNNING[0], "why": RUNNING[1]}],
            ["+", "Length", {"lines": items}],
            ["+", "Nav", {"n": 0, "text": "Contexts", "to": INDEX_PAGE}]]
     # Its rows, each [step, first line, last line]; and each run's items.

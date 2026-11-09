@@ -10,8 +10,9 @@ type CtxId = Text
 
 -- A page: its title; for a log, where each item has a page of its own:
 -- `items`, then its line; where each turn has one: `turns`, then its
--- number; and its first line; and links to other pages, in order.
-input Page(title: Text, items: Text = "", turns: Text = "", first: Int = 0) one
+-- number; its first line; and its context; and links to other pages, in
+-- order.
+input Page(title: Text, items: Text = "", turns: Text = "", first: Int = 0, id: CtxId = "") one
 input Nav(n: Int, text: Text, to: Text) key n
 
 -- A log's length, in lines, which grows as its context works: the host
@@ -21,6 +22,13 @@ input Length(lines: Int) one
 
 -- The index: each context, by `rank`, the last changed first.
 input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text) key id
+
+-- What a context is doing, as the host says, for the dot before it, in the
+-- index and before a log's title: a hue, and why. Gray, no CLI runs on it;
+-- green, a CLI works on a turn; yellow, a CLI waits, for input, a login, or
+-- icron; orange, it retries a model request that failed; red, its last turn
+-- failed, or its CLI stopped in the middle of one.
+input Activity(id: CtxId, hue: Hue, why: Text) key id
 
 -- A log, in order. Its turns, each with its label, such as `Turn 12 · 51
 -- items`, its title, the user's input, and the line where it starts. The
@@ -138,18 +146,21 @@ Continues(t) :- Chunk(_, t), Chunk(a, b), a <= t + 1, t + 1 <= b
 rel Gap(last: Int, first: Int)
 Gap(t, f) :- Ahead(t, f), not Farther(t, f), not Continues(t)
 
-id Top, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
+id Top, TitleRow, TitleDot, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
 id Log, Before, After, TurnMark(Int), Said(Int), SaidText(Int), RunBox(Int), RunWait(Int)
 id Ent(Int), Part(Int, Int), Wait(Int), GapAfter(Int), GapBefore(Int)
 id Side, Pins, NoPins, PinTurn(Int), PinRow(Int), TurnList, TurnRow(Int)
 
 Window(Top, title=t) :- Page(t, items, turnto, begin):
-  Heading(Title, text=t)
+  Row(TitleRow):
+    Dot(TitleDot, hue=h, text=why) :- Page(id=c), Activity(c, h, why)
+    Heading(Title, text=t)
   Row(Crumbs) :- Nav():
     for Nav(n, text, to):
       Link(Crumb(n), text=text, to=to, order=n)
   Table(Rows) :- Context():
     TableRow(Head, header=True, order=-1):
+      Label(Col(7), text="State", order=-1)
       Label(Col(0), text="Context")
       Label(Col(1), text="Title")
       Label(Col(2), text="Model")
@@ -159,6 +170,8 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
       Label(Col(6), text="Changed")
     for Context(c, title, model, turns, lines, size, changed, rank, to):
       TableRow(Ctx(c), order=rank):
+        Dot(Cell(c, 7), hue=h, text=why, order=-1) :- Activity(c, h, why)
+        Label(Cell(c, 7), text="", order=-1) :- not Activity(id=c)
         Link(Cell(c, 0), text=text(c), to=to)
         Label(Cell(c, 1), text=title)
         Label(Cell(c, 2), text=model, tone=Dim)

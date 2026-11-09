@@ -257,15 +257,15 @@ tree that it keeps against one built anew, and runs the view in a stand-in DOM
 
 ### glui
 
-glui (`src/glui/`) is the design language of pythia's GUI, on glem: a
-library in lem, with no syntax or meaning of its own. `widgets.lem` has
-its widget kinds, among them those that documents need (headings, links,
-tables, a log's entries and code), and `theme.lem` says what a theme
-gives: the colors, sizes and times that a front end draws with.
-`themes/dark.lem`, the default, and `light.lem` give them, after wui's
-log styles. `pythia-ui lem` loads glui's files and a theme first:
-`--theme light`, or `--theme FILE.lem` for another, which it refuses if
-a value is missing. The example is the countdown after approval,
+glui (`src/glui/`) is the design language of pythia's GUI, on glem: a library
+in lem, with no syntax or meaning of its own. `widgets.lem` has its widget
+kinds, among them those that documents need (headings, links, tables, a log's
+entries and code) and a dot of a hue, a light that says a state, and
+`theme.lem` says what a theme gives: the colors, sizes and times that a front
+end draws with. `themes/dark.lem`, the default, and `light.lem` give them,
+after wui's log styles. `pythia-ui lem` loads glui's files and a theme first:
+`--theme light`, or `--theme FILE.lem` for another, which it refuses if a
+value is missing. The example is the countdown after approval,
 `lem/approval.lem`, with what pythia sends and accepts, `lem/host.lem`:
 
 ```sh
@@ -280,15 +280,16 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/ap
 ! Withdraw("toolu_1")
 ```
 
-On the web, `src/glui/glui.js` draws them, with a recipe for each kind
-for glem.js's view. It makes each widget a native element (`button`,
-`a`, `details`, `table`, `pre`, `progress`) with classes: `g-` and its
-kind's name, and its flags. Its widgets send `Edited` and `Toggled`, it
-shows `Disabled` and `Tooltip`, and a link goes only to one of the host's
-own paths. It sets a theme's values on the page as CSS variables, `--glui-`
-and a value's name, and a look's stylesheet draws with them, over
-`web/glui.css`: `web/native.css`, the design doc's native look, or
-`web/log.css`, after wui's log. `make js-test` runs its cases in a
+On the web, `src/glui/glui.js` draws them, with a recipe for each kind for
+glem.js's view. It makes each widget a native element (`button`, `a`,
+`details`, `table`, `pre`, `progress`) with classes: `g-` and its kind's name,
+and its flags. Its widgets send `Edited` and `Toggled`, it shows `Disabled`
+and `Tooltip`, a link goes only to one of the host's own paths, and a dot says
+its text as an image's label and in its tooltip, in colors of its own that
+show on light stages and dark ones. It sets a theme's values on the page as
+CSS variables, `--glui-` and a value's name, and a look's stylesheet draws
+with them, over `web/glui.css`: `web/native.css`, the design doc's native
+look, or `web/log.css`, after wui's log. `make js-test` runs its cases in a
 stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
 `lem/test/form.lem`.
 
@@ -313,9 +314,14 @@ of pythia's node server (`pythia/interaction/node/view.py` in pythia), at
 log, its length, `Length`, a `Turn` for each turn, with the line where it
 starts, and the log's last rows: a `Chunk`, the lines that they cover, and a
 row for each message, with its text, `Message`, and for each run of other
-items between two messages within a turn, with what's in it, `Run`. A log's
-page shows its rows in order, each turn marked where it starts, and each run
-folded. As either end of the rows comes near the screen, the program sends
+items between two messages within a turn, with what's in it, `Run`. Before
+each context, in the index, and before a log's title, a dot (glui's `Dot`)
+says what the context is doing, as the host says (`Activity`): gray, no CLI
+runs on it; green, a CLI works on a turn; yellow, a CLI waits, for input, a
+login or icron; orange, it retries a model request that failed; red, its last
+turn failed, or its CLI stopped in the middle of one. A log's page shows its
+rows in order, each turn marked where it starts, and each run folded. As
+either end of the rows comes near the screen, the program sends
 `LoadBefore(line)` or `LoadAfter(line)` (glem's `Near`), and the host answers
 with another chunk, or with `EarlierFailed` or `LaterFailed`; so a page holds
 what's been scrolled through. As a log grows, the host says its new `Length`,

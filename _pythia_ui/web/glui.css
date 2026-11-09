@@ -50,6 +50,15 @@ font:var(--glui-code-size)/var(--glui-code-line) ui-monospace,SFMono-Regular,Men
 .g-tone-error{--g-tone:var(--glui-error-text)}
 .g-label{color:var(--g-tone)}
 
+/* A dot, a light of its hue, in colors that show on light stages and dark
+   ones alike. */
+.g-dot{display:inline-block;flex:none;width:.7em;height:.7em;border-radius:50%;vertical-align:middle;
+background:#8b949e;forced-color-adjust:none}
+.g-hue-green{background:#2ea043}
+.g-hue-yellow{background:#d29922}
+.g-hue-orange{background:#db6d28}
+.g-hue-red{background:#da3633}
+
 /* A log's entry: its mark, label and text on a line, then its body, with
    its children, if it has any. */
 .g-entry-mark:not(:empty),.g-entry-label:not(:empty){margin-right:.5em}

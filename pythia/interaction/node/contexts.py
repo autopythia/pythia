@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 from .._cli_save import CONTEXT_NAME, PUBLIC_SUFFIX
+from .._save_lock import LOCK_NAME
 from ..compaction import _SUMMARY_SUFFIX as SUMMARY_SUFFIX
 from ..registry import Entry, Registry, RegistryError, save_prefix_of
 from ..registry import key_of as _registry_key_of
@@ -549,6 +550,8 @@ class Context:
 
 
 def _what(name: str) -> str:
+    if name == LOCK_NAME:
+        return "lock"
     return "trace" if "trace." in name else "file"
 
 

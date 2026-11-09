@@ -37,7 +37,8 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from pythia.interaction.node import contexts, pages, server, styles, view
+from pythia.interaction._save_lock import take as take_lock
+from pythia.interaction.node import activity, contexts, pages, server, styles, view
 from pythia.interaction.node.store import MAX_BYTES as MAX_STORE
 from pythia.interaction.node.store import MAX_FILE_BYTES as MAX_FILE
 from pythia.interaction.node.store import Invalid, Store
@@ -113,6 +114,11 @@ def summary():
             "cached_input_tokens_sum": 2000, "cached_input_tokens_max": 1000,
             "non_cached_input_tokens_sum": 400, "context_tokens": 1280, "sample_count": 2,
             "compaction_count": 0, "elapsed_seconds": 75.0}
+
+
+def failure():
+    """A model request that failed, as the CLI records it."""
+    return {"type": "model_failure", "category": "http_error", "message": "HTTP 500"}
 
 
 def compaction(kind="coldstart"):
@@ -1462,7 +1468,9 @@ class ViewTests(WorkspaceTest):
         steps = self.steps("lem/facts/c/1")
         self.assertEqual(self.facts(steps, "Page"), [
             {"title": "local-0 (1)", "items": f"/{TOKEN}/c/1?line=",
-             "turns": f"/{TOKEN}/c/1?turn=", "first": 1}])
+             "turns": f"/{TOKEN}/c/1?turn=", "first": 1, "id": "local-0 (1)"}])
+        self.assertEqual([fields["id"] for fields in self.facts(steps, "Activity")],
+                         ["local-0 (1)"])  # what it's doing, for its dot (ActivityTests)
         self.assertEqual(self.facts(steps, "Length"), [{"lines": 63}])
         self.assertEqual(self.facts(steps, "Nav"), [
             {"n": 0, "text": "Root contexts", "to": f"/{TOKEN}/lem/"},
@@ -1891,7 +1899,7 @@ class GrowTests(unittest.TestCase):
     def test_its_length_and_the_turns_that_changed(self):
         grow = self.grown()
         self.assertEqual(self.facts(self.steps("lem/facts/c/1"), "Length"), [("+", {"lines": 7})])
-        self.assertEqual(self.steps(grow + "7"), [])  # nothing yet
+        self.assertEqual([rel for _, rel, _ in self.steps(grow + "7")], ["Activity"])  # no lines
         self.append([*answer(), summary(), *turn("Two.")])  # lines 8 to 21
         steps = self.steps(grow + "7")
         self.assertEqual(self.facts(steps, "Length"), [("-", {"lines": 7}), ("+", {"lines": 21})])
@@ -1899,7 +1907,7 @@ class GrowTests(unittest.TestCase):
                           for _, fields in self.facts(steps, "Turn")],
                          [(0, "The start · 1 item", "", 1), (1, "Turn 1 · 7 items", "One.", 2),
                           (2, "Turn 2 · 7 items", "Two.", 12)])
-        self.assertEqual(self.steps(grow + "21"), [])
+        self.assertEqual([rel for _, rel, _ in self.steps(grow + "21")], ["Activity"])
         self.append(turn("Three."))  # lines 22 to 31: turn 2's labels stay, and 3's come
         steps = self.steps(grow + "21")
         self.assertEqual([fields["n"] for _, fields in self.facts(steps, "Turn")], [1, 2, 3])
@@ -1915,7 +1923,7 @@ class GrowTests(unittest.TestCase):
         response = self.get(grow + "1")
         self.assertEqual((response.status, response.body),
                          (409, "s (1)'s log was replaced: load its page anew.\n"))
-        self.assertEqual(self.steps(self.grown() + "1"), [])
+        self.assertEqual([rel for _, rel, _ in self.steps(self.grown() + "1")], ["Activity"])
 
     def test_stars_set_and_cleared_from_the_page_by_the_roots_key(self):
         own = {"origins": ["http://127.0.0.1:8765"], "marked": True,
@@ -1994,6 +2002,115 @@ class GrowTests(unittest.TestCase):
         self.assertEqual(self.facts(rows, "Chunk"), [("+", {"first": 12, "last": 14})])
         self.assertEqual([(rel, fields["line"]) for _, rel, fields in rows if rel != "Chunk"],
                          [("Message", 12), ("Run", 13)])
+
+
+class ActivityTests(unittest.TestCase):
+    """What a root context is doing, for its dot (activity.py): by the lock that a CLI
+    holds on its save, and what it says there; else by its log's tail and age."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="node-activity-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.log = self.tmp / "s._private" / "context.jsonl"
+        write_log(self.tmp / "s.jsonl", [init(KEY_A)])
+        self.write([init(KEY_A), *turn("One.")])
+        registry = self.tmp / "registry"
+        self.assertEqual(Registry(registry).register(KEY_A, self.log.parent).status, "new")
+        self.roots = contexts.Roots(registry)
+
+    def write(self, items):
+        write_log(self.log, items)
+
+    def hue(self, ago=0.0):
+        """The hue and why, with the log last changed ``ago`` seconds before."""
+        context = self.roots.get("1")
+        context.refresh()
+        return activity.activity(context, now=context.index.changed + ago)
+
+    def held(self, **noted):
+        lock, _ = take_lock(self.log.parent)
+        self.addCleanup(lock.close)
+        lock.note(**noted)
+        return lock
+
+    def test_without_a_lock_file_it_guesses_from_the_logs_tail_and_age(self):
+        guesses = []
+        for items in ([*turn("One.")],  # between turns
+                      [message("user", "Two."), BOUNDARY, *work("w2")],  # in a turn
+                      [message("user", "Two."), BOUNDARY, failure(), SAMPLE_END]):  # it failed
+            self.write([init(KEY_A), *items])
+            for ago in (60, 7200, 3 * 86400):
+                hue, why = self.hue(ago)
+                self.assertTrue(why.endswith(" ago, and it has no lock, so this is a guess."), why)
+                guesses.append((hue, why.split(".")[0], why.split("changed ")[1].split(",")[0]))
+        self.assertEqual(guesses, [
+            ("Yellow", "Waiting, it seems: between turns", "1 min ago"),
+            ("Gray", "Inactive, it seems", "2 h ago"),
+            ("Gray", "Inactive, it seems", "3 days ago"),
+            ("Green", "Running, it seems: a turn is under way", "1 min ago"),
+            ("Gray", "Inactive, it seems: a turn stopped", "2 h ago"),
+            ("Gray", "Inactive, it seems: a turn stopped", "3 days ago"),
+            ("Orange", "Retrying, it seems: a model request failed", "1 min ago"),
+            ("Red", "Failed, it seems: its last turn ended in a failure", "2 h ago"),
+            ("Red", "Failed, it seems: its last turn ended in a failure", "3 days ago")])
+
+    def test_a_lock_that_no_cli_holds_says_none_runs(self):
+        self.held().close()  # a CLI with the lock ran, and ended
+        self.assertEqual(self.hue(), ("Gray", "Inactive: no CLI runs on it."))
+        self.assertIn(("lock", self.log.parent / "1.lock"), self.roots.get("1").files())
+        self.write([init(KEY_A), message("user", "Two."), BOUNDARY, *work("w2")])
+        self.assertEqual(self.hue(), ("Red", "Failed: its CLI stopped in the middle of a turn."))
+        self.write([init(KEY_A), message("user", "Two."), BOUNDARY, failure(), SAMPLE_END])
+        self.assertEqual(self.hue(), (
+            "Red", "Failed: its last turn ended in a failure, and no CLI runs on it."))
+
+    def test_a_cli_that_holds_the_lock_says_what_it_is_doing(self):
+        lock = self.held()
+        seen = []
+        for noted in ({}, {"phase": "sampling", "retrying": False},
+                      {"phase": "tool: exec_command"}, {"phase": "sampling", "retrying": True},
+                      {"phase": "failed", "retrying": False}, {"phase": "auth needed"},
+                      {"phase": "idle"}):
+            lock.note(**noted)
+            hue, why = self.hue(7200)  # its log's age doesn't matter
+            self.assertTrue(why.endswith(f" CLI PID {os.getpid()} on {socket.gethostname()}"
+                                         + time.strftime(", since %Y-%m-%d %H:%M.", time.localtime(
+                                             lock.owner["since"]))), why)
+            seen.append((hue, why.split(" CLI PID")[0]))
+        # A turn that ended with a yield to icron waits for a job to wake it.
+        self.write([init(KEY_A), message("user", "Two."), BOUNDARY,
+                    call("icron", "y1", {"call": "yield_('the build')"}), result("y1", "Yielded."),
+                    summary()])
+        seen.append(self.hue())
+        self.assertEqual([each[:2] if len(each) == 2 else each for each in seen], [
+            ("Green", "Running: a CLI runs on it."),
+            ("Green", "Running: sampling."),
+            ("Green", "Running: tool: exec_command."),
+            ("Orange", "Retrying: a model request failed, and the CLI samples again."),
+            ("Red", "Failed: the last turn ended in a failure; the CLI waits."),
+            ("Yellow", "Waiting: the CLI needs a login."),
+            ("Yellow", "Waiting: the CLI waits for input."),
+            ("Yellow", "Waiting: it yielded to icron, until a job wakes it."
+             + seen[-1][1].split("wakes it.")[1])])
+
+    def test_the_index_and_a_log_say_it_and_a_growing_log_says_it_again(self):
+        app = server.App(self.roots, TOKEN)
+
+        def steps(path):
+            return json.loads(app.respond("GET", f"/{TOKEN}/{path}", ["127.0.0.1"]).body)
+
+        def said(found):
+            return [(fields["id"], fields["hue"]) for _, rel, fields in found if rel == "Activity"]
+
+        self.held().close()
+        self.assertEqual(said(steps("lem/facts/")), [("s (1)", "Gray")])
+        self.assertEqual(said(steps("lem/facts/c/1")), [("s (1)", "Gray")])
+        page = app.respond("GET", f"/{TOKEN}/lem/c/1", ["127.0.0.1"]).body
+        grow = re.search(r'data-grow="/t0ken_x+/(lem/grow/1/[0-9]+/)\{lines\}"', page).group(1)
+        self.held(phase="sampling")  # a CLI runs on it now, though its log hasn't changed
+        self.assertEqual(said(steps(grow + str(len(self.roots.get("1"))))), [("s (1)", "Green")])
+        program = json.loads(PROGRAM.read_text())
+        self.assertEqual(step_problems(program, steps("lem/facts/")), [])
 
 
 class ServerTests(unittest.TestCase):

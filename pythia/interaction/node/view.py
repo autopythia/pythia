@@ -22,10 +22,13 @@ whole, if it went on. A log's facts hold the lines starred in it, which a page
 sets or clears at ``/TOKEN/lem/stars/N``, and the server keeps by the root's
 key (``store.py``); and the pins of its page's panel: each line starred, and
 the user's messages that a starred answer answers, which come anew from
-``/TOKEN/lem/pins/N`` once a star changes. An item's label and gist are those
-of the server's plain pages, and its body holds what they show for it
-(``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
-terminal shows it, each character to escape as its code point.
+``/TOKEN/lem/pins/N`` once a star changes. The index's facts and a log's say
+what each context is doing, for the dot before it (``activity.py``), and so
+does each answer to what a log gained, since a context may change without a
+line. An item's label and gist are those of the server's plain pages, and its
+body holds what they show for it (``pages.Renderer``), as text, cut as they
+cut it. Every text is as pythia's terminal shows it, each character to escape
+as its code point.
 
 The view's pages have a content security policy of their own, which runs
 the server's scripts, styles and fetches, and nothing else; its facts,
@@ -42,6 +45,7 @@ from urllib.parse import quote
 
 from .._cli_editor import safe_text
 from ..display import _format_byte_count as byte_count
+from .activity import GRAY, activity
 from .contexts import Context, parse, shown_path
 from .store import Store
 from .pages import (GIST_CHARS, TITLE_CHARS, Block, Fold, Inline, Line, Nest, Note, Pages,
@@ -400,7 +404,17 @@ class View:
                 "size": "?" if problem else byte_count(context.index.size),
                 "changed": "?" if problem else when(context.index.changed),
                 "rank": rank, "to": f"{pages.base}/lem/c/{quote(context.id)}"}])
+            steps.append(self.activity_fact(context, problem))
         return steps
+
+    @staticmethod
+    def activity_fact(context: Context, problem: Optional[str] = None) -> list:
+        """What ``context`` is doing, for the dot before it (``activity``): an Activity, by
+        its label; gray, with why, for a context that can't be read."""
+        hue, why = (GRAY, f"Unknown: it can't be read: {problem}") if problem else \
+            activity(context)
+        return ["+", "Activity", {"id": safe_text(context.label), "hue": hue,
+                                  "why": safe_text(why)}]
 
     def log_facts(self, pages: Pages, cid: str) -> Optional[list]:
         """Root ``cid``'s log: its length; its turns (``turn_facts``); and its last rows
@@ -417,7 +431,8 @@ class View:
                     ["+", "Page", {"title": safe_text(context.label),
                                    "items": f"{pages.base}/c/{number}?line=",
                                    "turns": f"{pages.base}/c/{number}?turn=",
-                                   "first": 1}],
+                                   "first": 1, "id": safe_text(context.label)}],
+                    self.activity_fact(context),
                     ["+", "Length", {"lines": len(index)}],
                     *(["+", "Stars", {"line": line}] for line in self._stars(context)),
                     *self.pin_facts(pages, context),
@@ -568,10 +583,11 @@ class View:
 
     def grow(self, pages: Pages, cid: str, generation: str, text: str) -> Response:
         """What root ``cid``'s log gained since it had ``text`` lines, for a page from when
-        its index was of generation ``generation``: its length, in place of the last, and
-        the turns that changed (``turn_facts``); nothing if it gained nothing. A log that
-        was indexed anew since, as one replaced or cut short is, can't answer: the page
-        must load anew."""
+        its index was of generation ``generation``: what its context is doing, as it may
+        change without a line, in place of what it was doing; and, if it gained lines, its
+        length, in place of the last, and the turns that changed (``turn_facts``). A log
+        that was indexed anew since, as one replaced or cut short is, can't answer: the
+        page must load anew."""
         context = pages.roots.get(cid)
         if context is None:
             return _plain(404, "There's no such root context here.")
@@ -584,11 +600,11 @@ class View:
                 lines = int(text)
                 if int(generation) != index.generation or lines > len(index):
                     return _plain(409, f"{context.label}'s log was replaced: load its page anew.")
-                if lines == len(index):
-                    return _steps([])
-                steps: list = [["-", "Length", {"lines": lines}],
-                               ["+", "Length", {"lines": len(index)}]]
-                steps.extend(self.turn_facts(context, lines))
+                steps: list = [self.activity_fact(context)]
+                if lines < len(index):
+                    steps += [["-", "Length", {"lines": lines}],
+                              ["+", "Length", {"lines": len(index)}]]
+                    steps.extend(self.turn_facts(context, lines))
         except OSError as exc:
             return _plain(404, f"{context.label}'s log can't be read: {exc}")
         return _steps(steps)

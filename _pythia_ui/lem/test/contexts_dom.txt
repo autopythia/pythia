@@ -19,7 +19,8 @@
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -59,7 +60,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -101,7 +103,8 @@ effect LoadBefore {"line":2}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -153,7 +156,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -210,7 +214,8 @@ effect LoadRun {"run":3}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -285,7 +290,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -363,7 +369,8 @@ effect Load {"line":4}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -441,7 +448,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -519,7 +527,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -599,7 +608,8 @@ effect LoadRun {"run":1}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -679,7 +689,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -759,7 +770,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -838,7 +850,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -918,7 +931,8 @@ effect Star {"line":2,"on":true}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -998,7 +1012,8 @@ main.g-window
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1079,7 +1094,8 @@ effect Star {"line":3,"on":true}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1159,7 +1175,8 @@ effect Star {"line":2,"on":false}
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1240,7 +1257,8 @@ revealed Said(6)
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1321,7 +1339,8 @@ revealed Ent(4)
 ---
 page title: "ui-0"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1412,7 +1431,8 @@ aside.g-hud.g-top-right
       button.g-listrow type="button" "The start · 1 item"
       button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1502,7 +1522,8 @@ aside.g-hud.g-top-right
       button.g-listrow type="button" "The start · 1 item"
       button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1594,7 +1615,8 @@ aside.g-hud.g-top-right
       button.g-listrow type="button" "The start · 1 item"
       button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
@@ -1670,8 +1692,101 @@ main.g-window
 effect LoadAround {"line":1}
 revealed TurnMark(0)
 
+=== a log's dot, before its title: what its context is doing, in its tooltip and to a screen reader
+["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1, "id": "ui-0"}]
+["+", "Activity", {"id": "ui-0", "hue": "Orange", "why": "Retrying: a model request failed, and the CLI samples again."}]
+---
+page title: "ui-0"
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "Starred"
+    div.g-panel-body
+      span.g-label.g-tone-dim "Turn 1 · 5 items: Plan the GUI"
+      button.g-listrow type="button" "[user] Plan the GUI"
+  section.g-panel
+    div.g-panel-title "Turns"
+    div.g-panel-body
+      button.g-listrow type="button" "The start · 1 item"
+      button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
+main.g-window
+  div.g-row
+    span.g-dot.g-hue-orange role="img" aria-label="Retrying: a model request failed, and the CLI samples again." title="Retrying: a model request failed, and the CLI samples again."
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
 === the index, in place of the log
-["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1}]
+["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1, "id": "ui-0"}]
 ["-", "Length", {"lines": 6}]
 ["-", "Chunk", {"first": 1, "last": 1}]
 ["-", "Chunk", {"first": 2, "last": 6}]
@@ -1683,12 +1798,14 @@ revealed TurnMark(0)
 ---
 page title: "Contexts"
 main.g-window
-  div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
   div.g-row
     a.g-link href="/" "Contexts"
   table.g-table
     tbody
       tr.g-tablerow.g-header
+        span.g-label "State"
         span.g-label "Context"
         span.g-label "Title"
         span.g-label "Model"
@@ -1697,6 +1814,7 @@ main.g-window
         span.g-label "Size"
         span.g-label "Changed"
       tr.g-tablerow
+        span.g-dot.g-hue-orange role="img" aria-label="Retrying: a model request failed, and the CLI samples again." title="Retrying: a model request failed, and the CLI samples again."
         a.g-link href="/c/ui-0" "ui-0"
         span.g-label "Plan the GUI"
         span.g-label.g-tone-dim "opus"
@@ -1705,6 +1823,46 @@ main.g-window
         span.g-label "13.7 MB"
         span.g-label.g-tone-dim "5 min ago"
       tr.g-tablerow
+        span.g-label
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label "Let us start"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "3"
+        span.g-label "120"
+        span.g-label "1.2 MB"
+        span.g-label.g-tone-dim "2 h ago"
+
+=== the index's dots: what each context is doing, and none where the host says nothing
+["+", "Activity", {"id": "ui-0", "hue": "Green", "why": "Running: sampling."}]
+---
+page title: "Contexts"
+main.g-window
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "State"
+        span.g-label "Context"
+        span.g-label "Title"
+        span.g-label "Model"
+        span.g-label "Turns"
+        span.g-label "Lines"
+        span.g-label "Size"
+        span.g-label "Changed"
+      tr.g-tablerow
+        span.g-dot.g-hue-green role="img" aria-label="Running: sampling." title="Running: sampling."
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label "Plan the GUI"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "12"
+        span.g-label "2563"
+        span.g-label "13.7 MB"
+        span.g-label.g-tone-dim "5 min ago"
+      tr.g-tablerow
+        span.g-label
         a.g-link href="/c/dev-1" "dev-1"
         span.g-label "Let us start"
         span.g-label.g-tone-dim "opus"

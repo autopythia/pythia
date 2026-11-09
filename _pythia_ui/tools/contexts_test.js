@@ -307,6 +307,33 @@
       ["1 asked before its facts", "/f/page", "/f/grow/6", "/f/grow/9", "Near(After, Later(6))", "Near(Before, Earlier(3))", "Length(9)", "3 turns"]
     ],
     [
+      "a log's dot follows what its context is doing, as the page asks what it gained, with lines or without",
+      function () {
+        var it = page();
+        answer(it, "/f/page", null, LOG.concat([
+          ["-", "Page", LOG[0][2]],
+          ["+", "Page", { title: "ui-0", items: "/f/item/", turns: "/f/turn-page/", first: 1, id: "ui-0" }],
+          ["+", "Activity", { id: "ui-0", hue: "Green", why: "Running: sampling." }]
+        ]));
+        var seen = facts(it, "Dot");
+        it.tick();
+        answer(it, "/f/grow/6", null, [["+", "Activity", { id: "ui-0", hue: "Green", why: "Running: sampling." }]]);
+        seen = seen.concat(facts(it, "Dot"));
+        it.tick();
+        answer(it, "/f/grow/6", null, [["+", "Activity", { id: "ui-0", hue: "Yellow", why: "Waiting: the CLI waits for input." }]]);
+        return seen.concat(facts(it, "Dot"), facts(it, "Activity").length + " activity", it.asked);
+      },
+      [
+        'Dot(TitleDot, Green, "Running: sampling.", TitleRow, 0)',
+        'Dot(TitleDot, Green, "Running: sampling.", TitleRow, 0)',
+        'Dot(TitleDot, Yellow, "Waiting: the CLI waits for input.", TitleRow, 0)',
+        "1 activity",
+        "/f/page",
+        "/f/grow/6",
+        "/f/grow/6"
+      ]
+    ],
+    [
       "what a log gained can't come, or the program refuses it: the page says why, and asks no more",
       function () {
         var it = page();
@@ -352,7 +379,7 @@
         answer(it, "/f/page", null, later);
         return it.asked.concat(facts(it, "Context"), facts(it, "Page"), it.said.slice(1));
       },
-      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a")', 'Page("Contexts", "", "", 0)']
+      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a")', 'Page("Contexts", "", "", 0, "")']
     ],
     [
       "a star: set at once, and kept; one that can't be kept is taken back",

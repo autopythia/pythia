@@ -40,6 +40,13 @@ widget Progress(frac: Num)
 -- refuses any other.
 widget Link(text: Text, to: Text)
 
+-- A dot of a hue, as a light that says a state: its text is what it says,
+-- to a screen reader, and in its tooltip, after any other. A front end
+-- gives each hue a color that shows on light stages and dark ones alike.
+enum Hue:
+  Gray, Green, Yellow, Orange, Red
+widget Dot(hue: Hue, text: Text)
+
 -- A log's entry: its label, such as `[tool-call] exec_command`; its text;
 -- a mark beside it, such as its line, which links to `to`, one of the
 -- host's own paths, if it's given; and its tone. With `fold`, its children

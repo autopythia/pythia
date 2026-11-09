@@ -173,6 +173,24 @@ var glui = (function () {
     });
   }
 
+  // A dot, as a light of its hue (glui.css), which says its text as an
+  // image's label, and in its tooltip, after any other.
+  function dot(w, view) {
+    var e = element(view, "span");
+    e.setAttribute("role", "img");
+    var it = made(w, e, null, null, function () {
+      attr(e, "aria-label", w.fields.text);
+      return ["g-dot", "g-hue-" + kebab(w.fields.hue[0])];
+    });
+    var update = it.update;
+    it.update = function () {
+      update();
+      var tip = e.getAttribute("title");
+      attr(e, "title", tip === null ? w.fields.text : w.fields.text + "\n" + tip);
+    };
+    return it;
+  }
+
   // Whether `to` is one of the host's own paths: from the root of its
   // origin, as `/c/ui-0`; not `//` or `/\`, which a browser takes to be
   // another host; and without spaces or controls.
@@ -452,6 +470,7 @@ var glui = (function () {
     ListRow: sends("g-listrow"),
     Progress: progress,
     Link: link,
+    Dot: dot,
     Entry: entry,
     Code: code
   };
