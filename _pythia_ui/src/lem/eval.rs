@@ -53,7 +53,7 @@
 //! expression may come at another step.
 
 use super::check::{
-  expr_vars, Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Rule, Test, MAX_ATOMS,
+  expr_vars, Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Rel, Rule, Test, MAX_ATOMS,
 };
 use super::parse::Cmp;
 use super::value::{int_fits, Ty, Value, MAX_INT};
@@ -720,10 +720,10 @@ impl Runtime {
     if self.tables[rel].facts.contains_key(&tuple) {
       return Ok(());
     }
-    let key = &self.prog.rels[rel].key;
-    match key.is_empty() {
-      true => self.tables[rel].put(tuple, Why::Host),
-      false => self.tables[rel].put_keyed(tuple, key),
+    let r = &self.prog.rels[rel];
+    match r.keyed() {
+      false => self.tables[rel].put(tuple, Why::Host),
+      true => self.tables[rel].put_keyed(tuple, &r.key),
     }
     Ok(())
   }
@@ -735,10 +735,10 @@ impl Runtime {
     if !self.tables[rel].facts.contains_key(tuple) {
       return Ok(false);
     }
-    let key = &self.prog.rels[rel].key;
-    match key.is_empty() {
-      true => _ = self.tables[rel].remove(tuple),
-      false => self.tables[rel].remove_keyed(tuple, key),
+    let r = &self.prog.rels[rel];
+    match r.keyed() {
+      false => _ = self.tables[rel].remove(tuple),
+      true => self.tables[rel].remove_keyed(tuple, &r.key),
     }
     Ok(true)
   }
@@ -863,17 +863,17 @@ impl Runtime {
           });
           continue;
         }
-        let key: Vec<usize> = if r.key.is_empty() {
-          (0..r.fields.len()).collect()
-        } else {
+        let key: Vec<usize> = if r.keyed() {
           r.key.clone()
+        } else {
+          (0..r.fields.len()).collect()
         };
         let k: Vec<Value> = key.iter().map(|&i| tuple[i].clone()).collect();
         if let Some((other, b)) = added.get(&(rel, k.clone())) {
           if *other != tuple {
             let (x, y) = (self.fact_text(rel, other), self.fact_text(rel, &tuple));
             let (at, other) = (self.why(Why::Action(*b)), self.why(Why::Action(a)));
-            return Err(format!("one key, two facts: {x} ({at}) and {y} ({other})"));
+            return Err(clash(r, &x, &at, &y, &other));
           }
         }
         let table = &mut self.tables[rel];
@@ -1370,7 +1370,7 @@ impl Runtime {
   fn check_keys(&mut self) -> Result<(), String> {
     for (rel, r) in self.prog.rels.iter().enumerate() {
       let version = self.tables[rel].version;
-      if r.key.is_empty() || self.held[rel] == Some(version) {
+      if !r.keyed() || self.held[rel] == Some(version) {
         continue;
       }
       if self.tables[rel].key_count(&r.key).clashes > 0 {
@@ -1398,7 +1398,7 @@ impl Runtime {
       if let Some((other, first)) = seen.get(&k) {
         let (x, y) = (self.fact_text(rel, other), self.fact_text(rel, tuple));
         let (at, other) = (self.why(*first), self.why(*why));
-        return Some(format!("one key, two facts: {x} ({at}) and {y} ({other})"));
+        return Some(clash(&self.prog.rels[rel], &x, &at, &y, &other));
       }
       seen.insert(k, (tuple, *why));
     }
@@ -1500,6 +1500,13 @@ fn pat_vars(pat: &Pat, out: &mut Vec<usize>) {
   }
 }
 
+/// The error for two facts of relation `r` that its key, or `one`, forbids:
+/// `x`, which holds `at`, and `y`, `other`.
+fn clash(r: &Rel, x: &str, at: &str, y: &str, other: &str) -> String {
+  let what = if r.one { "one fact at most" } else { "one key" };
+  format!("{what}, two facts: {x} ({at}) and {y} ({other})")
+}
+
 /// Whether a pattern has `_`.
 fn loose(pat: &Pat) -> bool {
   match pat {
@@ -1577,8 +1584,8 @@ fn followed(prog: &Program, rule: &Rule) -> Vec<bool> {
     |i: usize, v: usize| (vars.iter().enumerate()).any(|(j, vs)| j != i && vs.contains(&v));
   let own = |i: usize| vars[i].iter().any(|&v| !elsewhere(i, v));
   let keyed = |i: usize| {
-    let key = &prog.rels[atoms[i].rel].key;
-    !key.is_empty() && key.iter().all(|&c| !loose(&atoms[i].pats[c]))
+    let r = &prog.rels[atoms[i].rel];
+    r.keyed() && r.key.iter().all(|&c| !loose(&atoms[i].pats[c]))
   };
   let ok: Vec<bool> = (atoms.iter().enumerate())
     .map(|(i, atom)| !atom.pats.iter().any(loose) || own(i) || keyed(i))

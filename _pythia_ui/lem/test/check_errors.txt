@@ -118,6 +118,27 @@ t.lem:1:23: `lazy` comes once:
 rel Seen(n: Int) lazy lazy
                       ^^^^
 
+=== one, on an effect
+effect Sent(text: Text) one
+---
+t.lem:1:25: an effect is sent, not kept, so it isn't `one`:
+effect Sent(text: Text) one
+                        ^^^
+
+=== one twice
+input Size(n: Int) one one
+---
+t.lem:1:24: `one` comes once:
+input Size(n: Int) one one
+                       ^^^
+
+=== one, with a key
+input Size(n: Int, m: Int) key n one
+---
+t.lem:1:32: a relation that's `one` has one fact at most, and no key:
+input Size(n: Int, m: Int) key n one
+                               ^
+
 === constructors with a key
 id Top key x
 ---

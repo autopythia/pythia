@@ -15,3 +15,17 @@ UsesK(k) :- B(k), K(k, _)
 input P(a: Int, b: Int, c: Int) key a, b
 rel Q(n: Int)
 Q(n) :- B(n), P(n, _, _)
+-- One fact at most (`one`), as a key of no columns would give: the host's
+-- new fact replaces the last, as an `on` block's does; a rule that derives
+-- two fails the tick; and an atom of such a relation is followed, as
+-- AtSize's Size(n, _) is.
+input Size(n: Int, m: Int) one
+state Mode(m: Int) one
+msg SetMode(m: Int)
+on SetMode(m):
+  Mode(m)
+input D(n: Int)
+rel Over(n: Int) one
+Over(n) :- D(n), Size(s, _), n > s
+rel AtSize(n: Int)
+AtSize(n) :- B(n), Size(n, _)

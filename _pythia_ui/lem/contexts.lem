@@ -11,13 +11,13 @@ type CtxId = Text
 -- A page: its title; for a log, where each item has a page of its own:
 -- `items`, then its line; where each turn has one: `turns`, then its
 -- number; and its first line; and links to other pages, in order.
-input Page(title: Text, items: Text = "", turns: Text = "", first: Int = 0)
+input Page(title: Text, items: Text = "", turns: Text = "", first: Int = 0) one
 input Nav(n: Int, text: Text, to: Text) key n
 
 -- A log's length, in lines, which grows as its context works: the host
 -- says so as it learns it, each length in place of the last. It's apart
 -- from Page, which every widget of the page reads.
-input Length(lines: Int)
+input Length(lines: Int) one
 
 -- The index: each context, by `rank`, the last changed first.
 input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text) key id
@@ -59,19 +59,19 @@ state Asked(line: Int) key line
 -- folded, as when it doesn't say. Each run, and each item, still opens and
 -- folds alone; and a run that's open asks for its items as it comes near
 -- the screen.
-input Opening(open: Bool)
-rel Opens(open: Bool)
+input Opening(open: Bool) one
+rel Opens(open: Bool) one
 Opens(o) :- Opening(o)
 Opens(False) :- not Opening()
 
 -- The lines that came, from the first to the last; and where rows are.
 rel Below(line: Int)
 Below(f) :- Chunk(f, _), Chunk(g, _), g < f
-rel First(line: Int)
+rel First(line: Int) one
 First(f) :- Chunk(f, _), not Below(f)
 rel Above(line: Int)
 Above(t) :- Chunk(_, t), Chunk(_, u), u > t
-rel Last(line: Int)
+rel Last(line: Int) one
 Last(t) :- Chunk(_, t), not Above(t)
 rel RowAt(line: Int)
 RowAt(l) :- Message(l, _, _, _, _)

@@ -153,6 +153,9 @@ fn rel_json(rel: &Rel) -> Json {
     ("fields", fields_json(&rel.fields)),
     ("key", numbers(&rel.key)),
   ];
+  if rel.one {
+    members.push(("one", Json::from(true)));
+  }
   if rel.lazy {
     members.push(("lazy", Json::from(true)));
   }
@@ -481,11 +484,21 @@ impl Decls {
       Some(Json::Bool(true)) if kind == DeclKind::Rel => true,
       Some(_) => return Err(format!("{name}'s `lazy` is true, and only a `rel` is lazy")),
     };
+    let one = match value.get("one") {
+      None => false,
+      Some(Json::Bool(true)) if kind != DeclKind::Effect && key.is_empty() => true,
+      Some(_) => {
+        return Err(format!(
+          "{name}'s `one` is true, of a relation that isn't an effect, with no key"
+        ))
+      }
+    };
     Ok(Rel {
       name: name.into(),
       kind,
       fields,
       key,
+      one,
       lazy,
       at: At::nowhere(),
     })

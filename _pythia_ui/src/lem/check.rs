@@ -121,11 +121,22 @@ pub struct Rel {
   pub fields: Vec<Field>,
   /// The key's columns: facts that agree on them must agree on the rest.
   pub key: Vec<usize>,
+  /// Whether it has one fact at most (the flag `one`), as a key of no
+  /// columns would give: then `key` is empty.
+  pub one: bool,
   /// Whether it's derived only when something reads it: a rule of a
   /// relation that's derived, an `on` block, or the host, which asks for its
-  /// facts. It's lem's one flag, `lazy`, which only a `rel` takes.
+  /// facts (the flag `lazy`, which only a `rel` takes).
   pub lazy: bool,
   pub at: At,
+}
+
+impl Rel {
+  /// Whether facts that agree on some columns, `key`, must agree on the
+  /// rest: a key, or one fact at most.
+  pub fn keyed(&self) -> bool {
+    self.one || !self.key.is_empty()
+  }
 }
 
 /// A constructor of an enum, of `Id` or of `Msg`.
@@ -699,9 +710,15 @@ impl Loader<'_> {
                   self.ctor(decl, &ty)?;
                 }
               } else if !constructors && relations {
-                let lazy = self.flags(kind, flags)?;
+                let (lazy, one) = self.flags(kind, flags)?;
+                if let (true, Some(column)) = (one, key.first()) {
+                  return self.fail(
+                    column.span.clone(),
+                    "a relation that's `one` has one fact at most, and no key",
+                  );
+                }
                 for decl in decls {
-                  self.relation(kind, decl, key, lazy)?;
+                  self.relation(kind, decl, key, lazy, one)?;
                 }
               }
             }
@@ -740,22 +757,31 @@ impl Loader<'_> {
 
   /// A declaration's flags: whether it's `lazy`, lem's one flag, which only
   /// a `rel` takes. A layer above lem reads its own flags, and removes them.
-  fn flags(&self, kind: DeclKind, flags: &[SpanIdent]) -> Check<bool> {
-    let mut lazy = false;
+  /// A relation's flags: whether it's `lazy`, and whether it's `one`.
+  fn flags(&self, kind: DeclKind, flags: &[SpanIdent]) -> Check<(bool, bool)> {
+    let (mut lazy, mut one) = (false, false);
     for flag in flags {
-      let why = if &*flag.text != "lazy" {
-        format!("there's no flag `{}` in lem", flag.text)
-      } else if kind != DeclKind::Rel {
-        format!("only a `rel` is `lazy`, not {}", kind_a(kind))
-      } else if lazy {
-        "`lazy` comes once".to_string()
-      } else {
-        lazy = true;
-        continue;
+      let why = match &*flag.text {
+        "lazy" if kind != DeclKind::Rel => format!("only a `rel` is `lazy`, not {}", kind_a(kind)),
+        "one" if kind == DeclKind::Effect => {
+          "an effect is sent, not kept, so it isn't `one`".to_string()
+        }
+        "lazy" | "one" if (if &*flag.text == "lazy" { lazy } else { one }) => {
+          format!("`{}` comes once", flag.text)
+        }
+        "lazy" => {
+          lazy = true;
+          continue;
+        }
+        "one" => {
+          one = true;
+          continue;
+        }
+        _ => format!("there's no flag `{}` in lem", flag.text),
       };
       return self.fail(flag.span.clone(), why);
     }
-    Ok(lazy)
+    Ok((lazy, one))
   }
 
   /// A base type's name, as a type.
@@ -845,7 +871,14 @@ impl Loader<'_> {
     Ok(())
   }
 
-  fn relation(&mut self, kind: DeclKind, decl: &Decl, key: &[SpanIdent], lazy: bool) -> Check<()> {
+  fn relation(
+    &mut self,
+    kind: DeclKind,
+    decl: &Decl,
+    key: &[SpanIdent],
+    lazy: bool,
+    one: bool,
+  ) -> Check<()> {
     let fields = self.fields(&decl.params, true, &decl.name.text)?;
     let mut columns = Vec::new();
     for column in key {
@@ -875,6 +908,7 @@ impl Loader<'_> {
       kind,
       fields,
       key: columns,
+      one,
       lazy,
       at: self.at(&decl.span),
     });

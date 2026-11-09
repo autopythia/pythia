@@ -181,9 +181,14 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/test/jobs.lem
 and `?` names a relation whose facts to show after the tick. Each tick
 prints those facts, then the effects that it sends.
 
-A `rel` declared `lazy`, lem's one flag, is derived only when something
-reads it: a rule of a relation that's derived, an `on` block, or the host,
-with `?`. glem's `Within` is lazy, since few programs read it.
+A relation's `key` names columns: facts that agree on them must agree on the
+rest. The host's new fact, and an `on` block's, takes the place of the one
+with its key; two facts that a tick derives with one key fail it. A relation
+declared `one` has one fact at most, as a key of no columns would give: a
+page's title, a log's length, a setting. A `rel` declared `lazy` is derived
+only when something reads it: a rule of a relation that's derived, an `on`
+block, or the host, with `?`. glem's `Within` is lazy, since few programs read
+it.
 
 A tick runs a relation's rules only when a relation that they read has changed
 since they last ran; if its facts come out the same, what reads it doesn't run

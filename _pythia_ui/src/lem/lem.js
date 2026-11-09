@@ -998,6 +998,13 @@ var lem = (function () {
     }
   }
 
+  // Whether facts of a relation that agree on its key must agree on the
+  // rest: it has a key, or one fact at most (`one`), as a key of no columns
+  // would give.
+  function keyed(rel) {
+    return rel.one === true || rel.key.length > 0;
+  }
+
   // Whether a pattern has `_`.
   function loose(pat) {
     return pat[0] === "any" || (pat[0] === "ctor" && pat[2].some(loose));
@@ -1112,17 +1119,17 @@ var lem = (function () {
         return !elsewhere(i, v);
       });
     }
-    function keyed(i) {
-      var key = prog.rels[atoms[i].rel].key;
+    function byKey(i) {
+      var rel = prog.rels[atoms[i].rel];
       return (
-        key.length > 0 &&
-        key.every(function (c) {
+        keyed(rel) &&
+        rel.key.every(function (c) {
           return !loose(atoms[i].pats[c]);
         })
       );
     }
     var ok = atoms.map(function (atom, i) {
-      return !atom.pats.some(loose) || own(i) || keyed(i);
+      return !atom.pats.some(loose) || own(i) || byKey(i);
     });
     var counts = ok.every(function (yes, i) {
       return yes || vars[i].length === 0;
@@ -1350,9 +1357,9 @@ var lem = (function () {
     if (this.tables[r].facts.has(key(tuple))) {
       return;
     }
-    var cols = this.prog.rels[r].key;
-    if (cols.length > 0) {
-      this.tables[r].putKeyed(tuple, cols);
+    var rel = this.prog.rels[r];
+    if (keyed(rel)) {
+      this.tables[r].putKeyed(tuple, rel.key);
     } else {
       this.tables[r].put(tuple, HOST);
     }
@@ -1365,9 +1372,9 @@ var lem = (function () {
     if (!this.tables[r].facts.has(key(tuple))) {
       return false;
     }
-    var cols = this.prog.rels[r].key;
-    if (cols.length > 0) {
-      this.tables[r].removeKeyed(tuple, cols);
+    var rel = this.prog.rels[r];
+    if (keyed(rel)) {
+      this.tables[r].removeKeyed(tuple, rel.key);
       return true;
     }
     return this.tables[r].remove(tuple);
@@ -1549,7 +1556,7 @@ var lem = (function () {
         effects.push({ rel: ins.rel, tuple: ins.tuple });
         continue;
       }
-      var cols = rel.key.length > 0 ? rel.key : columns(rel.fields.length);
+      var cols = keyed(rel) ? rel.key : columns(rel.fields.length);
       var k = ins.rel + " " + key(project(ins.tuple, cols));
       var before = added.get(k);
       if (before !== undefined && compareLists(before.tuple, ins.tuple) !== 0) {
@@ -1567,7 +1574,7 @@ var lem = (function () {
     var prog = this.prog;
     var x = prog.factText(r, first.tuple) + " (" + this.why(why) + ")";
     var y = prog.factText(r, tuple) + " (" + this.why(other) + ")";
-    fail("one key, two facts: " + x + " and " + y);
+    fail((prog.rels[r].one === true ? "one fact at most" : "one key") + ", two facts: " + x + " and " + y);
   };
 
   // Runs the rules from the input and state facts, component by component,
@@ -2428,7 +2435,7 @@ var lem = (function () {
     var rels = this.prog.rels;
     for (var r = 0; r < rels.length; r++) {
       var version = this.tables[r].version;
-      if (rels[r].key.length === 0 || this.held[r] === version) {
+      if (!keyed(rels[r]) || this.held[r] === version) {
         continue;
       }
       if (this.tables[r].keyCount(rels[r].key).clashes > 0) {

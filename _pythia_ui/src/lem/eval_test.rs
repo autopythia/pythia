@@ -378,6 +378,26 @@ fn an_atom_whose_key_is_fixed_is_followed() {
 }
 
 #[test]
+fn an_atom_of_a_relation_of_one_fact_is_followed() {
+  // K(n) reads S(n, _), whose `n` B binds. S has one fact at most (`one`), so
+  // a new fact of the host's takes the last one's place, and a change to S is
+  // followed: the fact that went, and the one that came, each meet B's.
+  let src = "input S(n: Int, m: Int) one\ninput B(n: Int)\nrel K(n: Int)\nK(n) :- B(n), S(n, _)\n";
+  let prog = load(&[("one.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  for i in 0..1000 {
+    runtime.assert(&format!("B({i})")).unwrap();
+  }
+  runtime.assert("S(5, 0)").unwrap();
+  runtime.tick(None).unwrap();
+  runtime.assert("S(5, 1)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 4);
+  assert_eq!(runtime.facts("S").len(), 1);
+  assert_eq!(runtime.facts("K").len(), 1);
+}
+
+#[test]
 fn a_key_that_doesnt_hold_fails_each_tick_until_it_does() {
   // Keys are checked only where a relation has changed since they last
   // held: a relation whose keys didn't hold is checked again, though

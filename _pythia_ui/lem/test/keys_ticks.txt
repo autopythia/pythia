@@ -38,3 +38,43 @@ UsesK(0)
 ? Q
 ---
 Q(0)
+
+=== Size(0, 1), then Size(0, 2) in its place: one fact at most; AtSize(0)
++ Size(0, 1)
++ Size(0, 2)
+? Size
+? AtSize
+---
+Size(0, 2)
+AtSize(0)
+
+=== a mode, then another in its place
+! SetMode(1)
+? Mode
+---
+Mode(1)
+
+=== the other
+! SetMode(2)
+? Mode
+---
+Mode(2)
+
+=== D(6) and D(7), each over Size's 0: Over has two facts, and the tick fails
++ D(6)
++ D(7)
+---
+error: one fact at most, two facts: Over(6) (from the rule at lem/test/keys.lem:29:1) and Over(7) (from the rule at lem/test/keys.lem:29:1)
+
+=== D(7) goes: Over(6) alone
+- D(7)
+? Over
+---
+Over(6)
+
+=== Size(6, 0): no D is over 6, so Over goes, and AtSize too
++ Size(6, 0)
+? Over
+? AtSize
+---
+(nothing to show)
