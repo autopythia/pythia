@@ -15,6 +15,7 @@ read. Nothing here writes, in a save or in the registry.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -200,14 +201,19 @@ def line_kind(data: bytes, start: int = 0, end: Optional[int] = None
     return record_kind(record)
 
 
+# Each index's generations, from one count, so that no two are alike (Index).
+_GENERATIONS = itertools.count(1)
+
+
 class Index:
     """A log's line index: each complete line's byte offset and kind.
 
     ``refresh`` reads only what was appended since the last one. A log that
     shrank, was replaced (it has another inode), or whose last indexed bytes
-    changed is indexed anew, and ``generation`` counts up. A last line
-    without its newline is still being written, so it waits. Each method
-    holds the index's lock.
+    changed is indexed anew, and ``generation`` counts up, across every index
+    of the process, so that it names what one indexed. A last line without
+    its newline is still being written, so it waits. Each method holds the
+    index's lock.
     """
 
     def __init__(self, path: Path) -> None:
@@ -219,7 +225,7 @@ class Index:
         self._reset(None)
 
     def _reset(self, stamp: Optional[Tuple[int, int]]) -> None:
-        self.generation += 1
+        self.generation = next(_GENERATIONS)
         self.stamp = stamp
         self.end = 0  # the bytes indexed: complete lines only
         self.mtime_ns: Optional[int] = None

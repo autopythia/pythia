@@ -6,7 +6,8 @@
 // for a log, `data-before` and `data-after`, the URLs of the rows before a
 // line and after one, `data-run`, the URL of a run's items, and
 // `data-body`, the URL of an item's body, each with `{line}` or `{run}` in
-// place of its line. The compiled program and glui's themes are beside
+// place of its line; and `data-grow`, the URL of what the log gained since it
+// had `{lines}` lines. The compiled program and glui's themes are beside
 // this script, in compiled/. It shows the page in glui's widgets
 // (src/glui/glui.js), in the look and the theme that its bar chooses,
 // which the browser remembers, from the log's end, with every run folded
@@ -14,9 +15,11 @@
 // program's LoadBefore(line) and LoadAfter(line) with rows, or with
 // EarlierFailed(line, why) or LaterFailed(line, why); its LoadRun(run)
 // with the run's items, or with RunFailed(run, why); and its Load(line)
-// with the item's body, or with Failed(line, why). Like lem.js, it's a
-// plain script that defines one global, `contexts`, and it starts itself
-// on a page that gives `data-facts`.
+// with the item's body, or with Failed(line, why). Every few seconds, while
+// the page shows, it asks what a log gained, or an index's facts anew, and
+// tells the program what changed. Like lem.js, it's a plain script that
+// defines one global, `contexts`, and it starts itself on a page that gives
+// `data-facts`.
 var contexts = (function () {
   "use strict";
 
@@ -30,6 +33,8 @@ var contexts = (function () {
     ["dark", "dark"],
     ["light", "light"]
   ];
+  // How often a page asks what changed, while it shows.
+  var EVERY_MS = 4000;
   // Whether a log's runs fold, the default, or open, all at once.
   var RUNS = [
     ["folded", "folded"],
@@ -51,7 +56,13 @@ var contexts = (function () {
   //   before those on the page, keeping what's on the screen in place; and
   //   o.shown(), if given, hears that the page's facts are shown;
   // - o.opening, for a log, says whether every run opens, as an Opening
-  //   fact from the start, which the bar changes later (boot).
+  //   fact from the start, which the bar changes later (boot);
+  // - o.grow, for a log, is the URL of what it gained since it had {lines}
+  //   lines; and o.every(tick), if given, calls tick() every few seconds
+  //   while the page shows, when a log asks what it gained, and an index its
+  //   facts anew, one request at a time. What a log gained is steps; what
+  //   an index's facts gained and lost, the host works out. Should either
+  //   fail, the page says why, and asks no more.
   //
   // It asks for rows, a run's items, or a body, once while they're coming,
   // and again when the program asks again after they failed; meanwhile the
@@ -81,6 +92,16 @@ var contexts = (function () {
     var failed = new Map();
     // Why the program refused the host's last change, or null.
     var refused = null;
+    // Whether the page's facts are shown; how many lines a log has, as the
+    // host last said (Length), or null; an index's facts, as they last came,
+    // by their text; whether a request for what changed is out; and whether
+    // the page still asks.
+    var log = typeof o.grow === "string";
+    var ready = false;
+    var length = null;
+    var facts = null;
+    var asking = false;
+    var live = true;
     var view = glui.view(runtime, o.root, {
       effects: function (effects) {
         effects.forEach(function (effect) {
@@ -153,12 +174,87 @@ var contexts = (function () {
       view.update(steps);
       if (refused === null) {
         status(steps.length + " facts, shown in " + (Date.now() - began) + " ms", false);
+        ready = true;
+        length = lengthOf(steps, length);
+        facts = log ? null : byText(steps);
         if (o.shown) {
           o.shown();
         }
       }
     });
+
+    // Asks what changed, unless a request is out, or the page isn't shown
+    // yet, or asks no more.
+    function tick() {
+      if (asking || !live || !ready || (log && length === null)) {
+        return;
+      }
+      var url = log ? o.grow.split("{lines}").join(String(length)) : o.facts;
+      asking = true;
+      o.get(url, function (why, steps) {
+        asking = false;
+        if (why === null && !Array.isArray(steps)) {
+          why = "what changed isn't a list of steps";
+        }
+        var change = why === null && !log ? changed(facts, byText(steps)) : steps;
+        if (why === null && change.length > 0) {
+          refused = null;
+          view.update(change);
+          why = refused;
+        }
+        if (why !== null) {
+          live = false;
+          status("live updates stopped: " + why, true);
+          return;
+        }
+        if (log) {
+          length = lengthOf(steps, length);
+        } else {
+          facts = byText(steps);
+        }
+      });
+    }
+    if (o.every) {
+      o.every(tick);
+    }
     return view;
+  }
+
+  // The length that steps say a log has, by their last Length fact, else
+  // `was`.
+  function lengthOf(steps, was) {
+    steps.forEach(function (step) {
+      if (step[0] === "+" && step[1] === "Length") {
+        was = step[2].lines;
+      }
+    });
+    return was;
+  }
+
+  // Steps that add facts, by their text.
+  function byText(steps) {
+    var all = new Map();
+    steps.forEach(function (step) {
+      all.set(JSON.stringify([step[1], step[2]]), step);
+    });
+    return all;
+  }
+
+  // What takes facts `was` to facts `now`, each by its text: those that went,
+  // then those that came.
+  function changed(was, now) {
+    var steps = [];
+    was.forEach(function (step, text) {
+      if (!now.has(text)) {
+        steps.push(["-", step[1], step[2]]);
+      }
+    });
+    now.forEach(function (step, text) {
+      if (!was.has(text)) {
+        steps.push(step);
+      }
+    });
+    return steps;
   }
 
   // In a browser.
@@ -308,6 +404,16 @@ var contexts = (function () {
         root: root,
         program: program,
         opening: log ? chosen.runs === "open" : undefined,
+        grow: html.getAttribute("data-grow"),
+        every: function (tick) {
+          var showing = function () {
+            if (document.visibilityState !== "hidden") {
+              tick();
+            }
+          };
+          window.setInterval(showing, EVERY_MS);
+          document.addEventListener("visibilitychange", showing);
+        },
         facts: html.getAttribute("data-facts"),
         before: html.getAttribute("data-before"),
         after: html.getAttribute("data-after"),

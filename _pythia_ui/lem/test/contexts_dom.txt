@@ -7,7 +7,8 @@
 # widget's element near the screen, or take it away.
 
 === a log: its last rows, a turn's mark, messages whole, a run folded
-["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1, "last": 6}]
+["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1}]
+["+", "Length", {"lines": 6}]
 ["+", "Nav", {"n": 0, "text": "Contexts", "to": "/"}]
 ["+", "Turn", {"n": 0, "label": "The start \u00b7 1 item", "title": "", "line": 1}]
 ["+", "Turn", {"n": 1, "label": "Turn 1 \u00b7 5 items", "title": "Plan the GUI", "line": 2}]
@@ -785,7 +786,8 @@ main.g-window
         pre.g-code "Here's a plan."
 
 === the index, in place of the log
-["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1, "last": 6}]
+["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1}]
+["-", "Length", {"lines": 6}]
 ["-", "Chunk", {"first": 1, "last": 1}]
 ["-", "Chunk", {"first": 2, "last": 6}]
 ["+", "Page", {"title": "Contexts"}]

@@ -297,36 +297,42 @@ make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
 root contexts, and one context's log, a page each. Its host is the glui view
 of pythia's node server (`pythia/interaction/node/view.py` in pythia), at
 `/TOKEN/lem/`. It sends a page's facts: `Context` for each context; or, for a
-log, a `Turn` for each turn, with the line where it starts, and the log's last
-rows: a `Chunk`, the lines that they cover, and a row for each message, with
-its text, `Message`, and for each run of other items between two messages
-within a turn, with what's in it, `Run`. A log's page shows its rows in order,
-each turn marked where it starts, and each run folded. As either end of the
-rows comes near the screen, the program sends `LoadBefore(line)` or
-`LoadAfter(line)` (glem's `Near`), and the host answers with another chunk, or
-with `EarlierFailed` or `LaterFailed`; so a page holds what's been scrolled
-through. A run's items come when it's first opened: the program sends
-`LoadRun(run)`, and the host answers with `RunLoaded(run)` and an `Item` for
-each, or with `RunFailed(run, why)`. The host's `Opening(open)` opens every
-run, or folds them all, through glui's `Entry`'s `open`, and each still opens
-and folds alone; a run that's open asks for its items as it comes near the
-screen. An item's body comes the same way, when its entry is first opened: the
-program sends `Load(line)`, and the host answers with `Body` facts, or
-`Failed(line, why)`. `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test
-it.
+log, its length, `Length`, a `Turn` for each turn, with the line where it
+starts, and the log's last rows: a `Chunk`, the lines that they cover, and a
+row for each message, with its text, `Message`, and for each run of other
+items between two messages within a turn, with what's in it, `Run`. A log's
+page shows its rows in order, each turn marked where it starts, and each run
+folded. As either end of the rows comes near the screen, the program sends
+`LoadBefore(line)` or `LoadAfter(line)` (glem's `Near`), and the host answers
+with another chunk, or with `EarlierFailed` or `LaterFailed`; so a page holds
+what's been scrolled through. As a log grows, the host says its new `Length`,
+in place of the last, and the turns that changed; the program then asks for
+the later rows as it does for others, and the run that the log ended with
+comes whole, with its new items, if it went on. A run's items come when it's
+first opened: the program sends `LoadRun(run)`, and the host answers with
+`RunLoaded(run)` and an `Item` for each, or with `RunFailed(run, why)`. The
+host's `Opening(open)` opens every run, or folds them all, through glui's
+`Entry`'s `open`, and each still opens and folds alone; a run that's open asks
+for its items as it comes near the screen. An item's body comes the same way,
+when its entry is first opened: the program sends `Load(line)`, and the host
+answers with `Body` facts, or `Failed(line, why)`.
+`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. A page names its facts on
 its `html` element, `data-facts`, and, for a log, where the rows before a line
 and after one are, `data-before` and `data-after`, where a run's items are,
-`data-run`, and where an item's body is, `data-body`, each with `{line}` or
-`{run}`; the script fetches the program and the themes, compiled, from
+`data-run`, where an item's body is, `data-body`, each with `{line}` or
+`{run}`, and where what the log gained since it had `{lines}` lines is,
+`data-grow`; the script fetches the program and the themes, compiled, from
 `web/compiled/`, which `make compiled` writes, and a test checks against the
 files they're compiled from. A log's page starts at its end, and keeps what's
-on the screen in place as rows come above it. Its bar picks the look and the
-theme, and, for a log, whether its runs are folded or open, which the browser
-remembers. `make web` writes a sample, an index and a log of 13,394 items, the
-most that one of pythia's contexts had when it was first written, in turns of
-50, for two pages that show it as the node server's do:
+on the screen in place as rows come above it. Every few seconds while it
+shows, a page asks what changed: a log, what it gained; the index, its facts
+anew, whose difference from the last it applies. Its bar picks the look and
+the theme, and, for a log, whether its runs are folded or open, which the
+browser remembers. `make web` writes a sample, an index and a log of 13,394
+items, the most that one of pythia's contexts had when it was first written,
+in turns of 50, for two pages that show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

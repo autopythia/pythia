@@ -80,7 +80,8 @@ Window(Top, title="Contexts")
 - Nav(0, "wui", "/")
 - Context("dev-1", "Let us start", "opus", 4, 133, "1.3 MB", "now", 0, "/c/dev-1")
 - Context("ui-0", "Plan the GUI", "opus", 12, 2563, "13.7 MB", "6 min ago", 1, "/c/ui-0")
-+ Page("ui-0", "/c/ui-0?line=", "/c/ui-0?turn=", 1, 16)
++ Page("ui-0", "/c/ui-0?line=", "/c/ui-0?turn=", 1)
++ Length(16)
 + Nav(0, "Contexts", "/")
 + Turn(0, "The start · 2 items", "", 1)
 + Turn(1, "Turn 1 · 9 items", "Plan the GUI", 3)
@@ -452,8 +453,8 @@ Window(Top, title="ui-0")
 effect LoadRun(9)
 
 === the log grows: later rows, which the program asks for near the screen
-- Page("ui-0", "/c/ui-0?line=", "/c/ui-0?turn=", 1, 16)
-+ Page("ui-0", "/c/ui-0?line=", "/c/ui-0?turn=", 1, 20)
+- Length(16)
++ Length(20)
 ? Near
 ---
 Window(Top, title="ui-0")

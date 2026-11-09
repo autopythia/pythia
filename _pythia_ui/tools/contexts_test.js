@@ -15,14 +15,19 @@
   "use strict";
 
   // A page that starts, as contexts.start would in a browser, and what it
-  // asks for and says; with every run open, if `opening`.
-  function page(opening) {
+  // asks for and says; a log's, unless `more` says otherwise, as with
+  // {opening: true}, or {grow: null} for the index. it.tick() is what the
+  // browser calls every few seconds.
+  function page(more) {
     var doc = new standInDom.Document();
-    var it = { asked: [], waiting: new Map(), said: [], kept: 0, shown: 0 };
-    it.view = contexts.start({
+    var it = { asked: [], waiting: new Map(), said: [], kept: 0, shown: 0, tick: null };
+    var o = {
       root: doc.createElement("div"),
       program: CONTEXTS_TESTS.program,
-      opening: opening,
+      grow: "/f/grow/{lines}",
+      every: function (tick) {
+        it.tick = tick;
+      },
       facts: "/f/page",
       before: "/f/before/{line}",
       after: "/f/after/{line}",
@@ -42,7 +47,11 @@
       status: function (text, wrong) {
         it.said.push((wrong ? "wrong: " : "") + text.replace(/in \d+ ms/, "in N ms"));
       }
+    };
+    Object.keys(more || {}).forEach(function (name) {
+      o[name] = more[name];
     });
+    it.view = contexts.start(o);
     return it;
   }
 
@@ -76,7 +85,8 @@
   // A log of six lines: the start's run, then turn 1's message, run and
   // message, of which the last three rows come with the page.
   var LOG = [
-    ["+", "Page", { title: "ui-0", items: "/f/item/", turns: "/f/turn-page/", first: 1, last: 6 }],
+    ["+", "Page", { title: "ui-0", items: "/f/item/", turns: "/f/turn-page/", first: 1 }],
+    ["+", "Length", { lines: 6 }],
     ["+", "Turn", { n: 0, label: "The start \u00b7 2 items", title: "", line: 1 }],
     ["+", "Turn", { n: 1, label: "Turn 1 \u00b7 4 items", title: "Plan the GUI", line: 3 }],
     ["+", "Chunk", { first: 3, last: 6 }],
@@ -117,7 +127,7 @@
         answer(it, "/f/page", null, LOG);
         return it.asked.concat(it.said, facts(it, "Entry").length + " entries", "shown " + it.shown);
       },
-      ["/f/page", "7 facts, shown in N ms", "4 entries", "shown 1"]
+      ["/f/page", "8 facts, shown in N ms", "4 entries", "shown 1"]
     ],
     [
       "the earlier rows: asked for once while they come, and shown in place",
@@ -248,7 +258,7 @@
     [
       "every run open from the start: it asks for its items near the screen, once while they come",
       function () {
-        var it = page(true);
+        var it = page({ opening: true });
         answer(it, "/f/page", null, LOG);
         var asked = it.asked.slice();
         var near = facts(it, "Near");
@@ -269,6 +279,75 @@
         'Entry(RunBox(4), "2 tool calls: exec_command 2", "", "4", Dim, True, "/f/item/4", True, Log, 8)',
         "1 near"
       ]
+    ],
+    [
+      "a log that grows: the page asks what it gained, one request at a time, and its later rows come near the screen",
+      function () {
+        var it = page();
+        it.tick();
+        var before = it.asked.length;
+        answer(it, "/f/page", null, LOG);
+        it.tick();
+        it.tick();
+        answer(it, "/f/grow/6", null, [
+          ["-", "Length", { lines: 6 }],
+          ["+", "Length", { lines: 9 }],
+          ["+", "Turn", { n: 2, label: "Turn 2 \u00b7 2 items", title: "Go on", line: 7 }]
+        ]);
+        var near = facts(it, "Near");
+        it.tick();
+        answer(it, "/f/grow/9", null, []);
+        return [before + " asked before its facts"].concat(it.asked, near, facts(it, "Length"), facts(it, "Turn").length + " turns");
+      },
+      ["1 asked before its facts", "/f/page", "/f/grow/6", "/f/grow/9", "Near(After, Later(6))", "Near(Before, Earlier(3))", "Length(9)", "3 turns"]
+    ],
+    [
+      "what a log gained can't come, or the program refuses it: the page says why, and asks no more",
+      function () {
+        var it = page();
+        answer(it, "/f/page", null, LOG);
+        it.tick();
+        answer(it, "/f/grow/6", "409 Conflict", null);
+        it.tick();
+        var other = page();
+        answer(other, "/f/page", null, LOG);
+        other.tick();
+        answer(other, "/f/grow/6", null, [["+", "Length", { lines: "many" }]]);
+        other.tick();
+        return it.asked.concat(it.said.slice(1), other.asked, other.said.slice(1));
+      },
+      [
+        "/f/page",
+        "/f/grow/6",
+        "wrong: live updates stopped: 409 Conflict",
+        "/f/page",
+        "/f/grow/6",
+        "wrong: error: Length's `lines` is an Int, not a string",
+        "wrong: live updates stopped: Length's `lines` is an Int, not a string"
+      ]
+    ],
+    [
+      "an index that follows its contexts: what changed, and what went",
+      function () {
+        var it = page({ grow: null });
+        var index = [
+          ["+", "Page", { title: "Contexts" }],
+          ["+", "Context", { id: "a", title: "One", model: "m", turns: 1, lines: 10, size: "1 KB", changed: "now", rank: 0, to: "/a" }],
+          ["+", "Context", { id: "b", title: "Two", model: "m", turns: 2, lines: 20, size: "2 KB", changed: "1 min ago", rank: 1, to: "/b" }]
+        ];
+        it.tick();
+        answer(it, "/f/page", null, index);
+        it.tick();
+        var later = [
+          index[0],
+          ["+", "Context", { id: "a", title: "One", model: "m", turns: 2, lines: 30, size: "3 KB", changed: "now", rank: 0, to: "/a" }]
+        ];
+        answer(it, "/f/page", null, later);
+        it.tick();
+        answer(it, "/f/page", null, later);
+        return it.asked.concat(facts(it, "Context"), facts(it, "Page"), it.said.slice(1));
+      },
+      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a")', 'Page("Contexts", "", "", 0)']
     ],
     [
       "facts that can't come: the page says why",

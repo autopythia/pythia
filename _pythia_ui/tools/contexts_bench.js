@@ -73,7 +73,10 @@
         })
       ));
     }
-    var page = [["+", "Page", { title: "log", items: "/c/log?line=", turns: "/c/log?turn=", first: 1, last: items }]];
+    var page = [
+      ["+", "Page", { title: "log", items: "/c/log?line=", turns: "/c/log?turn=", first: 1 }],
+      ["+", "Length", { lines: items }]
+    ];
     return { page: page.concat(marks, chunks[0]), chunks: chunks, runs: runs, rows: rows };
   }
 

@@ -611,6 +611,15 @@ class IndexTests(unittest.TestCase):
     def context(self):
         return log_context(self.private)
 
+    def test_no_two_indexes_have_a_generation_alike(self):
+        # So that a page of the glui view, which names its log's generation as it asks what
+        # the log gained, learns that a root's log is another (view.py).
+        write_log(self.path, [init(KEY_A)])
+        write_log(self.tmp / "t._private" / "context.jsonl", [init(KEY_B)])
+        one = contexts.Index(self.path).refresh()
+        other = contexts.Index(self.tmp / "t._private" / "context.jsonl").refresh()
+        self.assertNotEqual(one.generation, other.generation)
+
     def test_kinds_and_calls_match_json(self):
         write_log(self.path, [
             init(KEY_A), message("user", "Hi"), call('a"b', "id\u00e9\\x", {}), result("i", "x"),
@@ -677,7 +686,8 @@ class IndexTests(unittest.TestCase):
         with open(self.path, "r+b") as log:
             log.truncate(index.offsets[1])
         index.refresh()
-        self.assertEqual((len(index), index.generation), (1, generation + 1))
+        self.assertEqual(len(index), 1)
+        self.assertGreater(index.generation, generation)
 
     def test_a_replaced_log_is_indexed_anew(self):
         write_log(self.path, [init(KEY_A), message("user", "Hi")])
@@ -689,7 +699,7 @@ class IndexTests(unittest.TestCase):
         with self.assertRaises(OSError):
             index.read(0, 1)  # not the log that was indexed
         index.refresh()
-        self.assertEqual(index.generation, generation + 1)
+        self.assertGreater(index.generation, generation)
         self.assertEqual([index.kind(line) for line in range(len(index))],
                          [("init", None), ("message", "assistant"), ("message", "user")])
 
@@ -702,7 +712,7 @@ class IndexTests(unittest.TestCase):
         with open(self.path, "r+b") as log:  # the same inode, longer
             log.write(rewritten)
         index.refresh()
-        self.assertEqual(index.generation, generation + 1)
+        self.assertGreater(index.generation, generation)
         self.assertEqual(len(index), 3)
 
     def test_a_log_replaced_by_a_longer_copy_is_read(self):
@@ -728,7 +738,7 @@ class IndexTests(unittest.TestCase):
                   [init(KEY_A), message("user", "Ho"), last, message("user", "More.")])
         os.replace(self.tmp / "new.jsonl", self.path)
         context.refresh()
-        self.assertEqual(context.index.generation, generation + 1)
+        self.assertGreater(context.index.generation, generation)
         self.assertEqual((len(context), context.title()), (4, "Ho"))
 
     def test_a_bad_line_shows_raw(self):
@@ -1394,9 +1404,11 @@ class ViewTests(WorkspaceTest):
                       f'data-before="/{TOKEN}/lem/rows/1/before/{{line}}" '
                       f'data-after="/{TOKEN}/lem/rows/1/after/{{line}}" '
                       f'data-run="/{TOKEN}/lem/run/1/{{run}}" '
-                      f'data-body="/{TOKEN}/lem/body/1/{{line}}">',
+                      f'data-body="/{TOKEN}/lem/body/1/{{line}}" '
+                      f'data-grow="/{TOKEN}/lem/grow/1/',
                       "<title>local-0 (1) · node</title>", f'<a href="/{TOKEN}/c/1">the plain'):
             self.assertIn(shown, log.body)
+        self.assertRegex(log.body, f'data-grow="/{TOKEN}/lem/grow/1/[1-9][0-9]*/{{lines}}">')
         second = self.get(f"lem/c/{SECOND}")  # another number of 1's
         self.assertEqual((second.status, second.location), (303, f"/{TOKEN}/lem/c/1"))
         self.assertEqual((self.get("lem").status, self.get("lem").location),
@@ -1438,7 +1450,8 @@ class ViewTests(WorkspaceTest):
         steps = self.steps("lem/facts/c/1")
         self.assertEqual(self.facts(steps, "Page"), [
             {"title": "local-0 (1)", "items": f"/{TOKEN}/c/1?line=",
-             "turns": f"/{TOKEN}/c/1?turn=", "first": 1, "last": 63}])
+             "turns": f"/{TOKEN}/c/1?turn=", "first": 1}])
+        self.assertEqual(self.facts(steps, "Length"), [{"lines": 63}])
         self.assertEqual(self.facts(steps, "Nav"), [
             {"n": 0, "text": "Root contexts", "to": f"/{TOKEN}/lem/"},
             {"n": 1, "text": "Plain pages", "to": f"/{TOKEN}/c/1"}])
@@ -1678,6 +1691,98 @@ class ViewTests(WorkspaceTest):
             "Nope isn't an input", "['-', 'Turn', {'n': 2, 'title': 't'}] doesn't add a fact",
             "Turn has no field x", "Turn's n is a Int, not 2.5", "Turn needs its line",
             "two Nav facts have the key [1]"])
+
+
+class GrowTests(unittest.TestCase):
+    """A log that grows, as a page of the glui view that asks what it gained sees it, from
+    one server throughout (view.py)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="node-grow-"))
+        self.log = self.tmp / "s._private" / "context.jsonl"
+        write_log(self.log, [init(KEY_A), message("user", "One."), BOUNDARY, *work("w1")])
+        write_log(self.tmp / "s.jsonl", [init(KEY_A)])
+        registry = self.tmp / "registry"
+        self.assertEqual(Registry(registry).register(KEY_A, self.log.parent).status, "new")
+        self.app = server.App(contexts.Roots(registry), TOKEN)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def get(self, path):
+        return self.app.respond("GET", f"/{TOKEN}/{path}", ["127.0.0.1"])
+
+    def steps(self, path):
+        response = self.get(path)
+        self.assertEqual((response.status, response.content_type), (200, "application/json"),
+                         response.body[:300])
+        return json.loads(response.body)
+
+    def append(self, items):
+        with open(self.log, "ab") as log:
+            log.write("".join(json.dumps(item) + "\n" for item in items).encode("utf-8"))
+
+    def grown(self):
+        """The page's URL for what its log gained since it had a number of lines."""
+        found = re.search(r'data-grow="/t0ken_x+/(lem/grow/1/[0-9]+/)\{lines\}"',
+                          self.get("lem/c/1").body)
+        self.assertIsNotNone(found)
+        return found.group(1)
+
+    @staticmethod
+    def facts(steps, name):
+        return [(step[0], fields) for step in steps for rel, fields in [step[1:]] if rel == name]
+
+    def test_its_length_and_the_turns_that_changed(self):
+        grow = self.grown()
+        self.assertEqual(self.facts(self.steps("lem/facts/c/1"), "Length"), [("+", {"lines": 7})])
+        self.assertEqual(self.steps(grow + "7"), [])  # nothing yet
+        self.append([*answer(), summary(), *turn("Two.")])  # lines 8 to 21
+        steps = self.steps(grow + "7")
+        self.assertEqual(self.facts(steps, "Length"), [("-", {"lines": 7}), ("+", {"lines": 21})])
+        self.assertEqual([(fields["n"], fields["label"], fields["title"], fields["line"])
+                          for _, fields in self.facts(steps, "Turn")],
+                         [(0, "The start · 1 item", "", 1), (1, "Turn 1 · 7 items", "One.", 2),
+                          (2, "Turn 2 · 7 items", "Two.", 12)])
+        self.assertEqual(self.steps(grow + "21"), [])
+        self.append(turn("Three."))  # lines 22 to 31: turn 2's labels stay, and 3's come
+        steps = self.steps(grow + "21")
+        self.assertEqual([fields["n"] for _, fields in self.facts(steps, "Turn")], [1, 2, 3])
+        program = json.loads(PROGRAM.read_text())
+        self.assertEqual(step_problems(program, [step for step in steps if step[0] == "+"]), [])
+
+    def test_a_page_of_a_log_that_was_replaced_loads_anew(self):
+        grow = self.grown()
+        for path, status in ((grow + "8", 409), (grow + "x", 404), (grow + "", 404),
+                             ("lem/grow/1/x/7", 404), ("lem/grow/9/1/7", 404)):
+            self.assertEqual(self.get(path).status, status, path)
+        write_log(self.log, [init(KEY_A)])  # shorter: indexed anew
+        response = self.get(grow + "1")
+        self.assertEqual((response.status, response.body),
+                         (409, "s (1)'s log was replaced: load its page anew.\n"))
+        self.assertEqual(self.steps(self.grown() + "1"), [])
+
+    def test_the_rows_after_a_run_that_went_on_start_with_it(self):
+        # Lines 4 to 7 are a run, which the log ends with; four more lines go on with it.
+        rows = self.steps("lem/rows/1/after/7")
+        self.assertEqual(self.facts(rows, "Chunk"), [("+", {"first": 8, "last": 7})])
+        self.append(work("w2"))  # lines 8 to 11
+        rows = self.steps("lem/rows/1/after/7")
+        self.assertEqual(self.facts(rows, "Chunk"), [("+", {"first": 4, "last": 11})])
+        self.assertEqual([(fields["line"], fields["last"], fields["text"])
+                          for _, fields in self.facts(rows, "Run")],
+                         [(4, 11, "2 tool calls: exec_command 2; 2 other")])
+        items = self.facts(rows, "Item")
+        self.assertEqual([(fields["line"], fields["run"]) for _, fields in items],
+                         [(8, 4), (9, 4), (11, 4)])
+        self.assertEqual(self.facts(self.steps("lem/run/1/4"), "Item")[3:],
+                         self.facts(rows, "Item"))
+        # A message ends the run: the rows after it are new ones.
+        self.append(answer("Done."))  # lines 12 to 14
+        rows = self.steps("lem/rows/1/after/11")
+        self.assertEqual(self.facts(rows, "Chunk"), [("+", {"first": 12, "last": 14})])
+        self.assertEqual([(rel, fields["line"]) for _, rel, fields in rows if rel != "Chunk"],
+                         [("Message", 12), ("Run", 13)])
 
 
 class ServerTests(unittest.TestCase):

@@ -12,7 +12,11 @@ each with what's in it. More rows come as either end of those on the page
 comes near the screen, from ``/TOKEN/lem/rows/N/before/LINE`` and
 ``/TOKEN/lem/rows/N/after/LINE``, so that a page holds what's been scrolled
 through; a run's items when it's opened, from ``/TOKEN/lem/run/N/LINE``; and
-an item's body when its entry opens, from ``/TOKEN/lem/body/N/LINE``. An
+an item's body when its entry opens, from ``/TOKEN/lem/body/N/LINE``. A log
+that grows says so, to a page that asks every few seconds what it gained
+since it had LINES lines, from ``/TOKEN/lem/grow/N/GENERATION/LINES``: its
+length, and the turns that changed; its later rows then come as others do,
+the run that it ended with whole, if it went on. An
 item's label and gist are those of the
 server's plain pages, and its body holds what they show for it
 (``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
@@ -269,6 +273,10 @@ class View:
         if what == "run":
             cid, _, line = name.partition("/")
             return self.run(pages, cid, line)
+        if what == "grow":
+            cid, _, rest = name.partition("/")
+            generation, _, lines = rest.partition("/")
+            return self.grow(pages, cid, generation, lines)
         if what == "body":
             cid, _, line = name.partition("/")
             return self.body(pages, cid, line)
@@ -280,11 +288,12 @@ class View:
 
     def _page(self, pages: Pages, title: str, facts: str, body: Optional[str] = None, *,
               rows: Optional[str] = None, run: Optional[str] = None,
-              plain: Optional[str] = None) -> Response:
+              grow: Optional[str] = None, plain: Optional[str] = None) -> Response:
         """A page of the view: the URLs of its facts, its rows before a line and after one
-        (``rows``, with ``{way}`` for ``before`` or ``after``), its runs' items and its
-        bodies; what it loads; and, for a browser without script, a link to the same in the
-        plain pages, ``plain``."""
+        (``rows``, with ``{way}`` for ``before`` or ``after``), its runs' items, its bodies,
+        and what its log gained since it had ``{lines}`` lines (``grow``); what it loads;
+        and, for a browser without script, a link to the same in the plain pages,
+        ``plain``."""
         missing = self.files.missing()
         if missing:
             return pages.not_found(f"The glui view needs files that aren't in "
@@ -296,7 +305,8 @@ class View:
             data += "".join(f' data-{way}="{h(rows.replace("{way}", way))}"'
                             for way in ("before", "after"))
         data += ("" if run is None else f' data-run="{h(run)}"') + (
-            "" if body is None else f' data-body="{h(body)}"')
+            "" if body is None else f' data-body="{h(body)}"') + (
+            "" if grow is None else f' data-grow="{h(grow)}"')
         plain = f"{pages.base}/" if plain is None else plain
         return Response(200, (
             f"<!doctype html>\n<html lang=en{data}>\n<head>\n<meta charset=utf-8>\n"
@@ -318,10 +328,15 @@ class View:
                 return Response(303, location=f"{pages.base}/lem/c/{entry.first}")
             return pages.context(cid, {})  # why there's no such root here
         number = quote(context.id)
+        try:
+            generation = context.refresh().index.generation
+        except OSError:
+            generation = 0  # its facts say why; growing, it asks again
         return self._page(pages, context.label, f"{pages.base}/lem/facts/c/{number}",
                           f"{pages.base}/lem/body/{number}/{{line}}",
                           rows=f"{pages.base}/lem/rows/{number}/{{way}}/{{line}}",
                           run=f"{pages.base}/lem/run/{number}/{{run}}",
+                          grow=f"{pages.base}/lem/grow/{number}/{generation}/{{lines}}",
                           plain=f"{pages.base}/c/{number}")
 
     # The facts.
@@ -361,9 +376,8 @@ class View:
         return steps
 
     def log_facts(self, pages: Pages, cid: str) -> Optional[list]:
-        """Root ``cid``'s log: its turns, each with how many items it shows and the line where
-        it starts, "The start" for the lines before the first; and its last rows (``chunk``).
-        None if there's no such root here, or its log can't be read."""
+        """Root ``cid``'s log: its length; its turns (``turn_facts``); and its last rows
+        (``chunk``). None if there's no such root here, or its log can't be read."""
         context = pages.roots.get(cid)
         if context is None:
             return None
@@ -376,30 +390,42 @@ class View:
                     ["+", "Page", {"title": safe_text(context.label),
                                    "items": f"{pages.base}/c/{number}?line=",
                                    "turns": f"{pages.base}/c/{number}?turn=",
-                                   "first": 1, "last": len(index)}],
+                                   "first": 1}],
+                    ["+", "Length", {"lines": len(index)}],
                     ["+", "Nav", {"n": 0, "text": "Root contexts", "to": f"{pages.base}/lem/"}],
                     ["+", "Nav", {"n": 1, "text": "Plain pages", "to": f"{pages.base}/c/{number}"}]]
-
-                def shown(start: int, stop: int) -> List[int]:
-                    return [line for line in range(start, stop)
-                            if not hidden(index.kind(line)[0])]
-
-                starts = context.turns()
-                first = starts[0] if starts else len(index)
-                if first > 0:
-                    lines = shown(0, first)
-                    steps.append(["+", "Turn", {
-                        "n": 0, "label": turn_label("The start", len(lines)), "title": "",
-                        "line": (lines[0] if lines else 0) + 1}])
-                for row in context.turn_rows():
-                    lines = shown(row.start, row.stop)
-                    steps.append(["+", "Turn", {
-                        "n": row.number, "label": turn_label(f"Turn {row.number}", len(lines)),
-                        "title": safe_text(cut(row.label, TITLE_CHARS) or "(no input)"),
-                        "line": (lines[0] if lines else row.start) + 1}])
+                steps.extend(self.turn_facts(context, 0))
                 steps.extend(self.chunk(pages, context, *spans(context, len(index) - 1, False)))
         except OSError:
             return None
+        return steps
+
+    def turn_facts(self, context: Context, since: int) -> list:
+        """A Turn for each of ``context``'s turns, with how many items it shows and the line
+        where it first shows, "The start" for the lines before the first; from the turn
+        before the one that line ``since - 1`` (from 0) is in, as the turns that lines
+        added from line ``since`` on may change: the last, and those that they start.
+        Holds the index's lock."""
+        index = context.index
+
+        def shown(start: int, stop: int) -> List[int]:
+            return [line for line in range(start, stop) if not hidden(index.kind(line)[0])]
+
+        steps: list = []
+        starts = context.turns()
+        least = max(0, context.turn_of(since - 1) - 1) if since > 0 else 0
+        first = starts[0] if starts else len(index)
+        if first > 0 and least == 0:
+            lines = shown(0, first)
+            steps.append(["+", "Turn", {
+                "n": 0, "label": turn_label("The start", len(lines)), "title": "",
+                "line": (lines[0] if lines else 0) + 1}])
+        for row in context.turn_rows()[max(0, least - 1):]:
+            lines = shown(row.start, row.stop)
+            steps.append(["+", "Turn", {
+                "n": row.number, "label": turn_label(f"Turn {row.number}", len(lines)),
+                "title": safe_text(cut(row.label, TITLE_CHARS) or "(no input)"),
+                "line": (lines[0] if lines else row.start) + 1}])
         return steps
 
     def chunk(self, pages: Pages, context: Context, low: int, high: int,
@@ -429,7 +455,10 @@ class View:
 
     def rows(self, pages: Pages, cid: str, way: str, text: str) -> Response:
         """Root ``cid``'s rows before line ``text`` (``way`` "before"), or after it ("after"),
-        about ``CHUNK_ROWS`` of them, as ``chunk`` gives them."""
+        about ``CHUNK_ROWS`` of them, as ``chunk`` gives them. The run that a log ended
+        with, at line ``text``, may go on as the log grows: then the rows after it start
+        with that run, whole, and the items of its lines after line ``text``, for a page
+        that has it open."""
         context = pages.roots.get(cid)
         if context is None:
             return _plain(404, "There's no such root context here.")
@@ -438,13 +467,54 @@ class View:
             index = context.index
             with index.lock:
                 line = int(text) if _WHOLE.match(text) else -1
+                grown = None
                 if way == "before" and 1 <= line <= len(index) + 1:
                     found = spans(context, line - 2, False)
                 elif way == "after" and 0 <= line <= len(index):
-                    found = spans(context, line, True)
+                    back = spans(context, line - 1, False, 1)[2] if line > 0 else []
+                    start = back[0][0] if back else line
+                    run = back and not (back[0] == (start, start) and index.kind(start) in _TALK)
+                    ahead = spans(context, start, True, 1)[2] if run else []
+                    grown = (start, ahead[0][1]) if ahead and ahead[0][1] >= line else None
+                    found = spans(context, start if grown else line, True)
                 else:
                     return _plain(404, f"{context.label} has no rows {way[:12]} line {text[:24]}.")
                 steps = self.chunk(pages, context, *found)
+                if grown is not None:
+                    records = context.records(line, grown[1] + 1)
+        except OSError as exc:
+            return _plain(404, f"{context.label}'s log can't be read: {exc}")
+        if grown is not None:
+            renderer = pages._renderer(context, fold=frozenset())
+            for number, record in records:
+                fact = item(renderer, number, grown[0] + 1, record)
+                if fact is not None:
+                    steps.append(["+", "Item", fact])
+        return _steps(steps)
+
+    def grow(self, pages: Pages, cid: str, generation: str, text: str) -> Response:
+        """What root ``cid``'s log gained since it had ``text`` lines, for a page from when
+        its index was of generation ``generation``: its length, in place of the last, and
+        the turns that changed (``turn_facts``); nothing if it gained nothing. A log that
+        was indexed anew since, as one replaced or cut short is, can't answer: the page
+        must load anew."""
+        context = pages.roots.get(cid)
+        if context is None:
+            return _plain(404, "There's no such root context here.")
+        try:
+            context.refresh()
+            index = context.index
+            with index.lock:
+                if not (_WHOLE.match(generation) and _WHOLE.match(text)):
+                    return _plain(404, f"{context.label} has no length {text[:24]}.")
+                lines = int(text)
+                if int(generation) != index.generation or lines > len(index):
+                    return _plain(409, f"{context.label}'s log was replaced: load its page anew.")
+                if lines == len(index):
+                    return _steps([])
+                steps: list = [["-", "Length", {"lines": lines}],
+                               ["+", "Length", {"lines": len(index)}]]
+                steps.extend(self.turn_facts(context, lines))
         except OSError as exc:
             return _plain(404, f"{context.label}'s log can't be read: {exc}")
         return _steps(steps)

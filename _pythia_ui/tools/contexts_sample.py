@@ -86,8 +86,8 @@ def main():
             "to": LOG_PAGE}])
     write(os.path.join(out, "index.json"), index)
     log = [["+", "Page", {"title": f"A sample log: {items:,} items",
-                          "items": LOG_PAGE + "#L", "turns": LOG_PAGE + "#T",
-                          "first": 1, "last": items}],
+                          "items": LOG_PAGE + "#L", "turns": LOG_PAGE + "#T", "first": 1}],
+           ["+", "Length", {"lines": items}],
            ["+", "Nav", {"n": 0, "text": "Contexts", "to": INDEX_PAGE}]]
     # Its rows, each [step, first line, last line]; and each run's items.
     rows, runs, bodies, marked = [], {}, 0, -1
