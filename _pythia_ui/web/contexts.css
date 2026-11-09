@@ -10,6 +10,6 @@ background:var(--glui-popup-back);border:1px solid var(--glui-popup-line);border
 .contexts-wrong{color:var(--glui-error-text)}
 @media print{.contexts-bar{display:none}}
 
-/* contexts.js keeps what's on the screen in place as rows come above it,
-   and the browser's own anchoring would move it again. */
+/* contexts.js keeps what's on the screen in place as rows come, above it
+   or below, and the browser's own anchoring would move it again. */
 html{overflow-anchor:none}

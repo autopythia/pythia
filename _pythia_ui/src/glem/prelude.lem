@@ -20,6 +20,11 @@ rel Key(chord: Chord, msg: Msg)
 -- they change while it's near.
 rel Near(id: Id, msg: Msg)
 
+-- Widgets to bring into view: the view scrolls the widget that a Reveal
+-- fact names into view, once for each `at`, as soon as its element shows,
+-- as a page that jumps to a row does once the row has come.
+rel Reveal(id: Id, at: Int)
+
 -- Where the pointer and the keyboard are, new each tick.
 input Hovered(id: Id)
 input Pressed(id: Id)

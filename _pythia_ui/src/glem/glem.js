@@ -565,7 +565,9 @@ var glem = (function () {
   // unless a recipe took the key, it sends the messages that glem's Key
   // facts give for it, a tick each. It sends the messages that glem's Near
   // facts give for a widget when its element comes near the screen, by the
-  // IntersectionObserver of the root's window, if it has one (watch). `host` hears what happens:
+  // IntersectionObserver of the root's window, if it has one (watch); and
+  // it scrolls into view the widgets that glem's Reveal facts name (reveal).
+  // `host` hears what happens:
   // host.effects(list) after a tick that sends effects, each as {name,
   // fields}, as JSON (src/lem/host.rs); and host.error(message) after one
   // that fails, which leaves the page as it was.
@@ -617,6 +619,9 @@ var glem = (function () {
     // their elements' keys; and what tells the view when one is near.
     this.near = new Map();
     this.nearOf = new Map();
+    // The `at` of each widget that a Reveal fact named and the view brought
+    // into view, by key; and how it waits for the page to settle first.
+    this.revealed = new Map();
     var win = root.ownerDocument.defaultView;
     var Observer = win && typeof win.IntersectionObserver === "function" ? win.IntersectionObserver : null;
     this.observer =
@@ -792,6 +797,37 @@ var glem = (function () {
     }
     this.runtime.untouch();
     this.watch();
+    this.reveal();
+  };
+
+  // Brings into view each widget that glem's Reveal facts name, as the last
+  // tick left them, once for each `at`, as soon as its element shows; in a
+  // browser, at its next frame, after what the host did with the page.
+  View.prototype.reveal = function () {
+    var view = this;
+    var now = new Map();
+    this.runtime.lem.relFacts(this.runtime.prog.lem.rel("Reveal")).forEach(function (fact) {
+      var key = lem.key(fact.tuple[0]);
+      var at = fact.tuple[1];
+      var w = view.widgets.get(key);
+      now.set(key, view.revealed.get(key));
+      if (w !== undefined && view.revealed.get(key) !== at) {
+        now.set(key, at);
+        var element = w.made.element;
+        var win = view.root.ownerDocument.defaultView;
+        var show = function () {
+          if (typeof element.scrollIntoView === "function") {
+            element.scrollIntoView({ block: "center" });
+          }
+        };
+        if (win && typeof win.requestAnimationFrame === "function") {
+          win.requestAnimationFrame(show);
+        } else {
+          show();
+        }
+      }
+    });
+    this.revealed = now;
   };
 
   // Watches the widgets that glem's Near facts name, as the last tick left

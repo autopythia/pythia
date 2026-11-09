@@ -31,6 +31,7 @@
       facts: "/f/page",
       before: "/f/before/{line}",
       after: "/f/after/{line}",
+      around: "/f/around/{line}",
       run: "/f/run/{run}",
       body: "/f/body/{line}",
       keep: function (update) {
@@ -377,6 +378,28 @@
         "Stars(3)",
         "Stars(6)",
         "wrong: couldn't keep the star: 403 Forbidden"
+      ]
+    ],
+    [
+      "a jump asks for the rows around its line; ones that can't come, the page says why",
+      function () {
+        var it = page();
+        answer(it, "/f/page", null, LOG);
+        it.view.send(["Jump", 1]);
+        it.view.send(["Jump", 1]);
+        var asked = it.asked.slice();
+        answer(it, "/f/around/1", null, EARLIER);
+        it.view.send(["Jump", 2]);
+        answer(it, "/f/around/2", "502 Bad Gateway", null);
+        return asked.concat(it.asked.slice(asked.length), facts(it, "Reveal"), "kept " + it.kept, it.said.slice(1));
+      },
+      [
+        "/f/page",
+        "/f/around/1",
+        "/f/around/2",
+        "Reveal(RunBox(1), 3)",
+        "kept 1",
+        "wrong: couldn't load the rows around line 2: 502 Bad Gateway"
       ]
     ],
     [

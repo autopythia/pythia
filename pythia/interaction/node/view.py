@@ -211,6 +211,18 @@ def spans(context: Context, start: int, forward: bool, most: Optional[int] = Non
     return line + 1, start + 1, found
 
 
+def around(context: Context, at: int) -> Tuple[int, int, List[Tuple[int, int]]]:
+    """About ``CHUNK_ROWS`` of ``context``'s rows around line ``at`` (from 0), as ``spans``
+    gives them: half of them before the row that holds it, whole, and the rest from that
+    row on."""
+    back = spans(context, at, False, 1)[2]
+    start = back[0][0] if back else at
+    low, _, before = spans(context, start - 1, False, CHUNK_ROWS // 2) if start > 0 \
+        else (start, start, [])
+    _, high, after = spans(context, start, True, CHUNK_ROWS - len(before))
+    return low, high, before + after
+
+
 def summary(context: Context, first: int, last: int) -> str:
     """What the run of lines ``first`` to ``last`` (from 0) of ``context``'s log holds, such
     as ``9 tool calls: exec_command 7, apply_patch 2; 2 reasoning``."""
@@ -308,7 +320,7 @@ class View:
         data = f' data-facts="{h(facts)}" data-store="{h(pages.base)}/lem/store/session"'
         if rows is not None:
             data += "".join(f' data-{way}="{h(rows.replace("{way}", way))}"'
-                            for way in ("before", "after"))
+                            for way in ("before", "after", "around"))
         data += ("" if run is None else f' data-run="{h(run)}"') + (
             "" if body is None else f' data-body="{h(body)}"') + (
             "" if grow is None else f' data-grow="{h(grow)}"') + (
@@ -466,11 +478,11 @@ class View:
         return steps
 
     def rows(self, pages: Pages, cid: str, way: str, text: str) -> Response:
-        """Root ``cid``'s rows before line ``text`` (``way`` "before"), or after it ("after"),
-        about ``CHUNK_ROWS`` of them, as ``chunk`` gives them. The run that a log ended
-        with, at line ``text``, may go on as the log grows: then the rows after it start
-        with that run, whole, and the items of its lines after line ``text``, for a page
-        that has it open."""
+        """Root ``cid``'s rows before line ``text`` (``way`` "before"), after it ("after"),
+        or around it ("around"), about ``CHUNK_ROWS`` of them, as ``chunk`` gives them. The
+        run that a log ended with, at line ``text``, may go on as the log grows: then the
+        rows after it start with that run, whole, and the items of its lines after line
+        ``text``, for a page that has it open."""
         context = pages.roots.get(cid)
         if context is None:
             return _plain(404, "There's no such root context here.")
@@ -482,6 +494,8 @@ class View:
                 grown = None
                 if way == "before" and 1 <= line <= len(index) + 1:
                     found = spans(context, line - 2, False)
+                elif way == "around" and 1 <= line <= len(index):
+                    found = around(context, line - 1)
                 elif way == "after" and 0 <= line <= len(index):
                     back = spans(context, line - 1, False, 1)[2] if line > 0 else []
                     start = back[0][0] if back else line

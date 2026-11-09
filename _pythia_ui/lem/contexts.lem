@@ -61,6 +61,8 @@ state Asked(line: Int) key line
 -- the screen.
 input Opening(open: Bool) one
 rel Opens(open: Bool) one
+Opens(o) :- Opening(o)
+Opens(False) :- not Opening()
 
 -- Stars: the host's, for this log, by line (Stars). A message, and an item,
 -- has a star, which the reader sets or clears (glui's Starred), and which
@@ -71,8 +73,32 @@ rel StarOf(line: Int, on: Bool) key line
 StarOf(l, True) :- Stars(l)
 StarOf(l, False) :- Message(line=l), not Stars(l)
 StarOf(i, False) :- Item(line=i), not Stars(i)
-Opens(o) :- Opening(o)
-Opens(False) :- not Opening()
+
+-- Jumping to a line, as the panel does: the rows around it come, as the
+-- host sends them (LoadAround); the run that it's in opens; and its turn's
+-- mark, if a turn starts there, else its message, or its item, comes into
+-- view (glem's Reveal); before the item's run has its items, the run.
+-- Each jump counts, so that one to the same line again brings it into view
+-- again.
+msg Jump(line: Int)
+effect LoadAround(line: Int)
+state Jumped(line: Int, n: Int) one
+rel TurnAt(line: Int)
+TurnAt(l) :- Turn(_, _, _, l)
+rel Reached(run: Int)
+Reached(r) :- Jumped(l, _), Run(r, _, last, _), r <= l, l <= last, not Message(line=l)
+rel Target(id: Id)
+Target(TurnMark(n)) :- Jumped(l, _), TurnAt(l), Turn(n, _, _, l)
+Target(Said(l)) :- Jumped(l, _), Message(line=l), not TurnAt(l)
+Target(Ent(l)) :- Jumped(l, _), Item(line=l), not Message(line=l), not TurnAt(l)
+Target(RunBox(r)) :- Reached(r), Jumped(l, _), not Item(line=l), not Message(line=l), not TurnAt(l)
+Reveal(id, at=n) :- Target(id), Jumped(_, n)
+
+-- Each run open or folded: open as the host says (Opens), or as a jump
+-- reaches into it.
+rel RunOpen(run: Int, open: Bool) key run
+RunOpen(r, True) :- Reached(r)
+RunOpen(r, o) :- Run(line=r), Opens(o), not Reached(r)
 
 -- The lines that came, from the first to the last; and where rows are.
 rel Below(line: Int)
@@ -87,9 +113,21 @@ rel RowAt(line: Int)
 RowAt(l) :- Message(l, _, _, _, _)
 RowAt(l) :- Run(l, _, _, _)
 
+-- Where the stretches that came don't meet, as after a jump: after each,
+-- the next, if rows lie between them, which a marker at either side asks
+-- for as it comes near the screen.
+rel Ahead(last: Int, first: Int)
+Ahead(t, f) :- Chunk(_, t), Chunk(f, _), f > t
+rel Farther(last: Int, first: Int)
+Farther(t, f) :- Ahead(t, f), Ahead(t, g), g < f
+rel Continues(last: Int)
+Continues(t) :- Chunk(_, t), Chunk(a, b), a <= t + 1, t + 1 <= b
+rel Gap(last: Int, first: Int)
+Gap(t, f) :- Ahead(t, f), not Farther(t, f), not Continues(t)
+
 id Top, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
 id Log, Before, After, TurnMark(Int), Said(Int), SaidText(Int), RunBox(Int), RunWait(Int)
-id Ent(Int), Part(Int, Int), Wait(Int)
+id Ent(Int), Part(Int, Int), Wait(Int), GapAfter(Int), GapBefore(Int)
 
 Window(Top, title=t) :- Page(t, items, turnto, begin):
   Heading(Title, text=t)
@@ -123,7 +161,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
       Entry(Said(l), label=label, text="", mark=text(l), tone=tone, to=items + text(l), order=l * 2, star=True, starred=s) :- StarOf(l, s):
         Code(SaidText(l), text=said)
     for Run(l, n, last, what):
-      Entry(RunBox(l), label=what, text="", mark=text(l), tone=Dim, fold=True, to=items + text(l), order=l * 2, open=o) :- Opens(o):
+      Entry(RunBox(l), label=what, text="", mark=text(l), tone=Dim, fold=True, to=items + text(l), order=l * 2, open=o) :- RunOpen(l, o):
         Label(RunWait(l), text="loading", tone=Dim) :- Opened(l), not RunLoaded(run=l), not RunFailed(run=l)
         Label(RunWait(l), text="couldn't load it: " + why, tone=Error) :- RunFailed(l, why), not RunLoaded(run=l)
         for Item(i, l, tone, label, gist, body):
@@ -131,6 +169,11 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
             Code(Part(i, k), text=b, diff=d, order=k) :- Body(i, k, b, d)
             Label(Wait(i), text="loading", tone=Dim) :- Asked(i), not Body(line=i), not Failed(line=i)
             Label(Wait(i), text="couldn't load it: " + why, tone=Error) :- Failed(i, why), not Body(line=i)
+    for Gap(above, below):
+      Label(GapAfter(above), text="later rows", tone=Dim, order=above * 2 + 1) :- not LaterFailed(line=above)
+      Label(GapAfter(above), text="couldn't load the later rows: " + why, tone=Error, order=above * 2 + 1) :- LaterFailed(above, why)
+      Label(GapBefore(below), text="earlier rows", tone=Dim, order=below * 2 - 2) :- not EarlierFailed(line=below)
+      Label(GapBefore(below), text="couldn't load the earlier rows: " + why, tone=Error, order=below * 2 - 2) :- EarlierFailed(below, why)
     Label(After, text="later rows", tone=Dim, order=finish * 2 + 1) :- Last(upto), Length(finish), upto < finish, not LaterFailed(line=upto)
     Label(After, text="couldn't load the later rows: " + why, tone=Error, order=finish * 2 + 1) :- Last(upto), Length(finish), upto < finish, LaterFailed(upto, why)
 
@@ -138,7 +181,9 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
 -- screen, unless the host couldn't send them.
 Near(Before, msg=Earlier(f)) :- First(f), Page(first=p), f > p, not EarlierFailed(line=f)
 Near(After, msg=Later(t)) :- Last(t), Length(p), t < p, not LaterFailed(line=t)
-Near(RunBox(l), msg=Fill(l)) :- Opens(True), Run(line=l), not RunLoaded(run=l), not RunFailed(run=l)
+Near(RunBox(l), msg=Fill(l)) :- RunOpen(l, True), not RunLoaded(run=l), not RunFailed(run=l)
+Near(GapAfter(t), msg=Later(t)) :- Gap(t, _), not LaterFailed(line=t)
+Near(GapBefore(f), msg=Earlier(f)) :- Gap(_, f), not EarlierFailed(line=f)
 
 on Earlier(f):
   LoadBefore(f)
@@ -153,6 +198,11 @@ on Toggled(RunBox(l), True):
 on Fill(l):
   Opened(l) :- Run(line=l), not RunLoaded(run=l)
   LoadRun(l) :- Run(line=l), not RunLoaded(run=l)
+
+on Jump(l):
+  Jumped(l, n + 1) :- Jumped(_, n)
+  Jumped(l, 1) :- not Jumped()
+  LoadAround(l)
 
 on Starred(Said(l), v):
   Star(l, v)

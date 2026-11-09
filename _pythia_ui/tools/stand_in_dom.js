@@ -11,8 +11,10 @@ var standInDom = (function () {
     this.made = 0;
     this.title = "";
     // The elements near the screen (near), and the observers that watch
-    // for them, as a browser's IntersectionObserver does, from the window.
+    // for them, as a browser's IntersectionObserver does, from the window;
+    // and the elements scrolled into view, in order.
     this.nearby = new Set();
+    this.revealed = [];
     this.observers = [];
     var doc = this;
     this.defaultView = {
@@ -243,6 +245,11 @@ var standInDom = (function () {
       }
     }
   });
+
+  // Scrolls the element into view: here, notes that it was.
+  Element.prototype.scrollIntoView = function () {
+    this.ownerDocument.revealed.push(this);
+  };
 
   // A details element's `open`, which its attribute holds. When it changes,
   // the element fires toggle, as a browser does; at once, where a browser

@@ -127,14 +127,26 @@
   }
 
   // What a case shows: the page's title, if it has one; the page, or "(no
-  // widgets)"; the Focused fact, if any; and what the host heard.
+  // widgets)"; the Focused fact, if any; what the host heard; and the
+  // widgets that the view scrolled into view (glem's Reveal), by id.
   function shown(it) {
     var r = it.runtime.prog.lem.rel("Focused");
     var focused = it.runtime.lem.relFacts(r).map(function (fact) {
       return it.runtime.prog.lem.factText(r, fact.tuple);
     });
     var title = it.doc.title ? ["page title: " + JSON.stringify(it.doc.title)] : [];
-    return title.concat([page(it.root) || "(no widgets)"], focused, it.heard).join("\n");
+    var revealed = [];
+    if (!it.real) {
+      var ids = new Map();
+      elements(it.view).forEach(function (element, id) {
+        ids.set(element, id);
+      });
+      revealed = it.doc.revealed.map(function (element) {
+        return "revealed " + (ids.has(element) ? ids.get(element) : "an element that went");
+      });
+      it.doc.revealed = [];
+    }
+    return title.concat([page(it.root) || "(no widgets)"], focused, it.heard, revealed).join("\n");
   }
 
   // Whether a step is the host's, which the view runs with the others

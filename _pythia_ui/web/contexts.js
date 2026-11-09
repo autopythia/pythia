@@ -3,8 +3,9 @@
 // pages, for the root contexts and for a context's log
 // (pythia/interaction/node/view.py). A page gives, on its <html> element,
 // `data-facts`, the URL of its facts, JSON steps (src/lem/host.rs); and,
-// for a log, `data-before` and `data-after`, the URLs of the rows before a
-// line and after one, `data-run`, the URL of a run's items, and
+// for a log, `data-before`, `data-after` and `data-around`, the URLs of the
+// rows before a line, after one and around one, `data-run`, the URL of a
+// run's items, and
 // `data-body`, the URL of an item's body, each with `{line}` or `{run}` in
 // place of its line; and `data-grow`, the URL of what the log gained since it
 // had `{lines}` lines, and `data-stars`, the URL that keeps its stars; and,
@@ -17,7 +18,8 @@
 // every run folded or every run open, as the bar's Runs says (Opening); and
 // it answers the
 // program's LoadBefore(line) and LoadAfter(line) with rows, or with
-// EarlierFailed(line, why) or LaterFailed(line, why); its LoadRun(run)
+// EarlierFailed(line, why) or LaterFailed(line, why); its LoadAround(line)
+// with rows, or a status that says why not; its LoadRun(run)
 // with the run's items, or with RunFailed(run, why); and its Load(line)
 // with the item's body, or with Failed(line, why). Every few seconds, while
 // the page shows, it asks what a log gained, or an index's facts anew, and
@@ -50,14 +52,15 @@ var contexts = (function () {
   //
   // - o.get(url, done) fetches JSON, and calls done(null, value), or
   //   done(why, null) if it can't, later rather than at once;
-  // - o.facts is the URL of the page's facts; o.before and o.after, the
-  //   URLs of the rows before a line and after one, with {line}; o.run, the
+  // - o.facts is the URL of the page's facts; o.before, o.after and
+  //   o.around, the URLs of the rows before a line, after one and around
+  //   one, with {line}; o.run, the
   //   URL of a run's items, with {run}; and o.body, the URL of an item's
   //   body, with {line}; each null for the index;
   // - o.status(text, wrong), if given, hears how it went: how long the
   //   page took to show, and what went wrong;
-  // - o.keep(update), if given, runs update(), which shows rows that came
-  //   before those on the page, keeping what's on the screen in place; and
+  // - o.keep(update), if given, runs update(), which shows what came, rows
+  //   or a run's items or a body, keeping what's on the screen in place; and
   //   o.shown(), if given, hears that the page's facts are shown;
   // - o.opening, for a log, says whether every run opens, as an Opening
   //   fact from the start, which the bar changes later (boot);
@@ -92,6 +95,7 @@ var contexts = (function () {
     var asks = {
       LoadBefore: { url: o.before, field: "line", failed: "EarlierFailed", wrong: "its rows aren't a list of steps" },
       LoadAfter: { url: o.after, field: "line", failed: "LaterFailed", wrong: "its rows aren't a list of steps" },
+      LoadAround: { url: o.around, field: "line", failed: null, wrong: "its rows aren't a list of steps" },
       LoadRun: { url: o.run, field: "run", failed: "RunFailed", wrong: "its items aren't a list of steps" },
       Load: { url: o.body, field: "line", failed: "Failed", wrong: "its body isn't a list of steps" }
     };
@@ -163,8 +167,13 @@ var contexts = (function () {
       }
     }
 
-    // What was asked for, `value`, fails: the turn or the entry says why.
+    // What was asked for, `value`, fails: the turn or the entry says why;
+    // or, for what has no fact to say so, the page.
     function fail(ask, value, why) {
+      if (ask.failed === null) {
+        status("couldn't load the rows around line " + value + ": " + why, true);
+        return;
+      }
       var fields = { why: why };
       fields[ask.field] = value;
       failed.set(ask.failed + " " + value, fields);
@@ -172,14 +181,15 @@ var contexts = (function () {
     }
 
     function load(ask, value) {
-      var name = ask.failed + " " + value;
+      var name = ask.url + " " + value;
       if (ask.url === null || ask.url === undefined || loading.has(name)) {
         return;
       }
       loading.add(name);
-      if (failed.has(name)) {
-        view.update([["-", ask.failed, failed.get(name)]]);
-        failed.delete(name);
+      var gone = ask.failed + " " + value;
+      if (failed.has(gone)) {
+        view.update([["-", ask.failed, failed.get(gone)]]);
+        failed.delete(gone);
       }
       o.get(ask.url.split("{" + ask.field + "}").join(String(value)), function (why, steps) {
         loading.delete(name);
@@ -191,13 +201,9 @@ var contexts = (function () {
           return;
         }
         refused = null;
-        if (ask.failed === "EarlierFailed") {
-          keep(function () {
-            view.update(steps);
-          });
-        } else {
+        keep(function () {
           view.update(steps);
-        }
+        });
         if (refused !== null) {
           fail(ask, value, refused);
         }
@@ -329,16 +335,29 @@ var contexts = (function () {
       );
   }
 
-  // Shows rows that came before those on the page, by update(), keeping
-  // what's on the screen in place: they're all above it, so the page
-  // scrolls down as far as they reach. The page's own scroll anchoring is
-  // off (web/contexts.css), so that only this moves it.
+  // Shows what came, by update(), keeping what's on the screen in place:
+  // the first of the log's rows that shows stays where it is, though rows
+  // come above it, or a run above it opens. The page's own scroll anchoring
+  // is off (web/contexts.css), so that only this moves it.
   function keep(update) {
     var page = document.scrollingElement;
-    var height = page ? page.scrollHeight : 0;
+    var rows = page ? document.querySelectorAll(".g-box > .g-entry") : [];
+    // The first row whose bottom is below the screen's top, by halves.
+    var low = 0;
+    var high = rows.length;
+    while (low < high) {
+      var mid = (low + high) >> 1;
+      if (rows[mid].getBoundingClientRect().bottom > 0) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    var anchor = low < rows.length ? rows[low] : null;
+    var top = anchor !== null ? anchor.getBoundingClientRect().top : 0;
     update();
-    if (page) {
-      page.scrollTop += page.scrollHeight - height;
+    if (anchor !== null && anchor.isConnected) {
+      page.scrollTop += anchor.getBoundingClientRect().top - top;
     }
   }
 
@@ -523,6 +542,7 @@ var contexts = (function () {
         facts: html.getAttribute("data-facts"),
         before: html.getAttribute("data-before"),
         after: html.getAttribute("data-after"),
+        around: html.getAttribute("data-around"),
         run: html.getAttribute("data-run"),
         body: html.getAttribute("data-body"),
         get: get,

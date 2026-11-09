@@ -1412,6 +1412,7 @@ class ViewTests(WorkspaceTest):
                       f'data-store="/{TOKEN}/lem/store/session" '
                       f'data-before="/{TOKEN}/lem/rows/1/before/{{line}}" '
                       f'data-after="/{TOKEN}/lem/rows/1/after/{{line}}" '
+                      f'data-around="/{TOKEN}/lem/rows/1/around/{{line}}" '
                       f'data-run="/{TOKEN}/lem/run/1/{{run}}" '
                       f'data-body="/{TOKEN}/lem/body/1/{{line}}" '
                       f'data-grow="/{TOKEN}/lem/grow/1/',
@@ -1581,6 +1582,20 @@ class ViewTests(WorkspaceTest):
             self.assertEqual(forward, whole)
             self.assertEqual(self.facts(self.steps("lem/rows/1/after/63"), "Chunk"),
                              [{"first": 64, "last": 63}])
+
+    def test_rows_around_a_line_keep_its_row_whole(self):
+        # Line 6 is inside turn 1's run, lines 5 to 17: the rows around it start with the
+        # row before that run, and the run comes whole.
+        with mock.patch.object(view, "CHUNK_ROWS", 3):
+            steps = self.steps("lem/rows/1/around/6")
+        self.assertEqual(self.facts(steps, "Chunk"), [{"first": 3, "last": 18}])
+        self.assertEqual([(rel, fields["line"]) for _, rel, fields in steps if rel != "Chunk"],
+                         [("Message", 3), ("Run", 5), ("Message", 18)])
+        with mock.patch.object(view, "CHUNK_ROWS", 3):
+            first = self.steps("lem/rows/1/around/1")
+        self.assertEqual(self.facts(first, "Chunk"), [{"first": 1, "last": 17}])  # 3 after
+        for line in ("0", "64", "x", ""):
+            self.assertEqual(self.get(f"lem/rows/1/around/{line}").status, 404, line)
 
     def test_bodies(self):
         def body(line):
