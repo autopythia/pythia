@@ -350,8 +350,12 @@ sends `Load(line)`, and the host answers with `Body` facts, or
 `Failed(line, why)`. `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test
 it.
 
-In a browser, `web/contexts.js` is the host's part. `lem/tabs.lem` is the
-strip of tabs that the view's tabs will show, in a HUD at the top left: the
+In a browser, `web/contexts.js` is the host's part. The node server's pages
+show tabs: the index's, and one for each context that's open, each a runtime
+and a view of its own, of which only the tab shown shows, and asks what
+changed; a click on a link to a context, without a modifier key, opens its
+tab, and the address follows the tab shown, which the server's store keeps,
+with the tabs open. `lem/tabs.lem` is their strip, in a HUD at the top: the
 host says which are open (`Open(n, title, rank)`, the index as 0) and which
 shows (`Shown(n)`), and hears a pick (`Show(n)`) and a close (`Close(n)`); the
 index can't be closed. A page names its facts on its `html` element,

@@ -11,19 +11,25 @@
 // and `data-pins`, the URL of its panel's pins; and, on each page,
 // `data-store`, the URL of the settings that the server keeps for the view
 // (pythia/interaction/node/store.py). The compiled program and glui's themes
-// are beside this script, in compiled/. It shows the page in glui's widgets
-// (src/glui/glui.js), in the look and the theme that its bar chooses, which
-// the server keeps, and the browser too; a log from its end, with every run
-// folded or every run open, as the bar's Runs says (Opening), and with its
-// panel beside it, or not, as the bar's Panel says (Aside). It answers the
-// program's LoadBefore(line) and LoadAfter(line) with rows, or with
-// EarlierFailed(line, why) or LaterFailed(line, why); its LoadAround(line)
-// with rows, or a status that says why not; its LoadRun(run) with the run's
-// items, or with RunFailed(run, why); and its Load(line) with the item's
-// body, or with Failed(line, why). Every few seconds, while the page shows,
-// it asks what a log gained, or an index's facts anew, and tells the program
-// what changed. Like lem.js, it's a plain script that defines one global,
-// `contexts`, and it starts itself on a page that gives `data-facts`.
+// are beside this script, in compiled/. A page of the node server's also
+// gives what its tabs need (tabs()): `data-index`, the URL of the index's
+// facts; `data-tab`, of a context's tab, with `{id}`; `data-log` and
+// `data-home`, the addresses of a context's page and the index's; and, for a
+// log, `data-open`, its number. It shows the page in glui's widgets
+// (src/glui/glui.js), with a tab for the index and for each context open, the
+// strip of them at the top (lem/tabs.lem), where the page names them, in the
+// look and the theme that its bar chooses, which the server keeps, and the
+// browser too; a log from its end, with every run folded or every run open,
+// as the bar's Runs says (Opening), and with its panel beside it, or not, as
+// the bar's Panel says (Aside). It answers the program's LoadBefore(line) and
+// LoadAfter(line) with rows, or with EarlierFailed(line, why) or
+// LaterFailed(line, why); its LoadAround(line) with rows, or a status that
+// says why not; its LoadRun(run) with the run's items, or with RunFailed(run,
+// why); and its Load(line) with the item's body, or with Failed(line, why).
+// Every few seconds, while the page shows, it asks what a log gained, or an
+// index's facts anew, and tells the program what changed. Like lem.js, it's a
+// plain script that defines one global, `contexts`, and it starts itself on a
+// page that gives `data-facts`.
 var contexts = (function () {
   "use strict";
 
@@ -50,6 +56,11 @@ var contexts = (function () {
     ["hidden", "hidden"],
     ["shown", "shown"]
   ];
+  // The tabs that the session keeps, as words of the store's (store.py):
+  // the open contexts' numbers, oldest first, and the number of the one
+  // shown, 0 for the index.
+  var TABS = /^([1-9][0-9]{0,8}(-[1-9][0-9]{0,8})*)?$/;
+  var TAB = /^(0|[1-9][0-9]{0,8})$/;
 
   // Shows a page of a compiled program, contexts.lem's, in a view in
   // `o.root`, and is its host:
@@ -80,6 +91,8 @@ var contexts = (function () {
   //   done(why): the program's Star(line, on) changes Stars on the page at
   //   once, and then in the server's store; one that can't be kept is
   //   taken back, and the page says why;
+  // - o.recipes, if given, are the recipes that the view draws with, in
+  //   place of glui's (glui.recipes);
   // - o.pins, for a log, is the URL of its panel's pins, which the page
   //   asks for anew once a star is kept, one request at a time: the Pin
   //   facts that come take the place of those before. Should they fail, the
@@ -131,7 +144,7 @@ var contexts = (function () {
     var pins = new Map();
     var pinning = false;
     var again = false;
-    var view = glui.view(runtime, o.root, {
+    var host = {
       effects: function (effects) {
         effects.forEach(function (effect) {
           if (effect.name === "Star") {
@@ -148,7 +161,8 @@ var contexts = (function () {
         refused = message;
         status("error: " + message, true);
       }
-    });
+    };
+    var view = o.recipes ? new glem.View(runtime, o.root, o.recipes, host, glui.state) : glui.view(runtime, o.root, host);
     var settings = [];
     if (typeof o.opening === "boolean") {
       settings.push(["+", "Opening", { open: o.opening }]);
@@ -337,6 +351,285 @@ var contexts = (function () {
     return view;
   }
 
+  // A page of tabs (V3): the index's tab, and a tab for each root context
+  // that's open, each a view of the program (start) in an element of its
+  // own, in o.holder, which only the tab shown shows; and their strip, a
+  // view of the strip's program (lem/tabs.lem) in o.strip. It takes:
+  //
+  // - o.program and o.strip_program, the compiled programs;
+  // - o.index, the URL of the index's facts; o.tab, the URL of a context's
+  //   tab, with {id}, which gives its title and its log's URLs as JSON
+  //   (pythia/interaction/node/view.py); o.log, the address of a
+  //   context's page, with {id}, and o.home, the index's, which a click on
+  //   a link to either, without a modifier key, shows in its tab instead;
+  // - o.get, o.post and o.status, as start() takes them;
+  // - o.settings(), what a log's tab starts with: {opening, aside};
+  // - o.kept, the tabs that the session kept, {tabs: numbers, tab:
+  //   number}, and o.open, the number of the tab to show at first, if a
+  //   page names one; o.keep_tabs(numbers, shown) keeps them anew as they
+  //   change;
+  // - o.title(text), o.address(url) and o.showing(tab) follow the tab
+  //   shown, its window's title, its page's address, and the tab itself;
+  //   o.top() and o.go(top), its scroll, which each tab keeps, and o.end(),
+  //   a log's end, where it starts; o.keep(root, update), as start()'s
+  //   keep, for the tab shown.
+  //
+  // Gives {open(n, show), show(n), close(n), shown(), each(f), tick()}:
+  // tick() asks the tab shown what changed, as only it asks.
+  function tabs(o) {
+    var doc = o.holder.ownerDocument;
+    var all = new Map();
+    var order = [];
+    var rank = 0;
+    var current = null;
+    var ready = false;
+    var strip = glui.view(new glem.Runtime(new glem.Program(o.strip_program)), o.strip, {
+      effects: function (effects) {
+        effects.forEach(function (effect) {
+          if (effect.name === "Show") {
+            show(effect.fields.n);
+          } else if (effect.name === "Close") {
+            close(effect.fields.n);
+          }
+        });
+      },
+      error: function (message) {
+        o.status("error: " + message, true);
+      }
+    });
+
+    function fact(tab) {
+      return { n: tab.n, title: tab.title, rank: tab.rank };
+    }
+
+    // glui's recipes, with a window that keeps the document's title the
+    // tab shown's.
+    function recipes(tab) {
+      var all = glui.recipes();
+      var window_ = all.Window;
+      all.Window = function (w, view) {
+        var made = window_(w, view);
+        var update = made.update;
+        made.update = function () {
+          update();
+          tab.heading = w.fields.title;
+          o.title(current === null ? tab.heading : current.heading || current.title);
+        };
+        return made;
+      };
+      return all;
+    }
+
+    // The tab's view, of the URLs that `urls` gives.
+    function begin(tab, urls) {
+      var settings = o.settings();
+      var log = tab.n !== 0;
+      tab.view = start({
+        root: tab.root,
+        program: o.program,
+        recipes: recipes(tab),
+        opening: log ? settings.opening : undefined,
+        aside: log ? settings.aside : undefined,
+        facts: urls.facts,
+        before: urls.before || null,
+        after: urls.after || null,
+        around: urls.around || null,
+        run: urls.run || null,
+        body: urls.body || null,
+        grow: urls.grow || null,
+        stars: urls.stars || null,
+        pins: urls.pins || null,
+        post: o.post,
+        get: o.get,
+        status: o.status,
+        every: function (tick) {
+          tab.tick = tick;
+        },
+        keep: function (update) {
+          if (tab === current) {
+            o.keep(tab.root, update);
+          } else {
+            update();
+          }
+        },
+        shown: function () {
+          if (!log) {
+            return;
+          }
+          if (tab === current) {
+            o.end();
+          } else {
+            tab.place = "end";
+          }
+        }
+      });
+    }
+
+    // Opens tab `n`, the index's if it's 0, if it isn't open; and shows it,
+    // with `andShow`. A context's tab asks for its URLs first; one that
+    // can't come closes, and the page says why.
+    function open(n, andShow) {
+      var tab = all.get(n);
+      if (tab === undefined) {
+        tab = { n: n, rank: rank++, title: n === 0 ? "Root contexts" : String(n), heading: null, root: doc.createElement("div"), view: null, tick: null, place: null };
+        tab.root.setAttribute("hidden", "");
+        o.holder.appendChild(tab.root);
+        all.set(n, tab);
+        order.push(n);
+        strip.update([["+", "Open", fact(tab)]]);
+        if (n === 0) {
+          begin(tab, { facts: o.index });
+        } else {
+          o.get(o.tab.split("{id}").join(String(n)), function (why, urls) {
+            if (all.get(n) !== tab) {
+              return;
+            }
+            if (why === null && (urls === null || typeof urls !== "object" || typeof urls.facts !== "string")) {
+              why = "its tab isn't one";
+            }
+            if (why !== null) {
+              o.status("couldn't open context " + n + ": " + why, true);
+              close(n);
+              return;
+            }
+            if (typeof urls.title === "string" && urls.title !== tab.title) {
+              var was = fact(tab);
+              tab.title = urls.title;
+              strip.update([
+                ["-", "Open", was],
+                ["+", "Open", fact(tab)]
+              ]);
+            }
+            begin(tab, urls);
+          });
+        }
+        if (!andShow) {
+          keep();
+        }
+      }
+      if (andShow) {
+        show(n);
+      }
+      return tab;
+    }
+
+    // Shows tab `n`, if it's open: where it was, as the tab shown before
+    // keeps its place.
+    function show(n) {
+      var tab = all.get(n);
+      if (tab === undefined || tab === current) {
+        return;
+      }
+      if (current !== null) {
+        current.place = o.top();
+        current.root.setAttribute("hidden", "");
+      }
+      current = tab;
+      tab.root.removeAttribute("hidden");
+      if (tab.place === "end") {
+        o.end();
+      } else {
+        o.go(tab.place === null ? 0 : tab.place);
+      }
+      strip.update([["+", "Shown", { n: n }]]);
+      o.title(tab.heading || tab.title);
+      o.address(n === 0 ? o.home : o.log.split("{id}").join(String(n)));
+      o.showing(tab);
+      if (tab.tick !== null) {
+        tab.tick();
+      }
+      keep();
+    }
+
+    // Closes tab `n`, but the index's: then the next shows, if it showed,
+    // or the one before.
+    function close(n) {
+      var tab = all.get(n);
+      if (n === 0 || tab === undefined) {
+        return;
+      }
+      var at = order.indexOf(n);
+      all.delete(n);
+      order.splice(at, 1);
+      if (tab.root.parentNode !== null) {
+        tab.root.parentNode.removeChild(tab.root);
+      }
+      strip.update([["-", "Open", fact(tab)]]);
+      if (tab === current) {
+        current = null;
+        show(order[Math.min(at, order.length - 1)]);
+      }
+      keep();
+    }
+
+    function keep() {
+      if (ready) {
+        o.keep_tabs(order.filter(function (n) {
+          return n !== 0;
+        }), current === null ? 0 : current.n);
+      }
+    }
+
+    // The number of a context whose page `href` is, 0 for the index's, or
+    // null.
+    function numberOf(href) {
+      if (href === null) {
+        return null;
+      }
+      if (href === o.home) {
+        return 0;
+      }
+      var parts = o.log.split("{id}");
+      if (href.length <= parts[0].length + parts[1].length || href.indexOf(parts[0]) !== 0 || href.slice(href.length - parts[1].length) !== parts[1]) {
+        return null;
+      }
+      var id = href.slice(parts[0].length, href.length - parts[1].length);
+      return /^[1-9][0-9]{0,8}$/.test(id) ? Number(id) : null;
+    }
+
+    o.holder.addEventListener("click", function (event) {
+      if (event.defaultPrevented || event.button > 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+        return;
+      }
+      for (var e = event.target; e && e !== o.holder; e = e.parentNode) {
+        if (e.nodeType === 1 && e.localName === "a") {
+          var n = numberOf(e.getAttribute("href"));
+          if (n !== null) {
+            event.preventDefault();
+            open(n, true);
+          }
+          return;
+        }
+      }
+    });
+
+    open(0, false);
+    (o.kept.tabs || []).forEach(function (n) {
+      open(n, false);
+    });
+    var first = typeof o.open === "number" ? o.open : all.has(o.kept.tab) ? o.kept.tab : 0;
+    open(first, false);
+    ready = true;
+    show(first);
+    return {
+      open: open,
+      show: show,
+      close: close,
+      shown: function () {
+        return current;
+      },
+      each: function (f) {
+        all.forEach(f);
+      },
+      tick: function () {
+        if (current !== null && current.tick !== null) {
+          current.tick();
+        }
+      },
+      strip: strip
+    };
+  }
+
   // The length that steps say a log has, by their last Length fact, else
   // `was`.
   function lengthOf(steps, was) {
@@ -399,12 +692,12 @@ var contexts = (function () {
   }
 
   // Shows what came, by update(), keeping what's on the screen in place:
-  // the first of the log's rows that shows stays where it is, though rows
-  // come above it, or a run above it opens. The page's own scroll anchoring
-  // is off (web/contexts.css), so that only this moves it.
-  function keep(update) {
+  // the first of the log's rows in `root` that shows stays where it is,
+  // though rows come above it, or a run above it opens. The page's own
+  // scroll anchoring is off (web/contexts.css), so that only this moves it.
+  function keepRows(root, update) {
     var page = document.scrollingElement;
-    var rows = page ? document.querySelectorAll(".g-box > .g-entry") : [];
+    var rows = page ? root.querySelectorAll(".g-box > .g-entry") : [];
     // The first row whose bottom is below the screen's top, by halves.
     var low = 0;
     var high = rows.length;
@@ -464,6 +757,21 @@ var contexts = (function () {
     return known() ? value : choices[0][0];
   }
 
+  // A word that the server's store keeps (`kept`), if it's one that
+  // `pattern` takes; else as the browser remembers it, if it lets the page;
+  // else "".
+  function rememberedWord(name, pattern, kept) {
+    var value = typeof kept === "string" ? kept : null;
+    if (value === null || !pattern.test(value)) {
+      try {
+        value = window.localStorage.getItem("glui." + name);
+      } catch (e) {
+        value = null;
+      }
+    }
+    return value !== null && pattern.test(value) ? value : "";
+  }
+
   function remember(name, value) {
     try {
       window.localStorage.setItem("glui." + name, value);
@@ -511,12 +819,25 @@ var contexts = (function () {
   // that keeps them anew, if there's one.
   function show(kept, store) {
     var html = document.documentElement;
+    // A page with `data-tab` shows tabs (tabs()), with the strip and the bar
+    // on a line of their own at the top; else one page, the bar over it.
+    var tabbing = html.getAttribute("data-tab") !== null;
     var bar = document.createElement("nav");
     var line = document.createElement("span");
     var root = document.createElement("div");
+    var stripRoot = document.createElement("div");
     bar.setAttribute("class", "contexts-bar");
     line.setAttribute("class", "contexts-status");
-    document.body.appendChild(bar);
+    if (tabbing) {
+      var top = document.createElement("div");
+      top.setAttribute("class", "contexts-strip");
+      top.appendChild(stripRoot);
+      top.appendChild(bar);
+      document.body.appendChild(top);
+      html.classList.add("contexts-tabbed");
+    } else {
+      document.body.appendChild(bar);
+    }
     document.body.appendChild(root);
     var status = function (text, wrong) {
       line.textContent = text;
@@ -542,9 +863,11 @@ var contexts = (function () {
       look: remembered("look", LOOKS, kept.look),
       theme: remembered("theme", THEMES, kept.theme),
       runs: remembered("runs", RUNS, kept.runs),
-      panel: remembered("panel", PANEL, kept.panel)
+      panel: remembered("panel", PANEL, kept.panel),
+      tabs: rememberedWord("tabs", TABS, kept.tabs),
+      tab: rememberedWord("tab", TAB, kept.tab)
     };
-    // A setting that changed: the browser remembers it, and the server's
+    // Settings that changed: the browser remembers them, and the server's
     // store keeps them all.
     var save = function (name, value) {
       chosen[name] = value;
@@ -557,12 +880,29 @@ var contexts = (function () {
         });
       }
     };
-    // The view, once the program has come; and whether the page is a log.
+    // The view, or the tabs, once the program has come; and whether the
+    // page shows logs.
     var shown = null;
-    var log = html.getAttribute("data-run") !== null;
+    var log = tabbing || html.getAttribute("data-run") !== null;
     // A log's panel shows beside it, as contexts.css makes room for it.
     var aside = function (name) {
-      html.classList.toggle("contexts-aside", log && name === "shown");
+      var now = tabbing ? shown !== null && shown.shown() !== null && shown.shown().n !== 0 : log;
+      html.classList.toggle("contexts-aside", now && name === "shown");
+    };
+    // Each view of a log, for a setting that changes.
+    var logs = function (f) {
+      if (shown === null) {
+        return;
+      }
+      if (!tabbing) {
+        f(shown);
+        return;
+      }
+      shown.each(function (tab) {
+        if (tab.n !== 0 && tab.view !== null) {
+          f(tab.view);
+        }
+      });
     };
     menu(bar, "Look", LOOKS, chosen.look, function (value) {
       save("look", value);
@@ -574,21 +914,23 @@ var contexts = (function () {
     });
     if (log) {
       menu(bar, "Runs", RUNS, chosen.runs, function (value) {
-        if (shown !== null) {
-          shown.update([
-            ["-", "Opening", { open: chosen.runs === "open" }],
+        var was = chosen.runs;
+        logs(function (view) {
+          view.update([
+            ["-", "Opening", { open: was === "open" }],
             ["+", "Opening", { open: value === "open" }]
           ]);
-        }
+        });
         save("runs", value);
       });
       menu(bar, "Panel", PANEL, chosen.panel, function (value) {
-        if (shown !== null) {
-          shown.update([
-            ["-", "Aside", { shown: chosen.panel === "shown" }],
+        var was = chosen.panel;
+        logs(function (view) {
+          view.update([
+            ["-", "Aside", { shown: was === "shown" }],
             ["+", "Aside", { shown: value === "shown" }]
           ]);
-        }
+        });
         save("panel", value);
         aside(value);
       });
@@ -597,9 +939,86 @@ var contexts = (function () {
     look(chosen.look);
     theme(chosen.theme);
     aside(chosen.panel);
+    var page = document.scrollingElement;
+    var every = function (tick) {
+      var showing = function () {
+        if (document.visibilityState !== "hidden") {
+          tick();
+        }
+      };
+      window.setInterval(showing, EVERY_MS);
+      document.addEventListener("visibilitychange", showing);
+    };
     get(new URL("compiled/contexts.json", here).href, function (why, program) {
       if (why !== null) {
         status("couldn't load the program: " + why, true);
+        return;
+      }
+      if (tabbing) {
+        get(new URL("compiled/tabs.json", here).href, function (why, strip) {
+          if (why !== null) {
+            status("couldn't load the tabs' program: " + why, true);
+            return;
+          }
+          var open = html.getAttribute("data-open");
+          shown = tabs({
+            holder: root,
+            strip: stripRoot,
+            program: program,
+            strip_program: strip,
+            index: html.getAttribute("data-index"),
+            tab: html.getAttribute("data-tab"),
+            log: html.getAttribute("data-log"),
+            home: html.getAttribute("data-home"),
+            open: open !== null && TAB.test(open) ? Number(open) : null,
+            kept: {
+              tabs: chosen.tabs === "" ? [] : chosen.tabs.split("-").map(Number),
+              tab: Number(chosen.tab)
+            },
+            keep_tabs: function (numbers, n) {
+              var words = numbers.map(String);
+              while (words.join("-").length > 64) {
+                words.shift();
+              }
+              chosen.tabs = words.join("-");
+              remember("tabs", chosen.tabs);
+              save("tab", String(n));
+            },
+            get: get,
+            post: keepIn,
+            status: status,
+            settings: function () {
+              return { opening: chosen.runs === "open", aside: chosen.panel === "shown" };
+            },
+            title: function (text) {
+              document.title = text;
+            },
+            address: function (url) {
+              if (window.location.pathname !== url) {
+                window.history.replaceState(null, "", url);
+              }
+            },
+            showing: function () {
+              aside(chosen.panel);
+            },
+            top: function () {
+              return page ? page.scrollTop : 0;
+            },
+            go: function (top) {
+              if (page) {
+                page.scrollTop = top;
+              }
+            },
+            end: function () {
+              if (page) {
+                page.scrollTop = page.scrollHeight;
+              }
+            },
+            keep: keepRows
+          });
+          aside(chosen.panel);
+          every(shown.tick);
+        });
         return;
       }
       shown = start({
@@ -611,15 +1030,7 @@ var contexts = (function () {
         stars: html.getAttribute("data-stars"),
         pins: html.getAttribute("data-pins"),
         post: keepIn,
-        every: function (tick) {
-          var showing = function () {
-            if (document.visibilityState !== "hidden") {
-              tick();
-            }
-          };
-          window.setInterval(showing, EVERY_MS);
-          document.addEventListener("visibilitychange", showing);
-        },
+        every: every,
         facts: html.getAttribute("data-facts"),
         before: html.getAttribute("data-before"),
         after: html.getAttribute("data-after"),
@@ -628,9 +1039,10 @@ var contexts = (function () {
         body: html.getAttribute("data-body"),
         get: get,
         status: status,
-        keep: keep,
+        keep: function (update) {
+          keepRows(document, update);
+        },
         shown: function () {
-          var page = document.scrollingElement;
           if (page && html.getAttribute("data-before") !== null) {
             page.scrollTop = page.scrollHeight;
           }
@@ -647,5 +1059,5 @@ var contexts = (function () {
     }
   }
 
-  return { start: start, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL };
+  return { start: start, tabs: tabs, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL };
 })();

@@ -484,14 +484,15 @@ fn the_compiled_files_are_up_to_date() {
   let (_, file, text) = THEMES[0];
   let contexts = glem::compile::compile(&program((file, text), &["contexts.lem"]));
   let form = json::parse(&contexts).expect("the compiled form is JSON");
-  let tests = object([("program", form)]);
+  let tabs = glem::compile::compile(&program((file, text), &["tabs.lem"]));
+  let strip = json::parse(&tabs).expect("the compiled form is JSON");
+  let tests = object([("program", form), ("tabs", strip)]);
   write_web(
     "contexts_tests.js",
     "CONTEXTS_TESTS",
     "src/glui/tests.rs",
     &tests,
   );
-  let tabs = glem::compile::compile(&program((file, text), &["tabs.lem"]));
   let mut files = vec![
     ("contexts.json".to_string(), contexts),
     ("tabs.json".to_string(), tabs),

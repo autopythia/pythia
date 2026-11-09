@@ -1,7 +1,7 @@
 /* web/contexts.css: what pythia's contexts' pages (contexts.js) add to
    glui's looks: their bar, at the top right, with its menus and a line of
-   status, in the theme's colors; a log's panel, beside it; and how a page
-   scrolls as rows come. */
+   status, in the theme's colors; a log's panel, beside it; a page of tabs;
+   and how a page scrolls as rows come. */
 .contexts-bar{position:fixed;top:.5rem;right:.75rem;z-index:20;display:flex;flex-wrap:wrap;align-items:center;
 gap:.3em .8em;max-width:calc(100vw - 1.5rem);padding:.2rem .7rem;
 font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--glui-text-dim);
@@ -20,6 +20,16 @@ background:var(--glui-popup-back);border:1px solid var(--glui-popup-line);border
 overflow:hidden;overflow-wrap:anywhere;padding-top:.15em;padding-bottom:.15em}
 .contexts-aside body{margin-right:calc(min(22rem,40vw) + 1.5rem)}
 @media print{.contexts-aside body{margin-right:8px}.g-hud.g-top-right{display:none}}
+
+/* A page of tabs (contexts.js): the strip of tabs and the bar on a line at
+   the top, which stays as the page scrolls, in the stage's color; the
+   strip's HUD in that line; and a log's panel below it. */
+.contexts-strip{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;align-items:flex-end;
+justify-content:space-between;gap:.4rem .75rem;padding:.35rem .75rem 0;background:var(--glui-stage)}
+.contexts-strip .g-hud{position:static;max-width:none}
+.contexts-tabbed .contexts-bar{position:static;margin-bottom:.3rem}
+.contexts-tabbed .g-hud.g-top-right{top:3.4rem}
+@media print{.contexts-strip{display:none}}
 
 /* contexts.js keeps what's on the screen in place as rows come, above it
    or below, and the browser's own anchoring would move it again. */

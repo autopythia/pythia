@@ -124,6 +124,116 @@
     return [["+", "Body", { line: line, part: 0, text: text, diff: false }]];
   }
 
+  // A page of tabs, as contexts.tabs shows one in a browser, and what it
+  // asks for, says and keeps: the index's tab first, and those that `more`
+  // says, as {kept: {tabs, tab}} or {open: n}.
+  function tabbed(more) {
+    var doc = new standInDom.Document();
+    var it = { doc: doc, asked: [], waiting: new Map(), said: [], kept: [], titles: [], addresses: [], top: 0, ends: 0 };
+    var o = {
+      holder: doc.createElement("div"),
+      strip: doc.createElement("div"),
+      program: CONTEXTS_TESTS.program,
+      strip_program: CONTEXTS_TESTS.tabs,
+      index: "/f/index",
+      tab: "/f/tab/{id}",
+      log: "/f/c/{id}",
+      home: "/f/",
+      get: function (url, done) {
+        it.asked.push(url);
+        it.waiting.set(url, done);
+      },
+      post: function (url, value, done) {
+        done(null);
+      },
+      status: function (text, wrong) {
+        it.said.push((wrong ? "wrong: " : "") + text.replace(/in \d+ ms/, "in N ms"));
+      },
+      settings: function () {
+        return { opening: false, aside: false };
+      },
+      kept: { tabs: [], tab: 0 },
+      open: null,
+      keep_tabs: function (numbers, shown) {
+        it.kept.push(numbers.join("-") + " shows " + shown);
+      },
+      title: function (text) {
+        it.titles.push(text);
+      },
+      address: function (url) {
+        it.addresses.push(url);
+      },
+      showing: function () {},
+      top: function () {
+        return it.top;
+      },
+      go: function (top) {
+        it.top = top;
+      },
+      end: function () {
+        it.ends++;
+      },
+      keep: function (root, update) {
+        update();
+      }
+    };
+    Object.keys(more || {}).forEach(function (name) {
+      o[name] = more[name];
+    });
+    it.holder = o.holder;
+    it.tabs = contexts.tabs(o);
+    return it;
+  }
+
+  // What a context's tab names, for tab `n`.
+  function tabOf(n) {
+    return {
+      id: String(n), title: "ctx (" + n + ")", facts: "/f/page/" + n, before: "/f/before/{line}",
+      after: "/f/after/{line}", around: "/f/around/{line}", run: "/f/run/{run}", body: "/f/body/{line}",
+      grow: "/f/grow/" + n + "/{lines}", stars: null, pins: null, plain: "/p/" + n
+    };
+  }
+
+  // The strip's facts of a relation, as lem writes them.
+  function strip(it, name) {
+    var runtime = it.tabs.strip.runtime;
+    var prog = runtime.prog.lem;
+    var r = prog.rel(name);
+    return runtime.lem.relFacts(r).map(function (fact) {
+      return prog.factText(r, fact.tuple);
+    });
+  }
+
+  // The first link in `e` to `href`, or null.
+  function linkTo(e, href) {
+    if (e.nodeType === 1 && e.localName === "a" && e.getAttribute("href") === href) {
+      return e;
+    }
+    for (var i = 0; i < e.childNodes.length; i++) {
+      var found = linkTo(e.childNodes[i], href);
+      if (found !== null) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  // Which of the holder's tabs show, by order.
+  function showing(it) {
+    var shown = [];
+    it.holder.childNodes.forEach(function (root, at) {
+      if (root.getAttribute("hidden") === null) {
+        shown.push(at);
+      }
+    });
+    return shown.join(" ");
+  }
+
+  var INDEX = [
+    ["+", "Page", { title: "Contexts" }],
+    ["+", "Context", { id: "c7", title: "Seven", model: "m", turns: 2, lines: 30, size: "3 KB", changed: "now", rank: 0, to: "/f/c/7" }]
+  ];
+
   var cases = [
     [
       "the page asks for its facts, shows its last rows, and says it's shown",
@@ -491,6 +601,106 @@
         "kept 1",
         "wrong: couldn't load the rows around line 2: 502 Bad Gateway"
       ]
+    ],
+    [
+      "a page of tabs: the index's, then those the session kept, each asking for its URLs; the one kept shows",
+      function () {
+        var it = tabbed({ kept: { tabs: [7, 3], tab: 3 } });
+        var asked = it.asked.slice();
+        answer(it, "/f/tab/7", null, tabOf(7));
+        answer(it, "/f/tab/3", null, tabOf(3));
+        var more = it.asked.slice(asked.length);
+        // The hidden tab's window comes last, and the title stays the shown one's.
+        answer(it, "/f/page/3", null, LOG);
+        answer(it, "/f/page/7", null, [["+", "Page", { title: "seven", items: "/f/item/", turns: "/f/turn-page/", first: 1 }]].concat(LOG.slice(1)));
+        return asked.concat(more, strip(it, "Open"), strip(it, "Shown"), showing(it), it.addresses, it.kept, it.titles.slice(-1));
+      },
+      [
+        "/f/index",
+        "/f/tab/7",
+        "/f/tab/3",
+        "/f/page/7",
+        "/f/page/3",
+        'Open(0, "Root contexts", 0)',
+        'Open(3, "ctx (3)", 2)',
+        'Open(7, "ctx (7)", 1)',
+        "Shown(3)",
+        "2",
+        "/f/c/3",
+        "7-3 shows 3",
+        "ui-0"
+      ]
+    ],
+    [
+      "a click on a link to a context opens its tab, and shows it, where it was; with a modifier key, the browser does as it does",
+      function () {
+        var it = tabbed();
+        answer(it, "/f/index", null, INDEX);
+        var link = linkTo(it.holder, "/f/c/7");
+        var modified = it.doc.fire(link, "click", { ctrlKey: true });
+        var before = it.asked.length;
+        it.top = 120;
+        var plain = it.doc.fire(link, "click");
+        answer(it, "/f/tab/7", null, tabOf(7));
+        it.top = 40;
+        it.tabs.show(0);
+        var back = it.top;
+        it.tabs.show(7);
+        return [modified.defaultPrevented + " " + before + " " + plain.defaultPrevented, back, it.top].concat(strip(it, "Shown"), showing(it), it.addresses, it.kept);
+      },
+      [
+        "false 1 true",
+        120,
+        40,
+        "Shown(7)",
+        "1",
+        "/f/",
+        "/f/c/7",
+        "/f/",
+        "/f/c/7",
+        " shows 0",
+        "7 shows 7",
+        "7 shows 0",
+        "7 shows 7"
+      ]
+    ],
+    [
+      "closing the tab shown shows the next, else the one before; the index can't be closed; a tab that can't come closes, and the page says why",
+      function () {
+        var it = tabbed({ kept: { tabs: [7, 3, 5], tab: 3 } });
+        answer(it, "/f/tab/7", null, tabOf(7));
+        answer(it, "/f/tab/3", null, tabOf(3));
+        it.tabs.strip.send(["Dismissed", ["TabOf", 3]]);
+        var first = strip(it, "Shown");
+        answer(it, "/f/tab/5", "404 Not Found", null);
+        var second = strip(it, "Shown");
+        it.tabs.close(0);
+        return first.concat(second, strip(it, "Open"), it.said, it.kept.slice(-1));
+      },
+      [
+        "Shown(5)",
+        "Shown(7)",
+        'Open(0, "Root contexts", 0)',
+        'Open(7, "ctx (7)", 1)',
+        "wrong: couldn't open context 5: 404 Not Found",
+        "7 shows 7"
+      ]
+    ],
+    [
+      "only the tab shown asks what changed; a log's page opens its tab, which starts at its end",
+      function () {
+        var it = tabbed({ open: 7 });
+        answer(it, "/f/tab/7", null, tabOf(7));
+        answer(it, "/f/page/7", null, LOG);
+        it.tabs.tick();
+        answer(it, "/f/grow/7/6", null, []);
+        var asked = it.asked.slice();
+        it.tabs.show(0);
+        answer(it, "/f/index", null, INDEX);
+        it.tabs.tick();
+        return asked.concat(it.asked.slice(asked.length), it.ends + " ends", it.titles.slice(-1));
+      },
+      ["/f/index", "/f/tab/7", "/f/page/7", "/f/grow/7/6", "/f/index", "1 ends", "Contexts"]
     ],
     [
       "facts that can't come: the page says why",
