@@ -207,6 +207,16 @@ var glui = (function () {
   var ITEM = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(.*))?$/;
   var BLANK = /^[ \t]*$/;
   var DELIMITER = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+  // How deep emphasis and links nest at most, past which their text is
+  // plain.
+  var MD_DEPTH = 32;
+  // What matches at a place in a text, from its lastIndex: never in a copy
+  // of the text's rest, which an engine may flatten whole for each match,
+  // as QuickJS does, so that a text of many takes no longer than another.
+  var TICKS = /`+/y;
+  var AUTOLINK = /<((?:https?:\/\/|mailto:)[^\s<>]*)>/iy;
+  var BARE = /https?:\/\/[^\s<>`]+/iy;
+  var LINK_TAIL = /[ \t]*(?:<([^<>\n]*)>|((?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))*))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*\)/y;
 
   // Whether a line starts a block that ends a paragraph.
   function mdStarts(line) {
@@ -419,7 +429,14 @@ var glui = (function () {
   }
 
   // Inline Markdown, as nodes in `parent`: "\u0000" is a line's break.
-  function mdInline(view, parent, source) {
+  function mdInline(view, parent, source, depth) {
+    depth = depth || 0;
+    if (depth > MD_DEPTH) {
+      parent.appendChild(view.doc.createTextNode(source));
+      return;
+    }
+    // What this text's links and emphasis have found (mdLinkAt, mdEmphasis).
+    var memo = { match: null, failed: {} };
     var plain = "";
     var flush = function () {
       if (plain !== "") {
@@ -443,7 +460,7 @@ var glui = (function () {
         continue;
       }
       if (c === "`") {
-        var run = /^`+/.exec(source.slice(i))[0].length;
+        var run = mdRun(source, i);
         var end = mdTicks(source, i + run, run);
         if (end < 0) {
           plain += source.slice(i, i + run);
@@ -462,36 +479,37 @@ var glui = (function () {
         continue;
       }
       if (c === "[" || (c === "!" && source[i + 1] === "[")) {
-        found = mdLinkAt(source, c === "!" ? i + 1 : i);
+        found = mdLinkAt(source, c === "!" ? i + 1 : i, memo);
         if (found !== null) {
           flush();
-          mdLink(view, parent, found.url, found.text, false);
+          mdLink(view, parent, found.url, found.text, false, depth);
           i = found.end;
           continue;
         }
       }
       if (c === "<") {
-        found = /^<((?:https?:\/\/|mailto:)[^\s<>]*)>/i.exec(source.slice(i));
+        AUTOLINK.lastIndex = i;
+        found = AUTOLINK.exec(source);
         if (found !== null) {
           flush();
-          mdLink(view, parent, found[1], found[1], true);
+          mdLink(view, parent, found[1], found[1], true, depth);
           i += found[0].length;
           continue;
         }
       }
       if ((c === "h" || c === "H") && /^https?:\/\/\S/i.test(source.slice(i, i + 9)) && (i === 0 || /[\s(\[<*_~"']/.test(source[i - 1]))) {
-        var url = mdBare(source.slice(i));
+        var url = mdBare(source, i);
         flush();
-        mdLink(view, parent, url, url, true);
+        mdLink(view, parent, url, url, true, depth);
         i += url.length;
         continue;
       }
       if (c === "*" || c === "_" || c === "~") {
-        found = mdEmphasis(source, i);
+        found = mdEmphasis(source, i, memo);
         if (found !== null) {
           flush();
           var em = element(view, found.tag);
-          mdInline(view, em, found.inner);
+          mdInline(view, em, found.inner, depth + 1);
           parent.appendChild(em);
           i = found.end;
           continue;
@@ -503,6 +521,12 @@ var glui = (function () {
     flush();
   }
 
+  // How many backticks run from `at`, where one is.
+  function mdRun(source, at) {
+    TICKS.lastIndex = at;
+    return TICKS.exec(source)[0].length;
+  }
+
   // Where the run of exactly `n` backticks after `from` starts, or -1.
   function mdTicks(source, from, n) {
     var k = from;
@@ -511,7 +535,7 @@ var glui = (function () {
       if (at < 0) {
         return -1;
       }
-      var run = /^`+/.exec(source.slice(at))[0].length;
+      var run = mdRun(source, at);
       if (run === n) {
         return at;
       }
@@ -520,31 +544,18 @@ var glui = (function () {
     return -1;
   }
 
-  // A link at `i`, at its `[`: {text, url, end}, or null.
-  function mdLinkAt(source, i) {
-    var depth = 0;
-    var k = i;
-    for (; k < source.length; k++) {
-      var c = source[k];
-      if (c === "\\") {
-        k++;
-      } else if (c === "`") {
-        var run = /^`+/.exec(source.slice(k))[0].length;
-        var end = mdTicks(source, k + run, run);
-        k = end < 0 ? k + run - 1 : end + run - 1;
-      } else if (c === "[") {
-        depth++;
-      } else if (c === "]") {
-        depth--;
-        if (depth === 0) {
-          break;
-        }
-      }
+  // A link at `i`, at its `[`: {text, url, end}, or null. Its `]` is the
+  // one that `memo` matches it with (mdBrackets), found once for the text.
+  function mdLinkAt(source, i, memo) {
+    if (memo.match === null) {
+      memo.match = mdBrackets(source);
     }
-    if (k >= source.length || source[k + 1] !== "(") {
+    var k = memo.match[i];
+    if (k < 0 || source[k + 1] !== "(") {
       return null;
     }
-    var m = /^[ \t]*(?:<([^<>\n]*)>|((?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))*))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*\)/.exec(source.slice(k + 2));
+    LINK_TAIL.lastIndex = k + 2;
+    var m = LINK_TAIL.exec(source);
     if (m === null) {
       return null;
     }
@@ -552,19 +563,58 @@ var glui = (function () {
     return { text: source.slice(i + 1, k), url: url.replace(/\\([!-\/:-@\[-`{-~])/g, "$1"), end: k + 2 + m[0].length };
   }
 
-  // A bare URL at the start of `rest`, without the punctuation that ends a
-  // sentence, or a parenthesis that it didn't open.
-  function mdBare(rest) {
-    var url = /^https?:\/\/[^\s<>`]+/i.exec(rest)[0];
-    while (/[.,;:!?'"*_~]$/.test(url) || (/\)$/.test(url) && url.split("(").length < url.split(")").length)) {
-      url = url.slice(0, -1);
+  // Each `[` of `source` with the `]` that closes it, as far as they nest,
+  // past escapes and code spans: its index, or -1; in one pass, so that a
+  // text of many `[` that nothing closes takes no longer than another.
+  function mdBrackets(source) {
+    var match = new Int32Array(source.length).fill(-1);
+    var open = [];
+    for (var k = 0; k < source.length; k++) {
+      var c = source[k];
+      if (c === "\\") {
+        k++;
+      } else if (c === "`") {
+        var run = mdRun(source, k);
+        var end = mdTicks(source, k + run, run);
+        k = end < 0 ? k + run - 1 : end + run - 1;
+      } else if (c === "[") {
+        open.push(k);
+      } else if (c === "]" && open.length > 0) {
+        match[open.pop()] = k;
+      }
     }
-    return url;
+    return match;
+  }
+
+  // The bare URL at `at` in `source`, without the punctuation that ends a
+  // sentence, or a parenthesis that it didn't open.
+  function mdBare(source, at) {
+    BARE.lastIndex = at;
+    var url = BARE.exec(source)[0];
+    var opened = url.split("(").length - 1;
+    var closed = url.split(")").length - 1;
+    var end = url.length;
+    while (end > 0) {
+      var last = url[end - 1];
+      if (/[.,;:!?'"*_~]/.test(last)) {
+        end--;
+      } else if (last === ")" && opened < closed) {
+        end--;
+        closed--;
+      } else {
+        break;
+      }
+    }
+    return url.slice(0, end);
   }
 
   // Emphasis at `i`: *, _, **, __ or ~~, as far as its match: {tag, inner,
-  // end}, or null. An _ within a word is none.
-  function mdEmphasis(source, i) {
+  // end}, or null. An _ within a word is none. Where the search for a
+  // delimiter's match goes on depends on where it is alone, so `memo` marks
+  // the places that a search that found none went through, and another
+  // search for that delimiter stops at one: a text of many delimiters that
+  // nothing matches takes no longer than another.
+  function mdEmphasis(source, i, memo) {
     var c = source[i];
     var double = source[i + 1] === c;
     if (c === "~" && !double) {
@@ -575,12 +625,18 @@ var glui = (function () {
     if (from >= source.length || /\s/.test(source[from]) || (c === "_" && i > 0 && /[A-Za-z0-9]/.test(source[i - 1]))) {
       return null;
     }
-    for (var k = from + 1; k < source.length; k++) {
+    var marks = memo.failed[delim];
+    if (marks === undefined) {
+      marks = memo.failed[delim] = new Uint8Array(source.length);
+    }
+    var seen = [];
+    for (var k = from + 1; k < source.length && marks[k] === 0; k++) {
+      seen.push(k);
       var ch = source[k];
       if (ch === "\\") {
         k++;
       } else if (ch === "`") {
-        var run = /^`+/.exec(source.slice(k))[0].length;
+        var run = mdRun(source, k);
         var end = mdTicks(source, k + run, run);
         k = end < 0 ? k + run - 1 : end + run - 1;
       } else if (source.slice(k, k + delim.length) === delim && !/\s/.test(source[k - 1])) {
@@ -591,16 +647,19 @@ var glui = (function () {
         }
       }
     }
+    seen.forEach(function (at) {
+      marks[at] = 1;
+    });
     return null;
   }
 
   // A link to `url`, of `label`, which is inlines, but with `raw`, as a
   // URL's own text: to one of the host's own paths, or to http, https or
   // mailto, in a new tab, without a referrer; else text, with its URL.
-  function mdLink(view, parent, url, label, raw) {
+  function mdLink(view, parent, url, label, raw, depth) {
     var safe = own(url) || /^(https?:\/\/|mailto:)\S+$/i.test(url);
     if (!safe) {
-      mdInline(view, parent, label);
+      mdInline(view, parent, label, depth + 1);
       parent.appendChild(view.doc.createTextNode(" (" + url + ")"));
       return;
     }
@@ -613,7 +672,7 @@ var glui = (function () {
     if (raw) {
       a.textContent = label;
     } else {
-      mdInline(view, a, label);
+      mdInline(view, a, label, depth + 1);
     }
     parent.appendChild(a);
   }

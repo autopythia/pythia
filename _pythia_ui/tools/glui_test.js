@@ -426,11 +426,33 @@
     });
   }
 
+  // Prose of what nothing closes: `[` and `_` by the thousand, which took
+  // a parser that looked for each one's match from where it was minutes;
+  // within seconds, wherever the tests run, as it takes well under one.
+  function long() {
+    var suite = tests.suites.filter(function (s) {
+      return s.name === "prose_dom.txt";
+    })[0];
+    var text = "[a [b](".repeat(15000) + "\n\n" + "_a __b _".repeat(2500);
+    var doc = new standInDom.Document();
+    var view = glui.view(new glem.Runtime(new glem.Program(suite.program)), doc.createElement("div"), {
+      effects: function () {},
+      error: function () {}
+    });
+    var began = Date.now();
+    view.update([["+", "Text", { n: 1, text: text }]]);
+    var took = Date.now() - began;
+    tap.report("prose of " + text.length + " characters that nothing closes, in seconds", took < 4000 ? null : "it took " + took + " ms");
+  }
+
   tests.suites.forEach(suite);
   if (typeof document !== "undefined" && document.body) {
     tests.suites.forEach(inThePage);
   }
   themes();
   paths();
+  if (typeof standInDom !== "undefined") {
+    long();
+  }
   tap.finish();
 })();
