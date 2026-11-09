@@ -24,7 +24,8 @@
 //! And a join's work, as the facts it visits, where the order matters, and
 //! where an atom binds nothing; the work that a lazy relation saves; and the
 //! work that a tick saves where what rules read hasn't changed, and where it
-//! follows what changed, or starts over.
+//! follows what changed, skips what a change leaves as it was, or starts
+//! over.
 
 use super::check::load;
 use super::eval::Runtime;
@@ -240,6 +241,46 @@ fn a_component_with_nothing_to_keep_starts_over_when_most_of_what_it_reads_is_ne
   runtime.tick(None).unwrap();
   assert_eq!(runtime.visits(), 40); // 40 came, 30 stayed, but 20 to keep
   assert_eq!(runtime.facts("Over").len(), 60);
+}
+
+#[test]
+fn a_change_that_leaves_a_literal_as_it_was_runs_nothing_for_it() {
+  // E's rule has a block's test, T(_), as well as T(n); U reads T only in a
+  // negated test; and V negates T(9).
+  let src = "input T(n: Int)\ninput S(w: Int, n: Int)\n\
+             rel E(w: Int)\nE(w) :- T(_), T(n), S(w, n)\n\
+             rel U(w: Int)\nU(w) :- S(w, _), not T(_)\n\
+             rel V(w: Int)\nV(w) :- S(w, _), not T(9)\n";
+  let prog = load(&[("tests.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  for i in 0..10 {
+    runtime.assert(&format!("T({i})")).unwrap();
+    runtime.assert(&format!("S({}, {i})", 100 + i)).unwrap();
+  }
+  runtime.tick(None).unwrap();
+  // T(10) leaves both tests holding as they did, and isn't T(9): E joins
+  // T(10) alone, which visits the test's first fact and T(10), and finds no
+  // S for 10; U and V run nothing.
+  runtime.assert("T(10)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 2);
+  // With every T gone, the tests hold no more, and the rules run whole: E's
+  // test fails at once; U and V visit S's 10 facts, and find no T for each.
+  for i in 0..=10 {
+    assert!(runtime.retract(&format!("T({i})")).unwrap());
+  }
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 20);
+  assert_eq!(runtime.facts("U").len(), 10);
+  assert_eq!(runtime.facts("V").len(), 10);
+  // T(5) makes the tests hold again: E's rule runs whole, 1 + 1 + 1, and U's,
+  // 10 + 10; but T(5) isn't T(9), so V runs nothing.
+  runtime.assert("T(5)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 23);
+  assert_eq!(runtime.facts("E").len(), 1);
+  assert!(runtime.facts("U").is_empty());
+  assert_eq!(runtime.facts("V").len(), 10);
 }
 
 #[test]

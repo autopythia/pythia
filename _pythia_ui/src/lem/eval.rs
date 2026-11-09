@@ -21,12 +21,15 @@
 //! the rule derives each fact, and each table logs the facts that came and went
 //! since the last tick (`Log`). A rule that reads one relation that changed
 //! joins there just those facts, with the rest of its body as it is, where that
-//! counts exactly (`followed`); else it runs whole. The relation's facts change
-//! in place, by the counts, and keep their indexes. Keys are checked by a count
-//! of each relation's facts by its key's values, which the tables keep
-//! (`Table::key_count`). A component that has no facts to keep, and most of
-//! whose inputs are new, starts over instead, running whole as on its first
-//! tick (`Runtime::starts_over`).
+//! counts exactly (`followed`); else it runs whole. A change counts for an atom
+//! or a negation only if a fact that came or went could match it, and, for a
+//! test that binds nothing, such as the `Turn()` that a block's condition gives
+//! each rule inside it, only if the test's truth changed
+//! (`Runtime::unchanged`). The relation's facts change in place, by the counts,
+//! and keep their indexes. Keys are checked by a count of each relation's facts
+//! by its key's values, which the tables keep (`Table::key_count`). A component
+//! that has no facts to keep, and most of whose inputs are new, starts over
+//! instead, running whole as on its first tick (`Runtime::starts_over`).
 //!
 //! An error while the rules run leaves the relations derived after the failing
 //! component without facts, as every tick that derived everything left them,
@@ -1043,15 +1046,16 @@ impl Runtime {
   }
 
   /// Follows what changed, since component `c` last ran, in what its rules
-  /// read, unless that has the versions that it had then: in place, by how
-  /// many ways each rule derives each fact (`counts`). A rule that reads
-  /// one relation that changed, at an atom that it follows ([`followed`]),
-  /// joins there just the facts that came, and those that went, with the
-  /// rest of its body as it is; one that reads more that changed, or reads
-  /// one in a negation, or at an atom that it doesn't follow, runs whole.
-  /// Every rule joins before any count changes. A fact whose counts change
-  /// holds if a rule derives it, by the lowest-numbered of them
-  /// ([`Runtime::place`]).
+  /// read, unless that has the versions that it had then: in place, by how many
+  /// ways each rule derives each fact (`counts`). A rule heeds only the atoms
+  /// and negations that what changed could make match otherwise
+  /// ([`Runtime::plan`], [`Runtime::unchanged`]). A rule with one such atom,
+  /// which it follows ([`followed`]), joins there just the facts that came, and
+  /// those that went, with the rest of its body as it is; one with more, or
+  /// with such a negation, or with such an atom that it doesn't follow, runs
+  /// whole; one with none does nothing. Every rule joins before any count
+  /// changes. A fact whose counts change holds if a rule derives it, by the
+  /// lowest-numbered of them ([`Runtime::place`]).
   fn follow(&mut self, c: usize) -> Result<(), String> {
     let read: Vec<u64> = (self.reads[c].iter())
       .map(|&r| self.tables[r].version)
@@ -1133,15 +1137,16 @@ impl Runtime {
     Ok(())
   }
 
-  /// What a tick does for rule `r`, by the relations in its body whose logs
-  /// aren't empty ([`Plan`]).
+  /// What a tick does for rule `r` ([`Plan`]), by the atoms and negations in
+  /// its body that what changed in their relations changes
+  /// ([`Runtime::unchanged`]).
   fn plan(&self, r: usize) -> Plan {
     let (mut at, mut changes) = (0, 0);
     for (i, lit) in self.prog.rules[r].body.iter().enumerate() {
       let (Lit::Atom(atom) | Lit::Not(atom)) = lit else {
         continue;
       };
-      if self.log(atom.rel).changed() {
+      if self.log(atom.rel).changed() && !self.unchanged(atom) {
         changes += match lit {
           Lit::Atom(_) if self.followed[r][i] => 1,
           _ => 2,
@@ -1154,6 +1159,31 @@ impl Runtime {
       1 => Plan::At(at),
       _ => Plan::Whole,
     }
+  }
+
+  /// Whether what changed in the relation of a rule's atom or negation,
+  /// since the last tick, leaves what it matches as it was, whatever its
+  /// variables are, and so changes none of the rule's solutions: when no
+  /// fact that came or went could match it ([`could_match`]); or, for a
+  /// test, which binds no variable ([`fixed`]), when it holds as it did. A
+  /// test of `_` alone, such as a block's condition `Turn()` gives, holds
+  /// while its relation has facts; any other holds before and after when
+  /// facts that it matches both came and went. Else it counts as changed.
+  fn unchanged(&self, atom: &Atom) -> bool {
+    let log = self.log(atom.rel);
+    let any_match = |facts: &Ordered<()>| facts.iter().any(|(t, _)| could_match(&atom.pats, t));
+    let (came, went) = (any_match(&log.came), any_match(&log.went));
+    if !came && !went {
+      return true;
+    }
+    if !atom.pats.iter().all(fixed) {
+      return false;
+    }
+    if atom.pats.iter().all(|pat| matches!(pat, Pat::Any)) {
+      let now = self.tables[atom.rel].facts.len();
+      return (now > 0) == (now + log.went.len > log.came.len);
+    }
+    came && went
   }
 
   /// A relation's log, which a tick that follows what changed has: rules
@@ -1343,6 +1373,44 @@ fn loose(pat: &Pat) -> bool {
     Pat::Ctor(_, pats) => pats.iter().any(loose),
     Pat::Var(_) | Pat::Const(_) | Pat::Expr(_) => false,
   }
+}
+
+/// Whether a pattern has no variable and no expression: an atom of such
+/// patterns alone binds nothing, a test, which holds or doesn't for every
+/// solution alike.
+fn fixed(pat: &Pat) -> bool {
+  match pat {
+    Pat::Var(_) | Pat::Expr(_) => false,
+    Pat::Ctor(_, pats) => pats.iter().all(fixed),
+    Pat::Any | Pat::Const(_) => true,
+  }
+}
+
+/// Whether a fact could match an atom's patterns, whatever its variables and
+/// expressions are: a variable matches anything, but the same value wherever
+/// it recurs; an expression, anything.
+fn could_match(pats: &[Pat], tuple: &Tuple) -> bool {
+  fn one<'a>(pat: &Pat, value: &'a Value, env: &mut Vec<(usize, &'a Value)>) -> bool {
+    match pat {
+      Pat::Any | Pat::Expr(_) => true,
+      Pat::Var(v) => match env.iter().find(|(u, _)| u == v) {
+        Some(&(_, bound)) => bound == value,
+        None => {
+          env.push((*v, value));
+          true
+        }
+      },
+      Pat::Const(c) => c == value,
+      Pat::Ctor(name, pats) => match value {
+        Value::Ctor(n, args) if n == name && args.len() == pats.len() => {
+          (pats.iter().zip(args.iter())).all(|(pat, arg)| one(pat, arg, env))
+        }
+        _ => false,
+      },
+    }
+  }
+  let mut env = Vec::new();
+  (pats.iter().zip(tuple.iter())).all(|(pat, value)| one(pat, value, &mut env))
 }
 
 /// For each of a rule's atoms, whether a tick follows a change to its

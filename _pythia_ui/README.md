@@ -191,7 +191,10 @@ either. Once its rules have run, a relation that isn't recursive follows what
 changed: each rule keeps how many ways it derives each fact, and joins just
 the facts that came to, or went from, a relation that it reads, where that
 counts exactly; a rule that reads such a relation in a negation, or reads two
-that changed, runs whole. A relation that has no facts to keep, and most of
+that changed, runs whole. A change counts for an atom or a negation only if a
+fact that came or went could match it, and, for a test that binds nothing,
+such as the `Turn()` that a block's condition gives each rule inside it, only
+if the test's truth changed. A relation that has no facts to keep, and most of
 whose inputs are new, starts over: it runs whole, as on its first tick. The
 facts, effects and errors are those of a tick that derives everything anew,
 which the tests run too, and compare (`lem/test/rerun.lem`,

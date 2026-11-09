@@ -81,3 +81,29 @@ Sizes(n, s) :- Kept(n, s)
 input Probe(n: Int)
 rel Found(n: Int)
 Found(n) :- Probe(n), Sizes(n, Big(_))
+
+-- What a change leaves as it was. A test that binds nothing, as a block's
+-- condition such as `Turn()` gives, holds while its relation has facts, so a
+-- change that leaves it so changes none of a rule's solutions: Heard follows
+-- a new round alone, and Unheard, which reads Round only in such a test, has
+-- nothing to follow. Nor does a literal that no fact that came or went could
+-- match: Early's `not Round(3)`, while round 3 neither comes nor goes. And a
+-- test of another fixed pattern holds before and after when facts that it
+-- matches both came and went: Moded's `Mode(1, _)`, as mode 1's value changes.
+input Round(n: Int)
+input Said(w: Int, n: Int)
+input Mode(n: Int, value: Text) key n
+rel Heard(w: Int)
+Heard(w) :- Round(_), Round(n), Said(w, n)
+rel Unheard(w: Int)
+Unheard(w) :- Said(w, _), not Round(_)
+rel Early(w: Int)
+Early(w) :- Said(w, 1), not Round(3)
+rel Moded(w: Int)
+Moded(w) :- Said(w, _), Mode(1, _)
+
+-- Self's E(a, a) matches only an edge from a node to itself, which none of
+-- the edges that come and go above is: no change of E changes it, though
+-- E(a, b) could match each.
+rel Self(a: Int)
+Self(a) :- E(a, a)

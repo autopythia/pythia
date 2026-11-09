@@ -315,3 +315,71 @@ Sizes(7, Big(9))
 Sizes(7, Small(0))
 Sizes(7, Small(1))
 Found(7)
+
+=== rounds 1 and 2, words said in rounds 1, 2 and 4, and mode 1
++ Round(1)
++ Round(2)
++ Said(10, 1)
++ Said(11, 2)
++ Said(12, 4)
++ Mode(1, "a")
+? Heard
+? Unheard
+? Early
+? Moded
+---
+Heard(10)
+Heard(11)
+Early(10)
+Moded(10)
+Moded(11)
+Moded(12)
+
+=== round 4: Heard follows it alone; Unheard and Early have nothing to follow
++ Round(4)
+? Heard
+? Unheard
+? Early
+---
+Heard(10)
+Heard(11)
+Heard(12)
+Early(10)
+
+=== mode 1's value changes, and mode 2 comes: Moded's test holds as it did
++ Mode(1, "b")
++ Mode(2, "c")
+? Moded
+---
+Moded(10)
+Moded(11)
+Moded(12)
+
+=== round 3: Early's negation holds no more
++ Round(3)
+? Heard
+? Early
+---
+Heard(10)
+Heard(11)
+Heard(12)
+
+=== every round goes: Heard has no facts, and Unheard every word
+- Round(1)
+- Round(2)
+- Round(3)
+- Round(4)
+? Heard
+? Unheard
+? Early
+---
+Unheard(10)
+Unheard(11)
+Unheard(12)
+Early(10)
+
+=== mode 1 goes: Moded's test holds no more
+- Mode(1, "b")
+? Moded
+---
+(nothing to show)

@@ -957,6 +957,69 @@ var lem = (function () {
     return pat[0] === "any" || (pat[0] === "ctor" && pat[2].some(loose));
   }
 
+  // Whether a pattern has no variable and no expression: an atom of such
+  // patterns alone binds nothing, a test, which holds or doesn't for every
+  // solution alike.
+  function fixed(pat) {
+    switch (pat[0]) {
+      case "var":
+      case "expr":
+        return false;
+      case "ctor":
+        return pat[2].every(fixed);
+    }
+    return true;
+  }
+
+  // Whether a fact could match an atom's patterns, whatever its variables
+  // and expressions are: a variable matches anything, but the same value
+  // wherever it recurs; an expression, anything.
+  function couldMatch(pats, tuple) {
+    var env = new Map();
+    function one(pat, value) {
+      switch (pat[0]) {
+        case "var":
+          if (env.has(pat[1])) {
+            return equal(env.get(pat[1]), value);
+          }
+          env.set(pat[1], value);
+          return true;
+        case "const":
+          return equal(pat[1], value);
+        case "ctor":
+          var pats = pat[2];
+          if (!Array.isArray(value) || value[0] !== pat[1] || value.length !== pats.length + 1) {
+            return false;
+          }
+          for (var i = 0; i < pats.length; i++) {
+            if (!one(pats[i], value[i + 1])) {
+              return false;
+            }
+          }
+          return true;
+      }
+      return true;
+    }
+    for (var i = 0; i < pats.length; i++) {
+      if (!one(pats[i], tuple[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Whether one of the facts that came, or went, in a log (Log), could
+  // match an atom's patterns (couldMatch).
+  function anyMatch(pats, facts) {
+    var it = facts.values();
+    for (var step = it.next(); !step.done; step = it.next()) {
+      if (couldMatch(pats, step.value)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // For each of a rule's atoms, whether a tick follows a change to its
   // relation alone by joining there just the facts that came and went
   // (Runtime.follow). A rule's solutions must count the same whatever order
@@ -1530,16 +1593,17 @@ var lem = (function () {
 
   // Follows what changed, since component `c` last ran, in what its rules
   // read, unless that has the versions that it had then: in place, by how
-  // many ways each rule derives each fact (counts). A rule that reads one
-  // relation that changed, at an atom that it follows (followed), joins
+  // many ways each rule derives each fact (counts). A rule heeds only the
+  // atoms and negations that what changed could make match otherwise (plan,
+  // unchanged). A rule with one such atom, which it follows (followed), joins
   // there just the facts that came, and those that went, in the order that
-  // they did, with the rest of its body as it is; one that reads more that
-  // changed, or reads one in a negation, or at an atom that it doesn't
-  // follow, runs whole. Every rule joins before any count changes. A fact
-  // whose counts change holds if a rule derives it, by the lowest-numbered
-  // of them (place); the facts that it adds come in the order that the
-  // rules' solutions first gave them, so that both runtimes' indexes keep
-  // them in one order.
+  // they did, with the rest of its body as it is; one with more, or with such
+  // a negation, or with such an atom that it doesn't follow, runs whole; one
+  // with none does nothing. Every rule joins before any count changes. A fact
+  // whose counts change holds if a rule derives it, by the lowest-numbered of
+  // them (place); the facts that it adds come in the order that the rules'
+  // solutions first gave them, so that both runtimes' indexes keep them in
+  // one order.
   Runtime.prototype.follow = function (c) {
     var self = this;
     var prog = this.prog;
@@ -1616,16 +1680,18 @@ var lem = (function () {
     this.ran[c] = read;
   };
 
-  // What a tick does for rule `r`, by the relations in its body whose logs
-  // aren't empty: nothing (null); join just what came and went at an atom
-  // that it follows (the atom's place); or run whole (-1).
+  // What a tick does for rule `r`, by the atoms and negations in its body
+  // that what changed in their relations changes (unchanged): nothing
+  // (null); join just what came and went at an atom that it follows (the
+  // atom's place); or run whole (-1).
   Runtime.prototype.plan = function (r) {
     var body = this.prog.rules[r].body;
     var at = -1;
     var changes = 0;
     for (var i = 0; i < body.length; i++) {
       var lit = body[i];
-      if ((lit.tag === "atom" || lit.tag === "not") && this.tables[lit.rel].log.changed()) {
+      var reads = lit.tag === "atom" || lit.tag === "not";
+      if (reads && this.tables[lit.rel].log.changed() && !this.unchanged(lit)) {
         changes += lit.tag === "atom" && this.followed[r][i] ? 1 : 2;
         at = i;
       }
@@ -1634,6 +1700,35 @@ var lem = (function () {
       return null;
     }
     return changes === 1 ? at : -1;
+  };
+
+  // Whether what changed in the relation of a rule's atom or negation, since
+  // the last tick, leaves what it matches as it was, whatever its variables
+  // are, and so changes none of the rule's solutions: when no fact that came
+  // or went could match it (couldMatch); or, for a test, which binds no
+  // variable (fixed), when it holds as it did. A test of `_` alone, such as
+  // a block's condition `Turn()` gives, holds while its relation has facts;
+  // any other holds before and after when facts that it matches both came
+  // and went. Else it counts as changed.
+  Runtime.prototype.unchanged = function (lit) {
+    var table = this.tables[lit.rel];
+    var log = table.log;
+    var came = anyMatch(lit.pats, log.came);
+    var went = anyMatch(lit.pats, log.went);
+    if (!came && !went) {
+      return true;
+    }
+    if (!lit.pats.every(fixed)) {
+      return false;
+    }
+    var any = lit.pats.every(function (pat) {
+      return pat[0] === "any";
+    });
+    if (any) {
+      var now = table.facts.size;
+      return (now > 0) === (now + log.went.size > log.came.size);
+    }
+    return came && went;
   };
 
   // Brings relation `rel`, of component `c`, up to its rules' counts, at the
