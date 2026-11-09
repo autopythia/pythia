@@ -103,21 +103,30 @@ def _unquoted(text: str) -> str:
 
 
 class App:
-    """What the node server answers: the routes behind the token, with no sockets involved."""
+    """What the node server answers: the routes behind the token, with no sockets involved.
+
+    With ``base``, a path such as ``/TOKEN/n/NAME``, the routes are behind it instead,
+    as a node on its standard streams has them, which another server reaches by ssh
+    (``stdio.py``): every URL starts with it, so that its pages link back through that
+    server.
+    """
 
     def __init__(self, roots: Roots, token: Optional[str] = None, *,
                  style: str = DEFAULT_STYLE, styles: Optional[Styles] = None,
-                 view: Optional[View] = None, store: Optional[Store] = None) -> None:
+                 view: Optional[View] = None, store: Optional[Store] = None,
+                 base: Optional[str] = None) -> None:
         self.token = token or new_token()
-        self._token = self.token.encode("ascii")
-        self.pages = Pages(roots, self.token, style=style, styles=styles)
+        self.base = f"/{self.token}" if base is None else base
+        self._base = self.base.encode("latin-1", "replace")
+        self._depth = self.base.count("/")  # the base's segments
+        self.pages = Pages(roots, self.token, style=style, styles=styles, base=self.base)
         self.view = View(store=store) if view is None else view
         self.store = store
 
     @property
     def path(self) -> str:
-        """The contexts page's path: the token, between slashes."""
-        return f"/{self.token}/"
+        """The contexts page's path: the token, or the base, and a slash."""
+        return f"{self.base}/"
 
     def respond(self, method: str, target: str, hosts: List[str], *,
                 origins: Sequence[str] = (), marked: bool = False,
@@ -132,12 +141,13 @@ class App:
         if len(target) > MAX_TARGET:
             return plain(414, "The URL is too long.")
         parts = urlsplit(target)
-        segments = parts.path.split("/", 2)
-        given = (segments[1] if len(segments) > 1 and not segments[0] and not parts.scheme
-                 and not parts.netloc else "")
-        if not hmac.compare_digest(given.encode("latin-1", "replace"), self._token):
+        depth = self._depth
+        segments = parts.path.split("/", depth + 1)
+        given = ("/".join(segments[:depth + 1]) if len(segments) > depth and not segments[0]
+                 and not parts.scheme and not parts.netloc else "")
+        if not hmac.compare_digest(given.encode("latin-1", "replace"), self._base):
             return plain(404, "Not found.")
-        rest = segments[2] if len(segments) > 2 else ""
+        rest = segments[depth + 1] if len(segments) > depth + 1 else ""
         stored = rest[len("lem/store/"):] if rest.startswith("lem/store/") else None
         starred = rest[len("lem/stars/"):] if rest.startswith("lem/stars/") else None
         own = (hosts[0].strip(), origins, marked, content_type, body)
@@ -148,7 +158,7 @@ class App:
         if method not in ("GET", "HEAD"):
             return plain(405, "The node server reads, with GET and HEAD; it takes POST for its "
                          "view's store alone.", (("Allow", "GET, HEAD"),))
-        if len(segments) < 3:
+        if len(segments) < depth + 2:
             return Response(308, location=self.path)
         if stored is not None and not parts.query:
             if stored not in FILES:

@@ -4,7 +4,9 @@ The root contexts are those that the node's registry lists, wherever their
 saves are: ``--registry``, else ``$PYTHIA_REGISTRY``, else ``~/.pythia/root``,
 as the CLI finds it. The glui view's settings are kept in ``--store``, else
 ``~/.pythia/node``; ``--store none`` keeps nothing. A relative path is taken
-from the launch directory.
+from the launch directory. With ``--stdio``, the server answers on its
+standard streams instead, as lines of JSON, for a node server elsewhere that
+reaches this node by ssh (``stdio.py``).
 """
 
 import argparse
@@ -17,6 +19,7 @@ from .._cli_editor import safe_text
 from ..registry import abbreviate, registry_path, save_prefix_of
 from .contexts import Roots, shown_path
 from .pages import _KEY, absent_note, when
+from . import stdio
 from .server import ADDRESS, App, Server
 from .store import Store
 from .styles import DEFAULT_STYLE, Styles
@@ -53,8 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", metavar="N", type=port_number, default=DEFAULT_PORT, help=(
         "the port to serve on, on 127.0.0.1 only; 0 picks a free one (default: "
         "%(default)s)"))
-    parser.add_argument("--list", action="store_true", help=(
+    way = parser.add_mutually_exclusive_group()
+    way.add_argument("--list", action="store_true", help=(
         "print the root contexts and exit, serving nothing"))
+    way.add_argument("--stdio", action="store_true", help=(
+        "serve on standard input and output, as lines of JSON, for a node server elsewhere "
+        "that reaches this node by ssh, with no port and no token"))
     parser.add_argument("--style", metavar="NAME", default=DEFAULT_STYLE, help=(
         "the style that pages show in, unless their URL names another: log-dark, "
         "log-light, chat, or another in the server's css/. The menu at each page's top "
@@ -160,6 +167,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     stored = Path(args.store).expanduser().absolute() if args.store else STORE
     store = None if args.store == "none" else Store(stored)
+    if args.stdio:
+        return stdio.serve(roots, store=store, style=args.style, styles=styles)
     try:
         server = Server(App(roots, style=args.style, styles=styles, store=store), args.port)
     except OSError as exc:

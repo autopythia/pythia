@@ -1015,7 +1015,9 @@ def hidden(kind: object) -> bool:
 
 
 class Pages:
-    """The node server's pages for its registry's roots. Every URL starts with the token.
+    """The node server's pages for its registry's roots. Every URL starts with the token,
+    or with ``base``, a path, if it's given, as a node on its standard streams has it
+    (``stdio.py``).
 
     The pages come in ``style``, by default ``default``, the server's. A
     request gets its own copy (``view``), with its style, and ``here``: its
@@ -1024,9 +1026,9 @@ class Pages:
     """
 
     def __init__(self, roots: Roots, token: str, *, style: str = DEFAULT_STYLE,
-                 styles: Optional[Styles] = None) -> None:
+                 styles: Optional[Styles] = None, base: Optional[str] = None) -> None:
         self.roots = roots
-        self.base = f"/{token}"
+        self.base = f"/{token}" if base is None else base
         self.styles = Styles() if styles is None else styles
         self.default = style
         self.style = style
