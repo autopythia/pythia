@@ -48,7 +48,7 @@ from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 from .contexts import Roots
 from .pages import BadRequest, Pages, Response
-from .remote import Remote
+from .remote import Remote, listings
 from .store import FILES, MAX_BYTES, REPLACED, Store
 from .styles import DEFAULT_STYLE, FIELD, NAME, Styles
 from .view import DATA_CSP, PAGE_CSP, View
@@ -136,9 +136,12 @@ class App:
         self.pages = Pages(roots, self.token, style=style, styles=styles, base=self.base)
         self.view = View(store=store) if view is None else view
         self.store = store
-        # The remote nodes, each by its name, and the command that reaches it.
+        # The remote nodes, each by its name, and the command that reaches it, whose roots
+        # the index shows after this node's.
         self.remotes: Dict[str, Remote] = {
             name: Remote(name, argv, f"{self.base}/n/{name}") for name, argv in remotes}
+        if self.remotes:
+            self.pages.listings = lambda: listings(list(self.remotes.values()))
 
     def close(self) -> None:
         """Ends the remotes' processes."""

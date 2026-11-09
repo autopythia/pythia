@@ -26,8 +26,9 @@ from unittest import mock
 
 from pythia.interaction.node import contexts, remote, server, stdio, view
 from pythia.interaction.node.store import Store
-from pythia_test.test_interaction_node import (CHECKOUT, HREF, LOCAL, OLD, PROJ, RUN_NODE, TOKEN,
-                                               environ, make_workspace, request, run_main)
+from pythia_test.test_interaction_node import (CHECKOUT, HREF, LOCAL, OLD, PROGRAM, PROJ,
+                                               RUN_NODE, TOKEN, environ, make_workspace,
+                                               request, run_main, step_problems)
 
 BASE = "/t0ken/n/sim"
 HOST = "127.0.0.1:8765"
@@ -458,6 +459,97 @@ class RemoteTests(RemoteTest):
                 status, out, err = run_main("--registry", registry, *argv)
                 self.assertEqual((status, out), (2, ""))
                 self.assertIn(why, err)
+
+
+
+class IndexTests(RemoteTest):
+    def app(self, *remotes):
+        app = server.App(self.roots, TOKEN, remotes=remotes)
+        self.addCleanup(app.close)
+        return app
+
+    def test_the_index_lists_each_remotes_roots_after_this_nodes(self):
+        app = self.app(("sim", node(self.ws.registry)), ("gone", python("import sys; sys.exit(1)")))
+        steps = json.loads(app.respond("GET", f"/{TOKEN}/lem/facts/", [HOST]).body)
+        self.assertEqual(step_problems(json.loads(PROGRAM.read_text()), steps), [])
+        local = [step[2] for step in steps if step[1] == "Context" and "/" not in step[2]["id"]]
+        mine = [step[2] for step in steps
+                if step[1] == "Context" and step[2]["id"].startswith("sim/")]
+        nodes = [step[2] for step in steps if step[1] == "Node"]
+        self.assertEqual([(node["name"], node["rank"], node["reached"], node["to"])
+                          for node in nodes],
+                         [("sim", len(local), True, f"/{TOKEN}/n/sim/lem/"),
+                          ("gone", len(local) + 1 + len(mine), False, f"/{TOKEN}/n/gone/lem/")])
+        host = app.remotes["sim"].hello["host"]
+        self.assertEqual(nodes[0]["title"], f"{host}: {len(mine)} root contexts")
+        self.assertEqual(nodes[1]["title"], "The remote node gone can't be reached: it ended, "
+                         "with status 1: it said nothing.")
+        # Its roots, as this node's own are, by ids of their own, ranked after its row.
+        self.assertEqual([(root["id"][4:], root["title"]) for root in mine],
+                         [(root["id"], root["title"]) for root in local])
+        self.assertEqual([root["rank"] for root in mine],
+                         list(range(len(local) + 1, len(local) + 1 + len(mine))))
+        self.assertEqual([root["to"] for root in mine],
+                         [f"/{TOKEN}/n/sim{root['to'][len(f'/{TOKEN}'):]}" for root in local])
+        doing = {step[2]["id"] for step in steps if step[1] == "Activity"}
+        self.assertTrue({root["id"] for root in mine} <= doing)
+
+    def test_what_a_remote_lists_that_isnt_a_root_of_its_isnt_shown(self):
+        base = f"/{TOKEN}/n/fake"
+
+        def root(cid, rank, **fields):
+            return ["+", "Context", {"id": cid, "title": "t", "model": "m", "turns": 1,
+                                     "lines": 2, "size": "3 B", "changed": "now", "rank": rank,
+                                     "to": f"{base}/lem/c/{rank}", **fields}]
+
+        listed = [["+", "Page", {"title": "Root contexts"}], ["+", "Nav", {"n": 0, "text": "x",
+                                                                            "to": "/"}],
+                  root("b (2)", 2), root("a (1)", 1), root("a (1)", 3),
+                  root("turns", 4, turns="1"), root("away", 5, to="/elsewhere/lem/c/5"),
+                  root("more", 6, extra=1), ["+", "Context", "x"], ["-", "Context", {}], 7,
+                  ["+", "Activity", {"id": "a (1)", "hue": "Green", "why": "w"}],
+                  ["+", "Activity", {"id": "b (2)", "hue": "Pink", "why": "w"}],
+                  ["+", "Activity", {"id": "other", "hue": "Red", "why": "w"}]]
+        answer = {"status": 200, "type": "application/json", "body": json.dumps(listed)}
+        app = self.app(("fake", python(FAKE, json.dumps({"/lem/facts/": answer}))))
+        steps = json.loads(app.respond("GET", f"/{TOKEN}/lem/facts/", [HOST]).body)
+        shown = [[step[1], step[2].get("id", step[2].get("name")), step[2].get("rank"),
+                  step[2].get("to", "")[len(base):]]
+                 for step in steps if step[1] == "Node" or (
+                     step[1] in ("Context", "Activity") and step[2]["id"].startswith("fake/"))]
+        local = len([step for step in steps if step[1] == "Context"]) - 2
+        self.assertEqual(shown, [["Node", "fake", local, "/lem/"],
+                                 ["Context", "fake/a (1)", local + 1, "/lem/c/1"],
+                                 ["Activity", "fake/a (1)", None, ""],
+                                 ["Context", "fake/b (2)", local + 2, "/lem/c/2"]])
+
+    def test_a_slow_remote_is_waited_for_briefly_and_left_running(self):
+        slow = python("import json, sys, time; sys.stdin.readline(); "
+                      "print(json.dumps({'node': 1, 'host': 'h', 'roots': 0}), flush=True); "
+                      "time.sleep(60)")
+        app = self.app(("slow", slow))
+        listing, = remote.listings(list(app.remotes.values()), wait=0.3)
+        self.assertEqual((listing.steps, listing.why),
+                         ([], "The remote node slow didn't answer in 0.3 s."))
+        self.assertIsNone(app.remotes["slow"]._process.poll())
+        with mock.patch.object(remote.Remote, "request", side_effect=RuntimeError("boom")):
+            listing, = remote.listings(list(app.remotes.values()))
+        self.assertEqual(listing.why, "The remote node slow couldn't be asked: RuntimeError: boom")
+
+    def test_the_plain_index_lists_each_remotes_roots(self):
+        app = self.app(("sim", node(self.ws.registry)), ("gone", python("import sys; sys.exit(1)")))
+        body = app.respond("GET", f"/{TOKEN}/", [HOST]).body
+        sim = body[body.index("<h2>Remote node sim</h2>"):body.index("<h2>Remote node gone")]
+        self.assertIn(f'<a href="/{TOKEN}/n/sim/">Its pages</a> · '
+                      f'<a href="/{TOKEN}/n/sim/lem/">in glui&#x27;s view</a>', sim)
+        self.assertIn(f'<a href="/{TOKEN}/n/sim/c/{LOCAL}">local-0 ({LOCAL})</a>', sim)
+        self.assertEqual(len(re.findall("<tr><td class=nw><a ", sim)),
+                         len(self.roots.contexts()))
+        self.assertIn("<h2>Remote node gone</h2>", body)
+        self.assertIn("<p class=dim>The remote node gone can&#x27;t be reached: it ended, with "
+                      "status 1: it said nothing.</p>", body)
+        self.assertEqual(server.App(self.roots, TOKEN).respond("GET", f"/{TOKEN}/", [HOST])
+                         .body.count("<h2>"), 0)
 
 
 if __name__ == "__main__":

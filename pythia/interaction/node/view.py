@@ -27,10 +27,13 @@ the user's messages that a starred answer answers, which come anew from
 ``/TOKEN/lem/pins/N`` once a star changes. The index's facts and a log's say
 what each context is doing, for the dot before it (``activity.py``), and so
 does each answer to what a log gained, since a context may change without a
-line. An item's label and gist are those of the server's plain pages, and its
-body holds what they show for it (``pages.Renderer``), as text, cut as they
-cut it. Every text is as pythia's terminal shows it, each character to escape
-as its code point.
+line. After this node's roots, the index's facts hold each remote node's
+(``remote.py``): a row for the node, which says how many roots it has, or why
+it can't be reached, then its roots, as its own index gives them, by ids of
+their own, as ``NAME/ID``, linking through this server. An item's label and
+gist are those of the server's plain pages, and its body holds what they show
+for it (``pages.Renderer``), as text, cut as they cut it. Every text is as
+pythia's terminal shows it, each character to escape as its code point.
 
 The view's pages have a content security policy of their own, which runs
 the server's scripts, styles and fetches, and nothing else; its facts,
@@ -443,6 +446,32 @@ class View:
                 "changed": "?" if problem else when(context.index.changed),
                 "rank": rank, "to": f"{pages.base}/lem/c/{quote(context.id)}"}])
             steps.append(self.activity_fact(context, problem))
+        rank = len(ordered)
+        for listing in pages.listings():
+            remote = self.remote_facts(listing, rank)
+            rank = 1 + max(step[2]["rank"] for step in remote if "rank" in step[2])
+            steps += remote
+        return steps
+
+    @staticmethod
+    def remote_facts(listing, rank: int) -> list:
+        """A remote node's row in the index, at ``rank``, then its roots, after it, as its own
+        index gives them (``remote.listings``), by ids of their own, as ``NAME/ID``, and what
+        each is doing; what isn't a root of its, linking through it, isn't shown."""
+        node = listing.remote
+        roots, doing = listing.roots(), listing.doing()
+        host = (node.hello or {}).get("host")
+        title = listing.why or (f"{host if isinstance(host, str) else node.name}: "
+                                f"{len(roots)} root context{'' if len(roots) == 1 else 's'}")
+        steps = [["+", "Node", {"name": node.name, "rank": rank, "title": safe_text(title),
+                                "reached": listing.why is None, "to": f"{node.base}/lem/"}]]
+        for fields in roots:
+            rank += 1
+            steps.append(["+", "Context", {**fields, "id": f"{node.name}/{fields['id']}",
+                                           "rank": rank}])
+            if fields["id"] in doing:
+                steps.append(["+", "Activity", {**doing[fields["id"]],
+                                                "id": f"{node.name}/{fields['id']}"}])
         return steps
 
     @staticmethod

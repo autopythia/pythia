@@ -9,7 +9,8 @@ remote's process starts at its first request, and again after it ends, once in `
 seconds at most, and it ends with the local server, as its input does. A request that it
 doesn't answer in ``TIMEOUT`` seconds gets 504, and the process ends, to start again;
 one while it can't be reached gets 502, which says why, by what it said last on its
-standard error.
+standard error. The index asks every remote for its roots at once (``listings``), and
+waits ``LISTING_WAIT`` seconds at most, without ending a remote that's slow.
 """
 
 from __future__ import annotations
@@ -25,8 +26,9 @@ import shlex
 import subprocess
 import threading
 import time
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
+from .activity import GRAY, GREEN, ORANGE, RED, YELLOW
 from .pages import Response
 
 # The protocol of a node on its standard streams, which its first line says.
@@ -37,10 +39,16 @@ STDIO = ("python3", "-m", "pythia.interaction.node", "--stdio")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
 TIMEOUT = 30.0
 RETRY = 5.0
+LISTING_WAIT = 5.0
 # An answer's line at most: the longest of a log's pages, with room to spare.
 MAX_ANSWER = 64 * 1024 * 1024
 # The lines of its standard error that a remote's failure can say.
 SAID = 20
+# A remote's root, as its view's index gives it, and what it's doing: each field's type.
+ROOT = {"id": str, "title": str, "model": str, "turns": int, "lines": int, "size": str,
+        "changed": str, "rank": int, "to": str}
+DOING = {"id": str, "hue": str, "why": str}
+HUES = frozenset((GRAY, GREEN, YELLOW, ORANGE, RED))
 
 
 def parse(text: str) -> Tuple[str, List[str]]:
@@ -88,17 +96,19 @@ class Remote:
 
     def request(self, method: str, target: str, host: str, *, origins: Sequence[str] = (),
                 marked: bool = False, content_type: Optional[str] = None,
-                body: Optional[bytes] = None) -> Response:
-        """Its answer to a request, as App.respond takes one, or why there's none."""
+                body: Optional[bytes] = None, wait: Optional[float] = None) -> Response:
+        """Its answer to a request, as App.respond takes one, or why there's none. With
+        ``wait`` shorter than its timeout, it waits that long at most, and leaves the
+        process running."""
         answer: "queue.Queue[Response]" = queue.Queue(maxsize=1)
         with self._lock:
             if self._closed:
                 return self._unreachable("the server is stopping")
             if self._process is None:
-                wait = self._started + self.retry - time.monotonic()
-                if wait > 0:
+                left = self._started + self.retry - time.monotonic()
+                if left > 0:
                     return self._unreachable(f"{self.why}; it's tried again in "
-                                             f"{math.ceil(wait)} s")
+                                             f"{math.ceil(left)} s")
                 if not self._start():
                     return self._unreachable(self.why)
             process = self._process
@@ -113,11 +123,14 @@ class Remote:
                 process.stdin.flush()
             except (OSError, ValueError):  # it ended, and its reader will say why
                 pass
+        waits = self.timeout if wait is None else min(wait, self.timeout)
         try:
-            return answer.get(timeout=self.timeout)
+            return answer.get(timeout=waits)
         except queue.Empty:
             with self._lock:
                 self._waiting.pop(rid, None)
+            if waits < self.timeout:
+                return _plain(504, f"The remote node {self.name} didn't answer in {waits:g} s.")
             self._end(process, f"it didn't answer in {self.timeout:g} s")
             return _plain(504, f"The remote node {self.name} didn't answer in "
                           f"{self.timeout:g} s; it's started again for the next request.")
@@ -230,6 +243,64 @@ class Remote:
         self.why = why
         for answer in waiting.values():
             answer.put(self._unreachable(why))
+
+
+class Listing(NamedTuple):
+    """What a remote node's view's index says of its roots (``view.py``): its steps, or
+    why it says nothing."""
+
+    remote: Remote
+    steps: list
+    why: Optional[str]
+
+    def _facts(self, name: str, types: Dict[str, type]) -> List[dict]:
+        found = []
+        for step in self.steps:
+            if (isinstance(step, list) and len(step) == 3 and step[:2] == ["+", name]
+                    and isinstance(step[2], dict) and step[2].keys() == types.keys()
+                    and all(type(step[2][field]) is kind for field, kind in types.items())):
+                found.append(step[2])
+        return found
+
+    def roots(self) -> List[dict]:
+        """Its roots, as its index gives them, in its order, each once: the fields of each
+        Context that's of their types, and links to a page of its own."""
+        roots: Dict[str, dict] = {}
+        for fields in sorted(self._facts("Context", ROOT), key=lambda each: each["rank"]):
+            if fields["to"].startswith(f"{self.remote.base}/lem/c/"):
+                roots.setdefault(fields["id"], fields)
+        return list(roots.values())
+
+    def doing(self) -> Dict[str, dict]:
+        """What each of its roots is doing, by its id: the fields of its Activity."""
+        return {fields["id"]: fields for fields in self._facts("Activity", DOING)
+                if fields["hue"] in HUES}
+
+
+def listings(remotes: Sequence[Remote], wait: float = LISTING_WAIT) -> List[Listing]:
+    """Each remote's listing, asked for at once, in their order."""
+    found: List[Optional[Listing]] = [None] * len(remotes)
+
+    def ask(at: int, remote: Remote) -> None:
+        try:
+            answer = remote.request("GET", f"{remote.base}/lem/facts/", "127.0.0.1", wait=wait)
+        except Exception as exc:  # a bug of its, which shouldn't take the index with it
+            found[at] = Listing(remote, [], f"The remote node {remote.name} couldn't be asked: "
+                                f"{type(exc).__name__}: {exc}")
+            return
+        steps = _json(answer.body.encode("utf-8", "replace")) if answer.status == 200 else None
+        why = None if isinstance(steps, list) else (
+            answer.body.strip() if answer.status != 200 else
+            f"The remote node {remote.name} answered with what isn't an index.")
+        found[at] = Listing(remote, steps if why is None else [], why)
+
+    threads = [threading.Thread(target=ask, args=(at, remote), daemon=True)
+               for at, remote in enumerate(remotes)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return [listing for listing in found if listing is not None]
 
 
 def _json(line: bytes) -> object:

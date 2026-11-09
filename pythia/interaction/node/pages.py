@@ -1022,7 +1022,8 @@ class Pages:
     The pages come in ``style``, by default ``default``, the server's. A
     request gets its own copy (``view``), with its style, and ``here``: its
     path and its query's fields but its style, from which the menu links to
-    the same page in each style.
+    the same page in each style. The index also shows the remote nodes' roots,
+    as ``listings()`` gives them, which the server sets (``remote.listings``).
     """
 
     def __init__(self, roots: Roots, token: str, *, style: str = DEFAULT_STYLE,
@@ -1033,6 +1034,7 @@ class Pages:
         self.default = style
         self.style = style
         self.here: Tuple[str, List[Tuple[str, str]]] = (f"{self.base}/", [])
+        self.listings: Callable[[], list] = list
 
     def view(self, *, style: Optional[str] = None,
              here: Optional[Tuple[str, List[Tuple[str, str]]]] = None) -> "Pages":
@@ -1162,8 +1164,34 @@ class Pages:
         view = self._a(self.view_url(), "In glui's view")
         body = (f"<h1>Root contexts in {h(shown_path(self.roots.path))}/</h1>\n"
                 f"<p class=dim>{h(note)}</p>\n"
-                f"<p>{view}</p>\n{table}")
+                f"<p>{view}</p>\n{table}"
+                + "".join("\n" + self._remote(listing) for listing in self.listings()))
         return self._page("contexts", [("contexts", None)], body)
+
+    def _remote(self, listing) -> str:
+        """A remote node's roots, as its own index gives them (``remote.Listing``), each
+        linking to its page through this server; or why it gives none."""
+        node = listing.remote
+        pages = self._a(f"{node.base}/", "Its pages")
+        view = self._a(f"{node.base}/lem/", "in glui's view")
+        head = f"<h2>Remote node {h(node.name)}</h2>\n<p>{pages} · {view}</p>\n"
+        if listing.why is not None:
+            return head + f"<p class=dim>{h(listing.why)}</p>\n"
+        roots = listing.roots()
+        rows = []
+        for root in roots:
+            link = self._a(f"{node.base}/c/{root['to'].rsplit('/', 1)[1]}", root["id"])
+            rows.append(f"<tr><td class=nw>{link}</td><td>{h(root['model'])}</td>"
+                        f"<td class=r>{root['turns']:,}</td><td class=r>{root['lines']:,}</td>"
+                        f"<td class=r>{h(root['size'])}</td><td class=nw>{h(root['changed'])}"
+                        f"</td><td>{h(root['title'])}</td></tr>\n")
+        count = len(roots)
+        note = (f"<p class=dim>{count} root context{'' if count == 1 else 's'}, the last "
+                "changed first.</p>\n" if roots else "<p class=dim>None yet.</p>\n")
+        return head + note + (
+            "<table>\n<tr><th>context</th><th>model</th><th class=r>turns</th>"
+            "<th class=r>lines</th><th class=r>size</th><th>changed</th><th>title</th></tr>\n"
+            + "".join(rows) + "</table>\n" if roots else "")
 
     def _context_row(self, context: Context, keys: List[str], problems: Dict[str, str]) -> str:
         key = (f'<span class=mono title="{h(context.key)}">'

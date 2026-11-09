@@ -23,6 +23,19 @@ input Length(lines: Int) one
 -- The index: each context, by `rank`, the last changed first.
 input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text) key id
 
+-- The remote nodes, whose roots the index shows after this node's, as the
+-- host says: each by its name, and its rank among the index's rows, before
+-- its roots, which are Contexts of their own, as `NAME/ID`; what it says of
+-- itself, how many roots it has, or why it can't be reached, which dims its
+-- row; and its own index, through this node's server.
+input Node(name: Text, rank: Int, title: Text, reached: Bool, to: Text) key name
+rel NodeTone(name: Text, tone: Tone) key name
+NodeTone(n, Strong) :- Node(name=n, reached=True)
+NodeTone(n, Dim) :- Node(name=n, reached=False)
+rel Indexed(any: Bool) one
+Indexed(True) :- Context()
+Indexed(True) :- Node()
+
 -- What a context is doing, as the host says, for the dot before it, in the
 -- index and before a log's title: a hue, and why. Gray, no CLI runs on it;
 -- green, a CLI works on a turn; yellow, a CLI waits, for input, a login, or
@@ -162,6 +175,7 @@ rel Gap(last: Int, first: Int)
 Gap(t, f) :- Ahead(t, f), not Farther(t, f), not Continues(t)
 
 id Top, TitleRow, TitleDot, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
+id NodeRow(Text), NodeCell(Text, Int)
 id Log, Before, After, TurnMark(Int), Said(Int), SaidText(Int), RunBox(Int), RunWait(Int)
 id Ent(Int), Part(Int, Int), Wait(Int), GapAfter(Int), GapBefore(Int)
 id Side, Pins, NoPins, PinTurn(Int), PinRow(Int), TurnList, TurnRow(Int)
@@ -173,7 +187,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
   Row(Crumbs) :- Nav():
     for Nav(n, text, to):
       Link(Crumb(n), text=text, to=to, order=n)
-  Table(Rows) :- Context():
+  Table(Rows) :- Indexed(True):
     TableRow(Head, header=True, order=-1):
       Label(Col(7), text="State", order=-1)
       Label(Col(0), text="Context")
@@ -194,6 +208,11 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
         Label(Cell(c, 4), text=text(lines))
         Label(Cell(c, 5), text=size)
         Label(Cell(c, 6), text=changed, tone=Dim)
+    for Node(n, rank, title, reached, to):
+      TableRow(NodeRow(n), order=rank):
+        Label(NodeCell(n, 7), text="", order=-1)
+        Link(NodeCell(n, 0), text=n, to=to)
+        Label(NodeCell(n, 1), text=title, tone=tone) :- NodeTone(n, tone)
   Box(Log) :- Chunk():
     Label(Before, text="earlier rows", tone=Dim, order=-1) :- First(f), f > begin, not EarlierFailed(line=f)
     Label(Before, text="couldn't load the earlier rows: " + why, tone=Error, order=-1) :- First(f), f > begin, EarlierFailed(f, why)
