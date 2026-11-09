@@ -276,7 +276,7 @@
         "/f/run/4",
         "Near(Before, Earlier(3))",
         "Near(RunBox(4), Fill(4))",
-        'Entry(RunBox(4), "2 tool calls: exec_command 2", "", "4", Dim, True, "/f/item/4", True, Log, 8)',
+        'Entry(RunBox(4), "2 tool calls: exec_command 2", "", "4", Dim, True, "/f/item/4", True, False, False, Log, 8)',
         "1 near"
       ]
     ],
@@ -348,6 +348,36 @@
         return it.asked.concat(facts(it, "Context"), facts(it, "Page"), it.said.slice(1));
       },
       ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a")', 'Page("Contexts", "", "", 0)']
+    ],
+    [
+      "a star: set at once, and kept; one that can't be kept is taken back",
+      function () {
+        var posted = [];
+        var answers = [];
+        var it = page({
+          stars: "/f/stars",
+          post: function (url, value, done) {
+            posted.push(url + " " + JSON.stringify(value));
+            answers.push(done);
+          }
+        });
+        answer(it, "/f/page", null, LOG.concat([["+", "Stars", { line: 6 }]]));
+        it.view.send(["Starred", ["Said", 3], true]);
+        var set = facts(it, "Stars");
+        answers.shift()(null);
+        it.view.send(["Starred", ["Said", 6], false]);
+        answers.shift()("403 Forbidden");
+        return posted.concat(set, facts(it, "Stars"), it.said.slice(1));
+      },
+      [
+        '/f/stars {"line":3,"on":true}',
+        '/f/stars {"line":6,"on":false}',
+        "Stars(3)",
+        "Stars(6)",
+        "Stars(3)",
+        "Stars(6)",
+        "wrong: couldn't keep the star: 403 Forbidden"
+      ]
     ],
     [
       "facts that can't come: the page says why",

@@ -324,27 +324,30 @@ first opened: the program sends `LoadRun(run)`, and the host answers with
 `RunLoaded(run)` and an `Item` for each, or with `RunFailed(run, why)`. The
 host's `Opening(open)` opens every run, or folds them all, through glui's
 `Entry`'s `open`, and each still opens and folds alone; a run that's open asks
-for its items as it comes near the screen. An item's body comes the same way,
-when its entry is first opened: the program sends `Load(line)`, and the host
-answers with `Body` facts, or `Failed(line, why)`.
+for its items as it comes near the screen. A message, and an item, has a star
+(glui's `Entry`'s `star`), faint until it's set: setting or clearing it sends
+`Star(line, on)`, and the host sets or clears `Stars(line)`. An item's body
+comes the same way, when its entry is first opened: the program sends
+`Load(line)`, and the host answers with `Body` facts, or `Failed(line, why)`.
 `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. A page names its facts on
 its `html` element, `data-facts`, and, for a log, where the rows before a line
 and after one are, `data-before` and `data-after`, where a run's items are,
 `data-run`, where an item's body is, `data-body`, each with `{line}` or
-`{run}`, and where what the log gained since it had `{lines}` lines is,
-`data-grow`; the script fetches the program and the themes, compiled, from
-`web/compiled/`, which `make compiled` writes, and a test checks against the
-files they're compiled from. A log's page starts at its end, and keeps what's
-on the screen in place as rows come above it. Every few seconds while it
-shows, a page asks what changed: a log, what it gained; the index, its facts
-anew, whose difference from the last it applies. Its bar picks the look and
-the theme, and, for a log, whether its runs are folded or open, which the node
-server keeps for the view, at `data-store`, and the browser too. `make web`
-writes a sample, an index and a log of 13,394 items, the most that one of
-pythia's contexts had when it was first written, in turns of 50, for two pages
-that show it as the node server's do:
+`{run}`, where what the log gained since it had `{lines}` lines is,
+`data-grow`, and where its stars are kept, `data-stars`, by the root's key;
+the script fetches the program and the themes, compiled, from `web/compiled/`,
+which `make compiled` writes, and a test checks against the files they're
+compiled from. A log's page starts at its end, and keeps what's on the screen
+in place as rows come above it. Every few seconds while it shows, a page asks
+what changed: a log, what it gained; the index, its facts anew, whose
+difference from the last it applies. Its bar picks the look and the theme,
+and, for a log, whether its runs are folded or open, which the node server
+keeps for the view, at `data-store`, and the browser too. `make web` writes a
+sample, an index and a log of 13,394 items, the most that one of pythia's
+contexts had when it was first written, in turns of 50, for two pages that
+show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

@@ -45,13 +45,14 @@ widget Link(text: Text, to: Text)
 -- host's own paths, if it's given; and its tone. With `fold`, its children
 -- show once it's opened, and opening or closing it sends `Toggled`; and it
 -- opens or folds as `open` says whenever that changes, as when a page
--- opens all its entries at once, which sends nothing. Code is text kept as
--- written, whose lines, with `diff`, show as a diff's.
-widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False, to: Text = "", open: Bool = False)
+-- opens all its entries at once, which sends nothing. With `star`, it has a
+-- star first, faint unless it's `starred`, which sends `Starred`. Code is
+-- text kept as written, whose lines, with `diff`, show as a diff's.
+widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False, to: Text = "", open: Bool = False, star: Bool = False, starred: Bool = False)
 widget Code(text: Text, diff: Bool = False)
 
 -- What widgets that hold a value send.
-msg Edited(id: Id, text: Text), Toggled(id: Id, value: Bool)
+msg Edited(id: Id, text: Text), Toggled(id: Id, value: Bool), Starred(id: Id, value: Bool)
 
 -- A widget may be disabled for several reasons, which a front end shows,
 -- as in its tooltip; its children are disabled with it.

@@ -5,11 +5,12 @@ Every URL starts with the token, 32 random bytes made new for each run and
 compared in constant time; any other path is a plain 404. The Host header
 must name loopback (127.0.0.1, localhost or [::1]) at any port, so that a
 DNS-rebinding page can't name it while an SSH forward from another port
-still works. GET and HEAD are answered; and POST, which replaces a file of the
-glui view's store (``store.py``), at ``/TOKEN/lem/store/NAME`` alone, from a
-page of the server's own origin (its Origin header), with the header that
-only the view's scripts send (``STORE_HEADER``), as JSON of a few KB at
-most. Every response has
+still works. GET and HEAD are answered; and POST, which changes the glui
+view's store (``store.py``), alone: at ``/TOKEN/lem/store/NAME``, which
+replaces its settings, and ``/TOKEN/lem/stars/N``, which sets or clears a
+star in root N's log; from a page of the server's own origin (its Origin
+header), with the header that only the view's scripts send
+(``STORE_HEADER``), as JSON of a few KB at most. Every response has
 ``nosniff``, ``no-store`` and ``no-referrer``, and a CSP: the plain pages'
 allows no script; the glui view's pages, under ``/TOKEN/lem/``, run the
 server's own scripts and styles, and its facts, bodies and files allow
@@ -38,7 +39,7 @@ from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 from .contexts import Roots
 from .pages import BadRequest, Pages, Response
-from .store import FILES, MAX_BYTES, Store
+from .store import FILES, MAX_BYTES, REPLACED, Store
 from .styles import DEFAULT_STYLE, FIELD, NAME, Styles
 from .view import DATA_CSP, View
 
@@ -110,7 +111,7 @@ class App:
         self.token = token or new_token()
         self._token = self.token.encode("ascii")
         self.pages = Pages(roots, self.token, style=style, styles=styles)
-        self.view = View() if view is None else view
+        self.view = View(store=store) if view is None else view
         self.store = store
 
     @property
@@ -138,8 +139,12 @@ class App:
             return plain(404, "Not found.")
         rest = segments[2] if len(segments) > 2 else ""
         stored = rest[len("lem/store/"):] if rest.startswith("lem/store/") else None
-        if method == "POST" and stored in FILES and not parts.query:
-            return self._keep(stored, hosts[0].strip(), origins, marked, content_type, body)
+        starred = rest[len("lem/stars/"):] if rest.startswith("lem/stars/") else None
+        own = (hosts[0].strip(), origins, marked, content_type, body)
+        if method == "POST" and stored in REPLACED and not parts.query:
+            return self._refused(*own) or self._keep(stored, body or b"")
+        if method == "POST" and starred and not parts.query:
+            return self._refused(*own) or self._star(_unquoted(starred), body or b"")
         if method not in ("GET", "HEAD"):
             return plain(405, "The node server reads, with GET and HEAD; it takes POST for its "
                          "view's store alone.", (("Allow", "GET, HEAD"),))
@@ -178,11 +183,12 @@ class App:
             return self.view.respond(pages, name)
         return pages.not_found("The node server has no such page.")
 
-    def _keep(self, name: str, host: str, origins: Sequence[str], marked: bool,
-              content_type: Optional[str], body: Optional[bytes]) -> Response:
-        """A POST that replaces file ``name`` of the view's store: from a page of the
-        server's own origin, the one that ``host``, the Host header, names, with
-        ``STORE_HEADER``; as JSON, which the store checks."""
+    def _refused(self, host: str, origins: Sequence[str], marked: bool,
+                 content_type: Optional[str], body: Optional[bytes]) -> Optional[Response]:
+        """Why a POST to the view's store is refused, or None: it must come from a page of
+        the server's own origin, the one that ``host``, the Host header, names, with
+        ``STORE_HEADER``, as JSON of ``MAX_BYTES`` at most; and the server must keep a
+        store."""
         if len(origins) != 1 or origins[0].strip().lower() != f"http://{host}".lower():
             return plain(403, "The view's store takes POST from the node server's own pages "
                          "only.")
@@ -194,8 +200,34 @@ class App:
             return plain(413, f"The view's store takes {MAX_BYTES:,} bytes at most.")
         if self.store is None:
             return plain(404, "This node server keeps no store.")
+        return None
+
+    def _keep(self, name: str, body: bytes) -> Response:
+        """A POST that replaces file ``name`` of the view's store with its JSON, which the
+        store checks."""
+        return self._stored(lambda store: store.write(name, json.loads(body.decode("utf-8"))))
+
+    def _star(self, number: str, body: bytes) -> Response:
+        """A POST that sets or clears a star in root ``number``'s log: ``{"line": LINE,
+        "on": BOOL}``, kept by the root's key."""
+        context = self.pages.roots.get(number)
+        if context is None:
+            return plain(404, "There's no such root context here.")
+
+        def star(store: Store) -> None:
+            value = json.loads(body.decode("utf-8"))
+            line = value.get("line") if isinstance(value, dict) else None
+            on = value.get("on") if isinstance(value, dict) else None
+            if type(line) is not int or line < 1 or not isinstance(on, bool):
+                raise ValueError('a star is {"line": LINE, "on": BOOL}')
+            store.star(context.key, line, on)
+
+        return self._stored(star)
+
+    def _stored(self, change) -> Response:
+        """The response to a change of the view's store: 204 once it's made."""
         try:
-            self.store.write(name, json.loads(body.decode("utf-8")))
+            change(self.store)
         except ValueError as exc:  # not JSON, not UTF-8, or not what the store keeps
             return plain(400, f"The view's store doesn't keep that: {exc}")
         except OSError as exc:

@@ -7,9 +7,10 @@
 // line and after one, `data-run`, the URL of a run's items, and
 // `data-body`, the URL of an item's body, each with `{line}` or `{run}` in
 // place of its line; and `data-grow`, the URL of what the log gained since it
-// had `{lines}` lines; and, on each page, `data-store`, the URL of the
-// settings that the server keeps for the view (pythia/interaction/node/
-// store.py). The compiled program and glui's themes are beside
+// had `{lines}` lines, and `data-stars`, the URL that keeps its stars; and,
+// on each page, `data-store`, the URL of the settings that the server keeps
+// for the view (pythia/interaction/node/store.py). The compiled program and
+// glui's themes are beside
 // this script, in compiled/. It shows the page in glui's widgets
 // (src/glui/glui.js), in the look and the theme that its bar chooses,
 // which the server keeps, and the browser too, from the log's end, with
@@ -65,7 +66,12 @@ var contexts = (function () {
   //   while the page shows, when a log asks what it gained, and an index its
   //   facts anew, one request at a time. What a log gained is steps; what
   //   an index's facts gained and lost, the host works out. Should either
-  //   fail, the page says why, and asks no more.
+  //   fail, the page says why, and asks no more;
+  // - o.stars, for a log, is the URL that keeps a star, set or cleared, and
+  //   o.post(url, value, done) sends it JSON, and calls done(null), or
+  //   done(why): the program's Star(line, on) changes Stars on the page at
+  //   once, and then in the server's store; one that can't be kept is
+  //   taken back, and the page says why.
   //
   // It asks for rows, a run's items, or a body, once while they're coming,
   // and again when the program asks again after they failed; meanwhile the
@@ -105,9 +111,15 @@ var contexts = (function () {
     var facts = null;
     var asking = false;
     var live = true;
+    // The lines starred, as the page shows them (Stars).
+    var starred = new Set();
     var view = glui.view(runtime, o.root, {
       effects: function (effects) {
         effects.forEach(function (effect) {
+          if (effect.name === "Star") {
+            star(effect.fields.line, effect.fields.on);
+            return;
+          }
           var ask = asks[effect.name];
           if (ask !== undefined) {
             load(ask, effect.fields[ask.field]);
@@ -121,6 +133,34 @@ var contexts = (function () {
     });
     if (typeof o.opening === "boolean") {
       view.update([["+", "Opening", { open: o.opening }]]);
+    }
+
+    // Sets or clears the star of line `line`: on the page at once, and then
+    // in the server's store, if there's one. One that can't be kept is
+    // taken back, and the page says why.
+    function star(line, on) {
+      if (starred.has(line) === on) {
+        return;
+      }
+      var change = function (set) {
+        if (set) {
+          starred.add(line);
+        } else {
+          starred.delete(line);
+        }
+        view.update([[set ? "+" : "-", "Stars", { line: line }]]);
+      };
+      change(on);
+      if (typeof o.stars === "string" && o.post) {
+        o.post(o.stars, { line: line, on: on }, function (why) {
+          if (why !== null) {
+            if (starred.has(line) === on) {
+              change(!on);
+            }
+            status("couldn't keep the star: " + why, true);
+          }
+        });
+      }
     }
 
     // What was asked for, `value`, fails: the turn or the entry says why.
@@ -178,6 +218,11 @@ var contexts = (function () {
       if (refused === null) {
         status(steps.length + " facts, shown in " + (Date.now() - began) + " ms", false);
         ready = true;
+        steps.forEach(function (step) {
+          if (step[0] === "+" && step[1] === "Stars") {
+            starred.add(step[2].line);
+          }
+        });
         length = lengthOf(steps, length);
         facts = log ? null : byText(steps);
         if (o.shown) {
@@ -464,6 +509,8 @@ var contexts = (function () {
         program: program,
         opening: log ? chosen.runs === "open" : undefined,
         grow: html.getAttribute("data-grow"),
+        stars: html.getAttribute("data-stars"),
+        post: keepIn,
         every: function (tick) {
           var showing = function () {
             if (document.visibilityState !== "hidden") {

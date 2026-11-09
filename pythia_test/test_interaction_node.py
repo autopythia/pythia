@@ -39,6 +39,7 @@ from unittest import mock
 
 from pythia.interaction.node import contexts, pages, server, styles, view
 from pythia.interaction.node.store import MAX_BYTES as MAX_STORE
+from pythia.interaction.node.store import MAX_FILE_BYTES as MAX_FILE
 from pythia.interaction.node.store import Invalid, Store
 from pythia.interaction.node.__main__ import main
 from pythia.interaction.registry import Registry
@@ -1416,7 +1417,8 @@ class ViewTests(WorkspaceTest):
                       f'data-grow="/{TOKEN}/lem/grow/1/',
                       "<title>local-0 (1) · node</title>", f'<a href="/{TOKEN}/c/1">the plain'):
             self.assertIn(shown, log.body)
-        self.assertRegex(log.body, f'data-grow="/{TOKEN}/lem/grow/1/[1-9][0-9]*/{{lines}}">')
+        self.assertRegex(log.body, f'data-grow="/{TOKEN}/lem/grow/1/[1-9][0-9]*/{{lines}}" '
+                                   f'data-stars="/{TOKEN}/lem/stars/1">')
         second = self.get(f"lem/c/{SECOND}")  # another number of 1's
         self.assertEqual((second.status, second.location), (303, f"/{TOKEN}/lem/c/1"))
         self.assertEqual((self.get("lem").status, self.get("lem").location),
@@ -1741,8 +1743,8 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(Invalid, re.escape(why)):
                 self.store.write("session", value)
         self.assertEqual(self.store.read("session"), {"look": "native"})
-        for data in (b"{not json", b'{"look": 1}', b"[]", b"{" + b" " * MAX_STORE + b"}",
-                     b'{"look": "log"}' + b" " * MAX_STORE):  # longer than it writes
+        for data in (b"{not json", b'{"look": 1}', b"[]", b"{" + b" " * MAX_FILE + b"}",
+                     b'{"look": "log"}' + b" " * MAX_FILE):  # longer than it writes
             (self.tmp / "node" / "session.json").write_bytes(data)
             self.assertEqual(self.store.read("session"), {}, data[:20])
 
@@ -1759,6 +1761,19 @@ class StoreTests(unittest.TestCase):
         self.assertEqual((response.status, response.body),
                          (500, "The view's store couldn't be written.\n"))
         self.assertEqual(said.getvalue(), "node: the view's store couldn't be written: disk full\n")
+
+    def test_stars_kept_by_root_one_at_a_time(self):
+        self.assertEqual(self.store.read("stars"), {})
+        for key, line, on in ((KEY_A, 5, True), (KEY_A, 9, True), (KEY_B, 2, True),
+                              (KEY_A, 5, False), (KEY_A, 9, True), (KEY_B, 2, False)):
+            self.store.star(key, line, on)
+        self.assertEqual(self.store.read("stars"), {KEY_A: [9]})  # a root's last star goes
+        for value, why in (({"x": [1]}, "'x' isn't a root's key"),
+                           ({KEY_A: [0]}, "aren't a list"), ({KEY_A: ["1"]}, "aren't a list"),
+                           ({KEY_A: list(range(1, 10_002))}, "aren't a list")):
+            with self.assertRaisesRegex(Invalid, re.escape(why)):
+                self.store.write("stars", value)
+        self.assertEqual(self.store.read("stars"), {KEY_A: [9]})
 
     def test_a_post_from_the_views_own_page(self):
         response = self.post(b'{"look": "native", "runs": "open"}')
@@ -1885,6 +1900,32 @@ class GrowTests(unittest.TestCase):
         self.assertEqual((response.status, response.body),
                          (409, "s (1)'s log was replaced: load its page anew.\n"))
         self.assertEqual(self.steps(self.grown() + "1"), [])
+
+    def test_stars_set_and_cleared_from_the_page_by_the_roots_key(self):
+        own = {"origins": ["http://127.0.0.1:8765"], "marked": True,
+               "content_type": "application/json"}
+        store = Store(self.tmp / "node")
+        app = server.App(self.app.pages.roots, TOKEN, store=store)
+
+        def post(path, body):
+            return app.respond("POST", f"/{TOKEN}/{path}", ["127.0.0.1:8765"], body=body, **own)
+
+        self.assertEqual(post("lem/stars/1", b'{"line": 2, "on": true}').status, 204)
+        self.assertEqual(post("lem/stars/1", b'{"line": 5, "on": true}').status, 204)
+        self.assertEqual(post("lem/stars/1", b'{"line": 2, "on": false}').status, 204)
+        self.assertEqual(store.read("stars"), {KEY_A: [5]})
+        steps = json.loads(app.respond("GET", f"/{TOKEN}/lem/facts/c/1", ["127.0.0.1"]).body)
+        self.assertEqual([fields for _, rel, fields in steps if rel == "Stars"], [{"line": 5}])
+        for path, body, status in (("lem/stars/9", b'{"line": 2, "on": true}', 404),
+                                   ("lem/stars/1", b'{"line": 0, "on": true}', 400),
+                                   ("lem/stars/1", b'{"line": 2, "on": 1}', 400),
+                                   ("lem/stars/1", b'[2]', 400),
+                                   ("lem/store/stars", b'{}', 405)):
+            self.assertEqual(post(path, body).status, status, (path, body))
+        elsewhere = dict(own, origins=["http://evil.example"])
+        self.assertEqual(app.respond("POST", f"/{TOKEN}/lem/stars/1", ["127.0.0.1:8765"],
+                                     body=b'{"line": 7, "on": true}', **elsewhere).status, 403)
+        self.assertEqual(store.read("stars"), {KEY_A: [5]})
 
     def test_the_rows_after_a_run_that_went_on_start_with_it(self):
         # Lines 4 to 7 are a run, which the log ends with; four more lines go on with it.

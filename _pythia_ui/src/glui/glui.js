@@ -268,9 +268,18 @@ var glui = (function () {
   // says when it's made, and whenever `open` changes, but not otherwise,
   // so that it stays as it was opened or closed in between; and the toggle
   // event that follows, which a browser fires later, sends nothing, since
-  // the program knows.
+  // the program knows. With `star`, a star comes first, a button that sends
+  // Starred, as set or cleared, and that opens or folds nothing.
   function entry(w, view) {
     var e = element(view, "div");
+    var star = element(view, "button", "g-entry-star");
+    star.setAttribute("type", "button");
+    takesReturn(star);
+    star.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      view.send(["Starred", w.id, !w.fields.starred]);
+    });
     var mark = element(view, "a");
     takesReturn(mark);
     var label_ = element(view, "span", "g-entry-label");
@@ -286,10 +295,16 @@ var glui = (function () {
     // Makes the entry's parts anew, for `fold`, with the same mark, label,
     // text and body, the body holding the children still.
     function build(fold) {
+      if (star.parentNode !== null) {
+        star.parentNode.removeChild(star);
+      }
       e.textContent = "";
       var head = element(view, fold ? "summary" : "div", "g-entry-head");
       if (fold) {
         takesReturn(head);
+      }
+      if (w.fields.star) {
+        head.appendChild(star);
       }
       head.appendChild(mark);
       head.appendChild(label_);
@@ -315,9 +330,12 @@ var glui = (function () {
       folds = fold;
     }
     return made(w, e, body, null, function () {
-      if (folds !== w.fields.fold) {
+      if (folds !== w.fields.fold || (star.parentNode !== null) !== w.fields.star) {
         build(w.fields.fold);
       }
+      text(star, w.fields.starred ? "\u2605" : "\u2606");
+      attr(star, "aria-pressed", w.fields.starred ? "true" : "false");
+      attr(star, "aria-label", w.fields.starred ? "starred" : "star");
       if (details !== null && shown !== w.fields.open) {
         shown = w.fields.open;
         if (details.open !== shown) {

@@ -58,6 +58,12 @@ font:var(--glui-code-size)/var(--glui-code-line) ui-monospace,SFMono-Regular,Men
 .g-entry-body{display:flex;flex-direction:column;gap:var(--glui-gap-down)}
 .g-entry-body:empty{display:none}
 .g-entry summary{cursor:pointer}
+/* An entry's star: faint until its entry is pointed at or it has the focus,
+   and in the accent once it's starred. */
+.g-entry-star{font:inherit;line-height:1;margin:0 .35em 0 0;padding:0 .1em;border:0;background:none;
+color:var(--glui-text-dim);opacity:.3;cursor:pointer}
+.g-entry-head:hover>.g-entry-star,.g-entry-star:focus-visible{opacity:1}
+.g-entry-star[aria-pressed=true]{opacity:1;color:var(--glui-accent)}
 
 /* What's disabled is at half alpha, once, however deep; a link that's
    refused or disabled goes nowhere. */

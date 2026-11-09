@@ -206,6 +206,14 @@
           it.doc.fire(e, "click");
         }
         return;
+      case "star":
+        var button = find(e, ["button"]);
+        if (it.real) {
+          button.click();
+        } else {
+          it.doc.fire(button, "click");
+        }
+        return;
       case "check":
         if (it.real) {
           input.click();

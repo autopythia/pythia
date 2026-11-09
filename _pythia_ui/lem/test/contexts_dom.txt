@@ -32,6 +32,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -46,6 +47,7 @@ main.g-window
         div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -70,6 +72,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -84,6 +87,7 @@ main.g-window
         div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -122,6 +126,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -136,6 +141,7 @@ main.g-window
         div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -172,6 +178,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -187,6 +194,7 @@ main.g-window
           span.g-label.g-tone-dim "loading"
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -227,6 +235,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -242,6 +251,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -249,18 +259,21 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
               div.g-entry-body
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -297,6 +310,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -312,6 +326,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -319,6 +334,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -326,12 +342,14 @@ main.g-window
                 span.g-label.g-tone-dim "loading"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -370,6 +388,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -385,6 +404,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -392,6 +412,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -401,12 +422,14 @@ main.g-window
                   span.g-diff-add "+one line"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -443,6 +466,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -458,6 +482,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -465,6 +490,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -474,12 +500,14 @@ main.g-window
                   span.g-diff-add "+one line"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -517,6 +545,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -532,6 +561,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -539,6 +569,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -548,12 +579,14 @@ main.g-window
                   span.g-diff-add "+one line"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -592,6 +625,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -607,6 +641,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -614,6 +649,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -623,12 +659,14 @@ main.g-window
                   span.g-diff-add "+one line"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -667,6 +705,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -682,6 +721,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -689,6 +729,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -698,12 +739,14 @@ main.g-window
                   span.g-diff-add "+one line"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
@@ -742,6 +785,7 @@ main.g-window
       div.g-entry-body
     div.g-entry.g-tone-user
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
         span.g-entry-label "[user]"
         span.g-entry-text
@@ -757,6 +801,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=3" "3"
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
@@ -764,6 +809,7 @@ main.g-window
           div.g-entry.g-fold.g-tone-tool
             details open
               summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
                 a.g-entry-mark href="/c/ui-0?line=4" "4"
                 span.g-entry-label "[tool-ret] exec_command"
                 span.g-entry-text "2 lines"
@@ -773,17 +819,340 @@ main.g-window
                   span.g-diff-add "+one line"
           div.g-entry.g-tone-dim
             div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
               a.g-entry-mark href="/c/ui-0?line=5" "5"
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
     div.g-entry.g-tone-assistant
       div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
         span.g-entry-label "[assistant]"
         span.g-entry-text
       div.g-entry-body
         pre.g-code "Here's a plan."
+
+=== starring a message: the host hears Star
+["star", "Said(2)"]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect Star {"line":2,"on":true}
+
+=== the host keeps it: the star is set
+["+", "Stars", {"line": 2}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
+=== starring an item, whose entry folds, sets it and doesn't open it
+["star", "Ent(3)"]
+["+", "Stars", {"line": 3}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect Star {"line":3,"on":true}
+
+=== clearing the message's star: the host hears it, and lets it go
+["star", "Said(2)"]
+["-", "Stars", {"line": 2}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect Star {"line":2,"on":false}
 
 === the index, in place of the log
 ["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1}]

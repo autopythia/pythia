@@ -16,7 +16,9 @@ an item's body when its entry opens, from ``/TOKEN/lem/body/N/LINE``. A log
 that grows says so, to a page that asks every few seconds what it gained
 since it had LINES lines, from ``/TOKEN/lem/grow/N/GENERATION/LINES``: its
 length, and the turns that changed; its later rows then come as others do,
-the run that it ended with whole, if it went on. An
+the run that it ended with whole, if it went on. A log's facts hold the lines
+starred in it, which a page sets or clears at ``/TOKEN/lem/stars/N``, and the
+server keeps by the root's key (``store.py``). An
 item's label and gist are those of the
 server's plain pages, and its body holds what they show for it
 (``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
@@ -38,6 +40,7 @@ from urllib.parse import quote
 from .._cli_editor import safe_text
 from ..display import _format_byte_count as byte_count
 from .contexts import Context, parse, shown_path
+from .store import Store
 from .pages import (GIST_CHARS, TITLE_CHARS, Block, Fold, Inline, Line, Nest, Note, Pages,
                     Renderer, Response, cut, gist, h, hidden, when)
 
@@ -250,8 +253,9 @@ def summary(context: Context, first: int, last: int) -> str:
 class View:
     """The view's routes, past ``/TOKEN/lem/``, on the server's pages (``pages.Pages``)."""
 
-    def __init__(self, files: Optional[Files] = None) -> None:
+    def __init__(self, files: Optional[Files] = None, store: Optional[Store] = None) -> None:
         self.files = Files() if files is None else files
+        self.store = store
 
     def respond(self, pages: Pages, rest: str) -> Response:
         """``rest``, the path past ``/TOKEN/lem/``, percent-decoded."""
@@ -288,7 +292,8 @@ class View:
 
     def _page(self, pages: Pages, title: str, facts: str, body: Optional[str] = None, *,
               rows: Optional[str] = None, run: Optional[str] = None,
-              grow: Optional[str] = None, plain: Optional[str] = None) -> Response:
+              grow: Optional[str] = None, stars: Optional[str] = None,
+              plain: Optional[str] = None) -> Response:
         """A page of the view: the URLs of its facts, its rows before a line and after one
         (``rows``, with ``{way}`` for ``before`` or ``after``), its runs' items, its bodies,
         and what its log gained since it had ``{lines}`` lines (``grow``); the settings
@@ -306,7 +311,8 @@ class View:
                             for way in ("before", "after"))
         data += ("" if run is None else f' data-run="{h(run)}"') + (
             "" if body is None else f' data-body="{h(body)}"') + (
-            "" if grow is None else f' data-grow="{h(grow)}"')
+            "" if grow is None else f' data-grow="{h(grow)}"') + (
+            "" if stars is None else f' data-stars="{h(stars)}"')
         plain = f"{pages.base}/" if plain is None else plain
         return Response(200, (
             f"<!doctype html>\n<html lang=en{data}>\n<head>\n<meta charset=utf-8>\n"
@@ -337,6 +343,7 @@ class View:
                           rows=f"{pages.base}/lem/rows/{number}/{{way}}/{{line}}",
                           run=f"{pages.base}/lem/run/{number}/{{run}}",
                           grow=f"{pages.base}/lem/grow/{number}/{generation}/{{lines}}",
+                          stars=f"{pages.base}/lem/stars/{number}",
                           plain=f"{pages.base}/c/{number}")
 
     # The facts.
@@ -392,6 +399,7 @@ class View:
                                    "turns": f"{pages.base}/c/{number}?turn=",
                                    "first": 1}],
                     ["+", "Length", {"lines": len(index)}],
+                    *(["+", "Stars", {"line": line}] for line in self._stars(context)),
                     ["+", "Nav", {"n": 0, "text": "Root contexts", "to": f"{pages.base}/lem/"}],
                     ["+", "Nav", {"n": 1, "text": "Plain pages", "to": f"{pages.base}/c/{number}"}]]
                 steps.extend(self.turn_facts(context, 0))
@@ -399,6 +407,10 @@ class View:
         except OSError:
             return None
         return steps
+
+    def _stars(self, context: Context) -> List[int]:
+        """The lines starred in ``context``'s log, as the store keeps them by its key."""
+        return [] if self.store is None else self.store.read("stars").get(context.key, [])
 
     def turn_facts(self, context: Context, since: int) -> list:
         """A Turn for each of ``context``'s turns, with how many items it shows and the line

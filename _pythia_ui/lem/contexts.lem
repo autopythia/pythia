@@ -61,6 +61,16 @@ state Asked(line: Int) key line
 -- the screen.
 input Opening(open: Bool) one
 rel Opens(open: Bool) one
+
+-- Stars: the host's, for this log, by line (Stars). A message, and an item,
+-- has a star, which the reader sets or clears (glui's Starred), and which
+-- the program asks the host to keep (Star).
+input Stars(line: Int)
+effect Star(line: Int, on: Bool)
+rel StarOf(line: Int, on: Bool) key line
+StarOf(l, True) :- Stars(l)
+StarOf(l, False) :- Message(line=l), not Stars(l)
+StarOf(i, False) :- Item(line=i), not Stars(i)
 Opens(o) :- Opening(o)
 Opens(False) :- not Opening()
 
@@ -110,14 +120,14 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
     for Turn(n, head, title, start):
       Entry(TurnMark(n), label=head, text="", mark=text(n), tone=Strong, to=turnto + text(n), order=start * 2 - 1) :- RowAt(start)
     for Message(l, n, tone, label, said):
-      Entry(Said(l), label=label, text="", mark=text(l), tone=tone, to=items + text(l), order=l * 2):
+      Entry(Said(l), label=label, text="", mark=text(l), tone=tone, to=items + text(l), order=l * 2, star=True, starred=s) :- StarOf(l, s):
         Code(SaidText(l), text=said)
     for Run(l, n, last, what):
       Entry(RunBox(l), label=what, text="", mark=text(l), tone=Dim, fold=True, to=items + text(l), order=l * 2, open=o) :- Opens(o):
         Label(RunWait(l), text="loading", tone=Dim) :- Opened(l), not RunLoaded(run=l), not RunFailed(run=l)
         Label(RunWait(l), text="couldn't load it: " + why, tone=Error) :- RunFailed(l, why), not RunLoaded(run=l)
         for Item(i, l, tone, label, gist, body):
-          Entry(Ent(i), label=label, text=gist, mark=text(i), tone=tone, fold=body, to=items + text(i), order=i):
+          Entry(Ent(i), label=label, text=gist, mark=text(i), tone=tone, fold=body, to=items + text(i), order=i, star=True, starred=s) :- StarOf(i, s):
             Code(Part(i, k), text=b, diff=d, order=k) :- Body(i, k, b, d)
             Label(Wait(i), text="loading", tone=Dim) :- Asked(i), not Body(line=i), not Failed(line=i)
             Label(Wait(i), text="couldn't load it: " + why, tone=Error) :- Failed(i, why), not Body(line=i)
@@ -143,6 +153,12 @@ on Toggled(RunBox(l), True):
 on Fill(l):
   Opened(l) :- Run(line=l), not RunLoaded(run=l)
   LoadRun(l) :- Run(line=l), not RunLoaded(run=l)
+
+on Starred(Said(l), v):
+  Star(l, v)
+
+on Starred(Ent(i), v):
+  Star(i, v)
 
 on Toggled(Ent(i), True):
   Asked(i) :- Item(line=i, body=True), not Body(line=i)
