@@ -238,8 +238,9 @@ class Remote:
         if errors is not None:
             errors.join(timeout=1)
         if why is None:
-            said = self._said[-1] if self._said else "it said nothing"
-            why = f"it ended, with status {status}: {said}"
+            # Its last word, as a clause of why: without the period that ends it, if any.
+            said = self._said[-1].rstrip(". ") if self._said else ""
+            why = f"it ended, with status {status}: {said or 'it said nothing'}"
         self.why = why
         for answer in waiting.values():
             answer.put(self._unreachable(why))

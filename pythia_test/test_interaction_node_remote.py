@@ -301,7 +301,7 @@ class RemoteTests(RemoteTest):
 
     def test_a_remote_that_cant_be_reached_says_why_and_is_tried_again(self):
         app = self.app(("gone", ["/nonexistent/node"]),
-                       ("fails", python("import sys; sys.stderr.write('no registry here\\n'); "
+                       ("fails", python("import sys; sys.stderr.write('no registry here.\\n'); "
                                         "sys.exit(3)")),
                        ("refuses", python("import json, sys; sys.stdin.readline(); "
                                           "print(json.dumps({'node': 1, 'error': 'nope'}))")),
