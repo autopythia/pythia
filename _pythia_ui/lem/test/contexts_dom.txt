@@ -2132,3 +2132,133 @@ main.g-window
         span.g-label
         a.g-link href="/n/far/lem/" "far"
         span.g-label.g-tone-dim "The remote node far can't be reached: it said nothing."
+
+=== a context's ✎ opens a row of fields under its own; Return in it saves, and the host hears KeepRoot
+["+", "Context", {"id": "dev-1", "title": "Let us start", "model": "opus", "turns": 3, "lines": 120, "size": "1.2 MB", "changed": "2 h ago", "rank": 1, "to": "/c/dev-1", "label": "start", "tags": "old", "keep": "/roots/dev-1"}]
+["click", "EditCell(\"dev-1\")"]
+["type", "LabelField(\"dev-1\")", "the start"]
+["type", "TagsField(\"dev-1\")", "old, First"]
+["focus", "TagsField(\"dev-1\")"]
+["key", "Enter"]
+---
+page title: "Contexts"
+main.g-window
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "State"
+        span.g-label "Context"
+        span.g-label "Label"
+        span.g-label "Title"
+        span.g-label "Model"
+        span.g-label "Turns"
+        span.g-label "Lines"
+        span.g-label "Size"
+        span.g-label "Changed"
+      tr.g-tablerow
+        span.g-dot.g-hue-green role="img" aria-label="Running: sampling." title="Running: sampling."
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-strong
+        span.g-label "Plan the GUI"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "12"
+        span.g-label "2563"
+        span.g-label "13.7 MB"
+        span.g-label.g-tone-dim "5 min ago"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-strong "start"
+        span.g-label "Let us start"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "3"
+        span.g-label "120"
+        span.g-label "1.2 MB"
+        span.g-label.g-tone-dim "2 h ago"
+        button.g-button type="button" title="its label and tags" "✎"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/n/sim/lem/" "sim"
+        span.g-label.g-tone-strong "cloud-0: 1 root context"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/n/sim/lem/c/10" "sim/ui-0 (10)"
+        span.g-label.g-tone-strong
+        span.g-label "There"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "2"
+        span.g-label "30"
+        span.g-label "3 KB"
+        span.g-label.g-tone-dim "now"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/n/far/lem/" "far"
+        span.g-label.g-tone-dim "The remote node far can't be reached: it said nothing."
+effect KeepRoot {"to":"/roots/dev-1","label":"the start","tags":"old, First"}
+
+=== Escape in the row closes it, and the host hears nothing
+["click", "EditCell(\"dev-1\")"]
+["focus", "LabelField(\"dev-1\")"]
+["key", "Escape"]
+---
+page title: "Contexts"
+main.g-window
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "Contexts"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  table.g-table
+    tbody
+      tr.g-tablerow.g-header
+        span.g-label "State"
+        span.g-label "Context"
+        span.g-label "Label"
+        span.g-label "Title"
+        span.g-label "Model"
+        span.g-label "Turns"
+        span.g-label "Lines"
+        span.g-label "Size"
+        span.g-label "Changed"
+      tr.g-tablerow
+        span.g-dot.g-hue-green role="img" aria-label="Running: sampling." title="Running: sampling."
+        a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-strong
+        span.g-label "Plan the GUI"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "12"
+        span.g-label "2563"
+        span.g-label "13.7 MB"
+        span.g-label.g-tone-dim "5 min ago"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-strong "start"
+        span.g-label "Let us start"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "3"
+        span.g-label "120"
+        span.g-label "1.2 MB"
+        span.g-label.g-tone-dim "2 h ago"
+        button.g-button type="button" title="its label and tags" "✎"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/n/sim/lem/" "sim"
+        span.g-label.g-tone-strong "cloud-0: 1 root context"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/n/sim/lem/c/10" "sim/ui-0 (10)"
+        span.g-label.g-tone-strong
+        span.g-label "There"
+        span.g-label.g-tone-dim "opus"
+        span.g-label "2"
+        span.g-label "30"
+        span.g-label "3 KB"
+        span.g-label.g-tone-dim "now"
+      tr.g-tablerow
+        span.g-label
+        a.g-link href="/n/far/lem/" "far"
+        span.g-label.g-tone-dim "The remote node far can't be reached: it said nothing."

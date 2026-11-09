@@ -521,7 +521,7 @@
         answer(it, "/f/page", null, later);
         return it.asked.concat(facts(it, "Context"), facts(it, "Page"), it.said.slice(1));
       },
-      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a", "")', 'Page("Contexts", "", "", 0, "")']
+      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a", "", "", "")', 'Page("Contexts", "", "", 0, "")']
     ],
     [
       "a star: set at once, and kept; one that can't be kept is taken back",
@@ -846,6 +846,47 @@
         return [rows.length + " rows", from(0), from(2), from(3), from(4)];
       },
       ["4 rows", "3", "4", "6", "null"]
+    ],
+    [
+      "a context's label and tags kept: posted, its tags as words, in lowercase, once each; then the index's facts asked for anew, once more if a request was out; one that can't be kept, the page says why",
+      function () {
+        var keepable = [
+          ["+", "Page", { title: "Contexts" }],
+          ["+", "Context", { id: "a", title: "One", model: "m", turns: 2, lines: 30, size: "3 KB", changed: "now", rank: 0, to: "/a", label: "", tags: "old", keep: "/roots/a" }]
+        ];
+        var posted = [];
+        var answers = [null, null, "400 Bad Request"];
+        var it = page({
+          grow: null,
+          post: function (url, value, done) {
+            posted.push(url + " " + JSON.stringify(value));
+            done(answers.shift());
+          }
+        });
+        answer(it, "/f/page", null, keepable);
+        var save = function (tags) {
+          it.view.send(["Edit", "a"]);
+          if (tags !== null) {
+            it.view.send(["Edited", ["TagsField", "a"], tags]);
+          }
+          it.view.send(["Save", "a"]);
+        };
+        save("UI, glui ui");
+        save(null); // while the facts are asked for anew
+        var asked = it.asked.length;
+        answer(it, "/f/page", null, keepable);
+        save("Not a tag!");
+        return posted.concat(asked + " asked", it.asked.length + " asked", wrong(it) + " wrong", it.said.slice(-1));
+      },
+      [
+        '/roots/a {"label":"","tags":["ui","glui"]}',
+        '/roots/a {"label":"","tags":["old"]}',
+        '/roots/a {"label":"","tags":["not","a","tag!"]}',
+        "2 asked",
+        "3 asked",
+        "1 wrong",
+        "wrong: couldn't keep the label and tags: 400 Bad Request"
+      ]
     ],
     [
       "an assistant's messages as Markdown writes them, as the bar says, from the start",

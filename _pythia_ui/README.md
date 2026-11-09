@@ -317,50 +317,53 @@ root contexts, and one context's log, a page each. Its host is the glui view
 of pythia's node server (`pythia/interaction/node/view.py` in pythia), at
 `/TOKEN/lem/`. It sends a page's facts: `Context` for each context, with the
 label that it's given, if any, which the index shows in a column of its own,
-and a `Tagged` for each of its tags; and, for each remote node whose roots the
-index shows after this node's, a `Node`, which says how many it has, or why it
-can't be reached, and dims its row, before its roots, by ids of their own, as
-`NAME/ID`; or, for a log, its length, `Length`, a `Turn` for each turn, with
-the line where it starts, and the log's last rows: a `Chunk`, the lines that
-they cover, and a row for each message, with its text, `Message`, and for each
-run of other items between two messages within a turn, with what's in it,
-`Run`. Before each context, in the index, and before a log's title, a dot
-(glui's `Dot`) says what the context is doing, as the host says (`Activity`):
-gray, no CLI runs on it; green, a CLI works on a turn; yellow, a CLI waits,
-for input, a login or icron; orange, it retries a model request that failed;
-red, its last turn failed, or its CLI stopped in the middle of one. An
-assistant's messages show as Markdown writes them, as the host says
-(`Formatting`), and a user's as written. A log's page shows its rows in order,
-each turn marked where it starts, and each run folded. As either end of the
-rows comes near the screen, the program sends `LoadBefore(line)` or
-`LoadAfter(line)` (glem's `Near`), and the host answers with another chunk, or
-with `EarlierFailed` or `LaterFailed`; so a page holds what's been scrolled
-through. As a log grows, the host says its new `Length`, in place of the last,
-and the turns that changed; the program then asks for the later rows as it
-does for others, and the run that the log ended with comes whole, with its new
-items, if it went on. A run's items come when it's first opened: the program
-sends `LoadRun(run)`, and the host answers with `RunLoaded(run)` and an `Item`
-for each, or with `RunFailed(run, why)`. The host's `Opening(open)` opens
-every run, or folds them all, through glui's `Entry`'s `open`, and each still
-opens and folds alone; a run that's open asks for its items as it comes near
-the screen. A jump to a line (`Jump(line)`) asks for the rows around it
-(`LoadAround(line)`), opens the run that holds it, and brings its row into
-view (glem's `Reveal`); where the stretches of rows that came don't meet, a
-marker at either side asks for the rows between as it comes near the screen. A
-message, and an item, has a star (glui's `Entry`'s `star`), faint until it's
-set: setting or clearing it sends `Star(line, on)`, and the host sets or
-clears `Stars(line)`. A log's panel shows beside it as the host says
-(`Aside(shown)`), in a HUD: the lines starred, under their turns, as the host
-sends them (`Pin`), a starred answer with the user's messages that it answers;
-and the outline of the log's turns. A click on a pin jumps to its line, and
-one on a turn visits it (`Visit(turn)`): a jump to the line where it first
-shows that brings its mark into view, and opens nothing. Restoring a place
-(`Restore(line)`), as a page does where it was left, is a jump to the row that
-starts at a line, which opens nothing either, and brings the row to the top of
-the screen, unmarked. An item's body comes the same way, when its entry is
-first opened: the program sends `Load(line)`, and the host answers with `Body`
-facts, or `Failed(line, why)`. `lem/test/contexts_ticks.txt` and
-`contexts_dom.txt` test it.
+and a `Tagged` for each of its tags; with them, its tags as one text, and the
+URL that keeps them, by which its row has a ✎, which opens a row under it,
+with a field for its label and one for its tags, which Save, or Return, sends
+to the host (`KeepRoot(to, label, tags)`), and Cancel, or Escape, closes; and,
+for each remote node whose roots the index shows after this node's, a `Node`,
+which says how many it has, or why it can't be reached, and dims its row,
+before its roots, by ids of their own, as `NAME/ID`; or, for a log, its
+length, `Length`, a `Turn` for each turn, with the line where it starts, and
+the log's last rows: a `Chunk`, the lines that they cover, and a row for each
+message, with its text, `Message`, and for each run of other items between two
+messages within a turn, with what's in it, `Run`. Before each context, in the
+index, and before a log's title, a dot (glui's `Dot`) says what the context is
+doing, as the host says (`Activity`): gray, no CLI runs on it; green, a CLI
+works on a turn; yellow, a CLI waits, for input, a login or icron; orange, it
+retries a model request that failed; red, its last turn failed, or its CLI
+stopped in the middle of one. An assistant's messages show as Markdown writes
+them, as the host says (`Formatting`), and a user's as written. A log's page
+shows its rows in order, each turn marked where it starts, and each run
+folded. As either end of the rows comes near the screen, the program sends
+`LoadBefore(line)` or `LoadAfter(line)` (glem's `Near`), and the host answers
+with another chunk, or with `EarlierFailed` or `LaterFailed`; so a page holds
+what's been scrolled through. As a log grows, the host says its new `Length`,
+in place of the last, and the turns that changed; the program then asks for
+the later rows as it does for others, and the run that the log ended with
+comes whole, with its new items, if it went on. A run's items come when it's
+first opened: the program sends `LoadRun(run)`, and the host answers with
+`RunLoaded(run)` and an `Item` for each, or with `RunFailed(run, why)`. The
+host's `Opening(open)` opens every run, or folds them all, through glui's
+`Entry`'s `open`, and each still opens and folds alone; a run that's open asks
+for its items as it comes near the screen. A jump to a line (`Jump(line)`)
+asks for the rows around it (`LoadAround(line)`), opens the run that holds it,
+and brings its row into view (glem's `Reveal`); where the stretches of rows
+that came don't meet, a marker at either side asks for the rows between as it
+comes near the screen. A message, and an item, has a star (glui's `Entry`'s
+`star`), faint until it's set: setting or clearing it sends `Star(line, on)`,
+and the host sets or clears `Stars(line)`. A log's panel shows beside it as
+the host says (`Aside(shown)`), in a HUD: the lines starred, under their
+turns, as the host sends them (`Pin`), a starred answer with the user's
+messages that it answers; and the outline of the log's turns. A click on a pin
+jumps to its line, and one on a turn visits it (`Visit(turn)`): a jump to the
+line where it first shows that brings its mark into view, and opens nothing.
+Restoring a place (`Restore(line)`), as a page does where it was left, is a
+jump to the row that starts at a line, which opens nothing either, and brings
+the row to the top of the screen, unmarked. An item's body comes the same way,
+when its entry is first opened: the program sends `Load(line)`, and the host
+answers with `Body` facts, or `Failed(line, why)`.
+`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. The node server's pages
 show tabs: the index's, and one for each context that's open, each a runtime
@@ -379,19 +382,21 @@ items are, `data-run`, where an item's body is, `data-body`, each with
 `{line}` or `{run}`, where what the log gained since it had `{lines}` lines
 is, `data-grow`, where its stars are kept, `data-stars`, by the root's key,
 and where its panel's pins are, `data-pins`, which it asks for anew once a
-star is kept; the script fetches the program and the themes, compiled, from
-`web/compiled/`, which `make compiled` writes, and a test checks against the
-files they're compiled from. A log's page starts at its end, and keeps the
-first row on the screen in place as rows come, above it or below. Every few
-seconds while it shows, a page asks what changed: a log, what it gained; the
-index, its facts anew, whose difference from the last it applies. Its bar
-picks the look and the theme, and, for a log, whether its runs are folded or
-open, whether its panel shows, and how wide, as a drag on its edge makes it,
-and whether an assistant's messages show as Markdown or as written, which the
-node server keeps for the view, at `data-store`, and the browser too.
-`make web` writes a sample, an index and a log of 13,394 items, the most that
-one of pythia's contexts had when it was first written, in turns of 50, for
-two pages that show it as the node server's do:
+star is kept; it keeps a context's label and tags as `KeepRoot` says, the tags
+as words, in lowercase, and then asks for the index's facts anew; the script
+fetches the program and the themes, compiled, from `web/compiled/`, which
+`make compiled` writes, and a test checks against the files they're compiled
+from. A log's page starts at its end, and keeps the first row on the screen in
+place as rows come, above it or below. Every few seconds while it shows, a
+page asks what changed: a log, what it gained; the index, its facts anew,
+whose difference from the last it applies. Its bar picks the look and the
+theme, and, for a log, whether its runs are folded or open, whether its panel
+shows, and how wide, as a drag on its edge makes it, and whether an
+assistant's messages show as Markdown or as written, which the node server
+keeps for the view, at `data-store`, and the browser too. `make web` writes a
+sample, an index and a log of 13,394 items, the most that one of pythia's
+contexts had when it was first written, in turns of 50, for two pages that
+show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

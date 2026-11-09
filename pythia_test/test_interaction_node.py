@@ -1459,7 +1459,8 @@ class ViewTests(WorkspaceTest):
                                  "title": 'Fix the bug <script>alert(1)</script> & "quoted"',
                                  "model": "model-a", "turns": 4, "lines": 63,
                                  "size": pages.byte_count(log.stat().st_size),
-                                 "to": f"/{TOKEN}/lem/c/1", "label": ""})
+                                 "to": f"/{TOKEN}/lem/c/1", "label": "", "tags": "",
+                                 "keep": ""})  # no store, so no label nor tags to keep
         # The rest, by id: their order is their logs' last change, which may be the same.
         self.assertEqual(sorted((fact["id"], fact["title"], fact["model"], fact["to"])
                                 for fact in found.values()),
@@ -2037,8 +2038,9 @@ class GrowTests(unittest.TestCase):
         self.assertEqual(store.read("roots"), {KEY_A: {"label": "the bug", "tags": ["fix", "ui"]}})
         index = json.loads(get("lem/facts/").body)
         self.assertEqual(step_problems(json.loads(PROGRAM.read_text()), index), [])
-        self.assertEqual([fields["label"] for _, rel, fields in index if rel == "Context"],
-                         ["the bug"])
+        self.assertEqual([(fields["label"], fields["tags"], fields["keep"])
+                          for _, rel, fields in index if rel == "Context"],
+                         [("the bug", "fix ui", f"/{TOKEN}/lem/roots/1")])
         self.assertEqual([fields for _, rel, fields in index if rel == "Tagged"],
                          [{"id": "s (1)", "tag": "fix"}, {"id": "s (1)", "tag": "ui"}])
         # Its log's page, its facts' and its tab's, say its label after its name.
@@ -2058,8 +2060,8 @@ class GrowTests(unittest.TestCase):
         self.assertEqual(post("lem/roots/1", b'{"label": "", "tags": []}').status, 204)
         self.assertEqual(store.read("roots"), {})
         index = json.loads(get("lem/facts/").body)
-        self.assertEqual([(rel, fields.get("label")) for _, rel, fields in index
-                          if rel in ("Context", "Tagged")], [("Context", "")])
+        self.assertEqual([(rel, fields.get("label"), fields.get("tags")) for _, rel, fields in index
+                          if rel in ("Context", "Tagged")], [("Context", "", "")])
         self.assertEqual(json.loads(get("lem/tab/1").body)["title"], "s (1)")
 
     def test_pins_of_the_lines_starred_with_the_questions_that_an_answer_answers(self):

@@ -111,7 +111,10 @@ var contexts = (function () {
   //   o.post(url, value, done) sends it JSON, and calls done(null), or
   //   done(why): the program's Star(line, on) changes Stars on the page at
   //   once, and then in the server's store; one that can't be kept is
-  //   taken back, and the page says why;
+  //   taken back, and the page says why; and, for the index, the program's
+  //   KeepRoot(to, label, tags) sends a context's label and tags to `to`,
+  //   the tags as words, in lowercase, after which the page asks for its
+  //   facts anew, at once;
   // - o.recipes, if given, are the recipes that the view draws with, in
   //   place of glui's (glui.recipes);
   // - o.pins, for a log, is the URL of its panel's pins, which the page
@@ -158,6 +161,9 @@ var contexts = (function () {
     var facts = null;
     var asking = false;
     var live = true;
+    // Whether to ask what changed once more, as soon as the request that's
+    // out is back.
+    var soon = false;
     // The lines starred, as the page shows them (Stars); the panel's pins,
     // as they last came, by their text; whether a request for them is out;
     // and whether to ask again once it's back, as a star was kept meanwhile.
@@ -170,6 +176,10 @@ var contexts = (function () {
         effects.forEach(function (effect) {
           if (effect.name === "Star") {
             star(effect.fields.line, effect.fields.on);
+            return;
+          }
+          if (effect.name === "KeepRoot") {
+            keepRoot(effect.fields.to, effect.fields.label, effect.fields.tags);
             return;
           }
           var ask = asks[effect.name];
@@ -226,6 +236,35 @@ var contexts = (function () {
           pin();
         });
       }
+    }
+
+    // Keeps a context's label and tags at `url`, as KeepRoot gives them: the
+    // tags apart by spaces or commas, in lowercase, once each; then asks for
+    // the index's facts anew, at once. What can't be kept, the page says why.
+    function keepRoot(url, label, tags) {
+      if (!o.post) {
+        return;
+      }
+      var words = [];
+      tags
+        .toLowerCase()
+        .split(/[\s,]+/)
+        .forEach(function (word) {
+          if (word !== "" && words.indexOf(word) < 0) {
+            words.push(word);
+          }
+        });
+      o.post(url, { label: label, tags: words }, function (why) {
+        if (why !== null) {
+          status("couldn't keep the label and tags: " + why, true);
+          return;
+        }
+        if (asking) {
+          soon = true;
+        } else {
+          tick();
+        }
+      });
     }
 
     // Asks for the panel's pins anew, as a star was kept: one request at a
@@ -366,6 +405,10 @@ var contexts = (function () {
           length = lengthOf(steps, length);
         } else {
           facts = byText(steps);
+        }
+        if (soon) {
+          soon = false;
+          tick();
         }
       });
     }

@@ -32,11 +32,11 @@ line. After this node's roots, the index's facts hold each remote node's
 it can't be reached, then its roots, as its own index gives them, by ids of
 their own, as ``NAME/ID``, linking through this server. The index's facts give
 each of this node's roots its label and tags, as the store keeps them by its
-key, which a page sets at ``/TOKEN/lem/roots/N``; a log's title, and its
-tab's, end with its label. An item's label and gist are those of the server's
-plain pages, and its body holds what they show for it (``pages.Renderer``), as
-text, cut as they cut it. Every text is as pythia's terminal shows it, each
-character to escape as its code point.
+key, which a page sets at ``/TOKEN/lem/roots/N``, as each root's facts say; a
+log's title, and its tab's, end with its label. An item's label and gist are
+those of the server's plain pages, and its body holds what they show for it
+(``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
+terminal shows it, each character to escape as its code point.
 
 The view's pages have a content security policy of their own, which runs
 the server's scripts, styles and fetches, and nothing else; its facts,
@@ -450,7 +450,9 @@ class View:
                 "size": "?" if problem else byte_count(context.index.size),
                 "changed": "?" if problem else when(context.index.changed),
                 "rank": rank, "to": f"{pages.base}/lem/c/{quote(context.id)}",
-                "label": safe_text(given["label"])}])
+                "label": safe_text(given["label"]), "tags": " ".join(given["tags"]),
+                "keep": "" if self.store is None else
+                f"{pages.base}/lem/roots/{quote(context.id)}"}])
             steps.extend(["+", "Tagged", {"id": safe_text(context.label), "tag": tag}]
                          for tag in given["tags"])
             steps.append(self.activity_fact(context, problem))
@@ -465,7 +467,9 @@ class View:
     def remote_facts(listing, rank: int) -> list:
         """A remote node's row in the index, at ``rank``, then its roots, after it, as its own
         index gives them (``remote.listings``), by ids of their own, as ``NAME/ID``, and what
-        each is doing; what isn't a root of its, linking through it, isn't shown."""
+        each is doing; what isn't a root of its, linking through it, isn't shown. A root has
+        the label that its node gives it, but neither its tags nor a way to keep them, here,
+        until where they're kept is settled (decision 11 of the contexts view's plan)."""
         node = listing.remote
         roots, doing = listing.roots(), listing.doing()
         host = (node.hello or {}).get("host")
@@ -475,7 +479,8 @@ class View:
                                 "reached": listing.why is None, "to": f"{node.base}/lem/"}]]
         for fields in roots:
             rank += 1
-            steps.append(["+", "Context", {**fields, "id": f"{node.name}/{fields['id']}",
+            mine = {name: value for name, value in fields.items() if name not in ("tags", "keep")}
+            steps.append(["+", "Context", {**mine, "id": f"{node.name}/{fields['id']}",
                                            "rank": rank}])
             if fields["id"] in doing:
                 steps.append(["+", "Activity", {**doing[fields["id"]],

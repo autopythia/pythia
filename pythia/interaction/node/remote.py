@@ -49,7 +49,7 @@ SAID = 20
 # and the fields that a root may have too, as a node of a later version gives them.
 ROOT = {"id": str, "title": str, "model": str, "turns": int, "lines": int, "size": str,
         "changed": str, "rank": int, "to": str}
-ROOT_TOO = {"label": str}
+ROOT_TOO = {"label": str, "tags": str, "keep": str}
 DOING = {"id": str, "hue": str, "why": str}
 HUES = frozenset((GRAY, GREEN, YELLOW, ORANGE, RED))
 
