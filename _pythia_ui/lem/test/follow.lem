@@ -122,3 +122,27 @@ input V(n: Int, m: Int)
 input W(n: Int, m: Int)
 rel R3(n: Int)
 R3(n) :- D(n), V(n, m), W(n, k)
+-- Lone's Mark(m) has a variable that appears nowhere else in its rule, as a
+-- block's condition often has: each of Each's facts derives Lone once for
+-- each of Mark's. A change that leaves how many facts Mark has, such as one
+-- replaced by another, changes none of Lone's counts and has nothing to
+-- follow, even as Each changes too; one that makes them more or fewer does.
+input Each(n: Int)
+input Mark(m: Int)
+rel Lone(n: Int)
+Lone(n) :- Each(n), Mark(m)
+-- An atom that shares a variable only with a negation, a comparison or a
+-- binding isn't alone: as a mark is replaced, Unbanned's Mark(m), Under's and
+-- Next's match other facts, which those parts take or refuse. Nor is one
+-- with an expression, which a fact may match or not by its value: Paired's
+-- Pair(m, 1 + 1).
+input Banned(m: Int)
+input Pair(m: Int, k: Int)
+rel Unbanned(n: Int)
+Unbanned(n) :- Each(n), Mark(m), not Banned(m)
+rel Under(n: Int)
+Under(n) :- Each(n), Mark(m), m < 5
+rel Next(n: Int, k: Int)
+Next(n, k) :- Each(n), Mark(m), k = m + 1
+rel Paired(n: Int)
+Paired(n) :- Each(n), Pair(m, 1 + 1)

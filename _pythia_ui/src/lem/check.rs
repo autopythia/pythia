@@ -1711,7 +1711,7 @@ fn pat_needs(pat: &Pat, out: &mut Vec<usize>) {
 }
 
 /// The variables that an expression uses.
-fn expr_vars(e: &Expr, out: &mut Vec<usize>) {
+pub(super) fn expr_vars(e: &Expr, out: &mut Vec<usize>) {
   match e {
     Expr::Var(v) => out.push(*v),
     Expr::Const(_) => {}

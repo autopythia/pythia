@@ -52,7 +52,9 @@
 //! results are the same, so the runtimes agree; only an error in an atom's
 //! expression may come at another step.
 
-use super::check::{Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Rule, Test, MAX_ATOMS};
+use super::check::{
+  expr_vars, Atom, Change, DeclKind, Expr, Lit, Op, Pat, Program, Rule, Test, MAX_ATOMS,
+};
 use super::parse::Cmp;
 use super::value::{int_fits, Ty, Value, MAX_INT};
 use std::cell::{Cell, RefCell};
@@ -617,9 +619,11 @@ pub struct Runtime {
   /// For each rule, of a component that isn't recursive, how many ways it
   /// derives each fact, as its component last ran ([`Runtime::follow`]);
   /// and for each of its atoms, whether a tick follows a change to that
-  /// atom's relation alone ([`followed`]).
+  /// atom's relation alone ([`followed`]); and whether it's an atom whose
+  /// variables appear nowhere else in the rule ([`alone`]).
   counts: Vec<HashMap<Tuple, u64>>,
   followed: Vec<Vec<bool>>,
+  alone: Vec<Vec<bool>>,
   /// Whether the next tick derives every relation anew ([`Runtime::forget`]).
   anew: bool,
 }
@@ -634,6 +638,7 @@ impl Runtime {
     let held = vec![None; prog.rels.len()];
     let counts = vec![HashMap::new(); prog.rules.len()];
     let followed = prog.rules.iter().map(followed).collect();
+    let alone = prog.rules.iter().map(alone).collect();
     Runtime {
       prog,
       tables,
@@ -645,6 +650,7 @@ impl Runtime {
       held,
       counts,
       followed,
+      alone,
       anew: false,
     }
   }
@@ -1249,7 +1255,7 @@ impl Runtime {
       let (Lit::Atom(atom) | Lit::Not(atom)) = lit else {
         continue;
       };
-      if self.log(atom.rel).changed() && !self.unchanged(atom) {
+      if self.log(atom.rel).changed() && !self.unchanged(atom, self.alone[r][i]) {
         match lit {
           Lit::Atom(_) if self.followed[r][i] => places.push(i),
           _ => return Plan::Whole,
@@ -1269,13 +1275,25 @@ impl Runtime {
   /// test, which binds no variable ([`fixed`]), when it holds as it did. A
   /// test of `_` alone, such as a block's condition `Turn()` gives, holds
   /// while its relation has facts; any other holds before and after when
-  /// facts that it matches both came and went. Else it counts as changed.
-  fn unchanged(&self, atom: &Atom) -> bool {
+  /// facts that it matches both came and went. An atom whose variables
+  /// appear nowhere else in its rule (`alone`) counts each solution once for
+  /// each fact that it matches, so it changes none when as many facts that
+  /// it matches came as went. Else it counts as changed.
+  fn unchanged(&self, atom: &Atom, alone: bool) -> bool {
     let log = self.log(atom.rel);
     let any_match = |facts: &Ordered<()>| facts.iter().any(|(t, _)| could_match(&atom.pats, t));
     let (came, went) = (any_match(&log.came), any_match(&log.went));
     if !came && !went {
       return true;
+    }
+    if alone {
+      let matches = |facts: &Ordered<()>| {
+        facts
+          .iter()
+          .filter(|(t, _)| could_match(&atom.pats, t))
+          .count()
+      };
+      return matches(&log.came) == matches(&log.went);
     }
     if !atom.pats.iter().all(fixed) {
       return false;
@@ -1554,6 +1572,72 @@ fn followed(rule: &Rule) -> Vec<bool> {
     .collect();
   let counts = (ok.iter().zip(&vars)).all(|(&yes, vs)| yes || vs.is_empty());
   ok.into_iter().map(|yes| counts && yes).collect()
+}
+
+/// For each part of a rule's body, whether it's an atom that has a variable,
+/// and no expression, and whose variables appear nowhere else in the rule:
+/// not in its head, nor in another part. Each solution of the rest of the
+/// body is then a solution once for each fact that the atom matches, which
+/// [`Runtime::unchanged`] uses. A block's condition, which every rule inside
+/// it gets, is often one, as `Opens(o)` is in a rule that doesn't use `o`.
+fn alone(rule: &Rule) -> Vec<bool> {
+  let uses: Vec<Vec<usize>> = (rule.body.iter())
+    .map(|lit| {
+      let mut out = Vec::new();
+      match lit {
+        Lit::Atom(atom) | Lit::Not(atom) => {
+          atom.pats.iter().for_each(|pat| pat_uses(pat, &mut out))
+        }
+        Lit::Let(v, e) => {
+          out.push(*v);
+          expr_vars(e, &mut out);
+        }
+        Lit::Test(t) | Lit::NotTest(t) => {
+          let (Test::Eq(a, b) | Test::Ne(a, b) | Test::Cmp(_, a, b)) = t;
+          expr_vars(a, &mut out);
+          expr_vars(b, &mut out);
+        }
+      }
+      out
+    })
+    .collect();
+  let mut head = Vec::new();
+  rule.args.iter().for_each(|e| expr_vars(e, &mut head));
+  let elsewhere = |i: usize, v: &usize| {
+    head.contains(v) || (uses.iter().enumerate()).any(|(j, u)| j != i && u.contains(v))
+  };
+  (rule.body.iter().enumerate())
+    .map(|(i, lit)| match lit {
+      Lit::Atom(atom) => {
+        !uses[i].is_empty()
+          && atom.pats.iter().all(plain)
+          && !uses[i].iter().any(|v| elsewhere(i, v))
+      }
+      _ => false,
+    })
+    .collect()
+}
+
+/// The variables that a pattern uses: those that it binds, and those of its
+/// expressions.
+fn pat_uses(pat: &Pat, out: &mut Vec<usize>) {
+  match pat {
+    Pat::Var(v) => out.push(*v),
+    Pat::Ctor(_, pats) => pats.iter().for_each(|pat| pat_uses(pat, out)),
+    Pat::Expr(e) => expr_vars(e, out),
+    Pat::Any | Pat::Const(_) => {}
+  }
+}
+
+/// Whether a pattern has no expression, so that [`could_match`] tells
+/// exactly which facts it matches, given that no other part of the body
+/// binds its variables.
+fn plain(pat: &Pat) -> bool {
+  match pat {
+    Pat::Expr(_) => false,
+    Pat::Ctor(_, pats) => pats.iter().all(plain),
+    Pat::Any | Pat::Var(_) | Pat::Const(_) => true,
+  }
 }
 
 /// What each component's rules read, as atoms or negations: the relations of

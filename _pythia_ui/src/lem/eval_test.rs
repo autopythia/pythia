@@ -313,6 +313,34 @@ fn a_rule_follows_two_changes_at_once() {
 }
 
 #[test]
+fn an_atom_alone_changes_nothing_while_it_matches_as_many_facts() {
+  // L's M(m) has a variable that appears nowhere else in the rule: each of
+  // A's facts derives L once for each of M's. A tick that replaces M's fact
+  // leaves how many facts M has, and so L's counts, as they were, and visits
+  // nothing; one that adds a second visits it and each of A's facts.
+  let src = "input A(n: Int)\ninput M(m: Int)\nrel L(n: Int)\nL(n) :- A(n), M(m)\n";
+  let prog = load(&[("alone.lem", src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let mut runtime = Runtime::new(prog);
+  for i in 0..1000 {
+    runtime.assert(&format!("A({i})")).unwrap();
+  }
+  runtime.assert("M(1)").unwrap();
+  runtime.tick(None).unwrap();
+  assert!(runtime.retract("M(1)").unwrap());
+  runtime.assert("M(2)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 0);
+  assert_eq!(runtime.facts("L").len(), 1000);
+  runtime.assert("M(3)").unwrap();
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.visits(), 1001);
+  assert!(runtime.retract("M(2)").unwrap());
+  assert!(runtime.retract("M(3)").unwrap());
+  runtime.tick(None).unwrap();
+  assert_eq!(runtime.facts("L").len(), 0);
+}
+
+#[test]
 fn a_key_that_doesnt_hold_fails_each_tick_until_it_does() {
   // Keys are checked only where a relation has changed since they last
   // held: a relation whose keys didn't hold is checked again, though

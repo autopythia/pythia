@@ -467,3 +467,104 @@ AB(40)
 ---
 AB(2)
 AB(20)
+
+=== Each(1), Each(2) and Mark(1): Lone(1) and Lone(2), each by one
++ Each(1)
++ Each(2)
++ Mark(1)
+? Lone
+---
+Lone(1)
+Lone(2)
+
+=== Mark(1) replaced by Mark(2): as many marks, so Lone has nothing to follow
+- Mark(1)
++ Mark(2)
+? Lone
+---
+Lone(1)
+Lone(2)
+
+=== a second mark: Lone's counts double, and its facts stay
++ Mark(3)
+? Lone
+---
+Lone(1)
+Lone(2)
+
+=== Mark(3) replaced by Mark(4) as Each(3) comes: Lone(3), by two
+- Mark(3)
++ Mark(4)
++ Each(3)
+? Lone
+---
+Lone(1)
+Lone(2)
+Lone(3)
+
+=== Mark(5) comes as Mark(2) and Mark(4) go: one mark, so each Lone by one
+- Mark(2)
+- Mark(4)
++ Mark(5)
+? Lone
+---
+Lone(1)
+Lone(2)
+Lone(3)
+
+=== the mark goes: Lone goes, every fact of it
+- Mark(5)
+? Lone
+---
+(nothing to show)
+
+=== Mark(3) and Banned(6): Lone again, and Unbanned, Under and Next for each
++ Mark(3)
++ Banned(6)
+? Lone
+? Unbanned
+? Under
+? Next
+---
+Lone(1)
+Lone(2)
+Lone(3)
+Unbanned(1)
+Unbanned(2)
+Unbanned(3)
+Under(1)
+Under(2)
+Under(3)
+Next(1, 4)
+Next(2, 4)
+Next(3, 4)
+
+=== Mark(3) replaced by Mark(6), banned and not under 5: Unbanned and Under go, and Next changes
+- Mark(3)
++ Mark(6)
+? Lone
+? Unbanned
+? Under
+? Next
+---
+Lone(1)
+Lone(2)
+Lone(3)
+Next(1, 7)
+Next(2, 7)
+Next(3, 7)
+
+=== Pair(1, 2), which Paired's Pair(m, 1 + 1) matches: Paired for each
++ Pair(1, 2)
+? Paired
+---
+Paired(1)
+Paired(2)
+Paired(3)
+
+=== Pair(1, 2) replaced by Pair(1, 3), which it doesn't match: Paired goes
+- Pair(1, 2)
++ Pair(1, 3)
+? Paired
+---
+(nothing to show)

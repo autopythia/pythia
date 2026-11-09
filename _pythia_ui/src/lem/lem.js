@@ -966,12 +966,14 @@ var lem = (function () {
     });
     // For each rule, of a component that isn't recursive, how many ways it
     // derives each fact, as its component last ran, by the fact's key, each
-    // as {tuple, n} (follow); and for each of its atoms, whether a tick
-    // follows a change to that atom's relation alone (followed).
+    // as {tuple, n} (follow); for each of its atoms, whether a tick follows
+    // a change to that atom's relation alone (followed); and whether it's an
+    // atom whose variables appear nowhere else in the rule (alone).
     this.counts = prog.rules.map(function () {
       return null;
     });
     this.followed = prog.rules.map(followed);
+    this.alone = prog.rules.map(alone);
     // Whether the next tick derives every relation anew (forget).
     this.anew = false;
     // What the last tick changed, by relation, and how many ticks have
@@ -1050,6 +1052,18 @@ var lem = (function () {
     return true;
   }
 
+  // How many of the facts that came, or went, in a log (Log), could match an
+  // atom's patterns (couldMatch).
+  function countMatches(pats, facts) {
+    var n = 0;
+    facts.forEach(function (tuple) {
+      if (couldMatch(pats, tuple)) {
+        n++;
+      }
+    });
+    return n;
+  }
+
   // Whether one of the facts that came, or went, in a log (Log), could
   // match an atom's patterns (couldMatch).
   function anyMatch(pats, facts) {
@@ -1099,6 +1113,111 @@ var lem = (function () {
     return ok.map(function (yes) {
       return counts && yes;
     });
+  }
+
+  // For each part of a rule's body, whether it's an atom that has a
+  // variable, and no expression, and whose variables appear nowhere else in
+  // the rule: not in its head, nor in another part. Each solution of the
+  // rest of the body is then a solution once for each fact that the atom
+  // matches, which Runtime.unchanged uses. A block's condition, which every
+  // rule inside it gets, is often one, as `Opens(o)` is in a rule that
+  // doesn't use `o`.
+  function alone(rule) {
+    var uses = rule.body.map(function (lit) {
+      var out = [];
+      switch (lit.tag) {
+        case "atom":
+        case "not":
+          lit.pats.forEach(function (pat) {
+            patUses(pat, out);
+          });
+          break;
+        case "let":
+          out.push(lit.v);
+          exprVars(lit.e, out);
+          break;
+        default:
+          exprVars(lit.a, out);
+          exprVars(lit.b, out);
+      }
+      return out;
+    });
+    var head = [];
+    rule.args.forEach(function (e) {
+      exprVars(e, head);
+    });
+    function elsewhere(i, v) {
+      return (
+        head.indexOf(v) >= 0 ||
+        uses.some(function (u, j) {
+          return j !== i && u.indexOf(v) >= 0;
+        })
+      );
+    }
+    return rule.body.map(function (lit, i) {
+      return (
+        lit.tag === "atom" &&
+        uses[i].length > 0 &&
+        lit.pats.every(plain) &&
+        !uses[i].some(function (v) {
+          return elsewhere(i, v);
+        })
+      );
+    });
+  }
+
+  // The variables that a pattern uses: those that it binds, and those of its
+  // expressions.
+  function patUses(pat, out) {
+    switch (pat[0]) {
+      case "var":
+        out.push(pat[1]);
+        return;
+      case "ctor":
+        pat[2].forEach(function (p) {
+          patUses(p, out);
+        });
+        return;
+      case "expr":
+        exprVars(pat[1], out);
+    }
+  }
+
+  // The variables that an expression uses.
+  function exprVars(e, out) {
+    switch (e[0]) {
+      case "var":
+        out.push(e[1]);
+        return;
+      case "ctor":
+        e[2].forEach(function (a) {
+          exprVars(a, out);
+        });
+        return;
+      case "neg":
+      case "num":
+        exprVars(e[1], out);
+        return;
+      case "arith":
+        exprVars(e[3], out);
+        exprVars(e[4], out);
+        return;
+      case "text":
+        exprVars(e[2], out);
+    }
+  }
+
+  // Whether a pattern has no expression, so that couldMatch tells exactly
+  // which facts it matches, given that no other part of the body binds its
+  // variables.
+  function plain(pat) {
+    switch (pat[0]) {
+      case "expr":
+        return false;
+      case "ctor":
+        return pat[2].every(plain);
+    }
+    return true;
   }
 
   // What each component's rules read, as atoms or negations: the relations
@@ -1769,7 +1888,7 @@ var lem = (function () {
     for (var i = 0; i < body.length; i++) {
       var lit = body[i];
       var reads = lit.tag === "atom" || lit.tag === "not";
-      if (reads && this.tables[lit.rel].log.changed() && !this.unchanged(lit)) {
+      if (reads && this.tables[lit.rel].log.changed() && !this.unchanged(lit, this.alone[r][i])) {
         if (lit.tag !== "atom" || !this.followed[r][i]) {
           return -1;
         }
@@ -1786,14 +1905,20 @@ var lem = (function () {
   // variable (fixed), when it holds as it did. A test of `_` alone, such as
   // a block's condition `Turn()` gives, holds while its relation has facts;
   // any other holds before and after when facts that it matches both came
-  // and went. Else it counts as changed.
-  Runtime.prototype.unchanged = function (lit) {
+  // and went. An atom whose variables appear nowhere else in its rule
+  // (`alone`) counts each solution once for each fact that it matches, so
+  // it changes none when as many facts that it matches came as went. Else it
+  // counts as changed.
+  Runtime.prototype.unchanged = function (lit, alone) {
     var table = this.tables[lit.rel];
     var log = table.log;
     var came = anyMatch(lit.pats, log.came);
     var went = anyMatch(lit.pats, log.went);
     if (!came && !went) {
       return true;
+    }
+    if (alone) {
+      return countMatches(lit.pats, log.came) === countMatches(lit.pats, log.went);
     }
     if (!lit.pats.every(fixed)) {
       return false;
