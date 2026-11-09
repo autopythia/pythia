@@ -57,7 +57,9 @@ TagCount(t, text(n) + " contexts") :- Tag(t, _, n), n /= 1
 
 -- Setting a context's label and tags, in the index: its ✎ opens a row
 -- under its own, with a field for its label and one for its tags, and Save
--- and Cancel; Return in the row saves, and Escape cancels. Its fields start
+-- and Cancel; Return in either field saves, and Escape cancels (by the
+-- fields themselves: glem's Within, which a rule that reads it derives for
+-- every widget, would cost every tick of a long log). Its fields start
 -- from what the host says, and keep what's typed in them, until the row
 -- closes, and they with it (glem's state goes with its widget). Saving
 -- sends what's in them to the host, with the URL that keeps them
@@ -349,8 +351,10 @@ on Visit(t):
   Jumped(l, 1, AtTurn) :- Turn(t, _, _, l), not Jumped()
   LoadAround(l) :- Turn(t, _, _, l)
 
-Key(Return, msg=Save(c)) :- Editing(_, c), Focused(f), Within(f, Editor(c))
-Key(Escape, msg=Cancel(c)) :- Editing(_, c), Focused(f), Within(f, Editor(c))
+Key(Return, msg=Save(c)) :- Editing(_, c), Focused(LabelField(c))
+Key(Return, msg=Save(c)) :- Editing(_, c), Focused(TagsField(c))
+Key(Escape, msg=Cancel(c)) :- Editing(_, c), Focused(LabelField(c))
+Key(Escape, msg=Cancel(c)) :- Editing(_, c), Focused(TagsField(c))
 Tooltip(EditCell(g, c), text="its label and tags") :- Placed(g, c, _), Context(id=c, keep=k), k /= ""
 Tooltip(LabelField(c), text="its label") :- Editing(_, c)
 Tooltip(TagsField(c), text="its tags, apart by spaces") :- Editing(_, c)

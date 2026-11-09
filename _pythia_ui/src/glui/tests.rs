@@ -126,6 +126,34 @@ fn the_programs_keep_their_keys() {
 }
 
 #[test]
+fn the_contexts_read_no_closure_of_the_widget_tree() {
+  // glem's Within, the closure of Parent, is derived only for a program
+  // that reads it; read, it's derived anew, for every widget of a page, as
+  // the tree changes, which costs each tick of a long log tens of
+  // milliseconds (tools/contexts_bench.js).
+  let (_, file, text) = THEMES[0];
+  let prog = program((file, text), &["contexts.lem"]).lem;
+  let within = prog
+    .rels
+    .iter()
+    .position(|rel| &*rel.name == "Within")
+    .unwrap();
+  let readers: Vec<&str> = (prog.rules.iter())
+    .filter(|rule| rule.head != within)
+    .filter(|rule| {
+      rule.body.iter().any(|lit| match lit {
+        crate::lem::check::Lit::Atom(atom) | crate::lem::check::Lit::Not(atom) => {
+          atom.rel == within
+        }
+        _ => false,
+      })
+    })
+    .map(|rule| &*rule.place)
+    .collect();
+  assert_eq!(readers, Vec::<&str>::new());
+}
+
+#[test]
 fn the_approval_hud_ticks_as_written_in_every_theme() {
   for (_, file, text) in THEMES {
     let mut runtime = runtime((file, text), &["host.lem", "approval.lem"]);
