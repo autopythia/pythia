@@ -291,16 +291,16 @@ class View:
               grow: Optional[str] = None, plain: Optional[str] = None) -> Response:
         """A page of the view: the URLs of its facts, its rows before a line and after one
         (``rows``, with ``{way}`` for ``before`` or ``after``), its runs' items, its bodies,
-        and what its log gained since it had ``{lines}`` lines (``grow``); what it loads;
-        and, for a browser without script, a link to the same in the plain pages,
-        ``plain``."""
+        and what its log gained since it had ``{lines}`` lines (``grow``); the settings
+        that the server keeps for the view (``store.py``); what it loads; and, for a browser
+        without script, a link to the same in the plain pages, ``plain``."""
         missing = self.files.missing()
         if missing:
             return pages.not_found(f"The glui view needs files that aren't in "
                                    f"{shown_path(self.files.directory)}/: "
                                    f"{', '.join(missing)}.")
         files = f"{pages.base}/lem/files/"
-        data = f' data-facts="{h(facts)}"'
+        data = f' data-facts="{h(facts)}" data-store="{h(pages.base)}/lem/store/session"'
         if rows is not None:
             data += "".join(f' data-{way}="{h(rows.replace("{way}", way))}"'
                             for way in ("before", "after"))

@@ -1,10 +1,15 @@
-"""The node server's HTTP server: on 127.0.0.1 only, behind a token, and read-only.
+"""The node server's HTTP server: on 127.0.0.1 only, behind a token, and reading only,
+but for its view's store.
 
 Every URL starts with the token, 32 random bytes made new for each run and
 compared in constant time; any other path is a plain 404. The Host header
 must name loopback (127.0.0.1, localhost or [::1]) at any port, so that a
 DNS-rebinding page can't name it while an SSH forward from another port
-still works. Only GET and HEAD are answered. Every response has
+still works. GET and HEAD are answered; and POST, which replaces a file of the
+glui view's store (``store.py``), at ``/TOKEN/lem/store/NAME`` alone, from a
+page of the server's own origin (its Origin header), with the header that
+only the view's scripts send (``STORE_HEADER``), as JSON of a few KB at
+most. Every response has
 ``nosniff``, ``no-store`` and ``no-referrer``, and a CSP: the plain pages'
 allows no script; the glui view's pages, under ``/TOKEN/lem/``, run the
 server's own scripts and styles, and its facts, bodies and files allow
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import gzip
 import hmac
+import json
 import re
 import secrets
 import socketserver
@@ -27,13 +33,14 @@ import sys
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 from .contexts import Roots
 from .pages import BadRequest, Pages, Response
+from .store import FILES, MAX_BYTES, Store
 from .styles import DEFAULT_STYLE, FIELD, NAME, Styles
-from .view import View
+from .view import DATA_CSP, View
 
 ADDRESS = "127.0.0.1"
 TOKEN_BYTES = 32
@@ -45,6 +52,10 @@ MAX_TARGET = 4096
 MAX_FIELDS = 8
 # A context's views, as query fields (pages.Pages.context); other pages take none.
 CONTEXT_FIELDS = frozenset(("line", "lines", "turn", "page", "summary"))
+# The header that the glui view's scripts send with a write to its store, which a page
+# elsewhere can't send to this server without its leave (a CORS preflight, which it never
+# gives).
+STORE_HEADER = "X-Pythia-View"
 LOOPBACK_HOST = re.compile(r"(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?\Z",
                            re.IGNORECASE)
 # The plain pages' CSP, and the server's own answers': no script. The glui
@@ -95,20 +106,25 @@ class App:
 
     def __init__(self, roots: Roots, token: Optional[str] = None, *,
                  style: str = DEFAULT_STYLE, styles: Optional[Styles] = None,
-                 view: Optional[View] = None) -> None:
+                 view: Optional[View] = None, store: Optional[Store] = None) -> None:
         self.token = token or new_token()
         self._token = self.token.encode("ascii")
         self.pages = Pages(roots, self.token, style=style, styles=styles)
         self.view = View() if view is None else view
+        self.store = store
 
     @property
     def path(self) -> str:
         """The contexts page's path: the token, between slashes."""
         return f"/{self.token}/"
 
-    def respond(self, method: str, target: str, hosts: List[str]) -> Response:
+    def respond(self, method: str, target: str, hosts: List[str], *,
+                origins: Sequence[str] = (), marked: bool = False,
+                content_type: Optional[str] = None, body: Optional[bytes] = None) -> Response:
         """The response to ``method`` on ``target``, the request line's path as
-        http.server gives it (decoded as Latin-1), with ``hosts``, its Host headers."""
+        http.server gives it (decoded as Latin-1), with ``hosts``, its Host headers; and,
+        for a POST, ``origins``, its Origin headers, whether it has ``STORE_HEADER``, its
+        content type, and its body, or None if it was too long to read."""
         if len(hosts) != 1 or not LOOPBACK_HOST.match(hosts[0].strip()):
             return plain(403, "The node server answers requests to 127.0.0.1, localhost or "
                          "[::1] only.")
@@ -120,12 +136,21 @@ class App:
                  and not parts.netloc else "")
         if not hmac.compare_digest(given.encode("latin-1", "replace"), self._token):
             return plain(404, "Not found.")
+        rest = segments[2] if len(segments) > 2 else ""
+        stored = rest[len("lem/store/"):] if rest.startswith("lem/store/") else None
+        if method == "POST" and stored in FILES and not parts.query:
+            return self._keep(stored, hosts[0].strip(), origins, marked, content_type, body)
         if method not in ("GET", "HEAD"):
-            return plain(405, "The node server only reads: GET and HEAD.",
-                         (("Allow", "GET, HEAD"),))
+            return plain(405, "The node server reads, with GET and HEAD; it takes POST for its "
+                         "view's store alone.", (("Allow", "GET, HEAD"),))
         if len(segments) < 3:
             return Response(308, location=self.path)
-        rest = segments[2]
+        if stored is not None and not parts.query:
+            if stored not in FILES:
+                return plain(404, "The view's store has no such file.")
+            kept = {} if self.store is None else self.store.read(stored)
+            return Response(200, json.dumps(kept, sort_keys=True),
+                            content_type="application/json", csp=DATA_CSP)
         route, slash, name = rest.partition("/")
         if route == "lem" and not slash:
             return Response(308, location=f"{self.path}lem/")
@@ -152,6 +177,31 @@ class App:
         if route == "lem":
             return self.view.respond(pages, name)
         return pages.not_found("The node server has no such page.")
+
+    def _keep(self, name: str, host: str, origins: Sequence[str], marked: bool,
+              content_type: Optional[str], body: Optional[bytes]) -> Response:
+        """A POST that replaces file ``name`` of the view's store: from a page of the
+        server's own origin, the one that ``host``, the Host header, names, with
+        ``STORE_HEADER``; as JSON, which the store checks."""
+        if len(origins) != 1 or origins[0].strip().lower() != f"http://{host}".lower():
+            return plain(403, "The view's store takes POST from the node server's own pages "
+                         "only.")
+        if not marked:
+            return plain(403, "The view's store takes POST from the view's own scripts only.")
+        if (content_type or "").split(";")[0].strip().lower() != "application/json":
+            return plain(415, "The view's store takes JSON.")
+        if body is None or len(body) > MAX_BYTES:
+            return plain(413, f"The view's store takes {MAX_BYTES:,} bytes at most.")
+        if self.store is None:
+            return plain(404, "This node server keeps no store.")
+        try:
+            self.store.write(name, json.loads(body.decode("utf-8")))
+        except ValueError as exc:  # not JSON, not UTF-8, or not what the store keeps
+            return plain(400, f"The view's store doesn't keep that: {exc}")
+        except OSError as exc:
+            print(f"node: the view's store couldn't be written: {exc}", file=sys.stderr)
+            return plain(500, "The view's store couldn't be written.")
+        return Response(204, content_type="text/plain", csp=DATA_CSP)
 
     def _style(self, given: List[str]) -> str:
         """The style that a query's style fields name, else the server's."""
@@ -190,8 +240,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _answer(self) -> None:
         try:
+            post = self._post() if self.command == "POST" else {}
             response = self.server.app.respond(self.command, self.path,
-                                               self.headers.get_all("Host") or [])
+                                               self.headers.get_all("Host") or [], **post)
         except Exception as exc:
             print("node: a page failed:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
@@ -200,6 +251,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send(response)
 
     do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _answer
+
+    def _post(self) -> dict:
+        """What App.respond takes of a POST: its Origin headers, whether it has
+        STORE_HEADER, its content type, and its body, read only if it says how long it is,
+        and that's at most MAX_BYTES; else None."""
+        length = (self.headers.get("Content-Length") or "").strip()
+        body = None
+        if length.isdigit() and int(length) <= MAX_BYTES:
+            body = self.rfile.read(int(length))
+            body = body if len(body) == int(length) else None
+        return {"origins": self.headers.get_all("Origin") or [],
+                "marked": self.headers.get(STORE_HEADER) is not None,
+                "content_type": self.headers.get("Content-Type"), "body": body}
 
     def _send(self, response: Response) -> None:
         # Pages escape every lone surrogate (pages.h); the rest, such as an

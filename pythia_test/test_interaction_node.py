@@ -38,6 +38,8 @@ from pathlib import Path
 from unittest import mock
 
 from pythia.interaction.node import contexts, pages, server, styles, view
+from pythia.interaction.node.store import MAX_BYTES as MAX_STORE
+from pythia.interaction.node.store import Invalid, Store
 from pythia.interaction.node.__main__ import main
 from pythia.interaction.registry import Registry
 
@@ -394,8 +396,10 @@ JS_RUN = """
 """
 
 
-def request(port, path, *, method="GET", hosts=None, headers=()):
-    """(status, headers by lowercase name, body); ``hosts``: the Host headers to send."""
+def request(port, path, *, method="GET", hosts=None, headers=(), body=None):
+    """(status, headers by lowercase name, body); ``hosts``: the Host headers to send;
+    ``body``: bytes to send, after the headers, which say how long it is unless they say
+    so themselves."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     try:
         connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
@@ -403,7 +407,9 @@ def request(port, path, *, method="GET", hosts=None, headers=()):
             connection.putheader("Host", host)
         for name, value in headers:
             connection.putheader(name, value)
-        connection.endheaders()
+        if body is not None and not any(name.lower() == "content-length" for name, _ in headers):
+            connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders(body)
         response = connection.getresponse()
         body = response.read()
         return (response.status, {name.lower(): value for name, value in response.getheaders()},
@@ -1393,7 +1399,8 @@ class ViewTests(WorkspaceTest):
         # Nothing that its policy refuses: no script but those, no style in the page.
         self.assertEqual(index.body.count("<script"), len(view.SCRIPTS))
         self.assertNotRegex(index.body, r"<style|style=|javascript:")
-        for shown in (f'<html lang=en data-facts="/{TOKEN}/lem/facts/">',
+        for shown in (f'<html lang=en data-facts="/{TOKEN}/lem/facts/" '
+                      f'data-store="/{TOKEN}/lem/store/session">',
                       "<title>root contexts · node</title>",
                       f'<noscript><p>The glui view runs in JavaScript; <a href="/{TOKEN}/">the '
                       "plain pages</a> need none.</p></noscript>"):
@@ -1401,6 +1408,7 @@ class ViewTests(WorkspaceTest):
         log = self.get("lem/c/1")
         self.assertEqual((log.status, log.csp), (200, view.PAGE_CSP))
         for shown in (f'<html lang=en data-facts="/{TOKEN}/lem/facts/c/1" '
+                      f'data-store="/{TOKEN}/lem/store/session" '
                       f'data-before="/{TOKEN}/lem/rows/1/before/{{line}}" '
                       f'data-after="/{TOKEN}/lem/rows/1/after/{{line}}" '
                       f'data-run="/{TOKEN}/lem/run/1/{{run}}" '
@@ -1693,6 +1701,122 @@ class ViewTests(WorkspaceTest):
             "two Nav facts have the key [1]"])
 
 
+class StoreTests(unittest.TestCase):
+    """The glui view's store, which keeps its settings across the server's runs (store.py),
+    and the POST that writes it, from the view's own pages alone (server.py)."""
+
+    OWN = {"origins": ["http://127.0.0.1:8765"], "marked": True,
+           "content_type": "application/json"}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="node-store-"))
+        self.store = Store(self.tmp / "node")
+        self.app = server.App(contexts.Roots(self.tmp / "registry"), TOKEN, store=self.store)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def post(self, body, name="session", host="127.0.0.1:8765", **options):
+        sent = dict(self.OWN, body=body)
+        sent.update(options)
+        return self.app.respond("POST", f"/{TOKEN}/lem/store/{name}", [host], **sent)
+
+    def kept(self, name="session"):
+        response = self.app.respond("GET", f"/{TOKEN}/lem/store/{name}", ["127.0.0.1:8765"])
+        self.assertEqual((response.content_type, response.csp),
+                         ("application/json", view.DATA_CSP))
+        return response.status, json.loads(response.body) if response.status == 200 else None
+
+    def test_settings_kept_whole_and_read_back(self):
+        self.assertEqual(self.store.read("session"), {})  # nothing yet, nor a directory
+        self.assertFalse((self.tmp / "node").exists())
+        self.store.write("session", {"look": "log", "theme": "dark"})
+        self.store.write("session", {"look": "native"})  # replaced whole
+        self.assertEqual(self.store.read("session"), {"look": "native"})
+        self.assertEqual(os.listdir(self.tmp / "node"), ["session.json"])  # no temporary file
+        for value, why in (([], "the settings aren't an object"),
+                           ({f"s{n}": "x" for n in range(33)}, "more than 32 settings"),
+                           ({"Look": "log"}, "'Look'"), ({"look": 1}, "'look'"),
+                           ({"look": "a b"}, "'look'"), ({"look": "x" * 65}, "'look'")):
+            with self.assertRaisesRegex(Invalid, re.escape(why)):
+                self.store.write("session", value)
+        self.assertEqual(self.store.read("session"), {"look": "native"})
+        for data in (b"{not json", b'{"look": 1}', b"[]", b"{" + b" " * MAX_STORE + b"}",
+                     b'{"look": "log"}' + b" " * MAX_STORE):  # longer than it writes
+            (self.tmp / "node" / "session.json").write_bytes(data)
+            self.assertEqual(self.store.read("session"), {}, data[:20])
+
+    def test_a_write_that_fails_leaves_the_old_file(self):
+        self.store.write("session", {"look": "log"})
+        with mock.patch("os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.store.write("session", {"look": "native"})
+        self.assertEqual(self.store.read("session"), {"look": "log"})
+        self.assertEqual(os.listdir(self.tmp / "node"), ["session.json"])
+        with mock.patch("os.fsync", side_effect=OSError("disk full")), \
+                contextlib.redirect_stderr(io.StringIO()) as said:
+            response = self.post(b'{"look": "native"}')
+        self.assertEqual((response.status, response.body),
+                         (500, "The view's store couldn't be written.\n"))
+        self.assertEqual(said.getvalue(), "node: the view's store couldn't be written: disk full\n")
+
+    def test_a_post_from_the_views_own_page(self):
+        response = self.post(b'{"look": "native", "runs": "open"}')
+        self.assertEqual((response.status, response.body), (204, ""))
+        self.assertEqual(self.kept(), (200, {"look": "native", "runs": "open"}))
+        # Its own origin, as the Host header names it, any loopback name and port.
+        response = self.post(b'{"look": "log"}', host="LOCALHOST:9000",
+                             origins=["http://localhost:9000"])
+        self.assertEqual(response.status, 204)
+        self.assertEqual(self.kept(), (200, {"look": "log"}))
+
+    def test_what_the_store_refuses(self):
+        self.post(b'{"look": "native"}')
+        for options, status, why in (
+                ({"origins": []}, 403, "own pages"),
+                ({"origins": ["http://evil.example"]}, 403, "own pages"),
+                ({"origins": ["http://127.0.0.1:9999"]}, 403, "own pages"),
+                ({"origins": ["http://127.0.0.1:8765"] * 2}, 403, "own pages"),
+                ({"origins": ["null"]}, 403, "own pages"),
+                ({"marked": False}, 403, "own scripts"),
+                ({"content_type": "text/plain"}, 415, "JSON"),
+                ({"content_type": None}, 415, "JSON"),
+                ({"body": None}, 413, "bytes at most"),
+                ({"body": b"{not json"}, 400, "doesn't keep that"),
+                ({"body": b"\xff"}, 400, "doesn't keep that"),
+                ({"body": b'{"look": ["log"]}'}, 400, "isn't a name with a short word")):
+            sent = {"body": b'{"look": "log"}'}
+            sent.update(options)
+            response = self.post(**sent)
+            self.assertEqual(response.status, status, options)
+            self.assertIn(why, response.body, options)
+        self.assertEqual(self.kept(), (200, {"look": "native"}))  # as it was
+        for path, method, status in (("lem/store/other", "POST", 405),
+                                     ("lem/store/other", "GET", 404),
+                                     ("lem/store/session?x=1", "POST", 405),
+                                     ("lem/facts/", "POST", 405), ("", "POST", 405)):
+            response = self.app.respond(method, f"/{TOKEN}/{path}", ["127.0.0.1:8765"],
+                                        body=b"{}", **{k: v for k, v in self.OWN.items()})
+            self.assertEqual(response.status, status, (path, method))
+        self.assertEqual(self.app.respond("POST", "/lem/store/session", ["127.0.0.1:8765"],
+                                          body=b"{}", **self.OWN).status, 404)  # no token
+
+    def test_the_views_script_sends_what_the_store_asks_for(self):
+        script = (view.UI_DIRECTORY / "web" / "contexts.js").read_text()
+        self.assertIn(f'"{server.STORE_HEADER}": "1"', script)
+        self.assertIn('getAttribute("data-store")', script)
+        self.assertIn('"Content-Type": "application/json"', script)
+
+    def test_a_server_that_keeps_no_store(self):
+        app = server.App(contexts.Roots(self.tmp / "registry"), TOKEN)
+        response = app.respond("POST", f"/{TOKEN}/lem/store/session", ["127.0.0.1:8765"],
+                               body=b"{}", **self.OWN)
+        self.assertEqual((response.status, response.body), (404, "This node server keeps no "
+                                                            "store.\n"))
+        response = app.respond("GET", f"/{TOKEN}/lem/store/session", ["127.0.0.1:8765"])
+        self.assertEqual((response.status, response.body), (200, "{}"))
+
+
 class GrowTests(unittest.TestCase):
     """A log that grows, as a page of the glui view that asks what it gained sees it, from
     one server throughout (view.py)."""
@@ -1798,7 +1922,9 @@ class ServerTests(unittest.TestCase):
             bad = Path(os.fsdecode(bytes(cls.ws.saves) + b"/bad\xff._private"))
             write_log(bad / "context.jsonl", [init(KEY_J), *turn("Bad.")])
             assert registry.register(KEY_J, bad).number == 9
-        cls.server = server.Server(server.App(contexts.Roots(cls.ws.registry), TOKEN), 0)
+        cls.store = cls.ws.tmp / "store"
+        cls.server = server.Server(server.App(contexts.Roots(cls.ws.registry), TOKEN,
+                                              store=Store(cls.store)), 0)
         cls.port = cls.server.server_port
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -1832,6 +1958,28 @@ class ServerTests(unittest.TestCase):
             status, _, body = self.get(f"/{TOKEN}/", hosts=hosts)
             self.assertEqual(status, 403, hosts)
             self.assertNotIn(TOKEN.encode(), body)
+
+    def test_the_store_takes_post_from_the_views_own_pages(self):
+        path = f"/{TOKEN}/lem/store/session"
+        own = [("Origin", f"http://127.0.0.1:{self.port}"), (server.STORE_HEADER, "1"),
+               ("Content-Type", "application/json")]
+        status, headers, body = self.get(path, method="POST", headers=own,
+                                         body=b'{"look": "native"}')
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(headers["content-security-policy"], view.DATA_CSP)
+        self.assertEqual(json.loads(self.get(path)[2]), {"look": "native"})
+        self.assertEqual(stat.S_IMODE(os.stat(self.store / "session.json").st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.store).st_mode), 0o700)
+        # Too long, or not saying how long: refused unread.
+        for extra, sent in (([("Content-Length", str(MAX_STORE + 1))], b"{}"),
+                            ([("Content-Length", "x")], b"{}")):
+            status, _, _ = self.get(path, method="POST", headers=own + extra, body=sent)
+            self.assertEqual(status, 413, extra)
+        # Another page's: refused, whatever it sends.
+        for headers in ([("Origin", "http://evil.example"), *own[1:]], own[1:], own[::2]):
+            status, _, _ = self.get(path, method="POST", headers=headers, body=b"{}")
+            self.assertEqual(status, 403, headers)
+        self.assertEqual(json.loads(self.get(path)[2]), {"look": "native"})
 
     def test_only_get_and_head(self):
         for method in ("POST", "PUT", "DELETE", "PATCH", "OPTIONS"):

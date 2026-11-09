@@ -7,11 +7,14 @@
 // line and after one, `data-run`, the URL of a run's items, and
 // `data-body`, the URL of an item's body, each with `{line}` or `{run}` in
 // place of its line; and `data-grow`, the URL of what the log gained since it
-// had `{lines}` lines. The compiled program and glui's themes are beside
+// had `{lines}` lines; and, on each page, `data-store`, the URL of the
+// settings that the server keeps for the view (pythia/interaction/node/
+// store.py). The compiled program and glui's themes are beside
 // this script, in compiled/. It shows the page in glui's widgets
 // (src/glui/glui.js), in the look and the theme that its bar chooses,
-// which the browser remembers, from the log's end, with every run folded
-// or every run open, as the bar's Runs says (Opening); and it answers the
+// which the server keeps, and the browser too, from the log's end, with
+// every run folded or every run open, as the bar's Runs says (Opening); and
+// it answers the
 // program's LoadBefore(line) and LoadAfter(line) with rows, or with
 // EarlierFailed(line, why) or LaterFailed(line, why); its LoadRun(run)
 // with the run's items, or with RunFailed(run, why); and its Load(line)
@@ -294,19 +297,44 @@ var contexts = (function () {
     }
   }
 
-  // A choice that the browser remembers, if it lets the page: one of
-  // `choices`, else the first.
-  function remembered(name, choices) {
-    var value = null;
-    try {
-      value = window.localStorage.getItem("glui." + name);
-    } catch (e) {
-      value = null;
+  // Sends JSON to the server's store, with the header that only the view's
+  // scripts send (pythia/interaction/node/server.py): then done(null), or
+  // done(why) if it couldn't.
+  function keepIn(url, value, done) {
+    fetch(url, {
+      method: "POST",
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Pythia-View": "1" },
+      body: JSON.stringify(value)
+    }).then(
+      function (response) {
+        done(response.ok ? null : response.status + " " + response.statusText);
+      },
+      function (error) {
+        done(error instanceof Error ? error.message : String(error));
+      }
+    );
+  }
+
+  // A choice: `kept`, as the server's store keeps it, if it's one of
+  // `choices`; else as the browser remembers it, if it lets the page; else
+  // the first.
+  function remembered(name, choices, kept) {
+    var value = kept;
+    var known = function () {
+      return choices.some(function (choice) {
+        return choice[0] === value;
+      });
+    };
+    if (!known()) {
+      try {
+        value = window.localStorage.getItem("glui." + name);
+      } catch (e) {
+        value = null;
+      }
     }
-    var known = choices.some(function (choice) {
-      return choice[0] === value;
-    });
-    return known ? value : choices[0][0];
+    return known() ? value : choices[0][0];
   }
 
   function remember(name, value) {
@@ -337,9 +365,24 @@ var contexts = (function () {
     bar.appendChild(wrap);
   }
 
-  // The page: its bar, with the look's and the theme's menus and a line of
+  // The page: its settings, as the server's store keeps them, if it does;
+  // then its bar, with the look's and the theme's menus and a line of
   // status; and the view.
   function boot() {
+    var store = document.documentElement.getAttribute("data-store");
+    if (store === null) {
+      show({});
+      return;
+    }
+    get(store, function (why, kept) {
+      var plain = why === null && kept !== null && typeof kept === "object" && !Array.isArray(kept);
+      show(plain ? kept : {}, store);
+    });
+  }
+
+  // The page, with the settings that the store keeps (`kept`), and the URL
+  // that keeps them anew, if there's one.
+  function show(kept, store) {
     var html = document.documentElement;
     var bar = document.createElement("nav");
     var line = document.createElement("span");
@@ -368,28 +411,44 @@ var contexts = (function () {
         glui.paint(html, it.lem);
       });
     };
-    var chosen = { look: remembered("look", LOOKS), theme: remembered("theme", THEMES), runs: remembered("runs", RUNS) };
+    var chosen = {
+      look: remembered("look", LOOKS, kept.look),
+      theme: remembered("theme", THEMES, kept.theme),
+      runs: remembered("runs", RUNS, kept.runs)
+    };
+    // A setting that changed: the browser remembers it, and the server's
+    // store keeps them all.
+    var save = function (name, value) {
+      chosen[name] = value;
+      remember(name, value);
+      if (store !== undefined) {
+        keepIn(store, chosen, function (why) {
+          if (why !== null) {
+            status("couldn't keep the settings: " + why, true);
+          }
+        });
+      }
+    };
     // The view, once the program has come; and whether the page is a log.
     var shown = null;
     var log = html.getAttribute("data-run") !== null;
     menu(bar, "Look", LOOKS, chosen.look, function (value) {
-      remember("look", value);
+      save("look", value);
       look(value);
     });
     menu(bar, "Theme", THEMES, chosen.theme, function (value) {
-      remember("theme", value);
+      save("theme", value);
       theme(value);
     });
     if (log) {
       menu(bar, "Runs", RUNS, chosen.runs, function (value) {
-        remember("runs", value);
         if (shown !== null) {
           shown.update([
             ["-", "Opening", { open: chosen.runs === "open" }],
             ["+", "Opening", { open: value === "open" }]
           ]);
         }
-        chosen.runs = value;
+        save("runs", value);
       });
     }
     bar.appendChild(line);

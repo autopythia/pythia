@@ -329,10 +329,11 @@ files they're compiled from. A log's page starts at its end, and keeps what's
 on the screen in place as rows come above it. Every few seconds while it
 shows, a page asks what changed: a log, what it gained; the index, its facts
 anew, whose difference from the last it applies. Its bar picks the look and
-the theme, and, for a log, whether its runs are folded or open, which the
-browser remembers. `make web` writes a sample, an index and a log of 13,394
-items, the most that one of pythia's contexts had when it was first written,
-in turns of 50, for two pages that show it as the node server's do:
+the theme, and, for a log, whether its runs are folded or open, which the node
+server keeps for the view, at `data-store`, and the browser too. `make web`
+writes a sample, an index and a log of 13,394 items, the most that one of
+pythia's contexts had when it was first written, in turns of 50, for two pages
+that show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

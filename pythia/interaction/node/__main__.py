@@ -2,7 +2,9 @@
 
 The root contexts are those that the node's registry lists, wherever their
 saves are: ``--registry``, else ``$PYTHIA_REGISTRY``, else ``~/.pythia/root``,
-as the CLI finds it. A relative path is taken from the launch directory.
+as the CLI finds it. The glui view's settings are kept in ``--store``, else
+``~/.pythia/node``; ``--store none`` keeps nothing. A relative path is taken
+from the launch directory.
 """
 
 import argparse
@@ -16,6 +18,7 @@ from ..registry import abbreviate, registry_path, save_prefix_of
 from .contexts import Roots, shown_path
 from .pages import _KEY, absent_note, when
 from .server import ADDRESS, App, Server
+from .store import Store
 from .styles import DEFAULT_STYLE, Styles
 
 PROG = "python3 -m pythia.interaction.node"
@@ -34,11 +37,15 @@ def port_number(text: str) -> int:
     return port
 
 
+# Where the glui view keeps what it keeps, unless --store says otherwise.
+STORE = Path.home() / ".pythia" / "node"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
         description=("Serve this node's root contexts, those that its registry lists, as web "
-                     "pages, read-only, on 127.0.0.1."))
+                     "pages, read-only but for the view's store, on 127.0.0.1."))
     parser.add_argument("--registry", metavar="DIR", default=None, help=(
         "the registry whose root contexts to show, read and never written. A relative "
         "path is from the launch directory (default: $PYTHIA_REGISTRY, else "
@@ -52,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
         "the style that pages show in, unless their URL names another: log-dark, "
         "log-light, chat, or another in the server's css/. The menu at each page's top "
         "right switches (default: %(default)s)"))
+    parser.add_argument("--store", metavar="DIR", default=None, help=(
+        "where the glui view keeps what it keeps across the server's runs, such as its "
+        "settings, as a browser keeps its profile; 'none' keeps nothing. A relative path is "
+        "from the launch directory (default: ~/.pythia/node)"))
     return parser
 
 
@@ -147,8 +158,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         width = shutil.get_terminal_size((80, 24)).columns
         print(render_list(roots, width), flush=True)
         return 0
+    stored = Path(args.store).expanduser().absolute() if args.store else STORE
+    store = None if args.store == "none" else Store(stored)
     try:
-        server = Server(App(roots, style=args.style, styles=styles), args.port)
+        server = Server(App(roots, style=args.style, styles=styles, store=store), args.port)
     except OSError as exc:
         _error(f"can't serve on {ADDRESS}:{args.port}: {exc}; give another port with --port, "
                "or --port 0 for a free one.")
