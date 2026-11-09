@@ -1919,6 +1919,19 @@ class GrowTests(unittest.TestCase):
     def facts(steps, name):
         return [(step[0], fields) for step in steps for rel, fields in [step[1:]] if rel == name]
 
+    def test_a_message_shows_whole_up_to_its_cut(self):
+        text = " ".join(["word"] * 1200)  # 5,999 characters, past the plain pages' cut
+        self.append([message("assistant", text), sample(), SAMPLE_END])
+
+        def said():
+            return [fields["text"] for _, rel, fields in self.steps("lem/facts/c/1")
+                    if rel == "Message" and fields["text"].startswith("word")]
+
+        self.assertEqual(said(), [text])
+        with mock.patch.object(view, "MESSAGE_CUT", 1000):
+            self.assertEqual(said(), [text[:1000] + "\n\n\u2026 4,999 more characters: the "
+                                      "whole item is on its line's page."])
+
     def test_its_length_and_the_turns_that_changed(self):
         grow = self.grown()
         self.assertEqual(self.facts(self.steps("lem/facts/c/1"), "Length"), [("+", {"lines": 7})])

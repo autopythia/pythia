@@ -89,6 +89,10 @@ _WHOLE = re.compile(r"(?:0|[1-9][0-9]{0,11})\Z")
 # About how many rows a stretch of a log holds that the view sends at once:
 # it ends where a row ends.
 CHUNK_ROWS = 200
+# A message shows whole, but for one of more than this many characters, which
+# is cut there, and which its line's page shows whole; an item's body is cut
+# as the plain pages cut it.
+MESSAGE_CUT = 100_000
 # A run's summary names this many tools at most.
 SUMMARY_TOOLS = 3
 # The lines that are rows alone: a user's message, or the assistant's.
@@ -540,8 +544,9 @@ class View:
               found: List[Tuple[int, int]]) -> list:
         """The rows ``found`` (``spans``) of ``context``'s log, which cover lines ``low`` to
         ``high - 1``, from 0: a Chunk, those lines from 1; and a Message, with its text,
-        cut as the plain pages cut it, or a Run, with what's in it, for each row."""
-        renderer = pages._renderer(context, fold=frozenset())
+        whole, up to ``MESSAGE_CUT`` characters, or a Run, with what's in it, for each
+        row."""
+        renderer = pages._renderer(context, cut=MESSAGE_CUT, fold=frozenset())
         index = context.index
         steps: list = [["+", "Chunk", {"first": low + 1, "last": high}]]
         for first, last in found:

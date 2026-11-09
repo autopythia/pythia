@@ -59,13 +59,14 @@ cursor:pointer}
 .g-tab-close{opacity:.6}
 .g-tab-close:hover,.g-tab-close:focus-visible{opacity:1}
 
-/* A dot, a light of its hue, round wherever it is, as a table's cell too,
-   in colors that show on light stages and dark ones alike. */
-.g-dot{display:inline-flex;flex:none;align-items:center;justify-content:center;vertical-align:middle;
---g-hue:#8b949e;forced-color-adjust:none}
-.g-dot::before{content:"";flex:none;width:.7em;height:.7em;border-radius:50%;background:var(--g-hue);
-box-shadow:inset 0 0 0 1px rgba(0,0,0,.18)}
-.g-tablerow>.g-dot{vertical-align:middle}
+/* A dot, a light of its hue, round wherever it is, and a table's cell, as
+   its row's others, where it is one, in colors that show on light stages
+   and dark ones alike. */
+.g-dot{display:inline-block;flex:none;vertical-align:middle;line-height:1;--g-hue:#8b949e;
+forced-color-adjust:none}
+.g-dot::before{content:"";display:inline-block;vertical-align:middle;width:.7em;height:.7em;border-radius:50%;
+background:var(--g-hue);box-shadow:inset 0 0 0 1px rgba(0,0,0,.18)}
+.g-tablerow>.g-dot{display:table-cell;vertical-align:middle}
 .g-hue-green{--g-hue:#2ea043}
 .g-hue-yellow{--g-hue:#e6c419}
 .g-hue-orange{--g-hue:#db6d28}

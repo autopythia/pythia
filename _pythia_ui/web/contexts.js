@@ -35,10 +35,10 @@ var contexts = (function () {
   "use strict";
 
   // The looks and themes, each [name, what the bar calls it], the first the
-  // default, as the node server's plain pages are in Log dark.
+  // default.
   var LOOKS = [
-    ["log", "Log"],
-    ["native", "Native"]
+    ["native", "Native"],
+    ["log", "Log"]
   ];
   var THEMES = [
     ["dark", "dark"],
