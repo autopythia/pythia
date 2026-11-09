@@ -1467,6 +1467,21 @@ class ViewTests(WorkspaceTest):
                          [("old (2)", "Old question.", "", f"/{TOKEN}/lem/c/2"),
                           ("proj (3)", "Elsewhere.", "model-e", f"/{TOKEN}/lem/c/3")])
 
+    def test_the_tags_in_use_by_name_with_how_many_roots_have_each(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "node")
+            store.root(KEY_A, {"label": "", "tags": ["x", "b"]})
+            store.root(KEY_E, {"label": "", "tags": ["x"]})
+            app = server.App(contexts.Roots(self.ws.registry), TOKEN, store=store)
+            steps = json.loads(app.respond("GET", f"/{TOKEN}/lem/facts/", ["127.0.0.1"]).body)
+        self.assertEqual([fields for _, rel, fields in steps if rel == "Tag"],
+                         [{"name": "b", "rank": 0, "count": 1},
+                          {"name": "x", "rank": 1, "count": 2}])
+        self.assertEqual(sorted((fields["id"], fields["tag"]) for _, rel, fields in steps
+                                if rel == "Tagged"),
+                         [("local-0 (1)", "b"), ("local-0 (1)", "x"), ("proj (3)", "x")])
+        self.assertEqual(step_problems(json.loads(PROGRAM.read_text()), steps), [])
+
     def test_a_log(self):
         steps = self.steps("lem/facts/c/1")
         self.assertEqual(self.facts(steps, "Page"), [
@@ -2043,6 +2058,9 @@ class GrowTests(unittest.TestCase):
                          [("the bug", "fix ui", f"/{TOKEN}/lem/roots/1")])
         self.assertEqual([fields for _, rel, fields in index if rel == "Tagged"],
                          [{"id": "s (1)", "tag": "fix"}, {"id": "s (1)", "tag": "ui"}])
+        self.assertEqual([fields for _, rel, fields in index if rel == "Tag"],
+                         [{"name": "fix", "rank": 0, "count": 1},
+                          {"name": "ui", "rank": 1, "count": 1}])
         # Its log's page, its facts' and its tab's, say its label after its name.
         facts = json.loads(get("lem/facts/c/1").body)
         self.assertEqual([fields["title"] for _, rel, fields in facts if rel == "Page"],
@@ -2061,7 +2079,7 @@ class GrowTests(unittest.TestCase):
         self.assertEqual(store.read("roots"), {})
         index = json.loads(get("lem/facts/").body)
         self.assertEqual([(rel, fields.get("label"), fields.get("tags")) for _, rel, fields in index
-                          if rel in ("Context", "Tagged")], [("Context", "", "")])
+                          if rel in ("Context", "Tagged", "Tag")], [("Context", "", "")])
         self.assertEqual(json.loads(get("lem/tab/1").body)["title"], "s (1)")
 
     def test_pins_of_the_lines_starred_with_the_questions_that_an_answer_answers(self):

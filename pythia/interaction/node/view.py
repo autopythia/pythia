@@ -32,11 +32,12 @@ line. After this node's roots, the index's facts hold each remote node's
 it can't be reached, then its roots, as its own index gives them, by ids of
 their own, as ``NAME/ID``, linking through this server. The index's facts give
 each of this node's roots its label and tags, as the store keeps them by its
-key, which a page sets at ``/TOKEN/lem/roots/N``, as each root's facts say; a
-log's title, and its tab's, end with its label. An item's label and gist are
-those of the server's plain pages, and its body holds what they show for it
-(``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
-terminal shows it, each character to escape as its code point.
+key, which a page sets at ``/TOKEN/lem/roots/N``, as each root's facts say,
+and each tag in use, with how many roots have it, by which the index groups
+them; a log's title, and its tab's, end with its label. An item's label and
+gist are those of the server's plain pages, and its body holds what they show
+for it (``pages.Renderer``), as text, cut as they cut it. Every text is as
+pythia's terminal shows it, each character to escape as its code point.
 
 The view's pages have a content security policy of their own, which runs
 the server's scripts, styles and fetches, and nothing else; its facts,
@@ -437,6 +438,13 @@ class View:
                 else f"{absent} aren't where they're registered")}])
         ordered = sorted(found, key=lambda each: (-each.index.changed, each.number))
         said = self._roots()
+        # The tags in use, by name, each with how many of the roots have it.
+        tags: Dict[str, int] = {}
+        for context in ordered:
+            for tag in said.get(context.key, {}).get("tags", []):
+                tags[tag] = tags.get(tag, 0) + 1
+        steps.extend(["+", "Tag", {"name": tag, "rank": rank, "count": tags[tag]}]
+                     for rank, tag in enumerate(sorted(tags)))
         for rank, context in enumerate(ordered):
             problem = problems.get(context.id)
             given = said.get(context.key, {"label": "", "tags": []})
@@ -481,7 +489,7 @@ class View:
             rank += 1
             mine = {name: value for name, value in fields.items() if name not in ("tags", "keep")}
             steps.append(["+", "Context", {**mine, "id": f"{node.name}/{fields['id']}",
-                                           "rank": rank}])
+                                           "rank": rank, "node": node.name}])
             if fields["id"] in doing:
                 steps.append(["+", "Activity", {**doing[fields["id"]],
                                                 "id": f"{node.name}/{fields['id']}"}])

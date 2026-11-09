@@ -21,10 +21,38 @@ input Nav(n: Int, text: Text, to: Text) key n
 input Length(lines: Int) one
 
 -- The index: each context, by `rank`, the last changed first, with the
--- label that it's given, if any, its tags, apart by spaces, and the URL
--- that keeps them, if they can be set; and each of its tags.
-input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text, label: Text = "", tags: Text = "", keep: Text = "") key id
+-- label that it's given, if any, its tags, apart by spaces, the URL that
+-- keeps them, if they can be set, and, for a remote node's, the node; and
+-- each of its tags.
+input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text, label: Text = "", tags: Text = "", keep: Text = "", node: Text = "") key id
 input Tagged(id: CtxId, tag: Text)
+
+-- The tags in use, as the host says: each by its name, ranked by name,
+-- with how many contexts have it. The index shows each as a row, which
+-- folds its group, and unfolds it, and its contexts under it, a context
+-- under each of its tags; then this node's contexts without one, under a
+-- row of their own, once a tag is used; then the remote nodes, each with
+-- its contexts. Each context's row is in a group, `""` for none, at an
+-- order among the index's rows (Placed): the tags' groups first, from
+-- below -10^9, then this node's contexts without a tag and the remote
+-- nodes, by rank, each with the row that edits it after its own (orders
+-- of 2 apart); and, below them all, the header.
+input Tag(name: Text, rank: Int, count: Int) key name
+msg Fold(tag: Text)
+state Folded(tag: Text, on: Bool) key tag
+rel Grouped(id: CtxId)
+Grouped(c) :- Tagged(c, t), Tag(name=t)
+rel Placed(group: Text, id: CtxId, order: Int) key group, id
+Placed(t, c, (r - 1000) * 1000000 + 2 + k * 2) :- Tagged(c, t), Tag(t, r, _), Grouped(c), Context(id=c, rank=k), not Folded(t, True)
+Placed("", c, k * 2) :- Context(id=c, rank=k), not Grouped(c)
+rel Untagged(any: Bool) one
+Untagged(True) :- Tag(), Context(id=c, node=""), not Grouped(c)
+rel TagArrow(tag: Text, arrow: Text) key tag
+TagArrow(t, "▸") :- Folded(t, True)
+TagArrow(t, "▾") :- Tag(name=t), not Folded(t, True)
+rel TagCount(tag: Text, text: Text) key tag
+TagCount(t, "1 context") :- Tag(t, _, 1)
+TagCount(t, text(n) + " contexts") :- Tag(t, _, n), n /= 1
 
 -- Setting a context's label and tags, in the index: its ✎ opens a row
 -- under its own, with a field for its label and one for its tags, and Save
@@ -34,15 +62,15 @@ input Tagged(id: CtxId, tag: Text)
 -- sends what's in them to the host, with the URL that keeps them
 -- (KeepRoot), which says them anew in the index's facts. A context without
 -- that URL, as a remote node's is, has no ✎.
-msg Edit(id: CtxId), Save(id: CtxId), Cancel(id: CtxId)
-state Editing(id: CtxId) one
+msg Edit(group: Text, id: CtxId), Save(id: CtxId), Cancel(id: CtxId)
+state Editing(group: Text, id: CtxId) one
 state Draft(field: Id, text: Text) key field
 effect KeepRoot(to: Text, label: Text, tags: Text)
 rel Drafting(field: Id, text: Text) key field
 Drafting(LabelField(c), t) :- Draft(LabelField(c), t)
-Drafting(LabelField(c), l) :- Editing(c), Context(id=c, label=l), not Draft(LabelField(c), _)
+Drafting(LabelField(c), l) :- Editing(_, c), Context(id=c, label=l), not Draft(LabelField(c), _)
 Drafting(TagsField(c), t) :- Draft(TagsField(c), t)
-Drafting(TagsField(c), g) :- Editing(c), Context(id=c, tags=g), not Draft(TagsField(c), _)
+Drafting(TagsField(c), g) :- Editing(_, c), Context(id=c, tags=g), not Draft(TagsField(c), _)
 
 -- The remote nodes, whose roots the index shows after this node's, as the
 -- host says: each by its name, and its rank among the index's rows, before
@@ -195,9 +223,10 @@ Continues(t) :- Chunk(_, t), Chunk(a, b), a <= t + 1, t + 1 <= b
 rel Gap(last: Int, first: Int)
 Gap(t, f) :- Ahead(t, f), not Farther(t, f), not Continues(t)
 
-id Top, TitleRow, TitleDot, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
-id NodeRow(Text), NodeCell(Text, Int)
-id EditCell(CtxId), Editor(CtxId), LabelField(CtxId), TagsField(CtxId), SaveRoot(CtxId), CancelRoot(CtxId)
+id Top, TitleRow, TitleDot, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int)
+id Ctx(Text, CtxId), Cell(Text, CtxId, Int), NodeRow(Text), NodeCell(Text, Int)
+id TagRow(Text), TagFold(Text), TagName(Text), TagSize(Text), UntaggedRow, UntaggedCell
+id EditCell(Text, CtxId), Editor(CtxId), LabelField(CtxId), TagsField(CtxId), SaveRoot(CtxId), CancelRoot(CtxId)
 id Log, Before, After, TurnMark(Int), Said(Int), SaidText(Int), RunBox(Int), RunWait(Int)
 id Ent(Int), Part(Int, Int), Wait(Int), GapAfter(Int), GapBefore(Int)
 id Side, Pins, NoPins, PinTurn(Int), PinRow(Int), TurnList, TurnRow(Int)
@@ -210,7 +239,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
     for Nav(n, text, to):
       Link(Crumb(n), text=text, to=to, order=n)
   Table(Rows) :- Indexed(True):
-    TableRow(Head, header=True, order=-1):
+    TableRow(Head, header=True, order=-2000000000):
       Label(Col(7), text="State", order=-1)
       Label(Col(0), text="Context")
       Label(Col(8), text="Label")
@@ -220,22 +249,29 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
       Label(Col(4), text="Lines")
       Label(Col(5), text="Size")
       Label(Col(6), text="Changed")
-    for Context(c, title, model, turns, lines, size, changed, rank, to, label, tags, keep):
-      TableRow(Ctx(c), order=rank * 2):
-        Dot(Cell(c, 7), hue=h, text=why, order=-1) :- Activity(c, h, why)
-        Label(Cell(c, 7), text="", order=-1) :- not Activity(id=c)
-        Link(Cell(c, 0), text=text(c), to=to)
-        Label(Cell(c, 8), text=label, tone=Strong)
-        Label(Cell(c, 1), text=title)
-        Label(Cell(c, 2), text=model, tone=Dim)
-        Label(Cell(c, 3), text=text(turns))
-        Label(Cell(c, 4), text=text(lines))
-        Label(Cell(c, 5), text=size)
-        Label(Cell(c, 6), text=changed, tone=Dim)
-        Button(EditCell(c), text="✎", on=Edit(c)) :- keep /= ""
-      TableRow(Editor(c), order=rank * 2 + 1) :- Editing(c):
+    for Tag(g, r, n):
+      TableRow(TagRow(g), order=(r - 1000) * 1000000):
+        Button(TagFold(g), text=arrow, on=Fold(g), order=-1) :- TagArrow(g, arrow)
+        Label(TagName(g), text=g, tone=Strong)
+        Label(TagSize(g), text=size, tone=Dim) :- TagCount(g, size)
+    TableRow(UntaggedRow, order=-1) :- Untagged(True):
+      Label(UntaggedCell, text="no tag", tone=Dim)
+    for Placed(g, c, o):
+      TableRow(Ctx(g, c), order=o):
+        Dot(Cell(g, c, 7), hue=h, text=why, order=-1) :- Activity(c, h, why)
+        Label(Cell(g, c, 7), text="", order=-1) :- not Activity(id=c)
+        Link(Cell(g, c, 0), text=text(c), to=to) :- Context(id=c, to=to)
+        Label(Cell(g, c, 8), text=label, tone=Strong) :- Context(id=c, label=label)
+        Label(Cell(g, c, 1), text=title) :- Context(id=c, title=title)
+        Label(Cell(g, c, 2), text=model, tone=Dim) :- Context(id=c, model=model)
+        Label(Cell(g, c, 3), text=text(turns)) :- Context(id=c, turns=turns)
+        Label(Cell(g, c, 4), text=text(lines)) :- Context(id=c, lines=lines)
+        Label(Cell(g, c, 5), text=size) :- Context(id=c, size=size)
+        Label(Cell(g, c, 6), text=changed, tone=Dim) :- Context(id=c, changed=changed)
+        Button(EditCell(g, c), text="✎", on=Edit(g, c)) :- Context(id=c, keep=k), k /= ""
+      TableRow(Editor(c), order=o + 1) :- Editing(g, c):
         Field(LabelField(c), text=l) :- Drafting(LabelField(c), l)
-        Field(TagsField(c), text=g) :- Drafting(TagsField(c), g)
+        Field(TagsField(c), text=words) :- Drafting(TagsField(c), words)
         Button(SaveRoot(c), text="Save", on=Save(c))
         Button(CancelRoot(c), text="Cancel", on=Cancel(c))
     for Node(n, rank, title, reached, to):
@@ -312,27 +348,33 @@ on Visit(t):
   Jumped(l, 1, AtTurn) :- Turn(t, _, _, l), not Jumped()
   LoadAround(l) :- Turn(t, _, _, l)
 
-Key(Return, msg=Save(c)) :- Editing(c), Focused(f), Within(f, Editor(c))
-Key(Escape, msg=Cancel(c)) :- Editing(c), Focused(f), Within(f, Editor(c))
-Tooltip(EditCell(c), text="its label and tags") :- Context(id=c, keep=k), k /= ""
-Tooltip(LabelField(c), text="its label") :- Editing(c)
-Tooltip(TagsField(c), text="its tags, apart by spaces") :- Editing(c)
+Key(Return, msg=Save(c)) :- Editing(_, c), Focused(f), Within(f, Editor(c))
+Key(Escape, msg=Cancel(c)) :- Editing(_, c), Focused(f), Within(f, Editor(c))
+Tooltip(EditCell(g, c), text="its label and tags") :- Placed(g, c, _), Context(id=c, keep=k), k /= ""
+Tooltip(LabelField(c), text="its label") :- Editing(_, c)
+Tooltip(TagsField(c), text="its tags, apart by spaces") :- Editing(_, c)
+Tooltip(TagFold(g), text="fold its contexts") :- TagArrow(g, "▾")
+Tooltip(TagFold(g), text="unfold its contexts") :- TagArrow(g, "▸")
 
-on Edit(c):
-  Editing(c)
+on Edit(g, c):
+  Editing(g, c)
 
 on Cancel(c):
-  del Editing(c)
+  del Editing(_, c)
 
 on Save(c):
   KeepRoot(k, l, g) :- Context(id=c, keep=k), Drafting(LabelField(c), l), Drafting(TagsField(c), g)
-  del Editing(c)
+  del Editing(_, c)
 
 on Edited(LabelField(c), t):
-  Draft(LabelField(c), t) :- Editing(c)
+  Draft(LabelField(c), t) :- Editing(_, c)
 
 on Edited(TagsField(c), t):
-  Draft(TagsField(c), t) :- Editing(c)
+  Draft(TagsField(c), t) :- Editing(_, c)
+
+on Fold(g):
+  Folded(g, False) :- Folded(g, True)
+  Folded(g, True) :- not Folded(g, True)
 
 on Restore(l):
   Jumped(l, n + 1, AtRow) :- Jumped(_, n, _)

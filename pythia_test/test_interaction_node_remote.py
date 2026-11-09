@@ -517,6 +517,8 @@ class IndexTests(RemoteTest):
                          list(range(len(local) + 1, len(local) + 1 + len(mine))))
         self.assertEqual([root["to"] for root in mine],
                          [f"/{TOKEN}/n/sim{root['to'][len(f'/{TOKEN}'):]}" for root in local])
+        self.assertEqual({root.get("node") for root in mine}, {"sim"})
+        self.assertEqual({root.get("node") for root in local}, {None})
         doing = {step[2]["id"] for step in steps if step[1] == "Activity"}
         self.assertTrue({root["id"] for root in mine} <= doing)
 
