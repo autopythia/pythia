@@ -68,6 +68,7 @@ FILES = {
     "contexts.css": "web/contexts.css",
     # contexts.js fetches these beside itself.
     "compiled/contexts.json": "web/compiled/contexts.json",
+    "compiled/tabs.json": "web/compiled/tabs.json",
     "compiled/theme-dark.json": "web/compiled/theme-dark.json",
     "compiled/theme-light.json": "web/compiled/theme-light.json",
 }

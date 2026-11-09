@@ -1674,14 +1674,16 @@ class ViewTests(WorkspaceTest):
         self.assertEqual(self.get("lem/facts/x").status, 404)
 
     def test_files(self):
-        # What the pages load, and what contexts.js fetches beside itself: the program,
-        # and each of its themes.
+        # What the pages load, and what contexts.js fetches beside itself, as it says:
+        # the programs, and each of its themes.
         script = (view.UI_DIRECTORY / "web" / "contexts.js").read_text()
         listed = re.search(r"var THEMES = \[(.*?)\];", script, re.S)[1]
         themes = re.findall(r'\["([a-z]+)", ', listed)
         self.assertEqual(themes, ["dark", "light"])
+        fetched = re.findall(r'new URL\("(compiled/[a-z-]+\.json)", here\)', script)
+        self.assertIn("compiled/contexts.json", fetched)
         self.assertEqual(sorted(view.FILES), sorted(
-            [*view.SCRIPTS, *view.STYLESHEETS, "compiled/contexts.json",
+            [*view.SCRIPTS, *view.STYLESHEETS, *fetched,
              *(f"compiled/theme-{theme}.json" for theme in themes)]))
         for name, path in view.FILES.items():
             response = self.get(f"lem/files/{name}")
