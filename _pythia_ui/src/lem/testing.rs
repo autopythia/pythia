@@ -1,6 +1,8 @@
 //! What the tests of lem, and of the layers above it, share: their files in
 //! the crate's `lem/`, cases in those files, round trips through the
-//! printer, and reports in TAP, as zinterp's `parse_test` writes them
+//! printer, ticks run twice to compare what the runtime remembers between
+//! ticks with what it would derive anew ([`tick_twice`]), and reports in
+//! TAP, as zinterp's `parse_test` writes them
 //! (pythia's `_pythia/src/zinterp/parse_test.rs`): `ok 1 - "title"`, or
 //! `not ok 2 - "title"` and why, then `1..N`. Trees compare as S-expressions
 //! without spans ([`mod_sexp`]). And what the runtimes in JavaScript share:
@@ -8,6 +10,7 @@
 //! scripts ([`unsafe_in_script`]).
 
 use super::check::LoadError;
+use super::eval::Runtime;
 use super::parse::{parse, Decl, Mod, Param, Sent, SentRef, Term};
 use super::print::print;
 use super::token::Span;
@@ -320,6 +323,55 @@ pub(crate) fn tick_cases(name: &str, mut tick: impl FnMut(&str) -> Result<String
     results.push((title, why));
   }
   report(results);
+}
+
+/// Runs a file of ticks on two runtimes of one program: one that remembers
+/// what its rules read when they last ran, as every runtime does, and one
+/// that forgets it before each tick ([`Runtime::forget`]), so that every
+/// rule runs. Each tick must give the same on both, and leave every
+/// relation's facts, and why each holds, the same. `lem` gives a runtime's
+/// lem, for a layer above it.
+pub(crate) fn tick_twice<R>(
+  name: &str,
+  runtimes: [R; 2],
+  mut tick: impl FnMut(&mut R, &str) -> Result<String, String>,
+  lem: impl Fn(&mut R) -> &mut Runtime,
+) {
+  let [mut remembers, mut forgets] = runtimes;
+  let mut results = Vec::new();
+  for (title, lines, _) in cases(name) {
+    lem(&mut forgets).forget();
+    let (a, b) = (tick(&mut remembers, &lines), tick(&mut forgets, &lines));
+    let (x, y) = (
+      everything(lem(&mut remembers)),
+      everything(lem(&mut forgets)),
+    );
+    let why = if a != b {
+      Some(format!(
+        "remembering, the tick gives\n{a:?}\nforgetting, it gives\n{b:?}"
+      ))
+    } else if x != y {
+      Some(format!(
+        "remembering, the facts are\n{x}forgetting, they're\n{y}"
+      ))
+    } else {
+      None
+    };
+    results.push((title, why));
+  }
+  report(results);
+}
+
+/// Every relation's facts, as lem writes them, and why each holds.
+fn everything(runtime: &Runtime) -> String {
+  let mut out = String::new();
+  for rel in 0..runtime.prog.rels.len() {
+    for (tuple, why) in runtime.rel_facts(rel) {
+      let (fact, why) = (runtime.fact_text(rel, tuple), runtime.why(why));
+      let _ = writeln!(out, "{fact} ({why})");
+    }
+  }
+  out
 }
 
 /// Writes `var NAME = value;` to `target/web/FILE`, for the tests in

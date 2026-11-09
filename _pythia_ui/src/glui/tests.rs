@@ -7,7 +7,8 @@
 //!   pythia's contexts (`lem/contexts.lem`) tick as
 //!   `lem/test/approval_ticks.txt`, `lem/test/page_ticks.txt` and
 //!   `lem/test/contexts_ticks.txt` say, in every theme, since rules never
-//!   read one;
+//!   read one; and, in the first theme, on a runtime that forgets what its
+//!   rules read before each tick, with the same facts after each;
 //! - glui's files and themes print back;
 //! - the three, compiled with glem's part ([`glem::compile`]) and read
 //!   back, tick as written too, with each tick as JSON steps, as
@@ -18,9 +19,8 @@
 //!   `glui.js` sets from a theme, which `theme.lem` names;
 //! - the web look's pages, `web/demo.html` and `web/test.html`, and the
 //!   contexts' sample pages, give themselves the CSP that pythia's node
-//!   server sends its glui view's pages,
-//!   and run only the crate's own files, and those that `make web` writes:
-//!   no script or style inline;
+//!   server sends its glui view's pages, and run only the crate's own
+//!   files, and those that `make web` writes: no script or style inline;
 //! - the compiled programs in `web/compiled/`, which the contexts' pages
 //!   fetch, are what their files compile to now; and the contexts,
 //!   compiled, go to `target/web/contexts_tests.js`, for
@@ -38,7 +38,7 @@ use crate::glem;
 use crate::json::{self, object, Value as Json};
 use crate::lem::host;
 use crate::lem::testing::{
-  cases, read, report, round_trip, tick_cases, unsafe_in_script, write_web,
+  cases, read, report, round_trip, tick_cases, tick_twice, unsafe_in_script, write_web,
 };
 use std::path::Path;
 
@@ -129,6 +129,24 @@ fn the_contexts_tick_as_written_in_every_theme() {
     tick_cases("test/contexts_ticks.txt", |lines| {
       runtime.script(lines, &notes)
     });
+  }
+}
+
+#[test]
+fn ticks_remembering_what_rules_read_are_ticks_that_forget_it() {
+  let (_, file, text) = THEMES[0];
+  let programs: [(&[&str], &str); 3] = [
+    (&["host.lem", "approval.lem"], "test/approval_ticks.txt"),
+    (&["test/page.lem"], "test/page_ticks.txt"),
+    (&["contexts.lem"], "test/contexts_ticks.txt"),
+  ];
+  for (files, ticks) in programs {
+    tick_twice(
+      ticks,
+      [runtime((file, text), files), runtime((file, text), files)],
+      |runtime, lines| runtime.script(lines, &notes),
+      |runtime| &mut runtime.lem,
+    );
   }
 }
 

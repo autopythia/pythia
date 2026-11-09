@@ -6,6 +6,7 @@ test/jobs.lem
 test/numbers.lem
 test/recursion.lem
 test/joins.lem
+test/rerun.lem
 host.lem
 approval.lem
 contexts.lem

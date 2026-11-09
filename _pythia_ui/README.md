@@ -185,6 +185,11 @@ A `rel` declared `lazy`, lem's one flag, is derived only when something
 reads it: a rule of a relation that's derived, an `on` block, or the host,
 with `?`. glem's `Within` is lazy, since few programs read it.
 
+A tick runs a relation's rules only when a relation that they read has changed
+since they last ran; if its facts come out the same, what reads it doesn't run
+either. The facts, effects and errors are those of a tick that derives
+everything anew, which the tests run too, and compare (`lem/test/rerun.lem`).
+
 For the web, a checked program can be written as data, its compiled form
 (`src/lem/compile.rs`): JSON, which lem's runtime in JavaScript,
 `src/lem/lem.js`, runs as `src/lem/eval.rs` runs a program. The host's

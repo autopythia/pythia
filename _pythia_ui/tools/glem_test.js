@@ -5,7 +5,9 @@
 // target/web/glem_tests.js: the task list's compiled form
 // (lem/test/tasks.lem), and its ticks (lem/test/tasks_ticks.txt) as JSON
 // steps, with what each shows and the facts that its joins visit, which
-// both runtimes must agree on; and the cases of lem/test/tasks_dom.txt,
+// both runtimes must agree on, and which a runtime that forgets what its
+// rules read before each tick must show too, with the same facts and why
+// each holds; and the cases of lem/test/tasks_dom.txt,
 // which only JavaScript runs. In a stand-in DOM (tools/stand_in_dom.js),
 // with toy recipes that make an element per widget, with its fields as
 // attributes, the view must show what the runtime does, after each tick of
@@ -18,21 +20,45 @@
 
   var tests = GLEM_TESTS;
 
-  // The tick file, on glem.js's runtime.
+  // A tick's steps on a runtime: what it shows, or its error.
+  function attempt(runtime, steps) {
+    try {
+      return runtime.run(steps, null);
+    } catch (e) {
+      return tap.error(e);
+    }
+  }
+
+  // Every relation's facts, as lem writes them, and why each holds.
+  function everything(runtime) {
+    var prog = runtime.prog;
+    var out = "";
+    prog.rels.forEach(function (rel, r) {
+      runtime.relFacts(r).forEach(function (fact) {
+        out += prog.factText(r, fact.tuple) + " (" + runtime.why(fact.why) + ")\n";
+      });
+    });
+    return out;
+  }
+
+  // The tick file, on glem.js's runtime; and again on one that forgets,
+  // before each tick, what its rules read.
   function ticks() {
     var runtime = new glem.Runtime(new glem.Program(tests.program));
+    var forgets = new glem.Runtime(new glem.Program(tests.program));
     tests.ticks.forEach(function (c) {
-      var got;
-      try {
-        got = runtime.run(c.steps, null);
-      } catch (e) {
-        got = tap.error(e);
-      }
+      var got = attempt(runtime, c.steps);
+      forgets.lem.forget();
+      var again = attempt(forgets, c.steps);
       var why = null;
       if (got !== c.want) {
         why = "the tick gives\n" + got + "\nnot\n" + c.want;
       } else if (runtime.lem.visits() !== c.visits) {
         why = "its joins visit " + runtime.lem.visits() + " facts, not " + c.visits;
+      } else if (again !== got) {
+        why = "forgetting what its rules read, the tick gives\n" + again;
+      } else if (everything(forgets.lem) !== everything(runtime.lem)) {
+        why = "remembering, the facts are\n" + everything(runtime.lem) + "forgetting, they're\n" + everything(forgets.lem);
       }
       tap.report("tasks_ticks.txt: " + c.title, why);
     });

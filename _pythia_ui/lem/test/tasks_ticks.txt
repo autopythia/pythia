@@ -50,6 +50,18 @@ Within(Row("a"), Top)
 Within(Row("b"), List)
 Within(Row("b"), Top)
 
+=== nothing new: the same widgets, and the editor's state
+? Editing
+? Draft
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("a"), text="first", on=Open("a"))
+      Line(Editor("a"), text="draft")
+    Item(Row("b"), text="second", on=Open("b"))
+Editing(Row("a"))
+Draft(Row("a"), "draft")
+
 === pinning shows the footer
 ! Pin("b")
 ? Pinned

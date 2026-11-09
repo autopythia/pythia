@@ -9,8 +9,22 @@
 //! own checks after a tick, through [`Runtime::rel_facts`] and
 //! [`Runtime::drop_facts`].
 //!
-//! Every tick derives everything again, but cheaply. A body's positive atoms
-//! join in the order that their facts ask for, after meringue's joins
+//! A tick runs a component's rules only if a relation that they read has
+//! changed since they last ran ([`Runtime::rerun`]). Each relation's table
+//! has a version, which every change to its facts moves on, and each
+//! component keeps the versions of what it read when it last ran. When it
+//! runs again, a relation whose facts come out the same keeps its table,
+//! version and all, so that what reads it needn't run again either. An
+//! error while the rules run leaves the relations derived after the failing
+//! component without facts, as every tick that derived everything left
+//! them, and forgets those versions, so that the next tick runs every rule.
+//! A relation's keys are checked only when its version has moved since they
+//! last held. The facts, the effects and the errors are those of a tick
+//! that derives everything anew, which [`Runtime::forget`] makes the next
+//! tick do, for the tests that compare the two.
+//!
+//! The rules run cheaply. A body's positive atoms join in the order that
+//! their facts ask for, after meringue's joins
 //! (`doc/pythia-ui-gui-design.md` in pythia): at each step, every atom that's
 //! ready is looked up by the columns bound so far, in an index on them; if
 //! one has no facts there, the step fails; else the join takes the atom
@@ -94,11 +108,15 @@ fn index<'a>(
 /// [`Table::derive`] keeps as facts change: every other change drops them.
 /// And, for the host's facts in a relation with a key, the facts by their
 /// key's values ([`Table::put_keyed`]), which only the host's changes keep.
+/// Its version moves on with every change to its facts but a rule's
+/// ([`Table::facts_mut`]): a table that rules fill is new, a version on from
+/// the one that it replaces ([`Runtime::rerun`]).
 #[derive(Default)]
 struct Table {
   facts: BTreeMap<Tuple, Why>,
   indexes: Indexes,
   keyed: Option<HashMap<Vec<Value>, Tuple>>,
+  version: u64,
 }
 
 impl Table {
@@ -131,8 +149,9 @@ impl Table {
   }
 
   /// The facts themselves, to change otherwise: so the indexes go, and the
-  /// facts by key.
+  /// facts by key, and the version moves on.
   fn facts_mut(&mut self) -> &mut BTreeMap<Tuple, Why> {
+    self.version += 1;
     self.indexes.get_mut().clear();
     self.keyed = None;
     &mut self.facts
@@ -249,6 +268,16 @@ pub struct Runtime {
   /// for one of their relations, which the next tick derives: `asked`.
   skip: Vec<bool>,
   asked: Vec<usize>,
+  /// For each component, the relations that its rules read ([`reads`]);
+  /// and the versions that they had when it last ran, or none: it hasn't
+  /// run since the runtime began, or since the rules failed, or a tick
+  /// skipped it.
+  reads: Vec<Vec<usize>>,
+  ran: Vec<Option<Vec<u64>>>,
+  /// For each relation, the version at which its keys last held, if any.
+  held: Vec<Option<u64>>,
+  /// Whether the next tick derives every relation anew ([`Runtime::forget`]).
+  anew: bool,
 }
 
 impl Runtime {
@@ -256,13 +285,30 @@ impl Runtime {
     let tables = prog.rels.iter().map(|_| Table::default()).collect();
     let visits = Cell::new(0);
     let skip = skipped(&prog, &[]);
+    let reads = reads(&prog);
+    let ran = vec![None; prog.components.len()];
+    let held = vec![None; prog.rels.len()];
     Runtime {
       prog,
       tables,
       visits,
       skip,
       asked: Vec::new(),
+      reads,
+      ran,
+      held,
+      anew: false,
     }
+  }
+
+  /// Forgets what the components read when they last ran, and which keys
+  /// held: the next tick, after its `on` blocks, clears every derived
+  /// relation, runs every rule and checks every key, as every tick did
+  /// before ticks kept what they derived. For tests, which compare the two.
+  pub fn forget(&mut self) {
+    self.ran.fill(None);
+    self.held.fill(None);
+    self.anew = true;
   }
 
   /// The facts that the last tick's joins visited: a measure of its work,
@@ -289,9 +335,17 @@ impl Runtime {
   }
 
   /// Drops a relation's facts that `drop` picks: for a layer above lem that
-  /// cleans up between ticks.
+  /// cleans up between ticks. If it picks none, nothing changes, so the
+  /// relation keeps its version.
   pub fn drop_facts(&mut self, rel: usize, mut drop: impl FnMut(&Tuple) -> bool) {
-    self.tables[rel].facts_mut().retain(|tuple, _| !drop(tuple));
+    let table = &mut self.tables[rel];
+    let gone: Vec<Tuple> = table.facts.keys().filter(|t| drop(t)).cloned().collect();
+    if !gone.is_empty() {
+      let facts = table.facts_mut();
+      for tuple in &gone {
+        facts.remove(tuple);
+      }
+    }
   }
 
   /// The host's fact, written in lem, such as `Now(1000)`
@@ -308,9 +362,13 @@ impl Runtime {
   }
 
   /// The host's fact, in an `input` relation. In a relation with a key, it
-  /// replaces the fact with its key.
+  /// replaces the fact with its key. A fact that holds already changes
+  /// nothing.
   pub fn assert_tuple(&mut self, rel: usize, tuple: Tuple) -> Result<(), String> {
     self.input(rel)?;
+    if self.tables[rel].facts.contains_key(&tuple) {
+      return Ok(());
+    }
     let key = &self.prog.rels[rel].key;
     match key.is_empty() {
       true => _ = self.tables[rel].facts_mut().insert(tuple, Why::Host),
@@ -319,9 +377,13 @@ impl Runtime {
     Ok(())
   }
 
-  /// Retracts the host's fact; whether it held.
+  /// Retracts the host's fact; whether it held. One that doesn't hold
+  /// changes nothing.
   pub fn retract_tuple(&mut self, rel: usize, tuple: &Tuple) -> Result<bool, String> {
     self.input(rel)?;
+    if !self.tables[rel].facts.contains_key(tuple) {
+      return Ok(false);
+    }
     let key = &self.prog.rels[rel].key;
     Ok(match key.is_empty() {
       true => self.tables[rel].facts_mut().remove(tuple).is_some(),
@@ -509,12 +571,17 @@ impl Runtime {
     Ok((inserts, deletes))
   }
 
-  /// Runs the rules again from the input and state facts, component by
-  /// component, in the checker's order.
+  /// Runs the rules from the input and state facts, component by component,
+  /// in the checker's order: each only if what it reads has changed
+  /// ([`Runtime::rerun`]). A component that the tick skips has no facts. If
+  /// a component's rules fail, those after it have no facts, as when every
+  /// tick cleared them first, and the next tick runs every rule.
   fn derive(&mut self) -> Result<(), String> {
-    for (table, rel) in self.tables.iter_mut().zip(&self.prog.rels) {
-      if rel.kind == DeclKind::Rel {
-        table.facts_mut().clear();
+    if std::mem::take(&mut self.anew) {
+      for (table, rel) in self.tables.iter_mut().zip(&self.prog.rels) {
+        if rel.kind == DeclKind::Rel {
+          table.facts_mut().clear();
+        }
       }
     }
     let asked = std::mem::take(&mut self.asked);
@@ -523,10 +590,69 @@ impl Runtime {
       false => self.skip.clone(),
     };
     for (c, skip) in skip.into_iter().enumerate() {
-      if !skip {
-        self.component(c)?;
+      let ran = match skip {
+        true => {
+          self.ran[c] = None;
+          self.clear(c);
+          Ok(())
+        }
+        false => self.rerun(c),
+      };
+      if let Err(e) = ran {
+        self.ran.fill(None);
+        for later in c + 1..self.prog.components.len() {
+          self.clear(later);
+        }
+        return Err(e);
       }
     }
+    Ok(())
+  }
+
+  /// Clears component `c`'s relations: those that have facts, so that one
+  /// without keeps its version.
+  fn clear(&mut self, c: usize) {
+    for &r in &self.prog.components[c].rels {
+      if !self.tables[r].facts.is_empty() {
+        self.tables[r].facts_mut().clear();
+      }
+    }
+  }
+
+  /// Runs component `c`'s rules, unless the relations that they read have
+  /// the versions that they had when it last ran. Each of its relations gets
+  /// a new table, a version on from the old one; but a relation whose facts
+  /// come out the same keeps the old table, with its version and indexes,
+  /// and why each fact holds now.
+  fn rerun(&mut self, c: usize) -> Result<(), String> {
+    let read: Vec<u64> = self.reads[c]
+      .iter()
+      .map(|&r| self.tables[r].version)
+      .collect();
+    if self.ran[c].as_ref() == Some(&read) {
+      return Ok(());
+    }
+    let olds: Vec<Table> = (self.prog.components[c].rels.iter())
+      .map(|&r| {
+        let version = self.tables[r].version + 1;
+        let new = Table {
+          version,
+          ..Table::default()
+        };
+        std::mem::replace(&mut self.tables[r], new)
+      })
+      .collect();
+    self.component(c)?;
+    for (&r, mut old) in self.prog.components[c].rels.iter().zip(olds) {
+      let new = &self.tables[r];
+      if new.facts.len() == old.facts.len() && new.facts.keys().eq(old.facts.keys()) {
+        for (why, &now) in old.facts.values_mut().zip(new.facts.values()) {
+          *why = now;
+        }
+        self.tables[r] = old;
+      }
+    }
+    self.ran[c] = Some(read);
     Ok(())
   }
 
@@ -585,10 +711,12 @@ impl Runtime {
     Value::Ctor(self.prog.rels[rel].name.clone(), tuple.clone()).to_string()
   }
 
-  /// Facts that agree on their relation's key agree on the rest.
-  fn check_keys(&self) -> Result<(), String> {
+  /// Facts that agree on their relation's key agree on the rest: checked
+  /// where the relation's version has moved since its keys last held.
+  fn check_keys(&mut self) -> Result<(), String> {
     for (rel, r) in self.prog.rels.iter().enumerate() {
-      if r.key.is_empty() {
+      let version = self.tables[rel].version;
+      if r.key.is_empty() || self.held[rel] == Some(version) {
         continue;
       }
       let mut seen: BTreeMap<Vec<Value>, (&Tuple, Why)> = BTreeMap::new();
@@ -601,6 +729,7 @@ impl Runtime {
         }
         seen.insert(key, (tuple, *why));
       }
+      self.held[rel] = Some(version);
     }
     Ok(())
   }
@@ -658,6 +787,27 @@ fn insert(tables: &mut [Table], new: New) -> BTreeMap<usize, Vec<Tuple>> {
     }
   }
   fresh
+}
+
+/// What each component's rules read, as atoms or negations: the relations of
+/// other components, the host's and the `on` blocks', in order.
+fn reads(prog: &Program) -> Vec<Vec<usize>> {
+  let comps = prog.components.iter();
+  comps
+    .map(|c| {
+      let mut read: Vec<usize> = (c.rules.iter())
+        .flat_map(|&r| &prog.rules[r].body)
+        .filter_map(|lit| match lit {
+          Lit::Atom(atom) | Lit::Not(atom) => Some(atom.rel),
+          _ => None,
+        })
+        .filter(|rel| !c.rels.contains(rel))
+        .collect();
+      read.sort_unstable();
+      read.dedup();
+      read
+    })
+    .collect()
 }
 
 /// The components that a tick skips: those whose relations are all lazy,

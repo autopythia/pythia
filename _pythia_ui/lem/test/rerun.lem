@@ -1,0 +1,31 @@
+-- rerun.lem: what a tick runs again (src/lem/eval.rs): a component's rules
+-- only when a relation that they read, as an atom or a negation, has
+-- changed; and its facts, when they come out the same, as they were, with
+-- why each holds now.
+input A(n: Int)
+input B(n: Int)
+input C(n: Int)
+input D(n: Int)
+
+-- Big's rules run first, and overflow for D(2): the relations derived
+-- after it then have no facts, until a tick runs every rule again.
+rel Big(n: Int)
+Big(n * 9007199254740991) :- D(n)
+
+-- R(1) holds by R's first rule, from A(1); then by its second, from B(1)
+-- alone: the same facts, but why one holds changes.
+rel R(n: Int)
+R(n) :- A(n)
+R(n) :- B(n)
+
+-- S reads C only as a negation.
+rel S(n: Int)
+S(n) :- R(n), not C(n)
+
+-- T is lazy: derived only while the host asks for it.
+rel T(n: Int) lazy
+T(n) :- S(n)
+
+-- K's keys hold until two of its facts share one.
+rel K(k: Int, n: Int) key k
+K(0, n) :- C(n)

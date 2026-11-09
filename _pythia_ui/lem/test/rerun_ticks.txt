@@ -1,0 +1,106 @@
+# Ticks of rerun.lem, on lem alone. Each case is a tick on the facts that
+# the cases before it left: `=== title`; lines that assert (`+ Fact`) or
+# retract (`- Fact`) the host's facts, or show a relation's facts after the
+# tick (`? Name`); `---`; then the facts asked for, or the tick's error. A
+# runtime that forgets, before each tick, what its rules read, and so
+# derives every relation anew, must come to the same facts, and why each
+# holds (src/lem/eval_test.rs, tools/lem_test.js).
+
+=== R from A, and S from R
++ A(1)
++ A(2)
+? R
+? S
+---
+R(1)
+R(2)
+S(1)
+S(2)
+
+=== R(1) from B as well: the same facts
++ B(1)
+? R
+---
+R(1)
+R(2)
+
+=== R(1) from B alone: the same facts, from R's second rule
+- A(1)
+? R
+---
+R(1)
+R(2)
+
+=== A(3) in place of A(2): as many facts, but others
+- A(2)
++ A(3)
+? R
+? S
+---
+R(1)
+R(3)
+S(1)
+S(3)
+
+=== C(3), read as a negation, hides S(3)
++ C(3)
+? S
+---
+S(1)
+
+=== T while the host asks for it
+? T
+---
+T(1)
+
+=== and not after: S alone
+? S
+---
+S(1)
+
+=== T again, from what hasn't changed since
+? T
+---
+T(1)
+
+=== C(1) as well: two facts, one key
++ C(1)
+? S
+---
+error: one key, two facts: K(0, 1) (from the rule at lem/test/rerun.lem:31:1) and K(0, 3) (from the rule at lem/test/rerun.lem:31:1)
+
+=== still, though nothing changed
+? R
+---
+error: one key, two facts: K(0, 1) (from the rule at lem/test/rerun.lem:31:1) and K(0, 3) (from the rule at lem/test/rerun.lem:31:1)
+
+=== C(1) goes: the keys hold
+- C(1)
+? S
+? K
+---
+S(1)
+K(0, 3)
+
+=== D(2) overflows
++ D(2)
+---
+error: `*` overflowed: a whole number stays within ±9007199254740991 (2^53 − 1), in the rule at lem/test/rerun.lem:13:1
+
+=== D(2) goes: every rule runs again
+- D(2)
+? R
+? S
+? K
+---
+R(1)
+R(3)
+S(1)
+K(0, 3)
+
+=== A(3) again: nothing changes, so no rule runs
++ A(3)
+? R
+---
+R(1)
+R(3)
