@@ -1505,6 +1505,26 @@ class ViewTests(WorkspaceTest):
             self.assertEqual(items[line], {"line": line, "run": run_of[line], "tone": tone,
                                            "label": label, "gist": line_gist, "body": body}, line)
 
+    def test_a_turn_marked_where_it_first_shows(self):
+        # A boundary with no message just before it starts a turn on a line that shows
+        # nothing. The turn's line is where it first shows, where its first row starts, so
+        # that its mark has a row to go before.
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "s._private"
+            write_log(private / "context.jsonl",
+                      [init(KEY_A), *turn("One."), BOUNDARY, *work("w2"), *answer("Two."),
+                       summary()])
+            write_log(Path(tmp) / "s.jsonl", [init(KEY_A)])
+            registry = Path(tmp) / "registry"
+            self.assertEqual(Registry(registry).register(KEY_A, private).status, "new")
+            app = server.App(contexts.Roots(registry), TOKEN)
+            steps = json.loads(app.respond("GET", f"/{TOKEN}/lem/facts/c/1",
+                                           ["127.0.0.1"]).body)
+        rows = [fields["line"] for _, rel, fields in steps if rel in ("Message", "Run")]
+        self.assertEqual([(fact["n"], fact["line"]) for fact in self.facts(steps, "Turn")],
+                         [(0, 1), (1, 2), (2, 13)])
+        self.assertIn(13, rows)
+
     def test_rows_come_in_chunks(self):
         # Three rows a chunk: the page's facts give the last; the rows before a chunk's
         # first line, those before it, to the log's start; and the rows after a line, those
