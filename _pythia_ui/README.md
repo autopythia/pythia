@@ -295,23 +295,33 @@ make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
 root contexts, and one context's log, a page each. Its host is the glui view
 of pythia's node server (`pythia/interaction/node/view.py` in pythia), at
 `/TOKEN/lem/`. It sends a page's facts: `Context` for each context; or, for a
-log, a `Turn` for each turn, folded. A turn's items come when it's first
-opened: the program sends `LoadTurn(turn)`, and the host answers with
-`Loaded(turn)` and an `Item` for each, or with `TurnFailed(turn, why)`; so a
-page holds only the turns that were opened. An item's body comes the same way,
-when its entry is first opened: the program sends `Load(line)`, and the host
+log, a `Turn` for each turn, with the line where it starts, and the log's last
+rows: a `Chunk`, the lines that they cover, and a row for each message, with
+its text, `Message`, and for each run of other items between two messages
+within a turn, with what's in it, `Run`. A log's page shows its rows in order,
+each turn marked where it starts, and each run folded. As either end of the
+rows comes near the screen, the program sends `LoadBefore(line)` or
+`LoadAfter(line)` (glem's `Near`), and the host answers with another chunk, or
+with `EarlierFailed` or `LaterFailed`; so a page holds what's been scrolled
+through. A run's items come when it's first opened: the program sends
+`LoadRun(run)`, and the host answers with `RunLoaded(run)` and an `Item` for
+each, or with `RunFailed(run, why)`. An item's body comes the same way, when
+its entry is first opened: the program sends `Load(line)`, and the host
 answers with `Body` facts, or `Failed(line, why)`.
 `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. A page names its facts on
-its `html` element, `data-facts`, and, for a log, where a turn's items are,
-`data-turn`, with `{turn}`, and where an item's body is, `data-body`, with
-`{line}`; the script fetches the program and the themes, compiled, from
+its `html` element, `data-facts`, and, for a log, where the rows before a line
+and after one are, `data-before` and `data-after`, where a run's items are,
+`data-run`, and where an item's body is, `data-body`, each with `{line}` or
+`{run}`; the script fetches the program and the themes, compiled, from
 `web/compiled/`, which `make compiled` writes, and a test checks against the
-files they're compiled from. Its bar picks the look and the theme, which the
-browser remembers. `make web` writes a sample, an index and a log of 13,394
-items, the most that one of pythia's contexts has had, in turns of 50, for two
-pages that show it as the node server's do:
+files they're compiled from. A log's page starts at its end, and keeps what's
+on the screen in place as rows come above it. Its bar picks the look and the
+theme, which the browser remembers. `make web` writes a sample, an index and a
+log of 13,394 items, the most that one of pythia's contexts had when it was
+first written, in turns of 50, for two pages that show it as the node server's
+do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

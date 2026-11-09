@@ -247,6 +247,10 @@
       case "focus":
         it.doc.focus(find(e, ["button", "input", "a", "summary"]) || e);
         return;
+      case "near":
+      case "far":
+        it.doc.near(e, step[0] === "near");
+        return;
     }
     throw new Error("there's no step " + JSON.stringify(step));
   }

@@ -3,16 +3,19 @@
 // pages, for the root contexts and for a context's log
 // (pythia/interaction/node/view.py). A page gives, on its <html> element,
 // `data-facts`, the URL of its facts, JSON steps (src/lem/host.rs); and,
-// for a log, `data-turn`, the URL of a turn's items, with `{turn}` in
-// place of its number, and `data-body`, the URL of an item's body, steps
-// of Body facts, with `{line}` in place of its line. The compiled program and
-// glui's themes are beside this script, in compiled/. It shows the page
-// in glui's widgets (src/glui/glui.js), in the look and the theme that its
-// bar chooses, which the browser remembers; and it answers the program's
-// LoadTurn(turn) with the turn's items, or with TurnFailed(turn, why); and
-// its Load(line) with the item's body, or with Failed(line, why). Like lem.js,
-// it's a plain script that defines one global, `contexts`, and it starts
-// itself on a page that gives `data-facts`.
+// for a log, `data-before` and `data-after`, the URLs of the rows before a
+// line and after one, `data-run`, the URL of a run's items, and
+// `data-body`, the URL of an item's body, each with `{line}` or `{run}` in
+// place of its line. The compiled program and glui's themes are beside
+// this script, in compiled/. It shows the page in glui's widgets
+// (src/glui/glui.js), in the look and the theme that its bar chooses,
+// which the browser remembers, from the log's end; and it answers the
+// program's LoadBefore(line) and LoadAfter(line) with rows, or with
+// EarlierFailed(line, why) or LaterFailed(line, why); its LoadRun(run)
+// with the run's items, or with RunFailed(run, why); and its Load(line)
+// with the item's body, or with Failed(line, why). Like lem.js, it's a
+// plain script that defines one global, `contexts`, and it starts itself
+// on a page that gives `data-facts`.
 var contexts = (function () {
   "use strict";
 
@@ -32,24 +35,36 @@ var contexts = (function () {
   //
   // - o.get(url, done) fetches JSON, and calls done(null, value), or
   //   done(why, null) if it can't, later rather than at once;
-  // - o.facts is the URL of the page's facts; o.turn, the URL of a turn's
-  //   items, with {turn}, or null; and o.body, the URL of an item's body,
-  //   with {line}, or null;
+  // - o.facts is the URL of the page's facts; o.before and o.after, the
+  //   URLs of the rows before a line and after one, with {line}; o.run, the
+  //   URL of a run's items, with {run}; and o.body, the URL of an item's
+  //   body, with {line}; each null for the index;
   // - o.status(text, wrong), if given, hears how it went: how long the
-  //   page took to show, and what went wrong.
+  //   page took to show, and what went wrong;
+  // - o.keep(update), if given, runs update(), which shows rows that came
+  //   before those on the page, keeping what's on the screen in place; and
+  //   o.shown(), if given, hears that the page's facts are shown.
   //
-  // It asks for a turn's items, or a body, once while they're coming, and
-  // again when the program asks again after they failed; meanwhile the turn
-  // or the entry no longer says why. What can't come, or what the program
-  // refuses, fails, which the turn or the entry says. Gives the view.
+  // It asks for rows, a run's items, or a body, once while they're coming,
+  // and again when the program asks again after they failed; meanwhile the
+  // run or the entry no longer says why. What can't come, or what the
+  // program refuses, fails, which the run, the entry or the end of the rows
+  // says. Gives the view.
   function start(o) {
     var status = o.status || function () {};
+    var keep =
+      o.keep ||
+      function (update) {
+        update();
+      };
     var runtime = new glem.Runtime(new glem.Program(o.program));
     // What the program asks for, by its effect: where it comes from; the
     // field that names it, in the effect and in the fact that says it
     // failed; that fact; and why steps that aren't a list are wrong.
     var asks = {
-      LoadTurn: { url: o.turn, field: "turn", failed: "TurnFailed", wrong: "its items aren't a list of steps" },
+      LoadBefore: { url: o.before, field: "line", failed: "EarlierFailed", wrong: "its rows aren't a list of steps" },
+      LoadAfter: { url: o.after, field: "line", failed: "LaterFailed", wrong: "its rows aren't a list of steps" },
+      LoadRun: { url: o.run, field: "run", failed: "RunFailed", wrong: "its items aren't a list of steps" },
       Load: { url: o.body, field: "line", failed: "Failed", wrong: "its body isn't a list of steps" }
     };
     // What's coming, and what failed, with its fact's fields, each by its
@@ -101,7 +116,13 @@ var contexts = (function () {
           return;
         }
         refused = null;
-        view.update(steps);
+        if (ask.failed === "EarlierFailed") {
+          keep(function () {
+            view.update(steps);
+          });
+        } else {
+          view.update(steps);
+        }
         if (refused !== null) {
           fail(ask, value, refused);
         }
@@ -121,6 +142,9 @@ var contexts = (function () {
       view.update(steps);
       if (refused === null) {
         status(steps.length + " facts, shown in " + (Date.now() - began) + " ms", false);
+        if (o.shown) {
+          o.shown();
+        }
       }
     });
     return view;
@@ -148,6 +172,19 @@ var contexts = (function () {
           done(error instanceof Error ? error.message : String(error), null);
         }
       );
+  }
+
+  // Shows rows that came before those on the page, by update(), keeping
+  // what's on the screen in place: they're all above it, so the page
+  // scrolls down as far as they reach. The page's own scroll anchoring is
+  // off (web/contexts.css), so that only this moves it.
+  function keep(update) {
+    var page = document.scrollingElement;
+    var height = page ? page.scrollHeight : 0;
+    update();
+    if (page) {
+      page.scrollTop += page.scrollHeight - height;
+    }
   }
 
   // A choice that the browser remembers, if it lets the page: one of
@@ -245,10 +282,19 @@ var contexts = (function () {
         root: root,
         program: program,
         facts: html.getAttribute("data-facts"),
-        turn: html.getAttribute("data-turn"),
+        before: html.getAttribute("data-before"),
+        after: html.getAttribute("data-after"),
+        run: html.getAttribute("data-run"),
         body: html.getAttribute("data-body"),
         get: get,
-        status: status
+        status: status,
+        keep: keep,
+        shown: function () {
+          var page = document.scrollingElement;
+          if (page && html.getAttribute("data-before") !== null) {
+            page.scrollTop = page.scrollHeight;
+          }
+        }
       });
     });
   }

@@ -348,27 +348,27 @@ JS_RUN = """
       console.log(text);
     }
   }
-  function run(facts, turns, bodies) {
+  function run(facts, runs, bodies) {
     var doc = new standInDom.Document();
     var waiting = new Map();
     var wrong = [];
     var shown = contexts.start({
       root: doc.createElement("div"), program: NODE.program, facts: "facts",
-      turn: "turn/{turn}", body: "body/{line}",
+      before: "before/{line}", after: "after/{line}", run: "run/{run}", body: "body/{line}",
       get: function (url, done) { waiting.set(url, done); },
       status: function (text, bad) { if (bad) { wrong.push(text); } }
     });
     waiting.get("facts")(null, facts);
-    var turned = 0;
-    Object.keys(turns).forEach(function (n) {
-      shown.send(["Toggled", ["TurnBox", Number(n)], true]);
-      var done = waiting.get("turn/" + n);
+    var ran = 0;
+    Object.keys(runs).forEach(function (line) {
+      shown.send(["Toggled", ["RunBox", Number(line)], true]);
+      var done = waiting.get("run/" + line);
       if (done === undefined) {
-        wrong.push("turn " + n + " asked for no items");
+        wrong.push("run " + line + " asked for no items");
         return;
       }
-      done(null, turns[n]);
-      turned += 1;
+      done(null, runs[line]);
+      ran += 1;
     });
     var opened = 0;
     Object.keys(bodies).forEach(function (line) {
@@ -386,10 +386,10 @@ JS_RUN = """
       return shown.runtime.lem.relFacts(prog.rel(name)).length;
     }
     return { wrong: wrong, entries: count("Entry"), codes: count("Code"),
-             rows: count("TableRow"), turned: turned, opened: opened };
+             rows: count("TableRow"), ran: ran, opened: opened };
   }
   out("NODE " + JSON.stringify({ index: run(NODE.index, {}, {}),
-                                 log: run(NODE.log, NODE.turns, NODE.bodies) }));
+                                 log: run(NODE.log, NODE.runs, NODE.bodies) }));
 })();
 """
 
@@ -1391,7 +1391,9 @@ class ViewTests(WorkspaceTest):
         log = self.get("lem/c/1")
         self.assertEqual((log.status, log.csp), (200, view.PAGE_CSP))
         for shown in (f'<html lang=en data-facts="/{TOKEN}/lem/facts/c/1" '
-                      f'data-turn="/{TOKEN}/lem/turn/1/{{turn}}" '
+                      f'data-before="/{TOKEN}/lem/rows/1/before/{{line}}" '
+                      f'data-after="/{TOKEN}/lem/rows/1/after/{{line}}" '
+                      f'data-run="/{TOKEN}/lem/run/1/{{run}}" '
                       f'data-body="/{TOKEN}/lem/body/1/{{line}}">',
                       "<title>local-0 (1) · node</title>", f'<a href="/{TOKEN}/c/1">the plain'):
             self.assertIn(shown, log.body)
@@ -1436,51 +1438,106 @@ class ViewTests(WorkspaceTest):
         steps = self.steps("lem/facts/c/1")
         self.assertEqual(self.facts(steps, "Page"), [
             {"title": "local-0 (1)", "items": f"/{TOKEN}/c/1?line=",
-             "turns": f"/{TOKEN}/c/1?turn="}])
+             "turns": f"/{TOKEN}/c/1?turn=", "first": 1, "last": 63}])
         self.assertEqual(self.facts(steps, "Nav"), [
             {"n": 0, "text": "Root contexts", "to": f"/{TOKEN}/lem/"},
             {"n": 1, "text": "Plain pages", "to": f"/{TOKEN}/c/1"}])
         turns = self.facts(steps, "Turn")
-        self.assertEqual([(fact["n"], fact["label"], fact["title"]) for fact in turns], [
-            (0, "The start · 2 items", ""),
-            (1, "Turn 1 · 14 items", 'Fix the bug <script>alert(1)</script> & "quoted"'),
-            (2, "Turn 2 · 10 items", "/compact"), (3, "Turn 3 · 13 items", "Next step."),
-            (4, "Turn 4 · 10 items", "/config · Look at this.")])
-        self.assertEqual(self.facts(steps, "Item"), [])  # a turn's come when it's opened
-        items = {}
-        for turn in turns:
-            loaded = self.steps(f"lem/turn/1/{turn['n']}")
-            self.assertEqual(loaded[0], ["+", "Loaded", {"turn": turn["n"]}])
+        self.assertEqual([(fact["n"], fact["label"], fact["title"], fact["line"])
+                          for fact in turns], [
+            (0, "The start · 2 items", "", 1),
+            (1, "Turn 1 · 14 items", 'Fix the bug <script>alert(1)</script> & "quoted"', 3),
+            (2, "Turn 2 · 10 items", "/compact", 22), (3, "Turn 3 · 13 items", "Next step.", 34),
+            (4, "Turn 4 · 10 items", "/config · Look at this.", 52)])
+        # The whole log, which holds fewer rows than a chunk: its messages, each with its
+        # text, and its runs, each with what's in it.
+        self.assertEqual(self.facts(steps, "Chunk"), [{"first": 1, "last": 63}])
+        messages = {fact["line"]: fact for fact in self.facts(steps, "Message")}
+        runs = {fact["line"]: fact for fact in self.facts(steps, "Run")}
+        self.assertEqual(sorted(messages), [3, 18, 30, 34, 48, 54, 60])
+        self.assertEqual([(line, run["last"], run["text"]) for line, run in sorted(runs.items())], [
+            (1, 2, "2 other"),
+            (5, 17, "3 tool calls: apply_patch 1, exec_command 1, update_plan 1; 1 reasoning; "
+             "3 other"),
+            (19, 21, "2 other"), (22, 29, "2 tool calls: compact 1, exec_command 1; 3 other"),
+            (31, 33, "2 other"),
+            (36, 47, "3 tool calls: exec_command 1, icron 1, retry 1; 3 other"),
+            (49, 51, "2 other"), (52, 53, "1 tool call: config 1"), (56, 59, "4 other"),
+            (61, 63, "2 other")])
+        context = contexts.Roots(self.ws.registry).get(LOCAL).refresh()
+        rows = {**messages, **runs}
+        self.assertEqual({line: fact["turn"] for line, fact in rows.items()},
+                         {line: context.turn_of(line - 1) for line in rows})
+        for line, tone, label, text in (
+                (3, "User", "[user]", 'Fix the bug <script>alert(1)</script> & "quoted"'),
+                (18, "Assistant", "[assistant]",
+                 "Fixed\\u202e it.\\u2028Next\\U000e0041 \U0001f469\u200d\U0001f4bb"),
+                (54, "User", "[user]", "Look at this.\n\n[image] image/png 11.7 KiB"),
+                (60, "Assistant", "[assistant]", "Lone \\ud800 surrogate.")):
+            self.assertEqual(messages[line], {"line": line, "turn": context.turn_of(line - 1),
+                                              "tone": tone, "label": label, "text": text}, line)
+        # A run's items come when it's opened: with the messages, every line but the
+        # boundaries, each in its run.
+        items, run_of = {}, {}
+        for line, run in runs.items():
+            loaded = self.steps(f"lem/run/1/{line}")
+            self.assertEqual(loaded[0], ["+", "RunLoaded", {"run": line}])
             mine = self.facts(loaded, "Item")
-            self.assertEqual({fact["turn"] for fact in mine}, {turn["n"]})
-            self.assertIn(f" · {len(mine)} items", turn["label"])  # as many as its label says
+            self.assertEqual({fact["run"] for fact in mine}, {line})
+            run_of.update((fact["line"], line) for fact in mine)
+            self.assertTrue(all(line <= fact["line"] <= run["last"] for fact in mine), line)
             items.update((fact["line"], fact) for fact in mine)
-        # Every line but the boundaries, each in its turn.
         boundaries = [line for line, record in enumerate(local_items(), 1)
                       if record in (BOUNDARY, SAMPLE_END)]
-        self.assertEqual(sorted(items), [line for line in range(1, 64) if line not in boundaries])
-        context = contexts.Roots(self.ws.registry).get(LOCAL).refresh()
-        self.assertEqual({line: fact["turn"] for line, fact in items.items()},
-                         {line: context.turn_of(line - 1) for line in items})
+        self.assertEqual(sorted([*items, *messages]),
+                         [line for line in range(1, 64) if line not in boundaries])
         for line, tone, label, line_gist, body in (
                 (1, "Dim", "[init]", f"{KEY_A} model=model-a", False),
-                (3, "User", "[user]", 'Fix the bug <script>alert(1)</script> & "quoted"', False),
                 (6, "Tool", "[tool-call] exec_command", "ls", True),
                 (9, "Tool", "[tool-ret] exec_command [ok]", "a.py … 2 lines", True),
                 (13, "Tool", "[tool-ret] apply_patch [ok]", "Done!", False),
-                (18, "Assistant", "[assistant]",
-                 "Fixed\\u202e it. Next\\U000e0041 \U0001f469\u200d\U0001f4bb", True),
                 (21, "Dim", "[turn]", "input_sum=2400 output_sum=160 cold_sum=400 cached_sum=2000 "
                  "cached_max=1000 context=1280 samples=2 compactions=0 elapsed=75.00s", False),
                 (36, "Error", "[model]", "Too many requests", True),
                 (47, "Tool", "[tool-ret] exec_command [ok]", "x" * (pages.GIST_CHARS - 1) + "…",
                  True),
-                (54, "User", "[user]", "Look at this.", True),
-                (59, "Error", "[bad line]", "not json at all", False),
-                (60, "Assistant", "[assistant]", "Lone \\ud800 surrogate.", False)):
-            self.assertEqual(items[line], {"line": line, "turn": context.turn_of(line - 1),
-                                           "tone": tone, "label": label, "gist": line_gist,
-                                           "body": body}, line)
+                (59, "Error", "[bad line]", "not json at all", False)):
+            self.assertEqual(items[line], {"line": line, "run": run_of[line], "tone": tone,
+                                           "label": label, "gist": line_gist, "body": body}, line)
+
+    def test_rows_come_in_chunks(self):
+        # Three rows a chunk: the page's facts give the last; the rows before a chunk's
+        # first line, those before it, to the log's start; and the rows after a line, those
+        # after it, to its end. Each chunk ends where a row ends, and they tile the log,
+        # each row in one.
+        whole = [(rel, fields["line"]) for _, rel, fields in self.steps("lem/facts/c/1")
+                 if rel in ("Message", "Run")]
+        with mock.patch.object(view, "CHUNK_ROWS", 3):
+            chunks = []
+            steps = self.steps("lem/facts/c/1")
+            while True:
+                chunk = self.facts(steps, "Chunk")[0]
+                rows = [(rel, fields["line"]) for _, rel, fields in steps
+                        if rel in ("Message", "Run")]
+                self.assertLessEqual(len(rows), 3, chunk)
+                chunks.insert(0, (chunk["first"], chunk["last"], rows))
+                if chunk["first"] == 1:
+                    break
+                steps = self.steps(f"lem/rows/1/before/{chunk['first']}")
+            self.assertEqual([row for _, _, rows in chunks for row in rows], whole)
+            self.assertEqual([chunks[0][0]] + [last + 1 for _, last, _ in chunks],
+                             [first for first, _, _ in chunks] + [64])
+            forward, after = [], 0
+            while after < 63:
+                steps = self.steps(f"lem/rows/1/after/{after}")
+                chunk = self.facts(steps, "Chunk")[0]
+                self.assertEqual(chunk["first"], after + 1)
+                forward += [(rel, fields["line"]) for _, rel, fields in steps
+                            if rel in ("Message", "Run")]
+                after = chunk["last"]
+            self.assertEqual(forward, whole)
+            self.assertEqual(self.facts(self.steps("lem/rows/1/after/63"), "Chunk"),
+                             [{"first": 64, "last": 63}])
 
     def test_bodies(self):
         def body(line):
@@ -1509,12 +1566,19 @@ class ViewTests(WorkspaceTest):
                           (f"lem/body/{REPLACED}/2", "There's no such root context here."),
                           (f"lem/body/{SECOND}/3", "There's no such root context here."),
                           ("lem/facts/c/99", "There's no such root context here."),
-                          ("lem/turn/1/5", "local-0 (1) has no turn 5."),
-                          ("lem/turn/1/x", "local-0 (1) has no turn x."),
-                          ("lem/turn/1/01", "local-0 (1) has no turn 01."),
-                          ("lem/turn/1/", "local-0 (1) has no turn ."),
-                          (f"lem/turn/{REPLACED}/1", "There's no such root context here."),
-                          (f"lem/turn/{SECOND}/1", "There's no such root context here."),
+                          ("lem/rows/1/before/0", "local-0 (1) has no rows before line 0."),
+                          ("lem/rows/1/before/65", "local-0 (1) has no rows before line 65."),
+                          ("lem/rows/1/after/64", "local-0 (1) has no rows after line 64."),
+                          ("lem/rows/1/after/01", "local-0 (1) has no rows after line 01."),
+                          ("lem/rows/1/after/x", "local-0 (1) has no rows after line x."),
+                          ("lem/rows/1/aside/3", "local-0 (1) has no rows aside line 3."),
+                          ("lem/run/1/3", "local-0 (1) has no run at line 3."),  # a message
+                          ("lem/run/1/6", "local-0 (1) has no run at line 6."),  # within one
+                          ("lem/run/1/4", "local-0 (1) has no run at line 4."),  # a boundary
+                          ("lem/run/1/0", "local-0 (1) has no run at line 0."),
+                          ("lem/run/1/x", "local-0 (1) has no run at line x."),
+                          (f"lem/rows/{REPLACED}/before/2", "There's no such root context here."),
+                          (f"lem/run/{SECOND}/1", "There's no such root context here."),
                           (f"lem/facts/c/{UNREADABLE}", "There's no such root context here.")):
             response = self.get(path)
             self.assertEqual((response.status, response.content_type, response.body),
@@ -1570,10 +1634,10 @@ class ViewTests(WorkspaceTest):
         for cid in (LOCAL, OLD, PROJ):
             steps = self.steps(f"lem/facts/c/{cid}")
             self.assertEqual(step_problems(program, steps), [], cid)
-            every = list(steps)  # as a page has them once each turn is open
-            for turn in self.facts(steps, "Turn"):
-                loaded = self.steps(f"lem/turn/{cid}/{turn['n']}")
-                self.assertEqual(step_problems(program, loaded), [], (cid, turn["n"]))
+            every = list(steps)  # as a page has them once each run is open
+            for run in self.facts(steps, "Run"):
+                loaded = self.steps(f"lem/run/{cid}/{run['line']}")
+                self.assertEqual(step_problems(program, loaded), [], (cid, run["line"]))
                 every += loaded
                 for item in self.facts(loaded, "Item"):
                     if item["body"]:
@@ -1582,7 +1646,7 @@ class ViewTests(WorkspaceTest):
             self.assertEqual(step_problems(program, every), [], cid)
         # The check itself.
         self.assertEqual(step_problems(program, [
-            ["+", "Item", {"line": 1, "turn": 0, "tone": "Blue", "label": "x", "gist": "y",
+            ["+", "Item", {"line": 1, "run": 1, "tone": "Blue", "label": "x", "gist": "y",
                            "body": 1}],
             ["+", "Turn", {"n": 1}], ["+", "Nope", {}], ["-", "Turn", {"n": 2, "title": "t"}],
             ["+", "Turn", {"n": 2.5, "label": "l", "title": "t", "x": 0}],
@@ -1590,9 +1654,10 @@ class ViewTests(WorkspaceTest):
             ["+", "Nav", {"n": 1, "text": "a", "to": "/"}],
             ["+", "Nav", {"n": 1, "text": "b", "to": "/"}]]), [
             "Item's tone is a Tone, not 'Blue'", "Item's body is a Bool, not 1",
-            "Turn needs its label", "Turn needs its title", "Nope isn't an input",
-            "['-', 'Turn', {'n': 2, 'title': 't'}] doesn't add a fact", "Turn has no field x",
-            "Turn's n is a Int, not 2.5", "two Nav facts have the key [1]"])
+            "Turn needs its label", "Turn needs its title", "Turn needs its line",
+            "Nope isn't an input", "['-', 'Turn', {'n': 2, 'title': 't'}] doesn't add a fact",
+            "Turn has no field x", "Turn's n is a Int, not 2.5", "Turn needs its line",
+            "two Nav facts have the key [1]"])
 
 
 class ServerTests(unittest.TestCase):
@@ -2008,14 +2073,16 @@ class ViewInJavaScriptTests(WorkspaceTest):
             return json.loads(app.respond("GET", f"/{TOKEN}/{path}", ["127.0.0.1"]).body)
 
         log = steps("lem/facts/c/1")
-        turns = {fields["n"]: steps(f"lem/turn/1/{fields['n']}")
-                 for _, rel, fields in log if rel == "Turn"}
-        items = [fields for loaded in turns.values() for _, rel, fields in loaded
+        runs = {fields["line"]: steps(f"lem/run/1/{fields['line']}")
+                for _, rel, fields in log if rel == "Run"}
+        items = [fields for loaded in runs.values() for _, rel, fields in loaded
                  if rel == "Item"]
+        marks = [fields for _, rel, fields in log if rel == "Turn"]
+        messages = [fields for _, rel, fields in log if rel == "Message"]
         bodies = {item["line"]: steps(f"lem/body/1/{item['line']}")
                   for item in items if item["body"]}
         node = {"program": json.loads(PROGRAM.read_text()), "index": steps("lem/facts/"),
-                "log": log, "turns": turns, "bodies": bodies}
+                "log": log, "runs": runs, "bodies": bodies}
         scripts = ("src/lem/lem.js", "src/glem/glem.js", "src/glui/glui.js",
                    "tools/stand_in_dom.js", "web/contexts.js")
         with tempfile.TemporaryDirectory() as tmp:
@@ -2029,10 +2096,11 @@ class ViewInJavaScriptTests(WorkspaceTest):
         self.assertEqual(len(said), 1, done.stdout + done.stderr)
         got = json.loads(said[0][len("NODE "):])
         self.assertEqual(got["index"], {"wrong": [], "entries": 0, "codes": 0, "rows": 4,
-                                        "turned": 0, "opened": 0})
-        self.assertEqual(got["log"], {"wrong": [], "entries": len(turns) + len(items),
-                                      "codes": sum(map(len, bodies.values())), "rows": 0,
-                                      "turned": len(turns), "opened": len(bodies)})
+                                        "ran": 0, "opened": 0})
+        self.assertEqual(got["log"], {
+            "wrong": [], "entries": len(marks) + len(messages) + len(runs) + len(items),
+            "codes": len(messages) + sum(map(len, bodies.values())), "rows": 0,
+            "ran": len(runs), "opened": len(bodies)})
 
 
 @unittest.skipUnless(os.environ.get("PYTHIA_LIVE_NODE_REGISTRY"),
@@ -2063,11 +2131,15 @@ class LiveTests(unittest.TestCase):
                     page = live.app.pages.url(context.id, f"line={line}")
                     statuses[page] = request(live.server_port, page)[0]
                 steps = facts(f"/{TOKEN}/lem/facts/c/{context.id}")
-                turns = [fields["n"] for _, rel, fields in steps if rel == "Turn"]
+                first = [fields["first"] for _, rel, fields in steps if rel == "Chunk"][0]
+                if first > 1:
+                    steps += facts(f"/{TOKEN}/lem/rows/{context.id}/before/{first}")
+                facts(f"/{TOKEN}/lem/rows/{context.id}/after/0")
+                runs = [fields["line"] for _, rel, fields in steps if rel == "Run"]
                 lines = []
-                for turn in sorted(set(turns[:3] + turns[-3:] + turns[::max(1, len(turns) // 8)])):
+                for run in sorted(set(runs[:3] + runs[-3:] + runs[::max(1, len(runs) // 8)])):
                     lines += [fields["line"] for _, rel, fields
-                              in facts(f"/{TOKEN}/lem/turn/{context.id}/{turn}")
+                              in facts(f"/{TOKEN}/lem/run/{context.id}/{run}")
                               if rel == "Item" and fields["body"]]
                 for line in sorted(set(lines[:5] + lines[-5:] + lines[::max(1, len(lines) // 10)])):
                     facts(f"/{TOKEN}/lem/body/{context.id}/{line}")

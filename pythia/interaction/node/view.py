@@ -5,10 +5,15 @@ N's log, each load glui's scripts and stylesheets, and the program that
 shows them, ``lem/contexts.lem`` compiled, from ``_pythia_ui/`` beside the
 package (``Files``), at ``/TOKEN/lem/files/NAME``. A page's facts come as
 JSON steps (``_pythia_ui/src/lem/host.rs``), from ``/TOKEN/lem/facts/`` and
-``/TOKEN/lem/facts/c/N``: for a log, its turns, folded. A turn's items come
-when it's opened, from ``/TOKEN/lem/turn/N/TURN``, so that a page holds
-only what's been opened; and an item's body when its entry opens, from
-``/TOKEN/lem/body/N/LINE``. An item's label and gist are those of the
+``/TOKEN/lem/facts/c/N``: for a log, its turns, each with the line where it
+starts, and its last rows. A log's rows are its messages, each with its
+text, and its runs, the other items between two messages within a turn,
+each with what's in it. More rows come as either end of those on the page
+comes near the screen, from ``/TOKEN/lem/rows/N/before/LINE`` and
+``/TOKEN/lem/rows/N/after/LINE``, so that a page holds what's been scrolled
+through; a run's items when it's opened, from ``/TOKEN/lem/run/N/LINE``; and
+an item's body when its entry opens, from ``/TOKEN/lem/body/N/LINE``. An
+item's label and gist are those of the
 server's plain pages, and its body holds what they show for it
 (``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
 terminal shows it, each character to escape as its code point.
@@ -23,7 +28,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from .._cli_editor import safe_text
@@ -63,7 +68,14 @@ TONES = {"user": "User", "assistant": "Assistant", "tool": "Tool", "tool err": "
 CALL_LINES = 64
 # A line's number in a body's URL, and a turn's in a turn's.
 _LINE = re.compile(r"[1-9][0-9]{0,11}\Z")
-_TURN = re.compile(r"(?:0|[1-9][0-9]{0,11})\Z")
+_WHOLE = re.compile(r"(?:0|[1-9][0-9]{0,11})\Z")
+# About how many rows a stretch of a log holds that the view sends at once:
+# it ends where a row ends.
+CHUNK_ROWS = 200
+# A run's summary names this many tools at most.
+SUMMARY_TOOLS = 3
+# The lines that are rows alone: a user's message, or the assistant's.
+_TALK = (("message", "user"), ("message", "assistant"))
 
 
 class Files:
@@ -135,9 +147,10 @@ def texts(renderer: Renderer, parts) -> List[Tuple[str, bool]]:
     return found
 
 
-def item(renderer: Renderer, line: int, turn: int, record: dict) -> Optional[dict]:
-    """Line ``line``'s Item: its tone, label and gist, and whether it has a body, which it
-    has unless its gist is all of it, on one line. None for a line that shows nothing.
+def item(renderer: Renderer, line: int, run: int, record: dict) -> Optional[dict]:
+    """Line ``line``'s Item, in the run that starts at line ``run``: its tone, label and
+    gist, and whether it has a body, which it has unless its gist is all of it, on one
+    line. None for a line that shows nothing.
 
     A message has no gist of its own: its gist is its text, on one line, cut.
     """
@@ -147,9 +160,87 @@ def item(renderer: Renderer, line: int, turn: int, record: dict) -> Optional[dic
     body = texts(renderer, shown.parts)
     line_gist = gist(record) or (cut(_one_line(body[0][0]), GIST_CHARS) if body else "")
     whole = len(body) == 1 and not body[0][1] and body[0][0].strip() == line_gist
-    return {"line": line, "turn": turn, "tone": TONES.get(shown.css, "Dim"),
+    return {"line": line, "run": run, "tone": TONES.get(shown.css, "Dim"),
             "label": safe_text(shown.label), "gist": safe_text(line_gist),
             "body": bool(body) and not whole}
+
+
+def spans(context: Context, start: int, forward: bool, most: Optional[int] = None
+          ) -> Tuple[int, int, List[Tuple[int, int]]]:
+    """Up to about ``most`` of ``context``'s rows, ``CHUNK_ROWS`` by default, from line ``start`` (from 0), forward or
+    back, in order, stopping where a row ends: a user's or the assistant's message is a row
+    alone, and the other lines that show, from one message to the next within a turn, are
+    a run. Each row is its first and last lines, from 0; and the lines that the rows cover,
+    from 0, as a range, hold those that show nothing too, and, at an end of the log, the
+    lines before its first row or after its last."""
+    index = context.index
+    most = CHUNK_ROWS if most is None else most
+    found: List[Tuple[int, int]] = []
+    run: Optional[List[int]] = None  # the run being gathered: its ends, and its turn
+    line = start
+    while 0 <= line < len(index):
+        kind = index.kind(line)
+        if not hidden(kind[0]):
+            talk = kind in _TALK
+            turn = context.turn_of(line)
+            if run is not None and (talk or run[2] != turn):
+                found.append((min(run[0], run[1]), max(run[0], run[1])))
+                run = None
+            if run is None:
+                if len(found) >= most:
+                    break
+                if talk:
+                    found.append((line, line))
+                else:
+                    run = [line, line, turn]
+            else:
+                run[1] = line
+        line += 1 if forward else -1
+    if run is not None:
+        found.append((min(run[0], run[1]), max(run[0], run[1])))
+    if forward:
+        return start, line, found
+    found.reverse()
+    return line + 1, start + 1, found
+
+
+def summary(context: Context, first: int, last: int) -> str:
+    """What the run of lines ``first`` to ``last`` (from 0) of ``context``'s log holds, such
+    as ``9 tool calls: exec_command 7, apply_patch 2; 2 reasoning``."""
+    index = context.index
+    calls: Dict[str, int] = {}
+    results = reasoning = other = 0
+    for offset, raw in enumerate(index.read(first, last + 1)):
+        kind = index.kind(first + offset)[0]
+        if hidden(kind):
+            continue
+        if kind in ("tool_call", "user_tool_call"):
+            record = parse(raw)
+            call = record.get("call") if kind == "user_tool_call" else record
+            name = call.get("name") if isinstance(call, dict) else None
+            named = isinstance(name, str) and name.strip()
+            name = safe_text(_one_line(name)) if named else "a tool"
+            calls[name] = calls.get(name, 0) + 1
+        elif kind in ("tool_result", "user_tool_result"):
+            results += 1
+        elif kind == "reasoning":
+            reasoning += 1
+        else:
+            other += 1
+    parts = []
+    total = sum(calls.values())
+    if total:
+        named = sorted(calls.items(), key=lambda pair: (-pair[1], pair[0]))
+        tools = ", ".join(f"{name} {count}" for name, count in named[:SUMMARY_TOOLS])
+        more = ", \u2026" if len(named) > SUMMARY_TOOLS else ""
+        parts.append(f"{total} tool call{'' if total == 1 else 's'}: {tools}{more}")
+    elif results:
+        parts.append(f"{results} tool result{'' if results == 1 else 's'}")
+    if reasoning:
+        parts.append(f"{reasoning} reasoning")
+    if other:
+        parts.append(f"{other} other")
+    return "; ".join(parts) or "nothing that shows"
 
 
 class View:
@@ -171,9 +262,13 @@ class View:
             facts = self.log_facts(pages, name[2:])
             return _plain(404, "There's no such root context here.") if facts is None \
                 else _steps(facts)
-        if what == "turn":
-            cid, _, turn = name.partition("/")
-            return self.turn(pages, cid, turn)
+        if what == "rows":
+            cid, _, rest = name.partition("/")
+            way, _, line = rest.partition("/")
+            return self.rows(pages, cid, way, line)
+        if what == "run":
+            cid, _, line = name.partition("/")
+            return self.run(pages, cid, line)
         if what == "body":
             cid, _, line = name.partition("/")
             return self.body(pages, cid, line)
@@ -184,18 +279,24 @@ class View:
     # The pages.
 
     def _page(self, pages: Pages, title: str, facts: str, body: Optional[str] = None, *,
-              turn: Optional[str] = None, plain: Optional[str] = None) -> Response:
-        """A page of the view: the URLs of its facts, its turns' items and its bodies, what
-        it loads, and, for a browser without script, a link to the same in the plain pages,
-        ``plain``."""
+              rows: Optional[str] = None, run: Optional[str] = None,
+              plain: Optional[str] = None) -> Response:
+        """A page of the view: the URLs of its facts, its rows before a line and after one
+        (``rows``, with ``{way}`` for ``before`` or ``after``), its runs' items and its
+        bodies; what it loads; and, for a browser without script, a link to the same in the
+        plain pages, ``plain``."""
         missing = self.files.missing()
         if missing:
             return pages.not_found(f"The glui view needs files that aren't in "
                                    f"{shown_path(self.files.directory)}/: "
                                    f"{', '.join(missing)}.")
         files = f"{pages.base}/lem/files/"
-        data = (f' data-facts="{h(facts)}"' + ("" if turn is None else f' data-turn="{h(turn)}"')
-                + ("" if body is None else f' data-body="{h(body)}"'))
+        data = f' data-facts="{h(facts)}"'
+        if rows is not None:
+            data += "".join(f' data-{way}="{h(rows.replace("{way}", way))}"'
+                            for way in ("before", "after"))
+        data += ("" if run is None else f' data-run="{h(run)}"') + (
+            "" if body is None else f' data-body="{h(body)}"')
         plain = f"{pages.base}/" if plain is None else plain
         return Response(200, (
             f"<!doctype html>\n<html lang=en{data}>\n<head>\n<meta charset=utf-8>\n"
@@ -219,7 +320,8 @@ class View:
         number = quote(context.id)
         return self._page(pages, context.label, f"{pages.base}/lem/facts/c/{number}",
                           f"{pages.base}/lem/body/{number}/{{line}}",
-                          turn=f"{pages.base}/lem/turn/{number}/{{turn}}",
+                          rows=f"{pages.base}/lem/rows/{number}/{{way}}/{{line}}",
+                          run=f"{pages.base}/lem/run/{number}/{{run}}",
                           plain=f"{pages.base}/c/{number}")
 
     # The facts.
@@ -259,61 +361,118 @@ class View:
         return steps
 
     def log_facts(self, pages: Pages, cid: str) -> Optional[list]:
-        """Root ``cid``'s log: its turns, each with how many items it shows, whose items come
-        when it's opened (``turn``); "The start" for the lines before the first. None if
-        there's no such root here, or its log can't be read."""
+        """Root ``cid``'s log: its turns, each with how many items it shows and the line where
+        it starts, "The start" for the lines before the first; and its last rows (``chunk``).
+        None if there's no such root here, or its log can't be read."""
         context = pages.roots.get(cid)
         if context is None:
             return None
         try:
             context.refresh()
+            number = quote(context.id)
+            index = context.index
+            with index.lock:
+                steps: list = [
+                    ["+", "Page", {"title": safe_text(context.label),
+                                   "items": f"{pages.base}/c/{number}?line=",
+                                   "turns": f"{pages.base}/c/{number}?turn=",
+                                   "first": 1, "last": len(index)}],
+                    ["+", "Nav", {"n": 0, "text": "Root contexts", "to": f"{pages.base}/lem/"}],
+                    ["+", "Nav", {"n": 1, "text": "Plain pages", "to": f"{pages.base}/c/{number}"}]]
+
+                def shown(start: int, stop: int) -> List[int]:
+                    return [line for line in range(start, stop)
+                            if not hidden(index.kind(line)[0])]
+
+                starts = context.turns()
+                first = starts[0] if starts else len(index)
+                if first > 0:
+                    lines = shown(0, first)
+                    steps.append(["+", "Turn", {
+                        "n": 0, "label": turn_label("The start", len(lines)), "title": "",
+                        "line": (lines[0] if lines else 0) + 1}])
+                for row in context.turn_rows():
+                    lines = shown(row.start, row.stop)
+                    steps.append(["+", "Turn", {
+                        "n": row.number, "label": turn_label(f"Turn {row.number}", len(lines)),
+                        "title": safe_text(cut(row.label, TITLE_CHARS) or "(no input)"),
+                        "line": (lines[0] if lines else row.start) + 1}])
+                steps.extend(self.chunk(pages, context, *spans(context, len(index) - 1, False)))
         except OSError:
             return None
-        number = quote(context.id)
-        steps: list = [
-            ["+", "Page", {"title": safe_text(context.label),
-                           "items": f"{pages.base}/c/{number}?line=",
-                           "turns": f"{pages.base}/c/{number}?turn="}],
-            ["+", "Nav", {"n": 0, "text": "Root contexts", "to": f"{pages.base}/lem/"}],
-            ["+", "Nav", {"n": 1, "text": "Plain pages", "to": f"{pages.base}/c/{number}"}]]
-        index = context.index
-        with index.lock:
-            def count(start: int, stop: int) -> int:
-                return sum(1 for line in range(start, stop) if not hidden(index.kind(line)[0]))
-
-            starts = context.turns()
-            first = starts[0] if starts else len(index)
-            if first > 0:
-                steps.append(["+", "Turn", {"n": 0, "label": turn_label("The start", count(0, first)),
-                                            "title": ""}])
-            for row in context.turn_rows():
-                steps.append(["+", "Turn", {
-                    "n": row.number, "label": turn_label(f"Turn {row.number}",
-                                                         count(row.start, row.stop)),
-                    "title": safe_text(cut(row.label, TITLE_CHARS) or "(no input)")}])
         return steps
 
-    def turn(self, pages: Pages, cid: str, text: str) -> Response:
-        """Turn ``text`` of root ``cid``: that its items came, and an Item for each of its
-        lines that shows; turn 0 is the lines before the first."""
+    def chunk(self, pages: Pages, context: Context, low: int, high: int,
+              found: List[Tuple[int, int]]) -> list:
+        """The rows ``found`` (``spans``) of ``context``'s log, which cover lines ``low`` to
+        ``high - 1``, from 0: a Chunk, those lines from 1; and a Message, with its text,
+        cut as the plain pages cut it, or a Run, with what's in it, for each row."""
+        renderer = pages._renderer(context, fold=frozenset())
+        index = context.index
+        steps: list = [["+", "Chunk", {"first": low + 1, "last": high}]]
+        for first, last in found:
+            turn = context.turn_of(first)
+            if first == last and index.kind(first) in _TALK:
+                record = parse(index.read(first, first + 1)[0])
+                shown = renderer.shown(record)
+                said = "" if shown is None else "\n\n".join(
+                    text for text, _diff in texts(renderer, shown.parts))
+                steps.append(["+", "Message", {
+                    "line": first + 1, "turn": turn,
+                    "tone": "Dim" if shown is None else TONES.get(shown.css, "Dim"),
+                    "label": "" if shown is None else safe_text(shown.label),
+                    "text": safe_text(said)}])
+            else:
+                steps.append(["+", "Run", {"line": first + 1, "turn": turn, "last": last + 1,
+                                           "text": summary(context, first, last)}])
+        return steps
+
+    def rows(self, pages: Pages, cid: str, way: str, text: str) -> Response:
+        """Root ``cid``'s rows before line ``text`` (``way`` "before"), or after it ("after"),
+        about ``CHUNK_ROWS`` of them, as ``chunk`` gives them."""
         context = pages.roots.get(cid)
         if context is None:
             return _plain(404, "There's no such root context here.")
         try:
             context.refresh()
-            number = int(text) if _TURN.match(text) else -1
-            if not 0 <= number <= len(context.turns()):
-                return _plain(404, f"{context.label} has no turn {text[:24]}.")
-            start, stop = context.turn_range(number)
-            if start == stop:
-                return _plain(404, f"{context.label} has no lines before its first turn.")
-            records = context.records(start, stop)
+            index = context.index
+            with index.lock:
+                line = int(text) if _WHOLE.match(text) else -1
+                if way == "before" and 1 <= line <= len(index) + 1:
+                    found = spans(context, line - 2, False)
+                elif way == "after" and 0 <= line <= len(index):
+                    found = spans(context, line, True)
+                else:
+                    return _plain(404, f"{context.label} has no rows {way[:12]} line {text[:24]}.")
+                steps = self.chunk(pages, context, *found)
+        except OSError as exc:
+            return _plain(404, f"{context.label}'s log can't be read: {exc}")
+        return _steps(steps)
+
+    def run(self, pages: Pages, cid: str, text: str) -> Response:
+        """The run of root ``cid``'s log that starts at line ``text``: that its items came,
+        and an Item for each of its lines that shows."""
+        context = pages.roots.get(cid)
+        if context is None:
+            return _plain(404, "There's no such root context here.")
+        try:
+            context.refresh()
+            index = context.index
+            with index.lock:
+                line = int(text) if _LINE.match(text) else 0
+                start = line - 1
+                back = spans(context, start, False, 1)[2] if 1 <= line <= len(index) else []
+                kind = index.kind(start) if back else None
+                if not back or back[0][0] != start or kind in _TALK or hidden(kind[0]):
+                    return _plain(404, f"{context.label} has no run at line {text[:24]}.")
+                first, last = spans(context, start, True, 1)[2][0]
+                records = context.records(first, last + 1)
         except OSError as exc:
             return _plain(404, f"{context.label}'s log can't be read: {exc}")
         renderer = pages._renderer(context, fold=frozenset())
-        steps: list = [["+", "Loaded", {"turn": number}]]
-        for line, record in records:
-            fact = item(renderer, line, number, record)
+        steps: list = [["+", "RunLoaded", {"run": line}]]
+        for number, record in records:
+            fact = item(renderer, number, line, record)
             if fact is not None:
                 steps.append(["+", "Item", fact])
         return _steps(steps)
