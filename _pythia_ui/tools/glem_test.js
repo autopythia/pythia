@@ -7,7 +7,8 @@
 // steps, with what each shows and the facts that its joins visit, which
 // both runtimes must agree on, and which a runtime that forgets what its
 // rules read before each tick must show too, with the same facts and why
-// each holds; and the cases of lem/test/tasks_dom.txt,
+// each holds; the tree that glem.js keeps from tick to tick must be the
+// one that tree() builds anew; and the cases of lem/test/tasks_dom.txt,
 // which only JavaScript runs. In a stand-in DOM (tools/stand_in_dom.js),
 // with toy recipes that make an element per widget, with its fields as
 // attributes, the view must show what the runtime does, after each tick of
@@ -41,8 +42,19 @@
     return out;
   }
 
+  // A tree's nodes, a line each: its depth, and its fact as lem writes it.
+  function treeText(runtime, nodes) {
+    var prog = runtime.prog.lem;
+    return nodes
+      .map(function (node) {
+        return node.depth + " " + prog.factText(node.rel, node.tuple);
+      })
+      .join("\n");
+  }
+
   // The tick file, on glem.js's runtime; and again on one that forgets,
-  // before each tick, what its rules read.
+  // before each tick, what its rules read. After a tick that doesn't fail,
+  // the tree that the runtime keeps is the one that tree() builds anew.
   function ticks() {
     var runtime = new glem.Runtime(new glem.Program(tests.program));
     var forgets = new glem.Runtime(new glem.Program(tests.program));
@@ -59,6 +71,12 @@
         why = "forgetting what its rules read, the tick gives\n" + again;
       } else if (everything(forgets.lem) !== everything(runtime.lem)) {
         why = "remembering, the facts are\n" + everything(runtime.lem) + "forgetting, they're\n" + everything(forgets.lem);
+      } else if (got.indexOf("error: ") !== 0) {
+        var kept = treeText(runtime, runtime.nodes());
+        var anew = treeText(runtime, runtime.tree());
+        if (kept !== anew) {
+          why = "the tree that it keeps is\n" + kept + "\nnot\n" + anew;
+        }
       }
       tap.report("tasks_ticks.txt: " + c.title, why);
     });
@@ -150,20 +168,45 @@
   // the runtime's outline does; or, after a tick that fails, what it showed,
   // and the host hears the error. The elements of widgets that stay are the
   // same ones, and only new widgets get elements; and the host hears each
-  // effect.
+  // effect. A tick that follows one that didn't fail, and doesn't fail
+  // itself, changes the tree and the page where they changed: it neither
+  // builds the tree anew nor shows it whole.
   function rendered() {
     var it = fixture([]);
+    var anew = 0;
+    var whole = 0;
+    var build = it.runtime.build;
+    it.runtime.build = function () {
+      anew++;
+      return build.apply(this, arguments);
+    };
+    var renderAll = it.view.renderAll;
+    it.view.renderAll = function () {
+      whole++;
+      return renderAll.apply(this, arguments);
+    };
+    var steady = false;
     tests.ticks.forEach(function (c) {
       var before = elements(it.root);
       var shown = page(it.root);
       var made = it.doc.made;
       it.heard = [];
-      it.view.update(c.steps);
+      anew = 0;
+      whole = 0;
+      var thrown = null;
+      try {
+        it.view.update(c.steps);
+      } catch (e) {
+        thrown = tap.error(e);
+      }
       var why = null;
       var effects = c.want.split("\n").filter(function (line) {
         return line.indexOf("effect ") === 0;
       });
-      if (c.want.indexOf("error: ") === 0) {
+      var failed = c.want.indexOf("error: ") === 0;
+      if (thrown !== null) {
+        why = "the view throws " + thrown;
+      } else if (failed) {
         if (it.heard.join("\n") !== c.want || page(it.root) !== shown) {
           why = "the host hears\n" + it.heard.join("\n") + "\nand the page is\n" + page(it.root);
         }
@@ -171,19 +214,23 @@
         why = "the page is\n" + page(it.root) + "\nnot\n" + it.runtime.outline(null).join("\n");
       } else if (it.heard.length !== effects.length) {
         why = "the host hears\n" + it.heard.join("\n") + "\nnot " + effects.length + " effects";
+      } else if (steady && (anew > 0 || whole > 0)) {
+        why = "the tick built the tree anew " + anew + " times, and showed it whole " + whole + " times";
       }
+      steady = !failed;
       tap.report("tasks_ticks.txt, in the DOM: " + c.title, why || kept(it, before, made));
     });
   }
 
   // Whether the elements of the widgets that stayed, since `before`, are the
   // same ones, and only new widgets got elements, of which there were
-  // `made` before: null, or why not.
+  // `made` before: null, or why not. A widget whose kind changed is new: its
+  // kind's recipe makes it an element, whose tag here is the kind.
   function kept(it, before, made) {
     var fresh = 0;
     var why = null;
     elements(it.root).forEach(function (element, key) {
-      if (!before.has(key)) {
+      if (!before.has(key) || before.get(key).tagName !== element.tagName) {
         fresh++;
       } else if (before.get(key) !== element && why === null) {
         why = key + " has a new element";

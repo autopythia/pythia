@@ -426,7 +426,8 @@ var glui = (function () {
   // What glui shows of a widget besides its fields, for glem.View: after a
   // tick, a function of a widget's id that gives {disabled, tooltip}: why
   // it's disabled, the reasons in order, and its tooltip, "" for none; or
-  // null, for neither.
+  // null, for neither. It reads the relations that `state.rels` names, so
+  // that the view asks again only for the widgets whose facts there change.
   function state(runtime) {
     var prog = runtime.prog;
     var disabled = new Map();
@@ -448,6 +449,7 @@ var glui = (function () {
       return why.length === 0 && tip === "" ? null : { disabled: why, tooltip: tip };
     };
   }
+  state.rels = ["Disabled", "Tooltip"];
 
   // The metrics that are times, in milliseconds (theme.lem); the rest are
   // sizes, in points, which CSS calls px.

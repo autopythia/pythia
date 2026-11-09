@@ -112,3 +112,79 @@ error: Stray's parent, Nowhere, isn't a widget (from the rule at lem/test/tasks.
 + Todo("e", "loop", 50)
 ---
 error: these widgets' parents form a cycle: Loop(1), Loop(2)
+
+=== a note under its row
+- Todo("e", "loop", 50)
++ Todo("f", "noted", 60)
++ Noted("f")
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("f"), text="noted", on=Open("f"))
+      Line(Note("f"), text="noted")
+  Line(Footer, text="pinned")
+
+=== the row goes, and its note stays: the note's parent isn't a widget
+- Todo("f", "noted", 60)
+---
+error: Note("f")'s parent, Row("f"), isn't a widget (from the rule at lem/test/tasks.lem:53:1)
+
+=== the note goes too, and a plain row comes
+- Noted("f")
++ Todo("g", "plain", 70)
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("g"), text="plain", on=Open("g"))
+  Line(Footer, text="pinned")
+
+=== an open folder, with a line inside
++ Opened(True)
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Group(Folder, title="folder")
+      Line(Inside, text="inside")
+    Item(Row("g"), text="plain", on=Open("g"))
+  Line(Footer, text="pinned")
+
+=== closed, the folder is a row, and the line stays inside
+- Opened(True)
++ Opened(False)
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Folder, text="folder", on=Pin("folder"))
+      Line(Inside, text="inside")
+    Item(Row("g"), text="plain", on=Open("g"))
+  Line(Footer, text="pinned")
+
+=== a stray, after a tick that didn't fail: its parent isn't a widget
++ Todo("h", "stray", 80)
+---
+error: Stray's parent, Nowhere, isn't a widget (from the rule at lem/test/tasks.lem:33:1)
+
+=== the stray goes
+- Todo("h", "stray", 80)
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Folder, text="folder", on=Pin("folder"))
+      Line(Inside, text="inside")
+    Item(Row("g"), text="plain", on=Open("g"))
+  Line(Footer, text="pinned")
+
+=== a loop, after a tick that didn't fail
++ Todo("i", "loop", 90)
+---
+error: these widgets' parents form a cycle: Loop(1), Loop(2)
+
+=== the loop goes
+- Todo("i", "loop", 90)
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Folder, text="folder", on=Pin("folder"))
+      Line(Inside, text="inside")
+    Item(Row("g"), text="plain", on=Open("g"))
+  Line(Footer, text="pinned")

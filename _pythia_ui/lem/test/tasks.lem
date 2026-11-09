@@ -45,3 +45,17 @@ on Type(t, text):
 -- first, by id.
 id Strayed
 Line(Strayed, parent=Nowhere, text="lost too") :- Todo(_, "stray", _)
+
+-- A row's note, under the row, which the host gives apart from it: if the
+-- row goes and the note stays, the note's parent isn't a widget.
+id Note(Text)
+input Noted(todo: Text)
+Line(Note(t), parent=Row(t), text="noted") :- Noted(t)
+
+-- A folder, a group while it's open and a row while it isn't, with a line
+-- inside that stays as the folder changes its kind.
+id Folder, Inside
+input Opened(open: Bool)
+Group(Folder, parent=List, title="folder", order=0) :- Opened(True)
+Item(Folder, parent=List, text="folder", on=Pin("folder"), order=0) :- Opened(False)
+Line(Inside, parent=Folder, text="inside") :- Opened(_)

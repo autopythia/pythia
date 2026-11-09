@@ -3,11 +3,13 @@
 // src/glem/mod.rs runs a program: lem's tick, then the widget tree's
 // checks, then dropping the state whose widget is gone, with the same
 // outline and errors, which the shared tests check (tools/glem_test.js,
-// `make js-test`). A view (View) keeps a program's widgets in the DOM, each
-// made by a recipe from the layer above, and sends messages from the
-// recipes' events and from keys. It's a plain script that defines one
-// global, `glem`, after lem.js's `lem`; it writes no HTML, and runs no code
-// that it's given.
+// `make js-test`). Where Rust builds the tree anew each tick, glem.js keeps
+// it, and changes it where a widget's relation changed. A view (View)
+// keeps a program's widgets in the DOM, each made by a recipe from the
+// layer above, and sends messages from the recipes' events and from keys;
+// it shows what changed in the tree since it last showed it. It's a plain
+// script that defines one global, `glem`, after lem.js's `lem`; it writes
+// no HTML, and runs no code that it's given.
 
 var glem = (function () {
   "use strict";
@@ -84,11 +86,26 @@ var glem = (function () {
   }
 
   // A glem program's runtime: lem's (lem.Runtime), and the widget tree, as
-  // the last tick left it, in `nodes`.
+  // the last tick left it. The tree stays from tick to tick, and a tick
+  // changes it where a kind's relation has a new version, by the facts that
+  // it gained and lost (grow). It's built anew from tree() the first time,
+  // after a tick whose tree failed, and when a change might break its rules,
+  // so that tree() gives the error, as Rust's does. Its nodes, each {kind,
+  // rel, tuple, id, key, fact, parent, order}, are by their ids, as
+  // lem.key gives them (byId); under each parent's key, or "" for the
+  // surfaces, in order (children); and, for each kind, by their facts'
+  // keys, with the version of the kind's table that they are (byFact,
+  // versions). `touched` is what changed since the view last showed the
+  // tree (untouch): the widgets, and the parents whose children changed, by
+  // key; or all of it. A runtime has one view at most.
   function Runtime(prog) {
     this.prog = prog;
     this.lem = new lem.Runtime(prog.lem);
-    this.nodes = [];
+    this.byId = null;
+    this.children = null;
+    this.byFact = null;
+    this.versions = null;
+    this.touched = { all: true, ids: new Set(), parents: new Set() };
   }
 
   // One tick: lem's, then the tree's checks, then dropping the state whose
@@ -96,7 +113,7 @@ var glem = (function () {
   // {rel, tuple}.
   Runtime.prototype.tick = function (msg) {
     var effects = this.lem.tick(msg);
-    this.nodes = this.tree();
+    this.grow();
     this.dropOrphans();
     return effects;
   };
@@ -207,6 +224,213 @@ var glem = (function () {
     return out;
   };
 
+  // The order of a node among its siblings: a widget by its `order`, then
+  // its id; a surface by its id, as tree() sorts them.
+  function before(a, b) {
+    return (a.order === null ? 0 : lem.compare(a.order, b.order)) || lem.compare(a.id, b.id);
+  }
+
+  // `list`, in order, without the nodes that went, and with `more`.
+  function merged(list, more) {
+    more.sort(before);
+    var out = [];
+    var i = 0;
+    var j = 0;
+    while (i < list.length || j < more.length) {
+      if (i < list.length && list[i].gone) {
+        i++;
+      } else if (j >= more.length || (i < list.length && before(list[i], more[j]) <= 0)) {
+        out.push(list[i++]);
+      } else {
+        out.push(more[j++]);
+      }
+    }
+    return out;
+  }
+
+  // A node for a fact of kind `k`, whose key in its table is `fact`.
+  Runtime.prototype.node = function (k, tuple, fact) {
+    var kind = this.prog.kinds[k];
+    var n = tuple.length;
+    return {
+      kind: k,
+      rel: kind.rel,
+      tuple: tuple,
+      id: tuple[0],
+      key: lem.key(tuple[0]),
+      fact: fact,
+      parent: kind.widget ? lem.key(tuple[n - 2]) : "",
+      order: kind.widget ? tuple[n - 1] : null
+    };
+  };
+
+  // Builds the tree anew, from tree(), which gives its errors; meanwhile,
+  // and after an error, there's none.
+  Runtime.prototype.build = function () {
+    this.byId = null;
+    this.touched.all = true;
+    var built = this.tree();
+    var kindOf = new Map();
+    this.prog.kinds.forEach(function (kind, k) {
+      kindOf.set(kind.rel, k);
+    });
+    var byId = new Map();
+    var children = new Map();
+    var byFact = this.prog.kinds.map(function () {
+      return new Map();
+    });
+    for (var i = 0; i < built.length; i++) {
+      var k = kindOf.get(built[i].rel);
+      var node = this.node(k, built[i].tuple, lem.key(built[i].tuple));
+      byId.set(node.key, node);
+      byFact[k].set(node.fact, node);
+      var list = children.get(node.parent);
+      if (list === undefined) {
+        list = [];
+        children.set(node.parent, list);
+      }
+      list.push(node);
+    }
+    var tables = this.lem.tables;
+    this.children = children;
+    this.byFact = byFact;
+    this.versions = this.prog.kinds.map(function (kind) {
+      return tables[kind.rel].version;
+    });
+    this.byId = byId;
+  };
+
+  // Brings the tree up to lem's facts: for each kind whose table has a new
+  // version, the nodes of the facts that it lost go, and those of the facts
+  // that it gained come; or anew (build).
+  Runtime.prototype.grow = function () {
+    if (this.byId === null) {
+      this.build();
+      return;
+    }
+    var kinds = this.prog.kinds;
+    var tables = this.lem.tables;
+    var gone = [];
+    var come = [];
+    for (var k = 0; k < kinds.length; k++) {
+      var table = tables[kinds[k].rel];
+      if (table.version === this.versions[k]) {
+        continue;
+      }
+      var had = this.byFact[k];
+      table.facts.forEach(function (entry, fact) {
+        if (!had.has(fact)) {
+          come.push({ kind: k, tuple: entry.tuple, fact: fact });
+        }
+      });
+      had.forEach(function (node, fact) {
+        if (!table.facts.has(fact)) {
+          gone.push(node);
+        }
+      });
+    }
+    if (!this.change(gone, come)) {
+      this.build();
+      return;
+    }
+    this.versions = kinds.map(function (kind) {
+      return tables[kind.rel].version;
+    });
+  };
+
+  // Takes the nodes `gone` from the tree, and adds one for each fact that
+  // `come`s, keeping each parent's children in order: whether the tree
+  // still keeps its rules, as far as the change can tell; if not, it's
+  // half changed. An id names one node; a widget that went leaves no
+  // children; and each new widget is under a surface, not in a cycle.
+  Runtime.prototype.change = function (gone, come) {
+    var touched = this.touched;
+    var more = new Map();
+    var i, node;
+    for (i = 0; i < gone.length; i++) {
+      node = gone[i];
+      node.gone = true;
+      this.byId.delete(node.key);
+      this.byFact[node.kind].delete(node.fact);
+      if (!more.has(node.parent)) {
+        more.set(node.parent, []);
+      }
+      touched.ids.add(node.key);
+    }
+    var added = [];
+    for (i = 0; i < come.length; i++) {
+      node = this.node(come[i].kind, come[i].tuple, come[i].fact);
+      if (this.byId.has(node.key)) {
+        return false;
+      }
+      this.byId.set(node.key, node);
+      this.byFact[node.kind].set(node.fact, node);
+      if (!more.has(node.parent)) {
+        more.set(node.parent, []);
+      }
+      more.get(node.parent).push(node);
+      touched.ids.add(node.key);
+      added.push(node);
+    }
+    var children = this.children;
+    more.forEach(function (list, parent) {
+      var now = merged(children.get(parent) || [], list);
+      if (now.length > 0) {
+        children.set(parent, now);
+      } else {
+        children.delete(parent);
+      }
+      touched.parents.add(parent);
+    });
+    for (i = 0; i < gone.length; i++) {
+      if (!this.byId.has(gone[i].key) && children.has(gone[i].key)) {
+        return false;
+      }
+    }
+    for (i = 0; i < added.length; i++) {
+      if (!this.rooted(added[i])) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Whether a node's parents lead to a surface: not to a node that isn't
+  // in the tree, nor back to it.
+  Runtime.prototype.rooted = function (node) {
+    var key = node.parent;
+    for (var steps = 0; key !== "" && steps <= this.byId.size; steps++) {
+      var up = this.byId.get(key);
+      if (key === node.key || up === undefined) {
+        return false;
+      }
+      key = up.parent;
+    }
+    return key === "";
+  };
+
+  // The tree's nodes in its order, each as {depth, rel, tuple}, as tree()
+  // gives them.
+  Runtime.prototype.nodes = function () {
+    var children = this.children;
+    var out = [];
+    (function walk(list, depth) {
+      for (var i = 0; i < list.length; i++) {
+        out.push({ depth: depth, rel: list[i].rel, tuple: list[i].tuple });
+        var below = children.get(list[i].key);
+        if (below !== undefined) {
+          walk(below, depth + 1);
+        }
+      }
+    })(children.get("") || [], 0);
+    return out;
+  };
+
+  // The view has shown what changed: there's nothing new to show.
+  Runtime.prototype.untouch = function () {
+    this.touched = { all: false, ids: new Set(), parents: new Set() };
+  };
+
   // The widget tree, as the last tick left it, as lines of text: a widget a
   // line, indented under its parent, with its own fields by name, then its
   // notes, if any, which notes(lemRuntime, id), from the layer above, gives
@@ -214,7 +438,7 @@ var glem = (function () {
   Runtime.prototype.outline = function (notes) {
     var prog = this.prog;
     var runtime = this.lem;
-    return this.nodes.map(function (node) {
+    return this.nodes().map(function (node) {
       var rel = prog.lem.rels[node.rel];
       var fields = rel.fields;
       var end = prog.widget.get(node.rel) ? fields.length - 2 : fields.length;
@@ -230,8 +454,7 @@ var glem = (function () {
 
   // Drops the `state` facts that name a widget that's gone, unless their
   // relation says `keep`: those with a value of type Id that isn't a
-  // widget's or a surface's. Only state that names a widget, and has
-  // facts, asks for the widgets' ids.
+  // widget's or a surface's, which the tree has by id.
   Runtime.prototype.dropOrphans = function () {
     var runtime = this.lem;
     var keep = this.prog.keep;
@@ -253,12 +476,7 @@ var glem = (function () {
     if (doomed.length === 0) {
       return;
     }
-    var live = new Set();
-    this.prog.kinds.forEach(function (kind) {
-      runtime.relFacts(kind.rel).forEach(function (fact) {
-        live.add(lem.key(fact.tuple[0]));
-      });
-    });
+    var live = this.byId;
     doomed.forEach(function (d) {
       runtime.dropFacts(d.rel, function (tuple) {
         return d.cols.some(function (i) {
@@ -336,7 +554,10 @@ var glem = (function () {
   // the layer above shows of the widget besides its fields, such as why
   // it's disabled: a value that JSON can write, or null. The view keeps it
   // in the widget's `state`, and a widget whose state changes is updated,
-  // as one whose fields change is.
+  // as one whose fields change is. `state.rels` names the relations whose
+  // facts it reads, each naming a widget's id first: the view asks again
+  // for the state of the widgets that their changed facts name. Without
+  // it, the view asks for every widget's, after every tick.
   //
   // The view fills in glem's Focused, the widget whose element holds the
   // keyboard's focus; and on Escape, Return or Tab, without a modifier, and
@@ -365,6 +586,20 @@ var glem = (function () {
     this.recipes = recipes;
     this.host = host || {};
     this.state = state || null;
+    // The relations that the state reads, by number, or null; and their
+    // facts as the view last showed them (seen), or null, before it first
+    // shows the tree, and when it can't tell what the state reads.
+    this.stateRels = null;
+    if (this.state !== null && Array.isArray(this.state.rels)) {
+      this.stateRels = this.state.rels.map(function (name) {
+        var r = prog.lem.rel(name);
+        if (r < 0) {
+          fail("there's no relation " + name + ", which the view's state reads");
+        }
+        return r;
+      });
+    }
+    this.seen = null;
     // The widgets, by their ids, as lem.key gives them; and by element.
     this.widgets = new Map();
     this.elements = new Map();
@@ -522,14 +757,176 @@ var glem = (function () {
     }
   };
 
-  // Shows the runtime's widget tree: makes the new widgets' elements,
-  // updates the changed ones, removes those that are gone, and puts each in
-  // its place in its parent's, in order. It makes the new elements first,
-  // and changes nothing in the page if a widget's parent has no place for
-  // it.
+  // Shows the tree as the last tick left it: all of it, the first time,
+  // after the tree was built anew, and when the view can't tell what the
+  // state reads (renderAll); else what changed since the view last showed
+  // it, Runtime's `touched`, and the widgets whose state's facts changed
+  // (renderSome).
   View.prototype.render = function () {
+    if (this.runtime.touched.all || this.seen === null) {
+      this.renderAll();
+    } else {
+      this.renderSome(this.runtime.touched);
+    }
+    this.runtime.untouch();
+  };
+
+  // The facts of the relations that the state reads, as the view sees them
+  // now: for each, its table's version, and the key of the widget that each
+  // fact names, by the fact's key.
+  View.prototype.stateFacts = function () {
+    var tables = this.runtime.lem.tables;
+    return this.stateRels.map(function (r) {
+      var facts = new Map();
+      tables[r].facts.forEach(function (entry, fact) {
+        facts.set(fact, lem.key(entry.tuple[0]));
+      });
+      return { version: tables[r].version, facts: facts };
+    });
+  };
+
+  // The keys of the widgets whose state's facts changed since the view
+  // last showed the tree; and the facts as they are now (next).
+  View.prototype.stateChanged = function () {
+    var tables = this.runtime.lem.tables;
+    var keys = new Set();
+    var seen = this.seen;
+    var next = this.stateRels.map(function (r, i) {
+      var was = seen[i];
+      var table = tables[r];
+      if (table.version === was.version) {
+        return was;
+      }
+      var facts = new Map();
+      table.facts.forEach(function (entry, fact) {
+        var key = was.facts.has(fact) ? was.facts.get(fact) : lem.key(entry.tuple[0]);
+        facts.set(fact, key);
+        if (!was.facts.has(fact)) {
+          keys.add(key);
+        }
+      });
+      was.facts.forEach(function (key, fact) {
+        if (!facts.has(fact)) {
+          keys.add(key);
+        }
+      });
+      return { version: table.version, facts: facts };
+    });
+    return { keys: keys, next: next };
+  };
+
+  // Shows what changed: the widgets `touched` and those whose state's facts
+  // changed, each made, updated or taken away; and, of each parent whose
+  // children changed, which a new widget's parent has, or whose element is
+  // new, the children, placed in order. As renderAll does, it changes
+  // nothing in the page until each new widget's recipe has made its
+  // element.
+  View.prototype.renderSome = function (touched) {
+    var view = this;
+    var runtime = this.runtime;
+    var prog = runtime.prog;
+    var stateOf = this.state === null ? null : this.state(runtime.lem);
+    var states = this.state === null ? null : this.stateChanged();
+    var keys = new Set(touched.ids);
+    if (states !== null) {
+      states.keys.forEach(function (key) {
+        keys.add(key);
+      });
+    }
+    var parents = new Set(touched.parents);
+    var made = [];
+    var changed = [];
+    // The widgets whose elements go, each as [its key, the widget]; and the
+    // new ones, by key.
+    var gone = [];
+    var fresh = new Map();
+    keys.forEach(function (key) {
+      var node = runtime.byId.get(key);
+      var w = view.widgets.get(key);
+      if (w !== undefined && (node === undefined || w.rel !== node.rel)) {
+        gone.push([key, w]);
+        w = undefined;
+      }
+      if (node === undefined) {
+        return;
+      }
+      var values = node.tuple.slice(1, prog.widget.get(node.rel) ? node.tuple.length - 2 : node.tuple.length);
+      var state = stateOf === null ? null : stateOf(node.id);
+      if (w === undefined) {
+        w = new Widget(prog, node.rel, node.id);
+        w.set(values);
+        w.state = state;
+        made.push(w);
+        fresh.set(key, w);
+        if (runtime.children.has(key)) {
+          parents.add(key);
+        }
+      } else if (lem.compare(w.values, values) !== 0 || JSON.stringify(w.state) !== JSON.stringify(state)) {
+        changed.push({ widget: w, values: values, state: state });
+      }
+    });
+    function widget(key) {
+      return fresh.has(key) ? fresh.get(key) : view.widgets.get(key);
+    }
+    for (var i = 0; i < made.length; i++) {
+      made[i].made = this.recipes[made[i].kind](made[i], this);
+    }
+    parents.forEach(function (key) {
+      var p = key === "" || !runtime.children.has(key) ? undefined : widget(key);
+      if (p !== undefined && !p.made.children) {
+        var whose = p.kind + "(" + p.key + ")";
+        fail(p.kind + "'s recipe holds no children, but " + whose + " has some");
+      }
+    });
+    // Nothing in the page has changed yet; now it does.
+    changed.forEach(function (c) {
+      c.widget.set(c.values);
+      c.widget.state = c.state;
+      update(c.widget);
+    });
+    made.forEach(update);
+    gone.forEach(function (pair) {
+      var element = pair[1].made.element;
+      if (element.parentNode) {
+        element.parentNode.removeChild(element);
+      }
+      view.elements.delete(element);
+      view.widgets.delete(pair[0]);
+    });
+    fresh.forEach(function (w, key) {
+      view.elements.set(w.made.element, w);
+      view.widgets.set(key, w);
+    });
+    parents.forEach(function (key) {
+      var p = key === "" ? null : widget(key);
+      var container = key === "" ? view.root : p !== undefined ? p.made.children : null;
+      if (container) {
+        var below = runtime.children.get(key) || [];
+        place(
+          container,
+          below.map(function (node) {
+            return view.widgets.get(node.key);
+          })
+        );
+      }
+    });
+    if (states !== null) {
+      this.seen = states.next;
+    }
+    // A widget that had the focus, and is gone, has it no more.
+    if (this.focused !== null && !runtime.byId.has(lem.key(this.focused))) {
+      this.focus(null);
+    }
+  };
+
+  // Shows the whole tree, as the last tick left it: makes the new widgets'
+  // elements, updates the changed ones, removes those that are gone, and
+  // puts each in its place in its parent's, in order, keeping the elements
+  // of the widgets that stay. It makes the new elements first, and changes
+  // nothing in the page if a widget's parent has no place for it.
+  View.prototype.renderAll = function () {
     var prog = this.runtime.prog;
-    var nodes = this.runtime.nodes;
+    var nodes = this.runtime.nodes();
     var next = new Map();
     var made = [];
     var changed = [];
@@ -601,6 +998,13 @@ var glem = (function () {
         place(w.made.children, under.get(name) || []);
       }
     });
+    // What the state reads, as shown: nothing, without a state; or null,
+    // when the view can't tell what it reads, so that it shows all again.
+    if (this.state === null) {
+      this.seen = [];
+    } else {
+      this.seen = this.stateRels === null ? null : this.stateFacts();
+    }
     // A widget that had the focus, and is gone, has it no more.
     if (this.focused !== null && !next.has(lem.key(this.focused))) {
       this.focus(null);
