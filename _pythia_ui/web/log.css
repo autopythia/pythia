@@ -55,3 +55,8 @@ border:var(--glui-outline) solid var(--glui-control-line);border-radius:var(--gl
 .g-log .g-toggle{display:inline-flex;align-items:center;gap:.4em}
 .g-log .g-toggle>input,.g-log .g-progress{accent-color:var(--glui-accent)}
 .g-log .g-progress{width:100%}
+
+/* Tabs: their text, dim but for the active tab's, which a line in the accent
+   marks. */
+.g-log .g-tab{gap:.4em;padding:.15em .5em;color:var(--glui-text-dim);border-bottom:2px solid transparent}
+.g-log .g-tab.g-active{color:var(--glui-text-strong);border-bottom-color:var(--glui-accent)}

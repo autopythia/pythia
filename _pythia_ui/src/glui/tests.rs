@@ -111,6 +111,7 @@ fn the_programs_keep_their_keys() {
   let (_, file, text) = THEMES[0];
   for files in [
     &["contexts.lem"][..],
+    &["tabs.lem"],
     &["host.lem", "approval.lem"],
     &["test/page.lem"],
     &["test/form.lem"],
@@ -152,12 +153,21 @@ fn the_contexts_tick_as_written_in_every_theme() {
 }
 
 #[test]
+fn the_tab_strip_ticks_as_written_in_every_theme() {
+  for (_, file, text) in THEMES {
+    let mut runtime = runtime((file, text), &["tabs.lem"]);
+    tick_cases("test/tabs_ticks.txt", |lines| runtime.script(lines, &notes));
+  }
+}
+
+#[test]
 fn ticks_remembering_what_rules_read_are_ticks_that_forget_it() {
   let (_, file, text) = THEMES[0];
-  let programs: [(&[&str], &str); 3] = [
+  let programs: [(&[&str], &str); 4] = [
     (&["host.lem", "approval.lem"], "test/approval_ticks.txt"),
     (&["test/page.lem"], "test/page_ticks.txt"),
     (&["contexts.lem"], "test/contexts_ticks.txt"),
+    (&["tabs.lem"], "test/tabs_ticks.txt"),
   ];
   for (files, ticks) in programs {
     tick_twice(
@@ -187,10 +197,11 @@ fn gluis_files_and_themes_print_back() {
 #[test]
 fn the_hud_the_page_and_the_contexts_tick_on_their_compiled_forms() {
   let (_, file, text) = THEMES[0];
-  let programs: [(&[&str], &str); 3] = [
+  let programs: [(&[&str], &str); 4] = [
     (&["host.lem", "approval.lem"], "test/approval_ticks.txt"),
     (&["test/page.lem"], "test/page_ticks.txt"),
     (&["contexts.lem"], "test/contexts_ticks.txt"),
+    (&["tabs.lem"], "test/tabs_ticks.txt"),
   ];
   for (files, ticks) in programs {
     let form = glem::compile::compile(&program((file, text), files));
@@ -211,11 +222,12 @@ fn the_hud_the_page_and_the_contexts_tick_on_their_compiled_forms() {
 #[test]
 fn the_web_looks_cases_for_javascript() {
   let (_, file, text) = THEMES[0];
-  let programs: [(&[&str], &str); 4] = [
+  let programs: [(&[&str], &str); 5] = [
     (&["host.lem", "approval.lem"], "test/approval_dom.txt"),
     (&["test/page.lem"], "test/page_dom.txt"),
     (&["test/form.lem"], "test/form_dom.txt"),
     (&["contexts.lem"], "test/contexts_dom.txt"),
+    (&["tabs.lem"], "test/tabs_dom.txt"),
   ];
   let suites = programs.map(|(files, dom)| {
     let form = glem::compile::compile(&program((file, text), files));
@@ -479,7 +491,11 @@ fn the_compiled_files_are_up_to_date() {
     "src/glui/tests.rs",
     &tests,
   );
-  let mut files = vec![("contexts.json".to_string(), contexts)];
+  let tabs = glem::compile::compile(&program((file, text), &["tabs.lem"]));
+  let mut files = vec![
+    ("contexts.json".to_string(), contexts),
+    ("tabs.json".to_string(), tabs),
+  ];
   for (name, file, text) in THEMES {
     let form = glem::compile::compile(&program((file, text), &[]));
     files.push((format!("theme-{name}.json"), form));

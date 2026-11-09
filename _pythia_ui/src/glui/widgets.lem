@@ -58,8 +58,15 @@ widget Dot(hue: Hue, text: Text)
 widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False, to: Text = "", open: Bool = False, star: Bool = False, starred: Bool = False)
 widget Code(text: Text, diff: Bool = False)
 
--- What widgets that hold a value send.
+-- Tabs: a strip of tabs, its items, each its text; the active one is the
+-- tab of what shows. Picking a tab sends `Chosen`; and one that `closes`
+-- has a button that sends `Dismissed`.
+widget Tabs
+widget TabItem(text: Text, active: Bool = False, closes: Bool = False)
+
+-- What widgets that hold a value send; and tabs.
 msg Edited(id: Id, text: Text), Toggled(id: Id, value: Bool), Starred(id: Id, value: Bool)
+msg Chosen(id: Id), Dismissed(id: Id)
 
 -- A widget may be disabled for several reasons, which a front end shows,
 -- as in its tooltip; its children are disabled with it.

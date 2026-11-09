@@ -50,6 +50,15 @@ font:var(--glui-code-size)/var(--glui-code-line) ui-monospace,SFMono-Regular,Men
 .g-tone-error{--g-tone:var(--glui-error-text)}
 .g-label{color:var(--g-tone)}
 
+/* Tabs: a strip of them, side by side, each its label and the button that
+   closes it, if it has one. */
+.g-tabs{display:flex;flex-wrap:wrap;align-items:flex-end;gap:2px}
+.g-tab{display:inline-flex;align-items:center}
+.g-tab-label,.g-tab-close{margin:0;padding:0;font:inherit;color:inherit;background:none;border:0;
+cursor:pointer}
+.g-tab-close{opacity:.6}
+.g-tab-close:hover,.g-tab-close:focus-visible{opacity:1}
+
 /* A dot, a light of its hue, in colors that show on light stages and dark
    ones alike. */
 .g-dot{display:inline-block;flex:none;width:.7em;height:.7em;border-radius:50%;vertical-align:middle;

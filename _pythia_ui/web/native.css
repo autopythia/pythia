@@ -73,3 +73,12 @@ font-variant-numeric:tabular-nums}
 .g-native .g-entry-body{margin:var(--glui-gap-down) 0 0 var(--glui-margin)}
 .g-native .g-code{padding:var(--glui-padding);background:var(--glui-code-back);
 border-radius:var(--glui-radius)}
+
+/* Tabs, as bui draws them: an inactive tab darker than its region, its text
+   dim; the active one in the region's color, its text strong; their top
+   corners rounded. */
+.g-native .g-tab{gap:calc(var(--glui-unit) / 4);min-height:var(--glui-unit);padding:0 var(--glui-margin);
+background:var(--glui-field-back);color:var(--glui-text-dim);
+border:var(--glui-outline) solid var(--glui-control-line);border-bottom:0;
+border-radius:var(--glui-radius) var(--glui-radius) 0 0}
+.g-native .g-tab.g-active{background:var(--glui-region);color:var(--glui-text-strong)}

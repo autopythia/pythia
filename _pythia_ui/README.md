@@ -260,13 +260,14 @@ tree that it keeps against one built anew, and runs the view in a stand-in DOM
 glui (`src/glui/`) is the design language of pythia's GUI, on glem: a library
 in lem, with no syntax or meaning of its own. `widgets.lem` has its widget
 kinds, among them those that documents need (headings, links, tables, a log's
-entries and code) and a dot of a hue, a light that says a state, and
-`theme.lem` says what a theme gives: the colors, sizes and times that a front
-end draws with. `themes/dark.lem`, the default, and `light.lem` give them,
-after wui's log styles. `pythia-ui lem` loads glui's files and a theme first:
-`--theme light`, or `--theme FILE.lem` for another, which it refuses if a
-value is missing. The example is the countdown after approval,
-`lem/approval.lem`, with what pythia sends and accepts, `lem/host.lem`:
+entries and code) a dot of a hue, a light that says a state, and tabs, a strip
+of them (`Tabs`, `TabItem`), and `theme.lem` says what a theme gives: the
+colors, sizes and times that a front end draws with. `themes/dark.lem`, the
+default, and `light.lem` give them, after wui's log styles. `pythia-ui lem`
+loads glui's files and a theme first: `--theme light`, or `--theme FILE.lem`
+for another, which it refuses if a value is missing. The example is the
+countdown after approval, `lem/approval.lem`, with what pythia sends and
+accepts, `lem/host.lem`:
 
 ```sh
 cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/approval.lem
@@ -283,15 +284,15 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/ap
 On the web, `src/glui/glui.js` draws them, with a recipe for each kind for
 glem.js's view. It makes each widget a native element (`button`, `a`,
 `details`, `table`, `pre`, `progress`) with classes: `g-` and its kind's name,
-and its flags. Its widgets send `Edited` and `Toggled`, it shows `Disabled`
-and `Tooltip`, a link goes only to one of the host's own paths, and a dot says
-its text as an image's label and in its tooltip, in colors of its own that
-show on light stages and dark ones. It sets a theme's values on the page as
-CSS variables, `--glui-` and a value's name, and a look's stylesheet draws
-with them, over `web/glui.css`: `web/native.css`, the design doc's native
-look, or `web/log.css`, after wui's log. `make js-test` runs its cases in a
-stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
-`lem/test/form.lem`.
+and its flags. Its widgets send `Edited` and `Toggled`, a tab `Chosen`, and
+its close button `Dismissed`, it shows `Disabled` and `Tooltip`, a link goes
+only to one of the host's own paths, and a dot says its text as an image's
+label and in its tooltip, in colors of its own that show on light stages and
+dark ones. It sets a theme's values on the page as CSS variables, `--glui-`
+and a value's name, and a look's stylesheet draws with them, over
+`web/glui.css`: `web/native.css`, the design doc's native look, or
+`web/log.css`, after wui's log. `make js-test` runs its cases in a stand-in
+DOM (`lem/test/*_dom.txt`), with a form of its controls, `lem/test/form.lem`.
 
 In a browser, `make web-serve` serves the web look's two pages.
 `web/demo.html` shows the approval HUD, a page of a log, or the form, in
@@ -349,14 +350,18 @@ sends `Load(line)`, and the host answers with `Body` facts, or
 `Failed(line, why)`. `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test
 it.
 
-In a browser, `web/contexts.js` is the host's part. A page names its facts on
-its `html` element, `data-facts`, and, for a log, where the rows before a line
-and after one are, `data-before`, `data-after` and `data-around`, where a
-run's items are, `data-run`, where an item's body is, `data-body`, each with
-`{line}` or `{run}`, where what the log gained since it had `{lines}` lines
-is, `data-grow`, where its stars are kept, `data-stars`, by the root's key,
-and where its panel's pins are, `data-pins`, which it asks for anew once a
-star is kept; the script fetches the program and the themes, compiled, from
+In a browser, `web/contexts.js` is the host's part. `lem/tabs.lem` is the
+strip of tabs that the view's tabs will show, in a HUD at the top left: the
+host says which are open (`Open(n, title, rank)`, the index as 0) and which
+shows (`Shown(n)`), and hears a pick (`Show(n)`) and a close (`Close(n)`); the
+index can't be closed. A page names its facts on its `html` element,
+`data-facts`, and, for a log, where the rows before a line and after one are,
+`data-before`, `data-after` and `data-around`, where a run's items are,
+`data-run`, where an item's body is, `data-body`, each with `{line}` or
+`{run}`, where what the log gained since it had `{lines}` lines is,
+`data-grow`, where its stars are kept, `data-stars`, by the root's key, and
+where its panel's pins are, `data-pins`, which it asks for anew once a star is
+kept; the script fetches the program and the themes, compiled, from
 `web/compiled/`, which `make compiled` writes, and a test checks against the
 files they're compiled from. A log's page starts at its end, and keeps the
 first row on the screen in place as rows come, above it or below. Every few

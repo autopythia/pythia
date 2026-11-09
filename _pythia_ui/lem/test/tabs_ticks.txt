@@ -1,0 +1,61 @@
+# Ticks of tabs.lem, after glem's prelude, glui's files and a theme: the tab
+# strip of the glui view of pythia's node server. Each case is a tick that
+# runs on the facts that the cases before it left: `=== title`; lines that
+# assert (`+ Fact`) or retract (`- Fact`) the host's facts, send a message
+# (`! Msg`), or show a relation's facts after the tick (`? Name`); `---`;
+# then the widget tree, the facts asked for, and the effects sent.
+
+=== the index alone: its tab shows, and can't be closed
++ Open(0, "Root contexts", 0)
++ Shown(0)
+---
+Hud(Strip, place=TopLeft)
+  Tabs(Strips)
+    TabItem(TabOf(0), text="Root contexts", active=True, closes=False)
+
+=== a context opens, after the index, and shows
++ Open(10, "ui-0 (10)", 1)
++ Shown(10)
+---
+Hud(Strip, place=TopLeft)
+  Tabs(Strips)
+    TabItem(TabOf(0), text="Root contexts", active=False, closes=False)
+    TabItem(TabOf(10), text="ui-0 (10)", active=True, closes=True)
+
+=== another opens, behind it
++ Open(3, "wui-1 (3)", 2)
+---
+Hud(Strip, place=TopLeft)
+  Tabs(Strips)
+    TabItem(TabOf(0), text="Root contexts", active=False, closes=False)
+    TabItem(TabOf(10), text="ui-0 (10)", active=True, closes=True)
+    TabItem(TabOf(3), text="wui-1 (3)", active=False, closes=True)
+
+=== picking the index asks the host to show it
+! Chosen(TabOf(0))
+---
+Hud(Strip, place=TopLeft)
+  Tabs(Strips)
+    TabItem(TabOf(0), text="Root contexts", active=False, closes=False)
+    TabItem(TabOf(10), text="ui-0 (10)", active=True, closes=True)
+    TabItem(TabOf(3), text="wui-1 (3)", active=False, closes=True)
+effect Show(0)
+
+=== closing a context's tab asks the host to close it
+! Dismissed(TabOf(10))
+---
+Hud(Strip, place=TopLeft)
+  Tabs(Strips)
+    TabItem(TabOf(0), text="Root contexts", active=False, closes=False)
+    TabItem(TabOf(10), text="ui-0 (10)", active=True, closes=True)
+    TabItem(TabOf(3), text="wui-1 (3)", active=False, closes=True)
+effect Close(10)
+
+=== the host closes it, and shows the next
+- Open(10, "ui-0 (10)", 1)
++ Shown(3)
+---
+Hud(Strip, place=TopLeft)
+  Tabs(Strips)
+    TabItem(TabOf(0), text="Root contexts", active=False, closes=False)
+    TabItem(TabOf(3), text="wui-1 (3)", active=True, closes=True)

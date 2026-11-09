@@ -1,0 +1,32 @@
+-- tabs.lem: the tab strip of the glui view of pythia's node server
+-- (pythia/interaction/node/view.py), in a HUD at the top left: the index
+-- first, then each context that's open, in the order opened, as the host
+-- says (Open, the index as 0), and the tab that shows (Shown). Picking a
+-- tab asks the host to show it (Show), and closing one, to close it
+-- (Close); the index can't be closed. In a browser, web/contexts.js is the
+-- host's part.
+input Open(n: Int, title: Text, rank: Int) key n
+input Shown(n: Int) one
+effect Show(n: Int)
+effect Close(n: Int)
+
+-- Whether each tab shows, and whether it closes.
+rel Showing(n: Int, on: Bool) key n
+Showing(n, True) :- Open(n, _, _), Shown(n)
+Showing(n, False) :- Open(n, _, _), not Shown(n)
+rel Closes(n: Int, on: Bool) key n
+Closes(0, False) :- Open(0, _, _)
+Closes(n, True) :- Open(n, _, _), n /= 0
+
+id Strip, Strips, TabOf(Int)
+
+Hud(Strip, place=TopLeft) :- Open():
+  Tabs(Strips):
+    for Open(n, title, rank):
+      TabItem(TabOf(n), text=title, active=a, closes=c, order=rank) :- Showing(n, a), Closes(n, c)
+
+on Chosen(TabOf(n)):
+  Show(n)
+
+on Dismissed(TabOf(n)):
+  Close(n)

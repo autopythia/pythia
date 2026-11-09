@@ -106,6 +106,20 @@
     return null;
   }
 
+  // The first element in `e`, or `e`, with the class `name`, or null.
+  function withClass(e, name) {
+    if (e.nodeType === 1 && (" " + (e.getAttribute("class") || "") + " ").indexOf(" " + name + " ") >= 0) {
+      return e;
+    }
+    for (var i = 0; i < e.childNodes.length; i++) {
+      var found = withClass(e.childNodes[i], name);
+      if (found !== null) {
+        return found;
+      }
+    }
+    return null;
+  }
+
   // A view of a compiled program in `root`, of `doc`, through glui's
   // recipes, from no facts; and `heard`, what its host hears, as lines.
   // `real` says whether `doc` is a browser's.
@@ -181,6 +195,7 @@
   // id as lem writes it: "click", on its element; "check", its checkbox;
   // "type", text into its field; "compose", text with an input method, and
   // "composed", the composition's end; "open" and "close", its entry;
+  // "star", its entry's star; "dismiss", its tab's close button;
   // "focus", on its control, if it has one, or its element; and, as for
   // glem's tests, "blur", and "key" with its name and modifiers. A disabled
   // control takes no click, change or text. In a browser, a click and a
@@ -224,6 +239,14 @@
           button.click();
         } else {
           it.doc.fire(button, "click");
+        }
+        return;
+      case "dismiss":
+        var closer = withClass(e, "g-tab-close");
+        if (it.real) {
+          closer.click();
+        } else {
+          it.doc.fire(closer, "click");
         }
         return;
       case "check":

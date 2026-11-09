@@ -1,0 +1,41 @@
+# The tab strip of pythia's contexts (tabs.lem) through glui's recipes, in
+# a stand-in DOM, for the tests in JavaScript alone (tools/glui_test.js):
+# the steps and what they show, as approval_dom.txt says. The host here is
+# the test: it hears Show and Close.
+
+=== the index and a context, which shows: a tab list, each tab its label, and the context's a close button
+["+", "Open", {"n": 0, "title": "Root contexts", "rank": 0}]
+["+", "Open", {"n": 10, "title": "ui-0 (10)", "rank": 1}]
+["+", "Shown", {"n": 10}]
+---
+aside.g-hud.g-top-left
+  div.g-tabs role="tablist"
+    span.g-tab
+      button.g-tab-label type="button" role="tab" aria-selected="false" "Root contexts"
+    span.g-tab.g-active
+      button.g-tab-label type="button" role="tab" aria-selected="true" "ui-0 (10)"
+      button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+
+=== a click on the index's tab: the host hears Show
+["click", "TabOf(0)"]
+---
+aside.g-hud.g-top-left
+  div.g-tabs role="tablist"
+    span.g-tab
+      button.g-tab-label type="button" role="tab" aria-selected="false" "Root contexts"
+    span.g-tab.g-active
+      button.g-tab-label type="button" role="tab" aria-selected="true" "ui-0 (10)"
+      button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+effect Show {"n":0}
+
+=== the context's close button: the host hears Close, and no Show
+["dismiss", "TabOf(10)"]
+---
+aside.g-hud.g-top-left
+  div.g-tabs role="tablist"
+    span.g-tab
+      button.g-tab-label type="button" role="tab" aria-selected="false" "Root contexts"
+    span.g-tab.g-active
+      button.g-tab-label type="button" role="tab" aria-selected="true" "ui-0 (10)"
+      button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+effect Close {"n":10}

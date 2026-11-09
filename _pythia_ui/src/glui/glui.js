@@ -173,6 +173,50 @@ var glui = (function () {
     });
   }
 
+  // A strip of tabs: a tab list, to a screen reader.
+  function tabs(w, view) {
+    var e = element(view, "div");
+    e.setAttribute("role", "tablist");
+    return made(w, e, e, null, function () {
+      return ["g-tabs"];
+    });
+  }
+
+  // A tab of a strip: its text, on a button, which is the tab, selected or
+  // not, to a screen reader; and, if it closes, a button that sends
+  // Dismissed. A click on the tab, but on that button, sends Chosen.
+  // g-active marks the active one.
+  function tabItem(w, view) {
+    var e = element(view, "span");
+    var label = element(view, "button", "g-tab-label");
+    var close = element(view, "button", "g-tab-close");
+    label.setAttribute("type", "button");
+    label.setAttribute("role", "tab");
+    close.setAttribute("type", "button");
+    takesReturn(label);
+    takesReturn(close);
+    text(close, "\u00d7");
+    e.appendChild(label);
+    e.addEventListener("click", function () {
+      view.send(["Chosen", w.id]);
+    });
+    close.addEventListener("click", function (event) {
+      event.stopPropagation();
+      view.send(["Dismissed", w.id]);
+    });
+    return made(w, e, null, label, function () {
+      text(label, w.fields.text);
+      attr(label, "aria-selected", w.fields.active ? "true" : "false");
+      attr(close, "aria-label", "close " + w.fields.text);
+      if (w.fields.closes && close.parentNode !== e) {
+        e.appendChild(close);
+      } else if (!w.fields.closes && close.parentNode === e) {
+        e.removeChild(close);
+      }
+      return w.fields.active ? ["g-tab", "g-active"] : ["g-tab"];
+    });
+  }
+
   // A dot, as a light of its hue (glui.css), which says its text as an
   // image's label, and in its tooltip, after any other.
   function dot(w, view) {
@@ -471,6 +515,8 @@ var glui = (function () {
     Progress: progress,
     Link: link,
     Dot: dot,
+    Tabs: tabs,
+    TabItem: tabItem,
     Entry: entry,
     Code: code
   };

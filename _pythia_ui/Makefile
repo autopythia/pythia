@@ -95,14 +95,15 @@ web:
 	$(PYTHON) tools/contexts_sample.py $(WEB)/sample
 
 # The compiled programs that the contexts' pages fetch, which pythia's node
-# server serves (pythia/interaction/node/view.py): lem/contexts.lem, and
-# glui's themes, each alone, in web/compiled/.
+# server serves (pythia/interaction/node/view.py): lem/contexts.lem, its
+# tab strip, lem/tabs.lem, and glui's themes, each alone, in web/compiled/.
 # A test compiles them again and compares (src/glui/tests.rs): after a
 # change to what they're compiled from, this writes them anew.
 compiled:
 	$(CARGO) build --bin $(BIN) --target $(HOST)
 	mkdir -p web/compiled
 	$(WEB_BIN) lem --compile lem/contexts.lem > web/compiled/contexts.json
+	$(WEB_BIN) lem --compile lem/tabs.lem > web/compiled/tabs.json
 	$(foreach t,dark light,$(WEB_BIN) lem --theme $(t) --compile > web/compiled/theme-$(t).json &&) true
 
 PORT := 8000
