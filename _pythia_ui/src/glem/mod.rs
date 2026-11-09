@@ -28,6 +28,7 @@ pub mod lower;
 mod tests;
 
 use crate::lem::check::{self, DeclKind, LoadError};
+use crate::lem::clash;
 use crate::lem::eval::{self, Effect, Script, Tuple, Why};
 use crate::lem::value::{Ty, Value};
 use lower::Kind;
@@ -59,6 +60,25 @@ pub fn load(files: &[(&str, &str)]) -> Result<Program, LoadError> {
   kinds.sort_by_key(|(rel, _)| *rel);
   let keep = lowered.keep.iter().map(|name| rel(name)).collect();
   Ok(Program { lem, kinds, keep })
+}
+
+impl Program {
+  /// Warnings for rules that may give one key two facts, or one id two
+  /// widgets, as lem's checker finds them ([`clash::clashes`]): the widget
+  /// kinds and surfaces share their ids. glem's own rules for `Parent`,
+  /// each of which a widget's fact fixes, are left out.
+  pub fn clashes(&self) -> Vec<String> {
+    let kinds: Vec<usize> = self.kinds.iter().map(|(rel, _)| *rel).collect();
+    let parent = self.lem.rel("Parent");
+    let skip: Vec<usize> = (0..self.lem.rules.len())
+      .filter(|&r| {
+        let rule = &self.lem.rules[r];
+        Some(rule.head) == parent
+          && matches!(rule.body.as_slice(), [check::Lit::Atom(atom)] if kinds.contains(&atom.rel))
+      })
+      .collect();
+    clash::clashes(&self.lem, &kinds, &skip)
+  }
 }
 
 /// Notes on a widget, for the outline, from a layer above glem: given lem's

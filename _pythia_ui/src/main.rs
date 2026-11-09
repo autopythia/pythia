@@ -177,6 +177,9 @@ fn lem(args: &[String]) -> ExitCode {
       return ExitCode::FAILURE;
     }
   };
+  for warning in prog.clashes() {
+    eprintln!("{warning}");
+  }
   let form = compile.then(|| glem::compile::compile(&prog));
   let mut runtime = glem::Runtime::new(prog);
   if let Err(error) = glui::complete(&mut runtime) {

@@ -36,6 +36,27 @@ fn glem_errors_read_as_written() {
 }
 
 #[test]
+fn the_task_list_keeps_its_keys_but_where_it_clashes_on_purpose() {
+  // Its rows' ids, given twice, and its Clashed each give one key two
+  // facts, as its ticks test; the rest of its rules can't, as far as lem's
+  // checker can tell (src/lem/clash.rs).
+  let src = read("test/tasks.lem");
+  let prog = load(&[("lem/test/tasks.lem", &src)]).unwrap_or_else(|e| panic!("{}", e.text));
+  let found = prog.clashes();
+  assert_eq!(found.len(), 2, "{found:#?}");
+  assert!(
+    found[0].contains("may give one id two widgets, of kinds Item and Line"),
+    "{}",
+    found[0]
+  );
+  assert!(
+    found[1].contains("may give Clashed two facts"),
+    "{}",
+    found[1]
+  );
+}
+
+#[test]
 fn ticks_of_a_task_list() {
   let src = read("test/tasks.lem");
   let prog = load(&[("lem/test/tasks.lem", &src)])

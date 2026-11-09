@@ -105,6 +105,25 @@ fn a_theme_that_lacks_a_value_is_refused() {
 }
 
 #[test]
+fn the_programs_keep_their_keys() {
+  // No rule may give one key two facts, nor one id two widgets, as far as
+  // lem's checker can tell before a tick runs (src/lem/clash.rs).
+  let (_, file, text) = THEMES[0];
+  for files in [
+    &["contexts.lem"][..],
+    &["host.lem", "approval.lem"],
+    &["test/page.lem"],
+    &["test/form.lem"],
+  ] {
+    assert_eq!(
+      program((file, text), files).clashes(),
+      Vec::<String>::new(),
+      "{files:?}"
+    );
+  }
+}
+
+#[test]
 fn the_approval_hud_ticks_as_written_in_every_theme() {
   for (_, file, text) in THEMES {
     let mut runtime = runtime((file, text), &["host.lem", "approval.lem"]);

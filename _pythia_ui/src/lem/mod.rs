@@ -21,6 +21,9 @@
 //! what's wrong, then the line with carets under the span.
 
 pub mod check;
+pub mod clash;
+#[cfg(test)]
+mod clash_test;
 pub mod compile;
 #[cfg(test)]
 mod compile_test;

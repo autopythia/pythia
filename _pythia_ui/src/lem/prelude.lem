@@ -1,4 +1,4 @@
 -- lem's prelude: what every lem program has.
 
 -- The time of the tick, in milliseconds since 1970.
-input Now(t: Time)
+input Now(t: Time) one

@@ -1,0 +1,135 @@
+# Programs whose keys the checker checks before a tick runs
+# (src/lem/clash.rs): each case's lines, loaded as `t.lem` after lem's
+# prelude; then the warnings that it gives, or (none).
+
+=== a key that fixes the rest of the fact
+input Todo(id: Text, title: Text) key id
+rel Shown(id: Text, title: Text) key id
+Shown(i, t) :- Todo(i, t)
+---
+(none)
+
+=== a key that doesn't fix a column
+input Todo(id: Text, title: Text, tag: Text)
+rel Shown(id: Text, title: Text) key id
+Shown(i, t) :- Todo(i, t, _)
+---
+t.lem:3:1: warning: this rule may give Shown two facts with one key, which differ in `title`:
+Shown(i, t) :- Todo(i, t, _)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+=== a key computed by arithmetic, which fixes nothing
+input P(a: Int, b: Int)
+rel S(k: Int, n: Int) key k
+S(a + b, a) :- P(a, b)
+---
+t.lem:3:1: warning: this rule may give S two facts with one key, which differ in `n`:
+S(a + b, a) :- P(a, b)
+^^^^^^^^^^^^^^^^^^^^^^
+
+=== a column that `=` binds from what the key fixes
+input A(n: Int)
+rel Twice(n: Int, t: Int) key n
+Twice(n, t) :- A(n), t = n * 2
+---
+(none)
+
+=== keys whose constructors differ
+input A(n: Int)
+id Row(Int), Note(Int)
+rel W(id: Id, n: Int) key id
+W(Row(n), n) :- A(n)
+W(Note(n), n + 1) :- A(n)
+---
+(none)
+
+=== keys whose constants differ
+input A(n: Int)
+rel Mode(m: Int, text: Text) key m
+Mode(0, "a") :- A(_)
+Mode(1, "b") :- A(_)
+---
+(none)
+
+=== two rules for one key, whose facts differ
+input A(n: Int)
+rel Mode(m: Int, text: Text) key m
+Mode(0, "a") :- A(_)
+Mode(0, "b") :- A(1)
+---
+t.lem:4:1: warning: this rule and the one at t.lem:3:1 may give Mode two facts with one key, which differ in `text`:
+Mode(0, "b") :- A(1)
+^^^^^^^^^^^^^^^^^^^^
+
+=== two rules for one key, which a negation keeps apart
+input A(n: Int) one
+input Failed(n: Int)
+rel Label(k: Int, text: Text) key k
+Label(0, "ok") :- A(n), not Failed(n)
+Label(0, "failed") :- A(n), Failed(n)
+---
+(none)
+
+=== a negation that keeps them apart only for one value of A
+input A(n: Int)
+input Failed(n: Int)
+rel Label(k: Int, text: Text) key k
+Label(0, "ok") :- A(n), not Failed(n)
+Label(0, "failed") :- A(n), Failed(n)
+---
+t.lem:5:1: warning: this rule and the one at t.lem:4:1 may give Label two facts with one key, which differ in `text`:
+Label(0, "failed") :- A(n), Failed(n)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+=== one fact at most, from a rule that may give two
+input A(n: Int)
+rel Big(n: Int) one
+Big(n) :- A(n), n > 3
+---
+t.lem:3:1: warning: this rule may give Big two facts, where `one` allows one:
+Big(n) :- A(n), n > 3
+^^^^^^^^^^^^^^^^^^^^^
+
+=== one fact at most: the least value, which a negation picks
+input Chunk(first: Int, last: Int) key first
+rel Below(f: Int)
+Below(f) :- Chunk(f, _), Chunk(g, _), g < f
+rel First(f: Int) one
+First(f) :- Chunk(f, _), not Below(f)
+---
+(none)
+
+=== one fact at most: the greatest, as `>` picks it
+input Chunk(first: Int, last: Int) key first
+rel Above(t: Int)
+Above(t) :- Chunk(_, t), Chunk(_, u), u > t
+rel Last(t: Int) one
+Last(t) :- Chunk(_, t), not Above(t)
+---
+(none)
+
+=== a negation that picks no one value: `<=` holds of the least too
+input Chunk(first: Int, last: Int) key first
+rel Below(f: Int)
+Below(f) :- Chunk(f, _), Chunk(g, _), g <= f
+rel First(f: Int) one
+First(f) :- Chunk(f, _), not Below(f)
+---
+t.lem:5:1: warning: this rule may give First two facts, where `one` allows one:
+First(f) :- Chunk(f, _), not Below(f)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+=== through one fact at most: the rest of a fact follows
+input Page(title: Text) one
+rel Title(n: Int, text: Text) key n
+Title(0, t) :- Page(t)
+---
+(none)
+
+=== two rules that one fact at most keeps apart, by its value
+input Opened(open: Bool) one
+rel Shown(k: Int, text: Text) key k
+Shown(0, "open") :- Opened(True)
+Shown(0, "closed") :- Opened(False)
+---
+(none)

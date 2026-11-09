@@ -55,7 +55,7 @@ Line(Note(t), parent=Row(t), text="noted") :- Noted(t)
 -- A folder, a group while it's open and a row while it isn't, with a line
 -- inside that stays as the folder changes its kind.
 id Folder, Inside
-input Opened(open: Bool)
+input Opened(open: Bool) one
 Group(Folder, parent=List, title="folder", order=0) :- Opened(True)
 Item(Folder, parent=List, text="folder", on=Pin("folder"), order=0) :- Opened(False)
 Line(Inside, parent=Folder, text="inside") :- Opened(_)

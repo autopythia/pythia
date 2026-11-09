@@ -2,7 +2,7 @@
 "files":["src/lem/prelude.lem","src/glem/prelude.lem","src/glui/widgets.lem","src/glui/theme.lem","src/glui/themes/dark.lem","lem/contexts.lem"],
 "types":{"Chord":null,"CtxId":"Text","Id":null,"Metric":null,"Msg":null,"Paint":null,"Place":null,"Tone":null},
 "rels":[
-{"name":"Now","kind":"input","fields":[["t","Time"]],"key":[]},
+{"name":"Now","kind":"input","fields":[["t","Time"]],"key":[],"one":true},
 {"name":"Parent","kind":"rel","fields":[["id","Id"],["parent","Id"]],"key":[0]},
 {"name":"Within","kind":"rel","fields":[["id","Id"],["outer","Id"]],"key":[],"lazy":true},
 {"name":"Key","kind":"rel","fields":[["chord","Chord"],["msg","Msg"]],"key":[]},

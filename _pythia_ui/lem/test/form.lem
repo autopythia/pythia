@@ -6,17 +6,17 @@
 id Top, Form, Title, Name, Hello, Remember, Choices, Choice(Int), Actions
 id Save, Help, Away, Left
 input Option(n: Int, text: Text) key n
-input Due(frac: Num)
+input Due(frac: Num) one
 state Typed(field: Id, text: Text) key field
 state Kept(box: Id, value: Bool) key box
 state Picked(n: Int) key n
 msg Pick(n: Int), Submit
 effect Saved(text: Text)
 
-rel Typing(text: Text)
+rel Typing(text: Text) one
 Typing(t) :- Typed(Name, t)
 Typing("") :- not Typed(field=Name)
-rel Keeping(value: Bool)
+rel Keeping(value: Bool) one
 Keeping(v) :- Kept(Remember, v)
 Keeping(False) :- not Kept(box=Remember)
 
