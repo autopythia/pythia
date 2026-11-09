@@ -8,7 +8,11 @@
 // the two ticks that it takes, one that asks for its items and one that
 // shows them; and opening an entry in it. Then, with every row there, as
 // when the page was scrolled to its start, opening an entry again. It
-// checks that each shows what it should, and fails if one doesn't.
+// checks that each shows what it should, and fails if one doesn't. Where
+// the engine lets a script collect its garbage, as QuickJS does with gc(),
+// it does before each time that it takes, so that a collection that the
+// step before left due doesn't fall in it: a program a little larger
+// moves when one falls, by tens of milliseconds.
 // `make js-bench` runs it, in JavaScriptCore through osascript on a Mac, or
 // in another engine, as JS=qjs, on the program that `make js-test` uses,
 // CONTEXTS_TESTS.program.
@@ -81,6 +85,9 @@
   }
 
   function ms(f) {
+    if (typeof gc === "function") {
+      gc();
+    }
     var began = Date.now();
     f();
     return Date.now() - began;
