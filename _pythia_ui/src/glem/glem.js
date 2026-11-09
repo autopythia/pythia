@@ -622,6 +622,9 @@ var glem = (function () {
     // The `at` of each widget that a Reveal fact named and the view brought
     // into view, by key; and how it waits for the page to settle first.
     this.revealed = new Map();
+    // The element that the view last brought into view, which it marks,
+    // data-revealed, until it brings another, or null.
+    this.marked = null;
     var win = root.ownerDocument.defaultView;
     var Observer = win && typeof win.IntersectionObserver === "function" ? win.IntersectionObserver : null;
     this.observer =
@@ -816,9 +819,16 @@ var glem = (function () {
         var element = w.made.element;
         var win = view.root.ownerDocument.defaultView;
         var show = function () {
+          if (view.marked !== null && view.marked !== element) {
+            view.marked.removeAttribute("data-revealed");
+          }
+          element.removeAttribute("data-revealed");
           if (typeof element.scrollIntoView === "function") {
             element.scrollIntoView({ block: "center" });
           }
+          void element.offsetWidth; // in a browser, so that a look's flash starts anew
+          element.setAttribute("data-revealed", "");
+          view.marked = element;
         };
         if (win && typeof win.requestAnimationFrame === "function") {
           win.requestAnimationFrame(show);

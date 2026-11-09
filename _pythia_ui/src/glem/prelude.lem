@@ -22,7 +22,8 @@ rel Near(id: Id, msg: Msg)
 
 -- Widgets to bring into view: the view scrolls the widget that a Reveal
 -- fact names into view, once for each `at`, as soon as its element shows,
--- as a page that jumps to a row does once the row has come.
+-- as a page that jumps to a row does once the row has come; and marks it,
+-- for a look to show, until it brings another into view.
 rel Reveal(id: Id, at: Int)
 
 -- Where the pointer and the keyboard are, new each tick.

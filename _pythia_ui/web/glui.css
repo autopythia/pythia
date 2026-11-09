@@ -59,14 +59,24 @@ cursor:pointer}
 .g-tab-close{opacity:.6}
 .g-tab-close:hover,.g-tab-close:focus-visible{opacity:1}
 
-/* A dot, a light of its hue, in colors that show on light stages and dark
-   ones alike. */
-.g-dot{display:inline-block;flex:none;width:.7em;height:.7em;border-radius:50%;vertical-align:middle;
-background:#8b949e;forced-color-adjust:none}
-.g-hue-green{background:#2ea043}
-.g-hue-yellow{background:#d29922}
-.g-hue-orange{background:#db6d28}
-.g-hue-red{background:#da3633}
+/* A dot, a light of its hue, round wherever it is, as a table's cell too,
+   in colors that show on light stages and dark ones alike. */
+.g-dot{display:inline-flex;flex:none;align-items:center;justify-content:center;vertical-align:middle;
+--g-hue:#8b949e;forced-color-adjust:none}
+.g-dot::before{content:"";flex:none;width:.7em;height:.7em;border-radius:50%;background:var(--g-hue);
+box-shadow:inset 0 0 0 1px rgba(0,0,0,.18)}
+.g-tablerow>.g-dot{vertical-align:middle}
+.g-hue-green{--g-hue:#2ea043}
+.g-hue-yellow{--g-hue:#e6c419}
+.g-hue-orange{--g-hue:#db6d28}
+.g-hue-red{--g-hue:#da3633}
+
+/* A widget that the page brought into view, as by a jump (glem's Reveal):
+   it flashes in the selection's color, which fades to a tint that stays
+   until another is brought into view. */
+[data-revealed]{background-color:color-mix(in srgb,var(--glui-selection) 35%,transparent);
+animation:g-revealed 2.4s ease-out}
+@keyframes g-revealed{from{background-color:var(--glui-selection)}}
 
 /* A log's entry: its mark, label and text on a line, then its body, with
    its children, if it has any. */

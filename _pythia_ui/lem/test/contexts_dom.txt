@@ -1241,7 +1241,7 @@ main.g-window
               span.g-entry-label "[note]"
               span.g-entry-text "all of it"
             div.g-entry-body
-    div.g-entry.g-tone-assistant
+    div.g-entry.g-tone-assistant data-revealed
       div.g-entry-head
         button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=6" "6"
@@ -1305,7 +1305,7 @@ main.g-window
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
               div.g-entry-body
-          div.g-entry.g-fold.g-tone-tool
+          div.g-entry.g-fold.g-tone-tool data-revealed
             details open
               summary.g-entry-head
                 button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
@@ -1387,7 +1387,7 @@ main.g-window
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
               div.g-entry-body
-          div.g-entry.g-fold.g-tone-tool
+          div.g-entry.g-fold.g-tone-tool data-revealed
             details open
               summary.g-entry-head
                 button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
@@ -1479,7 +1479,7 @@ main.g-window
                 span.g-entry-label "[tool-call] exec_command"
                 span.g-entry-text "ls"
               div.g-entry-body
-          div.g-entry.g-fold.g-tone-tool
+          div.g-entry.g-fold.g-tone-tool data-revealed
             details open
               summary.g-entry-head
                 button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
@@ -1547,7 +1547,7 @@ main.g-window
         span.g-entry-label "Turn 1 · 5 items"
         span.g-entry-text
       div.g-entry-body
-    div.g-entry.g-tone-user
+    div.g-entry.g-tone-user data-revealed
       div.g-entry-head
         button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
         a.g-entry-mark href="/c/ui-0?line=2" "2"
@@ -1620,7 +1620,7 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    div.g-entry.g-tone-strong
+    div.g-entry.g-tone-strong data-revealed
       div.g-entry-head
         a.g-entry-mark href="/c/ui-0?turn=0" "0"
         span.g-entry-label "The start · 1 item"
@@ -1715,7 +1715,7 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    div.g-entry.g-tone-strong
+    div.g-entry.g-tone-strong data-revealed
       div.g-entry-head
         a.g-entry-mark href="/c/ui-0?turn=0" "0"
         span.g-entry-label "The start · 1 item"
