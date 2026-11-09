@@ -20,16 +20,17 @@
 // strip of them at the top (lem/tabs.lem), where the page names them, in the
 // look and the theme that its bar chooses, which the server keeps, and the
 // browser too; a log from its end, with every run folded or every run open,
-// as the bar's Runs says (Opening), and with its panel beside it, or not, as
-// the bar's Panel says (Aside). It answers the program's LoadBefore(line) and
-// LoadAfter(line) with rows, or with EarlierFailed(line, why) or
-// LaterFailed(line, why); its LoadAround(line) with rows, or a status that
-// says why not; its LoadRun(run) with the run's items, or with RunFailed(run,
-// why); and its Load(line) with the item's body, or with Failed(line, why).
-// Every few seconds, while the page shows, it asks what a log gained, or an
-// index's facts anew, and tells the program what changed. Like lem.js, it's a
-// plain script that defines one global, `contexts`, and it starts itself on a
-// page that gives `data-facts`.
+// as the bar's Runs says (Opening), with its panel beside it, or not, as the
+// bar's Panel says (Aside), and with an assistant's messages as Markdown
+// writes them, or as written, as the bar's Text says (Formatting). It answers
+// the program's LoadBefore(line) and LoadAfter(line) with rows, or with
+// EarlierFailed(line, why) or LaterFailed(line, why); its LoadAround(line)
+// with rows, or a status that says why not; its LoadRun(run) with the run's
+// items, or with RunFailed(run, why); and its Load(line) with the item's
+// body, or with Failed(line, why). Every few seconds, while the page shows,
+// it asks what a log gained, or an index's facts anew, and tells the program
+// what changed. Like lem.js, it's a plain script that defines one global,
+// `contexts`, and it starts itself on a page that gives `data-facts`.
 var contexts = (function () {
   "use strict";
 
@@ -56,6 +57,12 @@ var contexts = (function () {
     ["hidden", "hidden"],
     ["shown", "shown"]
   ];
+  // Whether an assistant's messages show as Markdown writes them, the
+  // default, or as written.
+  var TEXT = [
+    ["markdown", "markdown"],
+    ["plain", "plain"]
+  ];
   // The tabs that the session keeps, as words of the store's (store.py):
   // the open contexts' numbers, oldest first, and the number of the one
   // shown, 0 for the index.
@@ -78,8 +85,10 @@ var contexts = (function () {
   //   or a run's items or a body, keeping what's on the screen in place; and
   //   o.shown(), if given, hears that the page's facts are shown;
   // - o.opening, for a log, says whether every run opens, as an Opening
-  //   fact from the start, and o.aside whether its panel shows, as an Aside
-  //   fact, both of which the bar changes later (boot);
+  //   fact from the start, o.aside whether its panel shows, as an Aside
+  //   fact, and o.formatting whether an assistant's messages show as
+  //   Markdown writes them, as a Formatting fact, each of which the bar
+  //   changes later (boot);
   // - o.grow, for a log, is the URL of what it gained since it had {lines}
   //   lines; and o.every(tick), if given, calls tick() every few seconds
   //   while the page shows, when a log asks what it gained, and an index its
@@ -169,6 +178,9 @@ var contexts = (function () {
     }
     if (typeof o.aside === "boolean") {
       settings.push(["+", "Aside", { shown: o.aside }]);
+    }
+    if (typeof o.formatting === "boolean") {
+      settings.push(["+", "Formatting", { markdown: o.formatting }]);
     }
     if (settings.length > 0) {
       view.update(settings);
@@ -363,7 +375,8 @@ var contexts = (function () {
   //   context's page, with {id}, and o.home, the index's, which a click on
   //   a link to either, without a modifier key, shows in its tab instead;
   // - o.get, o.post and o.status, as start() takes them;
-  // - o.settings(), what a log's tab starts with: {opening, aside};
+  // - o.settings(), what a log's tab starts with: {opening, aside,
+  //   formatting};
   // - o.kept, the tabs that the session kept, {tabs: numbers, tab:
   //   number}, and o.open, the number of the tab to show at first, if a
   //   page names one; o.keep_tabs(numbers, shown) keeps them anew as they
@@ -430,6 +443,7 @@ var contexts = (function () {
         recipes: recipes(tab),
         opening: log ? settings.opening : undefined,
         aside: log ? settings.aside : undefined,
+        formatting: log ? settings.formatting : undefined,
         facts: urls.facts,
         before: urls.before || null,
         after: urls.after || null,
@@ -864,6 +878,7 @@ var contexts = (function () {
       theme: remembered("theme", THEMES, kept.theme),
       runs: remembered("runs", RUNS, kept.runs),
       panel: remembered("panel", PANEL, kept.panel),
+      text: remembered("text", TEXT, kept.text),
       tabs: rememberedWord("tabs", TABS, kept.tabs),
       tab: rememberedWord("tab", TAB, kept.tab)
     };
@@ -934,6 +949,16 @@ var contexts = (function () {
         save("panel", value);
         aside(value);
       });
+      menu(bar, "Text", TEXT, chosen.text, function (value) {
+        var was = chosen.text;
+        logs(function (view) {
+          view.update([
+            ["-", "Formatting", { markdown: was === "markdown" }],
+            ["+", "Formatting", { markdown: value === "markdown" }]
+          ]);
+        });
+        save("text", value);
+      });
     }
     bar.appendChild(line);
     look(chosen.look);
@@ -988,7 +1013,11 @@ var contexts = (function () {
             post: keepIn,
             status: status,
             settings: function () {
-              return { opening: chosen.runs === "open", aside: chosen.panel === "shown" };
+              return {
+                opening: chosen.runs === "open",
+                aside: chosen.panel === "shown",
+                formatting: chosen.text === "markdown"
+              };
             },
             title: function (text) {
               document.title = text;
@@ -1026,6 +1055,7 @@ var contexts = (function () {
         program: program,
         opening: log ? chosen.runs === "open" : undefined,
         aside: log ? chosen.panel === "shown" : undefined,
+        formatting: log ? chosen.text === "markdown" : undefined,
         grow: html.getAttribute("data-grow"),
         stars: html.getAttribute("data-stars"),
         pins: html.getAttribute("data-pins"),
@@ -1059,5 +1089,5 @@ var contexts = (function () {
     }
   }
 
-  return { start: start, tabs: tabs, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL };
+  return { start: start, tabs: tabs, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL, TEXT: TEXT };
 })();

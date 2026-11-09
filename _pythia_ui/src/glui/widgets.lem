@@ -58,6 +58,11 @@ widget Dot(hue: Hue, text: Text)
 widget Entry(label: Text, text: Text, mark: Text = "", tone: Tone = Normal, fold: Bool = False, to: Text = "", open: Bool = False, star: Bool = False, starred: Bool = False)
 widget Code(text: Text, diff: Bool = False)
 
+-- Prose: text as Markdown writes it, which a front end shows formatted:
+-- its paragraphs, headings, lists, quotes, code and tables, and its
+-- emphasis, code and links; never as HTML, which shows as written.
+widget Prose(text: Text)
+
 -- Tabs: a strip of tabs, its items, each its text; the active one is the
 -- tab of what shows. Picking a tab sends `Chosen`; and one that `closes`
 -- has a button that sends `Dismissed`.

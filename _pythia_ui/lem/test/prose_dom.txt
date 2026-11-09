@@ -1,0 +1,155 @@
+# glui's Prose (lem/test/prose.lem) through its recipe, in a stand-in
+# DOM, for the tests in JavaScript alone (tools/glui_test.js): the steps
+# and what they show, as approval_dom.txt says. Each case's text replaces
+# the one before it.
+
+=== paragraphs: emphasis, strong, struck, code, a word with underscores, and a line's break
+["+", "Text", {"n": 1, "text": "A *word*, a **strong** one, ~~gone~~, `a ``tick`` here`, snake_case_name, and\na break:  \nhere.\n\nAnother paragraph, ending\\\nin a backslash's break."}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    p
+      "A "
+      em "word"
+      ", a "
+      strong "strong"
+      " one, "
+      del "gone"
+      ", "
+      code.g-prose-code "a ``tick`` here"
+      ", snake_case_name, and\na break:"
+      br
+      "here."
+    p
+      "Another paragraph, ending"
+      br
+      "in a backslash's break."
+
+=== headings, a rule, a quote with a list in it
+["+", "Text", {"n": 1, "text": "# One\n## Two *em*\n---\n> quoted *text*\n> - in a list\n> - of two"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    div.g-prose-heading.g-prose-h1 role="heading" aria-level="3" "One"
+    div.g-prose-heading.g-prose-h2 role="heading" aria-level="4"
+      "Two "
+      em "em"
+    hr
+    blockquote
+      p
+        "quoted "
+        em "text"
+      ul
+        li "in a list"
+        li "of two"
+
+=== lists: tight and nested, then loose, then ordered from 3
+["+", "Text", {"n": 1, "text": "- a\n- b\n  - c\n  - d\n\nText.\n\n* one\n\n* two\n\n3. x\n4. y"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    ul
+      li "a"
+      li
+        "b"
+        ul
+          li "c"
+          li "d"
+    p "Text."
+    ul
+      li
+        p "one"
+      li
+        p "two"
+    ol start="3"
+      li "x"
+      li "y"
+
+=== fenced code, as written, and a diff's lines as a diff's
+["+", "Text", {"n": 1, "text": "```js\nvar a = 1 < 2;\n  indented\n```\n~~~diff\n+one\n-two\n~~~"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    pre.g-code "var a = 1 < 2;\n  indented"
+    pre.g-code.g-diff
+      span.g-diff-add "+one\n"
+      span.g-diff-del "-two"
+
+=== a table: its head, its alignments, an escaped pipe and code in a cell
+["+", "Text", {"n": 1, "text": "| a | b | c |\n|:--|--:|:-:|\n| 1 | 2 | 3 |\n| x \\| y | `z` |"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    table
+      thead
+        tr
+          th.g-align-left "a"
+          th.g-align-right "b"
+          th.g-align-center "c"
+      tbody
+        tr
+          td.g-align-left "1"
+          td.g-align-right "2"
+          td.g-align-center "3"
+        tr
+          td.g-align-left "x | y"
+          td.g-align-right
+            code.g-prose-code "z"
+          td.g-align-center
+
+=== links: the web's in a new tab, without a referrer; the host's own; any other as text
+["+", "Text", {"n": 1, "text": "[docs](https://example.com/a_b) <https://x.org> see https://y.org/p(q). [own](/c/1) [bad](javascript:alert(1)) ![pic](https://example.com/p.png)"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    p
+      a.g-prose-link href="https://example.com/a_b" target="_blank" rel="noopener noreferrer" "docs"
+      " "
+      a.g-prose-link href="https://x.org" target="_blank" rel="noopener noreferrer" "https://x.org"
+      " see "
+      a.g-prose-link href="https://y.org/p(q)" target="_blank" rel="noopener noreferrer" "https://y.org/p(q)"
+      ". "
+      a.g-prose-link href="/c/1" "own"
+      " "
+      "bad"
+      " (javascript:alert(1))"
+      " "
+      a.g-prose-link href="https://example.com/p.png" target="_blank" rel="noopener noreferrer" "pic"
+
+=== HTML shows as written, and escapes and stray marks as text
+["+", "Text", {"n": 1, "text": "<b>bold</b> & <script>x</script>\n\\*not em\\* 2 * 3 * 4"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    p "<b>bold</b> & <script>x</script>\n*not em* 2 * 3 * 4"
+
+=== an item that holds two paragraphs makes its list loose
+["+", "Text", {"n": 1, "text": "- a\n\n  more of a\n- b"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    ul
+      li
+        p "a"
+        p "more of a"
+      li
+        p "b"
+
+=== an underscore within a word, or at its end, is no emphasis
+["+", "Text", {"n": 1, "text": "my_var_ and _real_ emphasis"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    p
+      "my_var_ and "
+      em "real"
+      " emphasis"

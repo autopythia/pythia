@@ -1,0 +1,9 @@
+-- prose.lem: a test of glui's Prose, text as Markdown writes it, in its
+-- recipe (tools/glui_test.js, lem/test/prose_dom.txt): a window of texts,
+-- each a Prose, by its number.
+input Text(n: Int, text: Text) key n
+id Top, Block(Int)
+
+Window(Top, title="prose") :- Text():
+  for Text(n, t):
+    Prose(Block(n), text=t, order=n)

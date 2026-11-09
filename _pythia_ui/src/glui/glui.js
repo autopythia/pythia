@@ -173,6 +173,451 @@ var glui = (function () {
     });
   }
 
+  // Prose: text as Markdown writes it, as elements, never as HTML, which
+  // shows as written. Its blocks: paragraphs; headings, by #; rules;
+  // quotes, by >; lists, by -, * or +, or by 1. or 1); fenced code, by ```
+  // or ~~~, a diff's lines as a diff's; and tables, as GitHub writes them.
+  // Its inlines: code, emphasis, strong, struck, links, autolinks and bare
+  // URLs, and backslash's escapes; a line that ends in two spaces or a
+  // backslash breaks. A link goes to one of the host's own paths, or to
+  // http, https or mailto, in a new tab, without a referrer; any other
+  // shows as text.
+  function prose(w, view) {
+    var e = element(view, "div");
+    var shown = null;
+    return made(w, e, null, null, function () {
+      if (shown !== w.fields.text) {
+        e.textContent = "";
+        var lines = w.fields.text.replace(/\r\n?/g, "\n").split("\n").map(function (line) {
+          return line.replace(/^\t+/, function (tabs) {
+            return "    ".repeat(tabs.length);
+          });
+        });
+        mdBlocks(view, e, mdParse(lines), false);
+        shown = w.fields.text;
+      }
+      return ["g-prose"];
+    });
+  }
+
+  var FENCE = /^( {0,3})(`{3,}|~{3,})[ \t]*([^`\s]*)[^`]*$/;
+  var HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+  var RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+  var QUOTE = /^ {0,3}> ?(.*)$/;
+  var ITEM = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(.*))?$/;
+  var BLANK = /^[ \t]*$/;
+  var DELIMITER = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+
+  // Whether a line starts a block that ends a paragraph.
+  function mdStarts(line) {
+    return FENCE.test(line) || HEADING.test(line) || RULE.test(line) || QUOTE.test(line) || ITEM.test(line);
+  }
+
+  // Markdown's blocks, from its lines: each {type, ...}.
+  function mdParse(lines) {
+    var out = [];
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+      var m;
+      if (BLANK.test(line)) {
+        i++;
+      } else if ((m = FENCE.exec(line)) !== null) {
+        var close = new RegExp("^ {0,3}" + (m[2][0] === "`" ? "`" : "~") + "{" + m[2].length + ",}[ \\t]*$");
+        var indent = new RegExp("^ {0," + m[1].length + "}");
+        var body = [];
+        i++;
+        while (i < lines.length && !close.test(lines[i])) {
+          body.push(lines[i].replace(indent, ""));
+          i++;
+        }
+        i++;
+        out.push({ type: "code", info: m[3].toLowerCase(), text: body.join("\n") });
+      } else if ((m = HEADING.exec(line)) !== null) {
+        out.push({ type: "heading", level: m[1].length, text: m[2] || "" });
+        i++;
+      } else if (RULE.test(line)) {
+        out.push({ type: "rule" });
+        i++;
+      } else if (QUOTE.test(line)) {
+        var quoted = [];
+        while (i < lines.length && (m = QUOTE.exec(lines[i])) !== null) {
+          quoted.push(m[1]);
+          i++;
+        }
+        out.push({ type: "quote", blocks: mdParse(quoted) });
+      } else if (ITEM.test(line)) {
+        i = mdList(lines, i, out);
+      } else if (line.indexOf("|") >= 0 && i + 1 < lines.length && lines[i + 1].indexOf("-") >= 0 && DELIMITER.test(lines[i + 1])) {
+        i = mdTable(lines, i, out);
+      } else {
+        var para = [line];
+        i++;
+        while (i < lines.length && !BLANK.test(lines[i]) && !mdStarts(lines[i])) {
+          para.push(lines[i]);
+          i++;
+        }
+        out.push({ type: "paragraph", lines: para });
+      }
+    }
+    return out;
+  }
+
+  // A list, from line i: its items, each its blocks, and whether it's
+  // loose, its items apart, which shows each paragraph as one. Gives the
+  // line after it.
+  function mdList(lines, i, out) {
+    var first = ITEM.exec(lines[i]);
+    var ordered = /\d/.test(first[2]);
+    var it = { type: "list", ordered: ordered, start: ordered ? parseInt(first[2], 10) : 1, items: [], loose: false };
+    while (i < lines.length) {
+      var m = ITEM.exec(lines[i]);
+      if (m === null || /\d/.test(m[2]) !== ordered) {
+        break;
+      }
+      var gap = m[3] === undefined ? 1 : m[3].length > 4 ? 1 : m[3].length;
+      var width = m[1].length + m[2].length + gap;
+      var body = [m[3] === undefined ? "" : m[3].slice(gap) + m[4]];
+      var blank = false;
+      i++;
+      while (i < lines.length) {
+        var next = lines[i];
+        if (BLANK.test(next)) {
+          body.push("");
+          blank = true;
+        } else if (/^ */.exec(next)[0].length >= width) {
+          body.push(next.slice(width));
+          blank = false;
+        } else if (!blank && !mdStarts(next)) {
+          body.push(next.replace(/^ +/, ""));
+        } else {
+          break;
+        }
+        i++;
+      }
+      while (body.length > 0 && body[body.length - 1] === "") {
+        body.pop();
+        it.loose = it.loose || (i < lines.length && ITEM.test(lines[i]));
+      }
+      it.loose = it.loose || body.indexOf("") >= 0 && mdParse(body).length > 1;
+      it.items.push(mdParse(body));
+    }
+    out.push(it);
+    return i;
+  }
+
+  // A table, from line i: its head, its columns' alignments, and its rows.
+  // Gives the line after it.
+  function mdTable(lines, i, out) {
+    var head = mdCells(lines[i]);
+    var aligns = mdCells(lines[i + 1]).map(function (cell) {
+      var left = cell[0] === ":";
+      var right = cell[cell.length - 1] === ":";
+      return left && right ? "center" : right ? "right" : left ? "left" : "";
+    });
+    var rows = [];
+    i += 2;
+    while (i < lines.length && !BLANK.test(lines[i]) && lines[i].indexOf("|") >= 0) {
+      rows.push(mdCells(lines[i]));
+      i++;
+    }
+    out.push({ type: "table", head: head, aligns: aligns, rows: rows });
+    return i;
+  }
+
+  // A table row's cells: its text between unescaped pipes.
+  function mdCells(line) {
+    var row = line.trim();
+    if (row[0] === "|") {
+      row = row.slice(1);
+    }
+    if (row[row.length - 1] === "|" && row[row.length - 2] !== "\\") {
+      row = row.slice(0, -1);
+    }
+    var found = [];
+    var cell = "";
+    for (var k = 0; k < row.length; k++) {
+      if (row[k] === "\\" && row[k + 1] === "|") {
+        cell += "|";
+        k++;
+      } else if (row[k] === "|") {
+        found.push(cell.trim());
+        cell = "";
+      } else {
+        cell += row[k];
+      }
+    }
+    found.push(cell.trim());
+    return found;
+  }
+
+  // Blocks, as elements in `parent`; with `tight`, a paragraph is its
+  // inlines alone, as in a list's item.
+  function mdBlocks(view, parent, found, tight) {
+    found.forEach(function (b) {
+      var e;
+      if (b.type === "paragraph") {
+        e = tight ? parent : element(view, "p");
+        var marked = b.lines.map(function (line, at) {
+          var last = at === b.lines.length - 1;
+          return !last && /( {2,}|\\)$/.test(line) ? line.replace(/( {2,}|\\)$/, "") + "\u0000" : line;
+        });
+        mdInline(view, e, marked.join("\n").replace(/\u0000\n/g, "\u0000"));
+      } else if (b.type === "heading") {
+        e = element(view, "div", "g-prose-heading g-prose-h" + b.level);
+        e.setAttribute("role", "heading");
+        e.setAttribute("aria-level", String(Math.min(b.level + 2, 6)));
+        mdInline(view, e, b.text);
+      } else if (b.type === "code") {
+        e = element(view, "pre", b.info === "diff" ? "g-code g-diff" : "g-code");
+        if (b.info === "diff") {
+          diff(view, e, b.text);
+        } else {
+          e.textContent = b.text;
+        }
+      } else if (b.type === "rule") {
+        e = element(view, "hr");
+      } else if (b.type === "quote") {
+        e = element(view, "blockquote");
+        mdBlocks(view, e, b.blocks, false);
+      } else if (b.type === "list") {
+        e = element(view, b.ordered ? "ol" : "ul");
+        if (b.ordered && b.start !== 1) {
+          e.setAttribute("start", String(b.start));
+        }
+        b.items.forEach(function (item) {
+          var li = element(view, "li");
+          mdBlocks(view, li, item, !b.loose);
+          e.appendChild(li);
+        });
+      } else {
+        e = element(view, "table");
+        var row = function (cellsOf, tag, into) {
+          var tr = element(view, "tr");
+          b.head.forEach(function (_, k) {
+            var cell = element(view, tag, b.aligns[k] ? "g-align-" + b.aligns[k] : null);
+            mdInline(view, cell, k < cellsOf.length ? cellsOf[k] : "");
+            tr.appendChild(cell);
+          });
+          into.appendChild(tr);
+        };
+        var thead = element(view, "thead");
+        var tbody = element(view, "tbody");
+        row(b.head, "th", thead);
+        b.rows.forEach(function (cellsOf) {
+          row(cellsOf, "td", tbody);
+        });
+        e.appendChild(thead);
+        if (b.rows.length > 0) {
+          e.appendChild(tbody);
+        }
+      }
+      if (e !== parent) {
+        parent.appendChild(e);
+      }
+    });
+  }
+
+  // Inline Markdown, as nodes in `parent`: "\u0000" is a line's break.
+  function mdInline(view, parent, source) {
+    var plain = "";
+    var flush = function () {
+      if (plain !== "") {
+        parent.appendChild(view.doc.createTextNode(plain));
+        plain = "";
+      }
+    };
+    var i = 0;
+    while (i < source.length) {
+      var c = source[i];
+      var found = null;
+      if (c === "\\" && /[!-\/:-@\[-`{-~]/.test(source[i + 1] || "")) {
+        plain += source[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c === "\u0000") {
+        flush();
+        parent.appendChild(element(view, "br"));
+        i++;
+        continue;
+      }
+      if (c === "`") {
+        var run = /^`+/.exec(source.slice(i))[0].length;
+        var end = mdTicks(source, i + run, run);
+        if (end < 0) {
+          plain += source.slice(i, i + run);
+          i += run;
+          continue;
+        }
+        var inner = source.slice(i + run, end).replace(/\n/g, " ");
+        if (/^ [\s\S]* $/.test(inner) && inner.trim() !== "") {
+          inner = inner.slice(1, -1);
+        }
+        flush();
+        var code = element(view, "code", "g-prose-code");
+        code.textContent = inner;
+        parent.appendChild(code);
+        i = end + run;
+        continue;
+      }
+      if (c === "[" || (c === "!" && source[i + 1] === "[")) {
+        found = mdLinkAt(source, c === "!" ? i + 1 : i);
+        if (found !== null) {
+          flush();
+          mdLink(view, parent, found.url, found.text, false);
+          i = found.end;
+          continue;
+        }
+      }
+      if (c === "<") {
+        found = /^<((?:https?:\/\/|mailto:)[^\s<>]*)>/i.exec(source.slice(i));
+        if (found !== null) {
+          flush();
+          mdLink(view, parent, found[1], found[1], true);
+          i += found[0].length;
+          continue;
+        }
+      }
+      if ((c === "h" || c === "H") && /^https?:\/\/\S/i.test(source.slice(i, i + 9)) && (i === 0 || /[\s(\[<*_~"']/.test(source[i - 1]))) {
+        var url = mdBare(source.slice(i));
+        flush();
+        mdLink(view, parent, url, url, true);
+        i += url.length;
+        continue;
+      }
+      if (c === "*" || c === "_" || c === "~") {
+        found = mdEmphasis(source, i);
+        if (found !== null) {
+          flush();
+          var em = element(view, found.tag);
+          mdInline(view, em, found.inner);
+          parent.appendChild(em);
+          i = found.end;
+          continue;
+        }
+      }
+      plain += c;
+      i++;
+    }
+    flush();
+  }
+
+  // Where the run of exactly `n` backticks after `from` starts, or -1.
+  function mdTicks(source, from, n) {
+    var k = from;
+    while (k < source.length) {
+      var at = source.indexOf("`", k);
+      if (at < 0) {
+        return -1;
+      }
+      var run = /^`+/.exec(source.slice(at))[0].length;
+      if (run === n) {
+        return at;
+      }
+      k = at + run;
+    }
+    return -1;
+  }
+
+  // A link at `i`, at its `[`: {text, url, end}, or null.
+  function mdLinkAt(source, i) {
+    var depth = 0;
+    var k = i;
+    for (; k < source.length; k++) {
+      var c = source[k];
+      if (c === "\\") {
+        k++;
+      } else if (c === "`") {
+        var run = /^`+/.exec(source.slice(k))[0].length;
+        var end = mdTicks(source, k + run, run);
+        k = end < 0 ? k + run - 1 : end + run - 1;
+      } else if (c === "[") {
+        depth++;
+      } else if (c === "]") {
+        depth--;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (k >= source.length || source[k + 1] !== "(") {
+      return null;
+    }
+    var m = /^[ \t]*(?:<([^<>\n]*)>|((?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))*))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*\)/.exec(source.slice(k + 2));
+    if (m === null) {
+      return null;
+    }
+    var url = m[1] !== undefined ? m[1] : m[2];
+    return { text: source.slice(i + 1, k), url: url.replace(/\\([!-\/:-@\[-`{-~])/g, "$1"), end: k + 2 + m[0].length };
+  }
+
+  // A bare URL at the start of `rest`, without the punctuation that ends a
+  // sentence, or a parenthesis that it didn't open.
+  function mdBare(rest) {
+    var url = /^https?:\/\/[^\s<>`]+/i.exec(rest)[0];
+    while (/[.,;:!?'"*_~]$/.test(url) || (/\)$/.test(url) && url.split("(").length < url.split(")").length)) {
+      url = url.slice(0, -1);
+    }
+    return url;
+  }
+
+  // Emphasis at `i`: *, _, **, __ or ~~, as far as its match: {tag, inner,
+  // end}, or null. An _ within a word is none.
+  function mdEmphasis(source, i) {
+    var c = source[i];
+    var double = source[i + 1] === c;
+    if (c === "~" && !double) {
+      return null;
+    }
+    var delim = double ? c + c : c;
+    var from = i + delim.length;
+    if (from >= source.length || /\s/.test(source[from]) || (c === "_" && i > 0 && /[A-Za-z0-9]/.test(source[i - 1]))) {
+      return null;
+    }
+    for (var k = from + 1; k < source.length; k++) {
+      var ch = source[k];
+      if (ch === "\\") {
+        k++;
+      } else if (ch === "`") {
+        var run = /^`+/.exec(source.slice(k))[0].length;
+        var end = mdTicks(source, k + run, run);
+        k = end < 0 ? k + run - 1 : end + run - 1;
+      } else if (source.slice(k, k + delim.length) === delim && !/\s/.test(source[k - 1])) {
+        if (!double && source[k + 1] === c) {
+          k++;
+        } else if (!(c === "_" && /[A-Za-z0-9]/.test(source[k + delim.length] || ""))) {
+          return { tag: c === "~" ? "del" : double ? "strong" : "em", inner: source.slice(from, k), end: k + delim.length };
+        }
+      }
+    }
+    return null;
+  }
+
+  // A link to `url`, of `label`, which is inlines, but with `raw`, as a
+  // URL's own text: to one of the host's own paths, or to http, https or
+  // mailto, in a new tab, without a referrer; else text, with its URL.
+  function mdLink(view, parent, url, label, raw) {
+    var safe = own(url) || /^(https?:\/\/|mailto:)\S+$/i.test(url);
+    if (!safe) {
+      mdInline(view, parent, label);
+      parent.appendChild(view.doc.createTextNode(" (" + url + ")"));
+      return;
+    }
+    var a = element(view, "a", "g-prose-link");
+    a.setAttribute("href", url);
+    if (!own(url)) {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    }
+    if (raw) {
+      a.textContent = label;
+    } else {
+      mdInline(view, a, label);
+    }
+    parent.appendChild(a);
+  }
+
   // A strip of tabs: a tab list, to a screen reader.
   function tabs(w, view) {
     var e = element(view, "div");
@@ -514,6 +959,7 @@ var glui = (function () {
     ListRow: sends("g-listrow"),
     Progress: progress,
     Link: link,
+    Prose: prose,
     Dot: dot,
     Tabs: tabs,
     TabItem: tabItem,

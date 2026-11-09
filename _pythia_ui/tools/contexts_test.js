@@ -703,6 +703,15 @@
       ["/f/index", "/f/tab/7", "/f/page/7", "/f/grow/7/6", "/f/index", "1 ends", "Contexts"]
     ],
     [
+      "an assistant's messages as Markdown writes them, as the bar says, from the start",
+      function () {
+        var it = page({ formatting: true });
+        answer(it, "/f/page", null, LOG);
+        return facts(it, "Formatting").concat(facts(it, "Prose"), facts(it, "Code").length + " code");
+      },
+      ["Formatting(True)", 'Prose(SaidText(6), "Done.", Said(6), 1)', "1 code"]
+    ],
+    [
       "facts that can't come: the page says why",
       function () {
         var it = page();

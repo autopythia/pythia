@@ -297,12 +297,23 @@
     throw new Error("there's no step " + JSON.stringify(step));
   }
 
-  // Whether the widgets that stayed, since `before`, kept their elements:
-  // null, or why not.
-  function kept(it, before) {
+  // Each widget's kind, by its id as lem writes it.
+  function kinds(view) {
+    var all = new Map();
+    view.widgets.forEach(function (w) {
+      all.set(w.key, w.kind);
+    });
+    return all;
+  }
+
+  // Whether the widgets that stayed, since `before`, of the kinds that they
+  // were (`was`), kept their elements: null, or why not. One whose kind
+  // changed is another widget, with an element of its own.
+  function kept(it, before, was) {
     var why = null;
+    var now = kinds(it.view);
     elements(it.view).forEach(function (element, id) {
-      if (why === null && before.has(id) && before.get(id) !== element) {
+      if (why === null && before.has(id) && was.get(id) === now.get(id) && before.get(id) !== element) {
         why = id + " has a new element";
       }
     });
@@ -316,6 +327,7 @@
     var it = fixture(s.program, doc, doc.createElement("div"));
     s.cases.forEach(function (c) {
       var before = elements(it.view);
+      var was = kinds(it.view);
       var got;
       it.heard = [];
       try {
@@ -325,7 +337,7 @@
         got = tap.error(e);
       }
       var why = got === c.want ? null : "the case gives\n" + got + "\nnot\n" + c.want;
-      tap.report(s.name + ": " + c.title, why || kept(it, before));
+      tap.report(s.name + ": " + c.title, why || kept(it, before, was));
     });
   }
 
@@ -348,6 +360,7 @@
     for (var i = 0; i < s.cases.length && s.cases[i].steps.every(atOnce); i++) {
       var c = s.cases[i];
       var before = elements(it.view);
+      var was = kinds(it.view);
       var got;
       it.heard = [];
       try {
@@ -357,7 +370,7 @@
         got = tap.error(e);
       }
       var why = got === c.want ? null : "the page's DOM gives\n" + got + "\nnot\n" + c.want;
-      tap.report("in the page's DOM: " + s.name + ": " + c.title, why || kept(it, before));
+      tap.report("in the page's DOM: " + s.name + ": " + c.title, why || kept(it, before, was));
     }
     document.body.removeChild(root);
     document.title = title;

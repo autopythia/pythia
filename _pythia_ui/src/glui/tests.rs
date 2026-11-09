@@ -115,6 +115,7 @@ fn the_programs_keep_their_keys() {
     &["host.lem", "approval.lem"],
     &["test/page.lem"],
     &["test/form.lem"],
+    &["test/prose.lem"],
   ] {
     assert_eq!(
       program((file, text), files).clashes(),
@@ -222,12 +223,13 @@ fn the_hud_the_page_and_the_contexts_tick_on_their_compiled_forms() {
 #[test]
 fn the_web_looks_cases_for_javascript() {
   let (_, file, text) = THEMES[0];
-  let programs: [(&[&str], &str); 5] = [
+  let programs: [(&[&str], &str); 6] = [
     (&["host.lem", "approval.lem"], "test/approval_dom.txt"),
     (&["test/page.lem"], "test/page_dom.txt"),
     (&["test/form.lem"], "test/form_dom.txt"),
     (&["contexts.lem"], "test/contexts_dom.txt"),
     (&["tabs.lem"], "test/tabs_dom.txt"),
+    (&["test/prose.lem"], "test/prose_dom.txt"),
   ];
   let suites = programs.map(|(files, dom)| {
     let form = glem::compile::compile(&program((file, text), files));

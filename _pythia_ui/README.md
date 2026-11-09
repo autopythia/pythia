@@ -260,14 +260,14 @@ tree that it keeps against one built anew, and runs the view in a stand-in DOM
 glui (`src/glui/`) is the design language of pythia's GUI, on glem: a library
 in lem, with no syntax or meaning of its own. `widgets.lem` has its widget
 kinds, among them those that documents need (headings, links, tables, a log's
-entries and code) a dot of a hue, a light that says a state, and tabs, a strip
-of them (`Tabs`, `TabItem`), and `theme.lem` says what a theme gives: the
-colors, sizes and times that a front end draws with. `themes/dark.lem`, the
-default, and `light.lem` give them, after wui's log styles. `pythia-ui lem`
-loads glui's files and a theme first: `--theme light`, or `--theme FILE.lem`
-for another, which it refuses if a value is missing. The example is the
-countdown after approval, `lem/approval.lem`, with what pythia sends and
-accepts, `lem/host.lem`:
+entries and code) a dot of a hue, a light that says a state, tabs, a strip of
+them (`Tabs`, `TabItem`), and prose, text as Markdown writes it (`Prose`), and
+`theme.lem` says what a theme gives: the colors, sizes and times that a front
+end draws with. `themes/dark.lem`, the default, and `light.lem` give them,
+after wui's log styles. `pythia-ui lem` loads glui's files and a theme first:
+`--theme light`, or `--theme FILE.lem` for another, which it refuses if a
+value is missing. The example is the countdown after approval,
+`lem/approval.lem`, with what pythia sends and accepts, `lem/host.lem`:
 
 ```sh
 cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/approval.lem
@@ -286,13 +286,15 @@ glem.js's view. It makes each widget a native element (`button`, `a`,
 `details`, `table`, `pre`, `progress`) with classes: `g-` and its kind's name,
 and its flags. Its widgets send `Edited` and `Toggled`, a tab `Chosen`, and
 its close button `Dismissed`, it shows `Disabled` and `Tooltip`, a link goes
-only to one of the host's own paths, and a dot says its text as an image's
-label and in its tooltip, in colors of its own that show on light stages and
-dark ones. It sets a theme's values on the page as CSS variables, `--glui-`
-and a value's name, and a look's stylesheet draws with them, over
-`web/glui.css`: `web/native.css`, the design doc's native look, or
-`web/log.css`, after wui's log. `make js-test` runs its cases in a stand-in
-DOM (`lem/test/*_dom.txt`), with a form of its controls, `lem/test/form.lem`.
+only to one of the host's own paths, a dot says its text as an image's label
+and in its tooltip, and prose shows Markdown as elements, never as HTML, its
+links to the host's own paths, or to http, https or mailto in a new tab,
+without a referrer, in colors of its own that show on light stages and dark
+ones. It sets a theme's values on the page as CSS variables, `--glui-` and a
+value's name, and a look's stylesheet draws with them, over `web/glui.css`:
+`web/native.css`, the design doc's native look, or `web/log.css`, after wui's
+log. `make js-test` runs its cases in a stand-in DOM (`lem/test/*_dom.txt`),
+with a form of its controls, `lem/test/form.lem`.
 
 In a browser, `make web-serve` serves the web look's two pages.
 `web/demo.html` shows the approval HUD, a page of a log, or the form, in
@@ -320,35 +322,36 @@ each context, in the index, and before a log's title, a dot (glui's `Dot`)
 says what the context is doing, as the host says (`Activity`): gray, no CLI
 runs on it; green, a CLI works on a turn; yellow, a CLI waits, for input, a
 login or icron; orange, it retries a model request that failed; red, its last
-turn failed, or its CLI stopped in the middle of one. A log's page shows its
-rows in order, each turn marked where it starts, and each run folded. As
-either end of the rows comes near the screen, the program sends
-`LoadBefore(line)` or `LoadAfter(line)` (glem's `Near`), and the host answers
-with another chunk, or with `EarlierFailed` or `LaterFailed`; so a page holds
-what's been scrolled through. As a log grows, the host says its new `Length`,
-in place of the last, and the turns that changed; the program then asks for
-the later rows as it does for others, and the run that the log ended with
-comes whole, with its new items, if it went on. A run's items come when it's
-first opened: the program sends `LoadRun(run)`, and the host answers with
-`RunLoaded(run)` and an `Item` for each, or with `RunFailed(run, why)`. The
-host's `Opening(open)` opens every run, or folds them all, through glui's
-`Entry`'s `open`, and each still opens and folds alone; a run that's open asks
-for its items as it comes near the screen. A jump to a line (`Jump(line)`)
-asks for the rows around it (`LoadAround(line)`), opens the run that holds it,
-and brings its row into view (glem's `Reveal`); where the stretches of rows
-that came don't meet, a marker at either side asks for the rows between as it
-comes near the screen. A message, and an item, has a star (glui's `Entry`'s
-`star`), faint until it's set: setting or clearing it sends `Star(line, on)`,
-and the host sets or clears `Stars(line)`. A log's panel shows beside it as
-the host says (`Aside(shown)`), in a HUD: the lines starred, under their
-turns, as the host sends them (`Pin`), a starred answer with the user's
-messages that it answers; and the outline of the log's turns. A click on a pin
-jumps to its line, and one on a turn visits it (`Visit(turn)`): a jump to the
-line where it first shows that brings its mark into view, and opens nothing.
-An item's body comes the same way, when its entry is first opened: the program
-sends `Load(line)`, and the host answers with `Body` facts, or
-`Failed(line, why)`. `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test
-it.
+turn failed, or its CLI stopped in the middle of one. An assistant's messages
+show as Markdown writes them, as the host says (`Formatting`), and a user's as
+written. A log's page shows its rows in order, each turn marked where it
+starts, and each run folded. As either end of the rows comes near the screen,
+the program sends `LoadBefore(line)` or `LoadAfter(line)` (glem's `Near`), and
+the host answers with another chunk, or with `EarlierFailed` or `LaterFailed`;
+so a page holds what's been scrolled through. As a log grows, the host says
+its new `Length`, in place of the last, and the turns that changed; the
+program then asks for the later rows as it does for others, and the run that
+the log ended with comes whole, with its new items, if it went on. A run's
+items come when it's first opened: the program sends `LoadRun(run)`, and the
+host answers with `RunLoaded(run)` and an `Item` for each, or with
+`RunFailed(run, why)`. The host's `Opening(open)` opens every run, or folds
+them all, through glui's `Entry`'s `open`, and each still opens and folds
+alone; a run that's open asks for its items as it comes near the screen. A
+jump to a line (`Jump(line)`) asks for the rows around it
+(`LoadAround(line)`), opens the run that holds it, and brings its row into
+view (glem's `Reveal`); where the stretches of rows that came don't meet, a
+marker at either side asks for the rows between as it comes near the screen. A
+message, and an item, has a star (glui's `Entry`'s `star`), faint until it's
+set: setting or clearing it sends `Star(line, on)`, and the host sets or
+clears `Stars(line)`. A log's panel shows beside it as the host says
+(`Aside(shown)`), in a HUD: the lines starred, under their turns, as the host
+sends them (`Pin`), a starred answer with the user's messages that it answers;
+and the outline of the log's turns. A click on a pin jumps to its line, and
+one on a turn visits it (`Visit(turn)`): a jump to the line where it first
+shows that brings its mark into view, and opens nothing. An item's body comes
+the same way, when its entry is first opened: the program sends `Load(line)`,
+and the host answers with `Body` facts, or `Failed(line, why)`.
+`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. The node server's pages
 show tabs: the index's, and one for each context that's open, each a runtime
@@ -372,7 +375,8 @@ first row on the screen in place as rows come, above it or below. Every few
 seconds while it shows, a page asks what changed: a log, what it gained; the
 index, its facts anew, whose difference from the last it applies. Its bar
 picks the look and the theme, and, for a log, whether its runs are folded or
-open and whether its panel shows, which the node server keeps for the view, at
+open, whether its panel shows, and whether an assistant's messages show as
+Markdown or as written, which the node server keeps for the view, at
 `data-store`, and the browser too. `make web` writes a sample, an index and a
 log of 13,394 items, the most that one of pythia's contexts had when it was
 first written, in turns of 50, for two pages that show it as the node server's
