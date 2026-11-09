@@ -14,7 +14,9 @@ save as ``--save review``, which has these files:
 - ``PREFIX._private/``, the private directory (mode 0700): ``context.jsonl``,
   the full log, which is all that resuming reads; ``--debug-trace``'s
   ``trace.req.jsonl``, ``trace.res.jsonl`` and ``trace.events.jsonl``;
-  and ``--debug-save-model-binding``'s ``context.jsonl.model-binding.json``.
+  ``--debug-save-model-binding``'s ``context.jsonl.model-binding.json``; and
+  ``1.lock``, the lock that a CLI holds while it runs on the save, which the
+  CLI makes once the save is prepared (``_save_lock``).
 
 A save in the original format is one file, its full log, at the ``--save``
 path or at ``PREFIX.jsonl``, with its traces and snapshot next to it. When

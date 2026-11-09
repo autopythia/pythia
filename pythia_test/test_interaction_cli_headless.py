@@ -20,6 +20,7 @@ from pythia.interaction import (
     ModelResponseError, ModelSample, ModelSampleBoundary, ToolCall, ToolResult, Tools,
     TurnSummary, cli, demo, load_interaction_save, save_interaction_save,
 )
+from pythia.interaction._save_lock import holder, take
 from pythia.interaction.codex_auth import CodexAuthUnavailable
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_pty import _SCRIPT
@@ -119,6 +120,33 @@ class HeadlessCLITests(unittest.TestCase):
         self.assertNotIn("PRIVATE_", stderr)
         self.assertNotIn("\x1b", stderr)
         self.assertIn(f"Save log: {self.path}", stderr)
+
+    def test_the_cli_holds_its_saves_lock_while_it_runs(self):
+        private = self.root / "session._private"
+        seen = []
+
+        def answer(context):
+            seen.append(holder(private))
+            return _answer()
+
+        code, _, _, stderr = self.run_main(["--prompt", "hello"], answer)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual((seen[0]["program"], seen[0]["pid"]), ("pythia", os.getpid()))
+        self.assertIsNone(holder(private))  # it let go as it ended
+        self.assertNotIn("lock", stderr)
+
+    def test_a_save_that_another_cli_holds_warns_and_goes_on(self):
+        code, _, _, stderr = self.run_main(["--prompt", "first"], _answer())
+        self.assertEqual(code, 0, stderr)
+        lock, _ = take(self.root / "session._private")  # another CLI, as far as it knows
+        self.addCleanup(lock.close)
+        code, _, _, stderr = self.run_main(["--resume", "--prompt", "again"], _answer("again"))
+        self.assertEqual(code, 0, stderr)
+        self.assertIn(f"Warning: another CLI is using this save (PID {os.getpid()} on ", stderr)
+        self.assertIn("This one goes on without the save's lock; two CLIs that write one save "
+                      "can corrupt it.", stderr)
+        self.assertIn(Message("assistant", "again"), load_interaction_save(self.path))
+        self.assertEqual(holder(self.root / "session._private")["pid"], os.getpid())
 
     def test_prompt_file_is_loaded_once_before_model_construction(self):
         source = self.root / "task.md"

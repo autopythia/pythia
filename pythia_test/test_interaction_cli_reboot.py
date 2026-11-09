@@ -24,6 +24,8 @@ from pythia.interaction import ToolSpec, Tools, TurnSummary, UserInteractionBoun
 from pythia.interaction import UserToolResult, cli, demo, load_interaction_save
 from pythia.interaction import save_interaction_save
 from pythia.interaction._cli_editor import Editor
+from pythia.interaction._cli_save import CliSave
+from pythia.interaction._save_lock import holder, take
 from pythia.interaction.environment import current_cancel
 from pythia.interaction.loop import kernel
 from pythia.interaction.loop import Urgency
@@ -364,6 +366,47 @@ class RebootStateTests(unittest.TestCase):
         self.assertEqual(_comparable(rebooted), _comparable(cli._parse_reboot_state(carried)))
         with self.assertRaises(OSError):
             os.fstat(descriptor)
+
+    def test_the_saves_lock_goes_on_to_the_restarted_cli(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        save = CliSave.at(Path(temporary.name) / "s")
+        os.mkdir(save.private, 0o700)
+        lock, _ = take(save.private)
+        self.addCleanup(lock.close)
+        seen = {}
+
+        def execve(path, argv, environment):
+            descriptor = int(environment[cli._REBOOT_LOCK_FD])
+            seen.update(descriptor=descriptor, inheritable=os.get_inheritable(descriptor))
+
+        with _rebootable(), mock.patch.object(cli.os, "execve", side_effect=execve):
+            cli._reboot_exec(cli._reboot_state(self._state(), InteractionConfig()), lock)
+        self.assertEqual(seen, {"descriptor": lock.fileno(), "inheritable": True})
+        # The restarted CLI's side: it goes on holding the lock, which no command session
+        # inherits.
+        descriptor, lock.descriptor = lock.descriptor, -1  # the replaced process is gone
+        with mock.patch.dict(os.environ, {cli._REBOOT_LOCK_FD: str(descriptor)}):
+            adopted, same = cli._locked_save(save)
+            self.assertNotIn(cli._REBOOT_LOCK_FD, os.environ)
+        self.addCleanup(adopted.close)
+        self.assertEqual((adopted.fileno(), same), (descriptor, save))
+        self.assertFalse(os.get_inheritable(descriptor))
+        self.assertEqual(holder(save.private)["pid"], os.getpid())
+
+    def test_a_lock_that_cannot_be_taken_is_a_note(self):
+        save = CliSave.at(Path("/nowhere/s"))
+        with mock.patch.object(cli, "take_save_lock",
+                               side_effect=PermissionError(13, "Permission denied")):
+            lock, noted = cli._locked_save(save)
+        self.assertIsNone(lock)
+        self.assertEqual(noted.notices, (
+            "Note: the save's lock couldn't be taken (Permission denied), so the node "
+            "server's view won't show that this CLI runs on it.",))
+        legacy = CliSave(Path("/nowhere/s.jsonl"))  # a save in the original format has none
+        with mock.patch.object(cli, "take_save_lock") as taken:
+            self.assertEqual(cli._locked_save(legacy), (None, legacy))
+        taken.assert_not_called()
 
     def test_a_state_that_cannot_be_read_is_a_warning(self):
         with mock.patch.dict(os.environ):

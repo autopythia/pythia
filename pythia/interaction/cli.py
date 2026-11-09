@@ -62,6 +62,10 @@ from ._cli_save import resume_cli_save
 from ._cli_terminal import PosixTerminal
 from ._debug_trace import DebugTrace
 from ._prompt import load_prompt
+from ._save_lock import SaveLock
+from ._save_lock import adopt as adopt_save_lock
+from ._save_lock import describe as describe_save_holder
+from ._save_lock import take as take_save_lock
 from .codex_auth import CodexAuthUnavailable
 from .compaction import CompactionError
 from .compaction import CompactionResult
@@ -2424,6 +2428,9 @@ _REBOOTED_OPTION = "--rebooted"
 # Names the descriptor of an unlinked file that holds what a restarted CLI
 # carries over (_reboot_state): it survives exec and leaves nothing behind.
 _REBOOT_STATE_FD = "PYTHIA_INTERACTION_REBOOT_FD"
+# Names the descriptor of the save's lifetime lock (_save_lock), which the
+# restarted CLI goes on holding (_locked_save).
+_REBOOT_LOCK_FD = "PYTHIA_INTERACTION_REBOOT_LOCK_FD"
 _REBOOT_STATE_VERSION = 1
 _REBOOT_CHECK_SECONDS = 60
 _REBOOT_CAUSES = ("/reboot", "coldstart")
@@ -2838,8 +2845,9 @@ class _Rebooting(Exception):
         self.state = state
 
 
-def _reboot_exec(state: dict) -> int:
-    """Replace this process with the restarted CLI; returns only on failure."""
+def _reboot_exec(state: dict, lock: Optional[SaveLock] = None) -> int:
+    """Replace this process with the restarted CLI, which goes on holding the save's
+    ``lock``, if it's held; returns only on failure."""
     command = _reboot_command()
     if command is None:  # _reboot_refusal checked it
         print("interaction CLI failed: the reboot can't run this process's command line "
@@ -2850,6 +2858,9 @@ def _reboot_exec(state: dict) -> int:
         file.flush()
         os.set_inheritable(file.fileno(), True)
         environment = {**os.environ, _REBOOT_STATE_FD: str(file.fileno())}
+        if lock is not None:
+            os.set_inheritable(lock.fileno(), True)
+            environment[_REBOOT_LOCK_FD] = str(lock.fileno())
         with suppress(OSError, ValueError):
             sys.stdout.flush()
             sys.stderr.flush()
@@ -3862,6 +3873,36 @@ def _apply_workspace(environment, snapshot) -> None:
         update(snapshot.enable_workspace)
 
 
+def _locked_save(save: CliSave) -> Tuple[Optional[SaveLock], CliSave]:
+    """The save's lifetime lock (_save_lock), which tells the node server's view that a
+    CLI runs on it: the one that a reboot carried over, if it did, else taken now; and
+    the save, with a notice if it goes on without one. Another CLI may hold it: then
+    this one warns, and goes on. A save in the original format has none."""
+    name = os.environ.pop(_REBOOT_LOCK_FD, None)  # command sessions don't inherit it
+    inherited = int(name) if name is not None and name.isdigit() else None
+    if inherited is not None and save.private is not None:
+        lock = adopt_save_lock(inherited, save.private)  # else it's closed
+        if lock is not None:
+            return lock, save
+    elif inherited is not None and inherited > 2:
+        with suppress(OSError):
+            os.close(inherited)
+    if save.private is None:
+        return None, save
+    try:
+        lock, owner = take_save_lock(save.private)
+    except OSError as exc:
+        notice = (f"Note: the save's lock couldn't be taken ({exc.strerror or exc}), so the "
+                  "node server's view won't show that this CLI runs on it.")
+        return None, replace(save, notices=(*save.notices, notice))
+    if lock is None:
+        notice = (f"Warning: another CLI is using this save ({describe_save_holder(owner)}). "
+                  "This one goes on without the save's lock; two CLIs that write one save "
+                  "can corrupt it.")
+        return None, replace(save, notices=(*save.notices, notice))
+    return lock, save
+
+
 def _prepared_save(path, args) -> CliSave:
     """The save to run on: main prepares it, and a --save path is prepared here."""
     if isinstance(path, CliSave):
@@ -4508,6 +4549,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     icron = None
     rebooted = None
     reboot_state = None
+    lock = None
     try:
         if args.list_roots:
             print(_roots_listing(args))
@@ -4568,6 +4610,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         save = prepare_cli_save(save_path, resume=args.resume,
                                 auto_migrate=args.auto_migrate_save,
                                 reasoning=args.save_log_reasoning)
+        lock, save = _locked_save(save)
         trace = (DebugTrace.open_paths(*save.trace_paths, context_id=1, role="main")
                  if args.debug_trace else None)
         try:
@@ -4624,7 +4667,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if warning:
                     with suppress(OSError, ValueError):
                         print(warning, file=sys.stderr)
-    return _reboot_exec(reboot_state)
+            if lock is not None and reboot_state is None:
+                lock.close()
+    return _reboot_exec(reboot_state, lock)
 
 
 if __name__ == "__main__":
