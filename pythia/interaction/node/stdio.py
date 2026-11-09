@@ -29,11 +29,11 @@ from typing import BinaryIO, Optional, Tuple
 
 from .contexts import Roots
 from .pages import Response
+from .remote import PROTOCOL
 from .server import MAX_TARGET, App, plain
 from .store import MAX_BYTES, Store
 from .styles import DEFAULT_STYLE, Styles
 
-PROTOCOL = 1
 # A request's line at most: its target, and a POST's body in base64.
 MAX_LINE = 2 * MAX_TARGET + 2 * MAX_BYTES
 # A base: a path of a few segments, each of characters that need no quoting in a URL, but

@@ -6,20 +6,21 @@ as the CLI finds it. The glui view's settings are kept in ``--store``, else
 ``~/.pythia/node``; ``--store none`` keeps nothing. A relative path is taken
 from the launch directory. With ``--stdio``, the server answers on its
 standard streams instead, as lines of JSON, for a node server elsewhere that
-reaches this node by ssh (``stdio.py``).
+reaches this node by ssh (``stdio.py``); and with ``--remote HOST``, a server
+shows HOST's root contexts too, reaching it so (``remote.py``).
 """
 
 import argparse
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .._cli_editor import safe_text
 from ..registry import abbreviate, registry_path, save_prefix_of
 from .contexts import Roots, shown_path
 from .pages import _KEY, absent_note, when
-from . import stdio
+from . import remote, stdio
 from .server import ADDRESS, App, Server
 from .store import Store
 from .styles import DEFAULT_STYLE, Styles
@@ -28,6 +29,14 @@ PROG = "python3 -m pythia.interaction.node"
 DEFAULT_PORT = 8765
 # --list cuts a row's last column to the terminal's width, but leaves at least this much.
 MIN_TITLE = 12
+
+
+def remote_node(text: str) -> Tuple[str, List[str]]:
+    """A --remote's value, as remote.parse takes it."""
+    try:
+        return remote.parse(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def port_number(text: str) -> int:
@@ -66,6 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
         "the style that pages show in, unless their URL names another: log-dark, "
         "log-light, chat, or another in the server's css/. The menu at each page's top "
         "right switches (default: %(default)s)"))
+    parser.add_argument("--remote", metavar="HOST", type=remote_node, action="append",
+                        default=[], help=(
+        "show HOST's root contexts too, at /TOKEN/n/HOST/, as a node server that it runs "
+        "with --stdio, reached by 'ssh -o BatchMode=yes HOST'; NAME=COMMAND reaches a node "
+        "named NAME by COMMAND instead, such as 'python3 -m pythia.interaction.node --stdio "
+        "--registry DIR'. Give it once for each remote node"))
     parser.add_argument("--store", metavar="DIR", default=None, help=(
         "where the glui view keeps what it keeps across the server's runs, such as its "
         "settings, as a browser keeps its profile; 'none' keeps nothing. A relative path is "
@@ -167,14 +182,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     stored = Path(args.store).expanduser().absolute() if args.store else STORE
     store = None if args.store == "none" else Store(stored)
+    if args.stdio and args.remote:
+        parser.error("argument --remote: not allowed with argument --stdio")
     if args.stdio:
         return stdio.serve(roots, store=store, style=args.style, styles=styles)
+    names = [name for name, _ in args.remote]
+    twice = next((name for name in names if names.count(name) > 1), None)
+    if twice is not None:
+        parser.error(f"argument --remote: {twice} is given twice")
+    app = App(roots, style=args.style, styles=styles, store=store, remotes=args.remote)
     try:
-        server = Server(App(roots, style=args.style, styles=styles, store=store), args.port)
+        server = Server(app, args.port)
     except OSError as exc:
         _error(f"can't serve on {ADDRESS}:{args.port}: {exc}; give another port with --port, "
                "or --port 0 for a free one.")
         return 1
+    try:
+        return _serve(server, roots)
+    finally:
+        app.close()
+
+
+def _serve(server: Server, roots: Roots) -> int:
     with server:
         _say(roots.problem() or _counted(roots))
         _say(server.url)
@@ -184,6 +213,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                  f"{shown_path(files.directory)}/: {', '.join(files.missing())}")
         else:
             _say(f"in glui's view: {server.url}lem/")
+        for name in server.app.remotes:
+            _say(f"remote node {name}: {server.url}n/{name}/, and in glui's view: "
+                 f"{server.url}n/{name}/lem/")
         port = server.server_port
         _say(f"from another machine: ssh -L {port}:{ADDRESS}:{port} HOST")
         try:

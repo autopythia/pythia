@@ -11,6 +11,8 @@ across its runs, in ``~/.pythia/node/`` unless ``--store`` says otherwise
 (``store.py``), with a dot before each context that says what it's doing, by
 the lock that a CLI holds on its save (``activity.py``). With ``--stdio``, it
 answers on its standard streams instead, for a node server elsewhere that
-reaches this node by ssh (``stdio.py``). It began as wui, a server for a
+reaches this node by ssh (``stdio.py``); and with ``--remote HOST``, it shows
+the pages of HOST's root contexts too, at ``/TOKEN/n/HOST/``, as such a node
+server there answers them (``remote.py``). It began as wui, a server for a
 directory of saves, and it uses only the standard library.
 """

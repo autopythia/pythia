@@ -1,27 +1,59 @@
 """The node server's remote nodes: a node on its standard streams (``--stdio``,
 ``pythia/interaction/node/stdio.py``), whose pages start with a base path in place
-of a token, which another node server reaches by ssh."""
+of a token; and the remotes of a node server (``--remote``, ``remote.py``), each
+such a node, reached here by a command that runs one on this node, as ssh would
+run one on another, whose pages the server answers ``/TOKEN/n/NAME/...`` with."""
 
 from __future__ import annotations
 
 import base64
+import gzip
 import io
 import json
+import queue
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from pythia.interaction.node import contexts, server, stdio
+from pythia.interaction.node import contexts, remote, server, stdio, view
 from pythia.interaction.node.store import Store
-from pythia_test.test_interaction_node import HREF, LOCAL, environ, make_workspace, run_main
+from pythia_test.test_interaction_node import (CHECKOUT, HREF, LOCAL, OLD, PROJ, RUN_NODE, TOKEN,
+                                               environ, make_workspace, request, run_main)
 
 BASE = "/t0ken/n/sim"
 HOST = "127.0.0.1:8765"
 HELLO = {"node": 1, "base": BASE}
+# A remote that answers each request with the answer that its argument gives for the
+# request's path past its base, and its id.
+FAKE = """import json, sys
+answers = json.loads(sys.argv[1])
+base = json.loads(sys.stdin.readline())["base"]
+print(json.dumps({"node": 1, "host": "fake", "roots": 0}), flush=True)
+for line in sys.stdin:
+    asked = json.loads(line)
+    print(json.dumps({"id": asked["id"], **answers[asked["target"][len(base):]]}), flush=True)
+"""
+
+
+def node(registry, store="none"):
+    """The command that runs a node server on its standard streams, from this checkout,
+    for ``registry``."""
+    return ["env", f"PYTHONPATH={CHECKOUT}", sys.executable, "-m", "pythia.interaction.node",
+            "--stdio", "--registry", str(registry), "--store", str(store)]
+
+
+def python(code, *argv):
+    """The command that runs ``code`` in Python."""
+    return [sys.executable, "-c", code, *argv]
 
 
 def get(rid, path):
@@ -188,6 +220,244 @@ class ProcessTests(RemoteTest):
         status, out, err = run_main("--stdio", "--list")
         self.assertEqual((status, out), (2, ""))
         self.assertIn("argument --list: not allowed with argument --stdio", err)
+
+
+
+class ParseTests(unittest.TestCase):
+    def test_a_host_is_reached_by_ssh_and_a_name_by_its_command(self):
+        self.assertEqual(remote.parse("cloud-0"), (
+            "cloud-0", ["ssh", "-o", "BatchMode=yes", "cloud-0", "python3", "-m",
+                        "pythia.interaction.node", "--stdio"]))
+        self.assertEqual(remote.parse("sim=python3 -m x --registry 'a b'"),
+                         ("sim", ["python3", "-m", "x", "--registry", "a b"]))
+        self.assertEqual(remote.parse("a.b_c=x=y"), ("a.b_c", ["x=y"]))
+
+    def test_what_isnt_a_remote(self):
+        name = ("isn't a node's name: letters, digits, '.', '_' and '-', from a letter or a "
+                "digit; for a host that isn't, give NAME=COMMAND")
+        for text, why in (("-oProxyCommand=x", f"'-oProxyCommand' {name}"),
+                          ("user@host", f"'user@host' {name}"), ("", f"'' {name}"),
+                          ("a/b", f"'a/b' {name}"), ("sim=", "sim's command is empty"),
+                          ("sim= ", "sim's command is empty"),
+                          ("sim='x", "No closing quotation")):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError) as caught:
+                    remote.parse(text)
+                self.assertEqual(str(caught.exception), why)
+
+
+class RemoteTests(RemoteTest):
+    def app(self, *remotes, **options):
+        """An app with ``remotes``, each with ``options``, and a timeout of 10 s unless they
+        say otherwise."""
+        app = server.App(self.roots, TOKEN, remotes=remotes)
+        for one in app.remotes.values():
+            for name, value in {"timeout": 10.0, **options}.items():
+                setattr(one, name, value)
+        self.addCleanup(app.close)
+        return app
+
+    def get(self, app, path, method="GET"):
+        return app.respond(method, f"/{TOKEN}{path}", [HOST])
+
+    def test_a_remotes_pages_come_through_the_local_server(self):
+        app = self.app(("sim", node(self.ws.registry)))
+        base = f"/{TOKEN}/n/sim/"
+        index = self.get(app, "/n/sim/")
+        self.assertEqual((index.status, index.content_type, index.csp), (200, "text/html", None))
+        links = [link for link in HREF.findall(index.body) if link.startswith("/")]
+        self.assertIn(f"{base}c/{LOCAL}", links)
+        self.assertEqual([link for link in links if not link.startswith(base)], [])
+        page = self.get(app, "/n/sim/lem/")
+        self.assertEqual((page.status, page.csp), (200, view.PAGE_CSP))
+        self.assertIn(f'src="{base}lem/files/contexts.js"', page.body)
+        facts = self.get(app, f"/n/sim/lem/facts/c/{LOCAL}")
+        self.assertEqual((facts.status, facts.content_type, facts.csp),
+                         (200, "application/json", view.DATA_CSP))
+        self.assertEqual(self.get(app, "/n/sim/c/1?line=1").status, 200)
+        self.assertEqual(self.get(app, "/n/sim", "HEAD").location, base)
+        self.assertEqual(self.get(app, "/n/nope/").status, 404)
+        self.assertEqual(self.get(app, "/n/").status, 404)
+        self.assertEqual(app.respond("PUT", f"{base}", [HOST]).status, 405)  # as it says
+        self.assertEqual(app.remotes["sim"].hello,
+                         {"node": 1, "host": mock.ANY, "roots": len(self.roots.entries())})
+        process = app.remotes["sim"]._process
+        app.close()
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(self.get(app, "/n/sim/").body,
+                         "The remote node sim can't be reached: the server is stopping.\n")
+
+    def test_the_views_files_are_the_local_servers_own(self):
+        app = self.app(("down", python("import sys; sys.exit(1)")))
+        mine = self.get(server.App(self.roots, TOKEN), "/lem/files/contexts.js")
+        for path in ("/n/down/lem/files/contexts.js", "/n/down/lem/files/compiled/tabs.json"):
+            with self.subTest(path=path):
+                got = self.get(app, path)
+                self.assertEqual(got.status, 200)
+        self.assertEqual(self.get(app, "/n/down/lem/files/contexts.js").body, mine.body)
+        self.assertEqual(self.get(app, "/n/down/lem/files/nope.js").status, 404)
+        self.assertEqual(self.get(app, "/n/down/lem/").status, 502)
+
+    def test_a_remote_that_cant_be_reached_says_why_and_is_tried_again(self):
+        app = self.app(("gone", ["/nonexistent/node"]),
+                       ("fails", python("import sys; sys.stderr.write('no registry here\\n'); "
+                                        "sys.exit(3)")),
+                       ("refuses", python("import json, sys; sys.stdin.readline(); "
+                                          "print(json.dumps({'node': 1, 'error': 'nope'}))")),
+                       ("other", python("print('hello')")),
+                       ("old", python("import sys; sys.stdin.readline(); print('{\"node\": 0}')")))
+        said = {name: self.get(app, f"/n/{name}/").body for name in app.remotes}
+        self.assertEqual(said, {
+            "gone": "The remote node gone can't be reached: its command couldn't start: "
+                    "[Errno 2] No such file or directory: '/nonexistent/node'.\n",
+            "fails": "The remote node fails can't be reached: it ended, with status 3: "
+                     "no registry here.\n",
+            "refuses": "The remote node refuses can't be reached: it refused: nope.\n",
+            "other": "The remote node other can't be reached: it didn't answer as a node "
+                     "does.\n",
+            "old": "The remote node old can't be reached: it didn't answer as a node "
+                   "does.\n"})
+        again = self.get(app, "/n/fails/")
+        self.assertEqual(again.status, 502)
+        self.assertRegex(again.body, r"no registry here; it's tried again in [1-5] s\.\n\Z")
+        app.remotes["fails"].retry = 0
+        self.assertEqual(self.get(app, "/n/fails/").body, said["fails"])
+
+    def test_a_remote_that_doesnt_answer_in_time_gets_504_and_starts_again(self):
+        app = self.app(("slow", python("import sys, time; sys.stdin.readline(); "
+                                       "time.sleep(60)")), timeout=0.3)
+        started = time.monotonic()
+        got = self.get(app, "/n/slow/")
+        self.assertEqual((got.status, got.body), (504, (
+            "The remote node slow didn't answer in 0.3 s; it's started again for the next "
+            "request.\n")))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIsNone(app.remotes["slow"]._process)
+        self.assertEqual(app.remotes["slow"].why, "it didn't answer in 0.3 s")
+
+    def test_what_a_remote_answers_passes_on_only_as_the_local_servers_own_pages_would(self):
+        base = f"/{TOKEN}/n/fake"
+        answers = {
+            "/script": {"status": 200, "type": "text/javascript", "body": "alert(1)"},
+            "/away": {"status": 303, "type": "text/plain", "body": "",
+                      "location": "http://elsewhere/"},
+            "/sideways": {"status": 303, "type": "text/plain", "body": "",
+                          "location": f"/{TOKEN}/n/fakes/"},
+            "/near": {"status": 303, "type": "text/plain", "body": "",
+                      "location": f"{base}/lem/c/1"},
+            "/loose": {"status": 200, "type": "text/html", "body": "<p>hi",
+                       "csp": "default-src *", "headers": [["Set-Cookie", "a=b"],
+                                                           ["Allow", "GET"]]},
+            "/view": {"status": 200, "type": "text/html", "body": "", "csp": view.PAGE_CSP},
+            "/broken": {"status": "200", "type": "text/html", "body": ""},
+        }
+        app = self.app(("fake", python(FAKE, json.dumps(answers))))
+        got = {path: self.get(app, f"/n/fake{path}") for path in answers}
+        refused = "The remote node fake answered with what this server doesn't pass on.\n"
+        self.assertEqual({path: (one.status, one.body) for path, one in got.items()
+                          if one.status == 502}, {
+            "/script": (502, refused), "/away": (502, refused), "/sideways": (502, refused),
+            "/broken": (502, "The remote node fake answered with a line that isn't an "
+                             "answer.\n")})
+        self.assertEqual(got["/near"].location, f"{base}/lem/c/1")
+        self.assertEqual((got["/loose"].body, got["/loose"].csp, got["/loose"].headers),
+                         ("<p>hi", None, (("Allow", "GET"),)))
+        self.assertEqual(got["/view"].csp, view.PAGE_CSP)
+
+    def test_the_views_posts_go_to_the_remotes_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self.app(("sim", node(self.ws.registry, Path(tmp) / "node")))
+
+            def post(path, value, **fields):
+                return app.respond("POST", f"/{TOKEN}/n/sim{path}", [HOST], **{
+                    "origins": [f"http://{HOST}"], "marked": True,
+                    "content_type": "application/json", "body": json.dumps(value).encode(),
+                    **fields})
+
+            self.assertEqual(post("/lem/store/session", {"look": "log"}).status, 204)
+            self.assertEqual(post("/lem/store/session", {"look": "x"}, marked=False).status,
+                             403)
+            self.assertEqual(post("/lem/store/session", {}, body=None).status, 413)
+            self.assertEqual(post(f"/lem/stars/{LOCAL}", {"line": 2, "on": True}).status, 204)
+            self.assertEqual(post("/lem/files/contexts.js", {}).status, 405)
+            self.assertEqual(json.loads(self.get(app, "/n/sim/lem/store/session").body),
+                             {"look": "log"})
+            kept = Store(Path(tmp) / "node")
+            self.assertEqual(kept.read("session"), {"look": "log"})
+            self.assertEqual(list(kept.read("stars").values()), [[2]])
+            self.assertEqual(app.respond("POST", f"/{TOKEN}/lem/store/session", [HOST],
+                                         origins=[f"http://{HOST}"], marked=True,
+                                         content_type="application/json", body=b"{}").status,
+                             404)  # the local server keeps no store
+
+    def test_requests_at_once_each_get_their_own_answer(self):
+        app = self.app(("sim", node(self.ws.registry)))
+        numbers = [LOCAL, OLD, PROJ] * 3
+        answers = queue.Queue()
+
+        def ask(number):
+            answers.put((number, self.get(app, f"/n/sim/lem/tab/{number}")))
+
+        threads = [threading.Thread(target=ask, args=(number,)) for number in numbers]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        got = [answers.get_nowait() for _ in numbers]
+        self.assertEqual(sorted((number, json.loads(one.body)["id"]) for number, one in got),
+                         sorted((number, number) for number in numbers))
+
+    def test_served_with_a_remote_and_stopped_on_ctrl_c(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", RUN_NODE, "--port", "0", "--registry", str(self.ws.registry),
+             "--store", "none", "--remote", "sim=" + " ".join(node(self.ws.registry))],
+            cwd=self.ws.tmp, env=environ(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True)
+        lines = queue.Queue()
+        threading.Thread(target=lambda: [lines.put(line) for line in process.stdout],
+                         daemon=True).start()
+        try:
+            printed = [lines.get(timeout=60) for _ in range(4)]
+            url = re.fullmatch(r"node: (http://127\.0\.0\.1:([0-9]+)/[A-Za-z0-9_-]{43}/)\n",
+                               printed[1])
+            self.assertIsNotNone(url, printed[1])
+            self.assertEqual(printed[3], f"node: remote node sim: {url[1]}n/sim/, and in glui's "
+                             f"view: {url[1]}n/sim/lem/\n")
+            with urllib.request.urlopen(url[1] + "n/sim/lem/", timeout=20) as response:
+                self.assertEqual(response.headers["Content-Security-Policy"], view.PAGE_CSP)
+                self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+            port = int(url[2])
+            status, headers, body = request(port, url[1][len(f"http://127.0.0.1:{port}"):]
+                                            + f"n/sim/c/{LOCAL}",
+                                            headers=[("Accept-Encoding", "gzip")])
+            self.assertEqual(status, 200)
+            if headers.get("content-encoding") == "gzip":
+                body = gzip.decompress(body)
+            self.assertIn("local-0", body.decode())
+            process.send_signal(signal.SIGINT)
+            self.assertEqual(process.wait(timeout=60), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            process.stdout.close()
+
+    def test_remote_options_that_dont_go(self):
+        registry = str(self.ws.registry)
+        # Should one go, the server can't start, rather than serve in this test.
+        unserved = mock.patch("pythia.interaction.node.__main__.Server",
+                              side_effect=OSError("no port in this test"))
+        unserved.start()
+        self.addCleanup(unserved.stop)
+        for argv, why in (
+                (["--remote", "a@b"], "argument --remote: 'a@b' isn't a node's name"),
+                (["--stdio", "--remote", "x"], "argument --remote: not allowed with argument "
+                                               "--stdio"),
+                (["--remote", "x", "--remote", "x=y"], "argument --remote: x is given twice")):
+            with self.subTest(argv=argv):
+                status, out, err = run_main("--registry", registry, *argv)
+                self.assertEqual((status, out), (2, ""))
+                self.assertIn(why, err)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,15 @@ and no request is logged.
 
 Every plain page takes ``?style=NAME``, one of the styles that ``css/``
 holds (``styles.py``); a name that isn't one is a bad request.
+
+Behind ``/TOKEN/n/NAME/`` are the pages of remote node NAME (``--remote``,
+``remote.py``), as it answers them, a site within this server's, with its own
+store: GET, HEAD and its view's POSTs go to it, which checks them as this
+server does. What it answers passes on only as this server's own pages would:
+as HTML, plain text or JSON, with none of its headers but Allow, under this
+server's content security policies, and with redirects within its own pages;
+and its view's scripts, styles and programs are this server's own, so that its
+pages run nothing that it sent.
 """
 
 from __future__ import annotations
@@ -39,9 +48,10 @@ from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 from .contexts import Roots
 from .pages import BadRequest, Pages, Response
+from .remote import Remote
 from .store import FILES, MAX_BYTES, REPLACED, Store
 from .styles import DEFAULT_STYLE, FIELD, NAME, Styles
-from .view import DATA_CSP, View
+from .view import DATA_CSP, PAGE_CSP, View
 
 ADDRESS = "127.0.0.1"
 TOKEN_BYTES = 32
@@ -53,6 +63,9 @@ MAX_TARGET = 4096
 MAX_FIELDS = 8
 # A context's views, as query fields (pages.Pages.context); other pages take none.
 CONTEXT_FIELDS = frozenset(("line", "lines", "turn", "page", "summary"))
+# What a remote's answer passes on as: its types, and its headers.
+REMOTE_TYPES = frozenset(("text/html", "text/plain", "application/json"))
+REMOTE_HEADERS = frozenset(("Allow",))
 # The header that the glui view's scripts send with a write to its store, which a page
 # elsewhere can't send to this server without its leave (a CORS preflight, which it never
 # gives).
@@ -114,7 +127,8 @@ class App:
     def __init__(self, roots: Roots, token: Optional[str] = None, *,
                  style: str = DEFAULT_STYLE, styles: Optional[Styles] = None,
                  view: Optional[View] = None, store: Optional[Store] = None,
-                 base: Optional[str] = None) -> None:
+                 base: Optional[str] = None,
+                 remotes: Sequence[Tuple[str, Sequence[str]]] = ()) -> None:
         self.token = token or new_token()
         self.base = f"/{self.token}" if base is None else base
         self._base = self.base.encode("latin-1", "replace")
@@ -122,6 +136,14 @@ class App:
         self.pages = Pages(roots, self.token, style=style, styles=styles, base=self.base)
         self.view = View(store=store) if view is None else view
         self.store = store
+        # The remote nodes, each by its name, and the command that reaches it.
+        self.remotes: Dict[str, Remote] = {
+            name: Remote(name, argv, f"{self.base}/n/{name}") for name, argv in remotes}
+
+    def close(self) -> None:
+        """Ends the remotes' processes."""
+        for remote in self.remotes.values():
+            remote.close()
 
     @property
     def path(self) -> str:
@@ -148,6 +170,9 @@ class App:
         if not hmac.compare_digest(given.encode("latin-1", "replace"), self._base):
             return plain(404, "Not found.")
         rest = segments[depth + 1] if len(segments) > depth + 1 else ""
+        if rest.startswith("n/"):
+            return self._remote(method, target, rest[2:], hosts[0].strip(), origins, marked,
+                                content_type, body)
         stored = rest[len("lem/store/"):] if rest.startswith("lem/store/") else None
         starred = rest[len("lem/stars/"):] if rest.startswith("lem/stars/") else None
         own = (hosts[0].strip(), origins, marked, content_type, body)
@@ -192,6 +217,30 @@ class App:
         if route == "lem":
             return self.view.respond(pages, name)
         return pages.not_found("The node server has no such page.")
+
+    def _remote(self, method: str, target: str, rest: str, host: str,
+                origins: Sequence[str], marked: bool, content_type: Optional[str],
+                body: Optional[bytes]) -> Response:
+        """The answer of remote node NAME, ``rest`` being ``NAME/...``; the view's files,
+        this server's own."""
+        name, _, path = rest.partition("/")
+        remote = self.remotes.get(name)
+        if remote is None:
+            return plain(404, "There's no such remote node here.")
+        if path.startswith("lem/files/") and method in ("GET", "HEAD"):
+            return self.view.respond(self.pages, _unquoted(path[len("lem/"):]))
+        answer = remote.request(method, target, host, origins=origins, marked=marked,
+                                content_type=content_type, body=body)
+        within = answer.location is None or (answer.location + "?").startswith(
+            (f"{remote.base}/", f"{remote.base}?"))
+        if answer.content_type not in REMOTE_TYPES or not within:
+            return plain(502, f"The remote node {name} answered with what this server "
+                         "doesn't pass on.")
+        return Response(answer.status, answer.body, content_type=answer.content_type,
+                        location=answer.location,
+                        headers=[header for header in answer.headers
+                                 if header[0] in REMOTE_HEADERS],
+                        csp=answer.csp if answer.csp in (PAGE_CSP, DATA_CSP) else None)
 
     def _refused(self, host: str, origins: Sequence[str], marked: bool,
                  content_type: Optional[str], body: Optional[bytes]) -> Optional[Response]:
