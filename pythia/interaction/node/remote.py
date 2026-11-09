@@ -10,7 +10,8 @@ seconds at most, and it ends with the local server, as its input does. A request
 doesn't answer in ``TIMEOUT`` seconds gets 504, and the process ends, to start again;
 one while it can't be reached gets 502, which says why, by what it said last on its
 standard error. The index asks every remote for its roots at once (``listings``), and
-waits ``LISTING_WAIT`` seconds at most, without ending a remote that's slow.
+waits ``LISTING_WAIT`` seconds at most; a remote that's slow goes on, unless a request
+has waited ``TIMEOUT`` seconds for it, as one of a connection that stalled does.
 """
 
 from __future__ import annotations
@@ -86,20 +87,25 @@ class Remote:
         # and why it can't be reached, if it can't.
         self.hello: Optional[dict] = None
         self.why: Optional[str] = None
+        # Its lock, for what follows; and another, for its process's input, a line at a
+        # time, which a reader never waits for, so that answers keep coming.
         self._lock = threading.Lock()
+        self._writing = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._started = -math.inf
         self._closed = False
         self._ids = itertools.count(1)
+        # The requests that wait for an answer, by id; and when each request that isn't
+        # answered yet was sent, whether it's waited for or not.
         self._waiting: Dict[int, "queue.Queue[Response]"] = {}
-        self._said: Deque[str] = collections.deque(maxlen=SAID)
+        self._sent: Dict[int, float] = {}
 
     def request(self, method: str, target: str, host: str, *, origins: Sequence[str] = (),
                 marked: bool = False, content_type: Optional[str] = None,
                 body: Optional[bytes] = None, wait: Optional[float] = None) -> Response:
         """Its answer to a request, as App.respond takes one, or why there's none. With
         ``wait`` shorter than its timeout, it waits that long at most, and leaves the
-        process running."""
+        process running, unless a request has waited its timeout for it."""
         answer: "queue.Queue[Response]" = queue.Queue(maxsize=1)
         with self._lock:
             if self._closed:
@@ -113,11 +119,13 @@ class Remote:
                     return self._unreachable(self.why)
             process = self._process
             rid = next(self._ids)
-            request = {"id": rid, "method": method, "target": target, "host": host}
-            if method == "POST":
-                request.update(origins=list(origins), marked=marked, type=content_type,
-                               body=None if body is None else base64.b64encode(body).decode())
             self._waiting[rid] = answer
+            self._sent[rid] = time.monotonic()
+        request = {"id": rid, "method": method, "target": target, "host": host}
+        if method == "POST":
+            request.update(origins=list(origins), marked=marked, type=content_type,
+                           body=None if body is None else base64.b64encode(body).decode())
+        with self._writing:
             try:
                 process.stdin.write(json.dumps(request).encode("ascii") + b"\n")
                 process.stdin.flush()
@@ -129,11 +137,13 @@ class Remote:
         except queue.Empty:
             with self._lock:
                 self._waiting.pop(rid, None)
-            if waits < self.timeout:
-                return _plain(504, f"The remote node {self.name} didn't answer in {waits:g} s.")
-            self._end(process, f"it didn't answer in {self.timeout:g} s")
-            return _plain(504, f"The remote node {self.name} didn't answer in "
-                          f"{self.timeout:g} s; it's started again for the next request.")
+                oldest = min(self._sent.values(), default=math.inf) \
+                    if self._process is process else math.inf
+            if time.monotonic() - oldest >= self.timeout:
+                self._end(process, f"it didn't answer in {self.timeout:g} s", stuck=True)
+                return _plain(504, f"The remote node {self.name} didn't answer in "
+                              f"{self.timeout:g} s; it's started again for the next request.")
+            return _plain(504, f"The remote node {self.name} didn't answer in {waits:g} s.")
 
     def close(self) -> None:
         """Ends its process, if it runs, by the end of its input, else by a signal."""
@@ -149,7 +159,6 @@ class Remote:
     def _start(self) -> bool:
         """Starts its process, with its lock held: whether it started."""
         self._started = time.monotonic()
-        self._said.clear()
         self.hello = None
         try:
             process = subprocess.Popen(self.argv, stdin=subprocess.PIPE,
@@ -160,10 +169,11 @@ class Remote:
             return False
         self._process = process
         self.why = None
-        errors = threading.Thread(target=self._read_errors, args=(process,), daemon=True,
+        said: Deque[str] = collections.deque(maxlen=SAID)
+        errors = threading.Thread(target=self._read_errors, args=(process, said), daemon=True,
                                   name=f"node remote {self.name} errors")
         errors.start()
-        threading.Thread(target=self._read, args=(process, errors), daemon=True,
+        threading.Thread(target=self._read, args=(process, errors, said), daemon=True,
                          name=f"node remote {self.name}").start()
         try:
             process.stdin.write(json.dumps({"node": PROTOCOL, "base": self.base})
@@ -173,7 +183,8 @@ class Remote:
             pass  # it ended, and its reader will say why
         return True
 
-    def _read(self, process: subprocess.Popen, errors: threading.Thread) -> None:
+    def _read(self, process: subprocess.Popen, errors: threading.Thread,
+              said: Deque[str]) -> None:
         """Hands each answer that the process gives to its request, until it ends."""
         why = None
         try:
@@ -199,37 +210,51 @@ class Remote:
                     value = _json(line)
                     rid = value.get("id") if isinstance(value, dict) else None
                     with self._lock:
+                        if type(rid) is int and self._process is process:
+                            self._sent.pop(rid, None)
                         waiting = self._waiting.pop(rid, None) if type(rid) is int else None
                     if waiting is not None:
                         waiting.put(_answer(self.name, value))
         except (OSError, ValueError):
             pass
-        self._end(process, why, errors)
+        self._end(process, why, errors, said)
         process.stdout.close()
 
-    def _read_errors(self, process: subprocess.Popen) -> None:
+    @staticmethod
+    def _read_errors(process: subprocess.Popen, said: Deque[str]) -> None:
         try:
             for line in process.stderr:
                 text = line.decode("utf-8", "replace").strip()
                 if text:
-                    self._said.append(text)
+                    said.append(text)
         except (OSError, ValueError):
             pass
         process.stderr.close()
 
     def _end(self, process: subprocess.Popen, why: Optional[str],
-             errors: Optional[threading.Thread] = None) -> None:
+             errors: Optional[threading.Thread] = None,
+             said: Optional[Deque[str]] = None, stuck: bool = False) -> None:
         """Ends ``process``, if it's still the one that runs, for ``why``, else for what it
-        said last; and answers the requests that wait for it."""
+        said last, at once if it's ``stuck``; and answers the requests that wait for it."""
         with self._lock:
             if self._process is not process:
                 return
             self._process = None
-            waiting, self._waiting = self._waiting, {}
+            self.why = why or "it ended"
+            waiting, self._waiting, self._sent = self._waiting, {}, {}
+        # The end of its input ends it; unless it's stuck, or a line waits to go in, as it
+        # does to a process that reads no more, which a signal ends.
+        if stuck:
+            process.kill()
+        if not self._writing.acquire(timeout=0.5):
+            process.kill()
+            self._writing.acquire()
         try:
             process.stdin.close()
         except OSError:
             pass
+        finally:
+            self._writing.release()
         try:
             status = process.wait(timeout=2)
         except subprocess.TimeoutExpired:
@@ -239,8 +264,8 @@ class Remote:
             errors.join(timeout=1)
         if why is None:
             # Its last word, as a clause of why: without the period that ends it, if any.
-            said = self._said[-1].rstrip(". ") if self._said else ""
-            why = f"it ended, with status {status}: {said or 'it said nothing'}"
+            last = said[-1].rstrip(". ") if said else ""
+            why = f"it ended, with status {status}: {last or 'it said nothing'}"
         self.why = why
         for answer in waiting.values():
             answer.put(self._unreachable(why))

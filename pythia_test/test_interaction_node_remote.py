@@ -44,6 +44,16 @@ for line in sys.stdin:
     print(json.dumps({"id": asked["id"], **answers[asked["target"][len(base):]]}), flush=True)
 """
 
+# A remote that answers its first request, then nothing, as one whose connection stalled.
+ONCE = """import json, sys, time
+sys.stdin.readline()
+print(json.dumps({"node": 1, "host": "once", "roots": 0}), flush=True)
+asked = json.loads(sys.stdin.readline())
+print(json.dumps({"id": asked["id"], "status": 200, "type": "application/json", "body": "[]"}),
+      flush=True)
+time.sleep(60)
+"""
+
 
 def node(registry, store="none"):
     """The command that runs a node server on its standard streams, from this checkout,
@@ -335,6 +345,22 @@ class RemoteTests(RemoteTest):
         self.assertLess(time.monotonic() - started, 10)
         self.assertIsNone(app.remotes["slow"]._process)
         self.assertEqual(app.remotes["slow"].why, "it didn't answer in 0.3 s")
+
+    def test_a_remote_ends_once_a_request_has_waited_its_timeout_and_not_before(self):
+        app = self.app(("once", python(ONCE)), timeout=1.0)
+        once = app.remotes["once"]
+        self.assertEqual(self.get(app, "/n/once/lem/facts/").status, 200)
+        time.sleep(1.2)  # longer than its timeout, since a request that it answered
+        late, = remote.listings([once], wait=0.3)
+        self.assertEqual(late.why, "The remote node once didn't answer in 0.3 s.")
+        process = once._process
+        self.assertIsNone(process.poll())
+        time.sleep(0.8)  # and now, since one that it didn't
+        later, = remote.listings([once], wait=0.3)
+        self.assertEqual(later.why, "The remote node once didn't answer in 1 s; it's started "
+                         "again for the next request.")
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(once.why, "it didn't answer in 1 s")
 
     def test_what_a_remote_answers_passes_on_only_as_the_local_servers_own_pages_would(self):
         base = f"/{TOKEN}/n/fake"
