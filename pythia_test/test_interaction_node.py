@@ -1798,7 +1798,8 @@ class StoreTests(unittest.TestCase):
         self.store.write("session", {"look": "log", "theme": "dark"})
         self.store.write("session", {"look": "native"})  # replaced whole
         self.assertEqual(self.store.read("session"), {"look": "native"})
-        self.assertEqual(os.listdir(self.tmp / "node"), ["session.json"])  # no temporary file
+        # No temporary file; the lock that a change takes.
+        self.assertEqual(sorted(os.listdir(self.tmp / "node")), [".lock", "session.json"])
         for value, why in (([], "the settings aren't an object"),
                            ({f"s{n}": "x" for n in range(33)}, "more than 32 settings"),
                            ({"Look": "log"}, "'Look'"), ({"look": 1}, "'look'"),
@@ -1817,7 +1818,7 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "disk full"):
                 self.store.write("session", {"look": "native"})
         self.assertEqual(self.store.read("session"), {"look": "log"})
-        self.assertEqual(os.listdir(self.tmp / "node"), ["session.json"])
+        self.assertEqual(sorted(os.listdir(self.tmp / "node")), [".lock", "session.json"])
         with mock.patch("os.fsync", side_effect=OSError("disk full")), \
                 contextlib.redirect_stderr(io.StringIO()) as said:
             response = self.post(b'{"look": "native"}')
@@ -1837,6 +1838,24 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(Invalid, re.escape(why)):
                 self.store.write("stars", value)
         self.assertEqual(self.store.read("stars"), {KEY_A: [9]})
+
+    def test_two_stores_of_one_directory_lose_no_change(self):
+        # As two node servers keep one store, a remote node's own, and the one
+        # that another server runs there on its standard streams: each change
+        # reads the file and writes it anew, under the store's lock.
+        other = Store(self.tmp / "node")
+
+        def star(store, lines):
+            for line in lines:
+                store.star(KEY_A, line, True)
+
+        threads = [threading.Thread(target=star, args=(store, range(first, 401, 2)))
+                   for store, first in ((self.store, 1), (other, 2))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        self.assertEqual(self.store.read("stars"), {KEY_A: list(range(1, 401))})
 
     def test_labels_and_tags_kept_by_root_one_at_a_time(self):
         self.assertEqual(self.store.read("roots"), {})

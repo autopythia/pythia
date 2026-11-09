@@ -10,19 +10,23 @@ root's key, so that they follow a save that moves, which a page sets or clears o
 time; and ``roots.json``, each root's label and tags, by its key, which a page sets for
 one root at a time. A write goes to a temporary file, which then takes the old one's
 place, so that a crash leaves the old file or the new; two pages that write at once each
-keep what they wrote last.
+keep what they wrote last. A change reads what it changes and writes it under the store's
+lock, ``.lock`` in its directory, which every process that keeps the store takes, as two
+node servers may, so that neither loses what the other changed; where a file system
+can't lock, a change goes on without it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
 import tempfile
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, Iterator, List, Tuple
 
 # The most bytes that a page may send to the store, and that a file of it holds.
 MAX_BYTES = 16 * 1024
@@ -143,13 +147,13 @@ class Store:
     def write(self, name: str, value: object) -> None:
         """Replaces file ``name``, one of ``FILES``, with ``value``, once it's checked. Raises
         Invalid, or OSError if it can't be written."""
-        with self._lock:
+        with self._locked():
             self._replace(name, FILES[name](value))
 
     def star(self, key: str, line: int, on: bool) -> None:
         """Stars line ``line`` of the log of the root whose key is ``key``, or clears its star:
         the rest of the stars stay as they are. Raises Invalid, or OSError."""
-        with self._lock:
+        with self._locked():
             kept = self.read("stars")
             lines = set(kept.get(key, ()))
             (lines.add if on else lines.discard)(line)
@@ -161,13 +165,27 @@ class Store:
         ``root`` checks them, or neither, if they're empty: the rest stay as they are.
         Raises Invalid, or OSError."""
         label, tags = root(value)
-        with self._lock:
+        with self._locked():
             kept = self.read("roots")
             if label or tags:
                 kept[key] = {"label": label, "tags": tags}
             else:
                 kept.pop(key, None)
             self._replace("roots", roots(kept))
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """The store's lock: this one's, among its threads, then ``.lock``'s, among the
+        processes that keep the store, if its file system can lock it."""
+        with self._lock:
+            self.path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            handle = os.open(self.path / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                with contextlib.suppress(OSError):  # as on a file system that can't
+                    fcntl.flock(handle, fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(handle)  # which lets the lock go
 
     def _replace(self, name: str, value: dict) -> None:
         """Replaces file ``name`` with ``value``, checked, through a temporary file; with the
