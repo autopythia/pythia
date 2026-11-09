@@ -972,7 +972,9 @@ var lem = (function () {
     this.counts = prog.rules.map(function () {
       return null;
     });
-    this.followed = prog.rules.map(followed);
+    this.followed = prog.rules.map(function (rule) {
+      return followed(prog, rule);
+    });
     this.alone = prog.rules.map(alone);
     // Whether the next tick derives every relation anew (forget).
     this.anew = false;
@@ -1081,11 +1083,14 @@ var lem = (function () {
   // (Runtime.follow). A rule's solutions must count the same whatever order
   // its join takes: a solution counts each fact of an atom with `_` that
   // binds a variable that no other atom binds, and once an atom without
-  // `_`, which matches one fact at most; an atom with `_` and no variable
-  // is a test, which counts once, so a change there isn't followed. But an
-  // atom with `_` whose variables other atoms bind counts one fact or each,
-  // by the order of the join: then no change to the rule is followed.
-  function followed(rule) {
+  // `_`, which matches one fact at most, as does one with `_` only outside
+  // its relation's key, whose columns other atoms fix if it binds nothing of
+  // its own; an atom with `_` and no variable is a test, which counts once,
+  // so a change there isn't followed. But any other atom with `_` whose
+  // variables other atoms bind counts one fact or each, by the order of the
+  // join: then no change to the rule is followed. A key that doesn't hold fails the
+  // tick, and the next runs every rule whole (checkKeys).
+  function followed(prog, rule) {
     var atoms = [];
     for (var i = 0; i < rule.body.length && rule.body[i].tag === "atom"; i++) {
       atoms.push(rule.body[i]);
@@ -1097,15 +1102,27 @@ var lem = (function () {
       });
       return out;
     });
-    function own(i) {
-      return vars[i].some(function (v) {
-        return vars.every(function (others, j) {
-          return j === i || others.indexOf(v) < 0;
-        });
+    function elsewhere(i, v) {
+      return vars.some(function (others, j) {
+        return j !== i && others.indexOf(v) >= 0;
       });
     }
+    function own(i) {
+      return vars[i].some(function (v) {
+        return !elsewhere(i, v);
+      });
+    }
+    function keyed(i) {
+      var key = prog.rels[atoms[i].rel].key;
+      return (
+        key.length > 0 &&
+        key.every(function (c) {
+          return !loose(atoms[i].pats[c]);
+        })
+      );
+    }
     var ok = atoms.map(function (atom, i) {
-      return !atom.pats.some(loose) || own(i);
+      return !atom.pats.some(loose) || own(i) || keyed(i);
     });
     var counts = ok.every(function (yes, i) {
       return yes || vars[i].length === 0;
@@ -2415,6 +2432,11 @@ var lem = (function () {
         continue;
       }
       if (this.tables[r].keyCount(rels[r].key).clashes > 0) {
+        // Rules followed what changed as if each key held (followed): the
+        // next tick runs every rule whole.
+        for (var c = 0; c < this.ran.length; c++) {
+          this.ran[c] = null;
+        }
         this.keyError(r, rels[r].key);
       }
       this.held[r] = version;

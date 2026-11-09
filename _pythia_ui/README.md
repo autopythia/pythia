@@ -191,17 +191,20 @@ either. Once its rules have run, a relation that isn't recursive follows what
 changed: each rule keeps how many ways it derives each fact, and joins just
 the facts that came to, or went from, each relation that it reads, where that
 counts exactly, with the others as they were before the tick where they must
-be; a rule that reads such a relation in a negation runs whole. A change
-counts for an atom or a negation only if a fact that came or went could match
-it, and, for a test that binds nothing, such as the `Turn()` that a block's
-condition gives each rule inside it, only if the test's truth changed; and,
-for an atom whose variables appear nowhere else in its rule, which counts each
-solution once for each fact that it matches, only if how many facts it matches
-changed. A relation that has no facts to keep, and most of whose inputs are
-new, starts over: it runs whole, as on its first tick. The facts, effects and
-errors are those of a tick that derives everything anew, which the tests run
-too, and compare (`lem/test/rerun.lem`, `lem/test/follow.lem`); and both
-runtimes' joins visit the same facts.
+be; an atom with `_` counts exactly where it binds a variable of its own, or
+has `_` only outside its relation's key, so that it matches one fact at most,
+and a key that doesn't hold makes the next tick run every rule whole; a rule
+that reads such a relation in a negation runs whole. A change counts for an
+atom or a negation only if a fact that came or went could match it, and, for a
+test that binds nothing, such as the `Turn()` that a block's condition gives
+each rule inside it, only if the test's truth changed; and, for an atom whose
+variables appear nowhere else in its rule, which counts each solution once for
+each fact that it matches, only if how many facts it matches changed. A
+relation that has no facts to keep, and most of whose inputs are new, starts
+over: it runs whole, as on its first tick. The facts, effects and errors are
+those of a tick that derives everything anew, which the tests run too, and
+compare (`lem/test/rerun.lem`, `lem/test/follow.lem`); and both runtimes'
+joins visit the same facts.
 
 For the web, a checked program can be written as data, its compiled form
 (`src/lem/compile.rs`): JSON, which lem's runtime in JavaScript,

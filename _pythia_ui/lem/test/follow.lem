@@ -146,3 +146,13 @@ rel Next(n: Int, k: Int)
 Next(n, k) :- Each(n), Mark(m), k = m + 1
 rel Paired(n: Int)
 Paired(n) :- Each(n), Pair(m, 1 + 1)
+-- KeyedBoth's AK(n, _) has `_`, and another atom binds its variable; but
+-- AK's key is `n`, so it matches one fact at most, whatever the order of the
+-- join, and a change to AK is followed, as one to Both's A(n, _) isn't.
+-- UsesK reads K so: while K's key doesn't hold, a tick fails, and the next
+-- runs every rule whole.
+input AK(n: Int, m: Int) key n
+rel KeyedBoth(n: Int)
+KeyedBoth(n) :- B(n), AK(n, _)
+rel UsesK(k: Int)
+UsesK(k) :- B(k), K(k, _)

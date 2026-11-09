@@ -568,3 +568,54 @@ Paired(3)
 ? Paired
 ---
 (nothing to show)
+
+=== AK(1, 10), AK(2, 20) and B(1): KeyedBoth(1), and KeyedBoth(2) by B(2)
++ AK(1, 10)
++ AK(2, 20)
++ B(1)
+? KeyedBoth
+---
+KeyedBoth(1)
+KeyedBoth(2)
+
+=== AK(1, 11), by its key in place of AK(1, 10): KeyedBoth(1) stays
++ AK(1, 11)
+? KeyedBoth
+---
+KeyedBoth(1)
+KeyedBoth(2)
+
+=== AK(1, 11) goes: KeyedBoth(1) goes
+- AK(1, 11)
+? KeyedBoth
+---
+KeyedBoth(2)
+
+=== B(0) and C(2): UsesK(0), by K(0, 2)
++ B(0)
++ C(2)
+? K
+? UsesK
+---
+K(0, 2)
+UsesK(0)
+
+=== C(3): K's key doesn't hold, and the tick fails
++ C(3)
+---
+error: one key, two facts: K(0, 2) (from the rule at lem/test/follow.lem:49:1) and K(0, 3) (from the rule at lem/test/follow.lem:49:1)
+
+=== C(2) goes: K's key holds again, and every rule runs whole
+- C(2)
+? K
+? UsesK
+---
+K(0, 3)
+UsesK(0)
+
+=== C(3) goes: K goes, and UsesK with it
+- C(3)
+? K
+? UsesK
+---
+(nothing to show)

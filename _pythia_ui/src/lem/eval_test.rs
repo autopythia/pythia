@@ -17,7 +17,9 @@
 //!   again, and what it keeps, through negations, a lazy relation, keys that
 //!   don't hold, and a rule that fails;
 //! - `lem/test/follow_ticks.txt` runs `lem/test/follow.lem`: how a tick
-//!   follows what came and went, and where a rule runs whole.
+//!   follows what came and went, and where a rule runs whole;
+//! - `lem/test/keys_ticks.txt` runs `lem/test/keys.lem`: a rule that reads
+//!   a relation through its key, and a key that doesn't hold.
 //!
 //! Each tick file also runs on a runtime that forgets, before each tick,
 //! what its rules read, so that every rule runs: the facts must be the same.
@@ -81,6 +83,15 @@ fn ticks_of_what_runs_again() {
     .unwrap_or_else(|e| panic!("{}\n(raised at {})", e.text, e.loc));
   let mut runtime = Runtime::new(prog);
   tick_cases("test/rerun_ticks.txt", |lines| runtime.script(lines));
+}
+
+#[test]
+fn ticks_through_keys() {
+  let src = read("test/keys.lem");
+  let prog = load(&[("lem/test/keys.lem", &src)])
+    .unwrap_or_else(|e| panic!("{}\n(raised at {})", e.text, e.loc));
+  let mut runtime = Runtime::new(prog);
+  tick_cases("test/keys_ticks.txt", |lines| runtime.script(lines));
 }
 
 #[test]
@@ -341,6 +352,32 @@ fn an_atom_alone_changes_nothing_while_it_matches_as_many_facts() {
 }
 
 #[test]
+fn an_atom_whose_key_is_fixed_is_followed() {
+  // K(n) reads A(n, _), whose `n` B binds. Keyed on `n`, A matches one fact
+  // at most for each `n`, whatever the order of the join, so a change to A
+  // is followed: the fact that went, and the one that came in its place,
+  // each meet B's fact. Without the key, every change to A runs K's rule
+  // whole.
+  for (key, visits) in [(" key n", 4), ("", 2000)] {
+    let src = format!(
+      "input A(n: Int, m: Int){key}\ninput B(n: Int)\nrel K(n: Int)\nK(n) :- B(n), A(n, _)\n"
+    );
+    let prog = load(&[("keyed.lem", &src)]).unwrap_or_else(|e| panic!("{}", e.text));
+    let mut runtime = Runtime::new(prog);
+    for i in 0..1000 {
+      runtime.assert(&format!("A({i}, 0)")).unwrap();
+      runtime.assert(&format!("B({i})")).unwrap();
+    }
+    runtime.tick(None).unwrap();
+    assert!(runtime.retract("A(5, 0)").unwrap());
+    runtime.assert("A(5, 1)").unwrap();
+    runtime.tick(None).unwrap();
+    assert_eq!(runtime.visits(), visits, "{key:?}");
+    assert_eq!(runtime.facts("K").len(), 1000);
+  }
+}
+
+#[test]
 fn a_key_that_doesnt_hold_fails_each_tick_until_it_does() {
   // Keys are checked only where a relation has changed since they last
   // held: a relation whose keys didn't hold is checked again, though
@@ -362,7 +399,15 @@ fn a_key_that_doesnt_hold_fails_each_tick_until_it_does() {
 
 #[test]
 fn ticks_remembering_what_rules_read_are_ticks_that_forget_it() {
-  for name in ["jobs", "numbers", "recursion", "joins", "rerun", "follow"] {
+  for name in [
+    "jobs",
+    "numbers",
+    "recursion",
+    "joins",
+    "rerun",
+    "follow",
+    "keys",
+  ] {
     let src = read(&format!("test/{name}.lem"));
     let file = format!("lem/test/{name}.lem");
     let runtime = || {

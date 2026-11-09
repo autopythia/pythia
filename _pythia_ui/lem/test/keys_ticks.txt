@@ -1,0 +1,40 @@
+# keys.lem, a tick per case, each on the facts that the cases before it left,
+# as jobs_ticks.txt says.
+
+=== B(0), C(2), C(3), and two of P's facts for 0, in the first tick: K's key doesn't hold
++ B(0)
++ C(2)
++ C(3)
++ P(0, 1, 0)
++ P(0, 2, 0)
+---
+error: one key, two facts: K(0, 2) (from the rule at lem/test/keys.lem:9:1) and K(0, 3) (from the rule at lem/test/keys.lem:9:1)
+
+=== C(2) goes: K's key holds, and UsesK(0), by K(0, 3); and Q(0), its rule run whole
+- C(2)
+? K
+? UsesK
+? Q
+---
+K(0, 3)
+UsesK(0)
+Q(0)
+
+=== C(3) goes: UsesK goes
+- C(3)
+? K
+? UsesK
+---
+(nothing to show)
+
+=== C(4): UsesK(0) comes again
++ C(4)
+? UsesK
+---
+UsesK(0)
+
+=== P(0, 1, 0) goes: Q(0) stays, by P(0, 2, 0)
+- P(0, 1, 0)
+? Q
+---
+Q(0)

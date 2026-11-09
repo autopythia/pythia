@@ -1,0 +1,17 @@
+-- keys.lem: a rule that reads a relation through its key
+-- (src/lem/eval.rs). UsesK's K(k, _) has `_`, and B binds its `k`; K's key
+-- is `k`, so it matches one fact at most, and a change to K is followed.
+-- While K's key doesn't hold, K(k, _) matches more, and a tick fails; the
+-- next runs every rule whole, so that what UsesK counted then doesn't stay.
+input B(n: Int)
+input C(n: Int)
+rel K(k: Int, n: Int) key k
+K(0, n) :- C(n)
+rel UsesK(k: Int)
+UsesK(k) :- B(k), K(k, _)
+-- Q's P(n, _, _) has `_` in a column of P's key, so it may match more than
+-- one fact: a change to P runs Q's rule whole. After the tick that fails,
+-- the next runs it whole, as two of P's facts match.
+input P(a: Int, b: Int, c: Int) key a, b
+rel Q(n: Int)
+Q(n) :- B(n), P(n, _, _)

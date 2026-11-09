@@ -637,7 +637,11 @@ impl Runtime {
     let ran = vec![None; prog.components.len()];
     let held = vec![None; prog.rels.len()];
     let counts = vec![HashMap::new(); prog.rules.len()];
-    let followed = prog.rules.iter().map(followed).collect();
+    let followed = prog
+      .rules
+      .iter()
+      .map(|rule| followed(&prog, rule))
+      .collect();
     let alone = prog.rules.iter().map(alone).collect();
     Runtime {
       prog,
@@ -1370,6 +1374,9 @@ impl Runtime {
         continue;
       }
       if self.tables[rel].key_count(&r.key).clashes > 0 {
+        // Rules followed what changed as if each key held ([`followed`]):
+        // the next tick runs every rule whole.
+        self.ran.fill(None);
         let miscounted = || {
           let name = &self.prog.rels[rel].name;
           format!("the facts of {name} by their key were miscounted (a bug in lem's runtime)")
@@ -1545,11 +1552,14 @@ fn could_match(pats: &[Pat], tuple: &Tuple) -> bool {
 /// ([`Runtime::follow`]). A rule's solutions must count the same whatever
 /// order its join takes: a solution counts each fact of an atom with `_`
 /// that binds a variable that no other atom binds, and once an atom without
-/// `_`, which matches one fact at most; an atom with `_` and no variable is
-/// a test, which counts once, so a change there isn't followed. But an atom
-/// with `_` whose variables other atoms bind counts one fact or each, by the
-/// order of the join: then no change to the rule is followed.
-fn followed(rule: &Rule) -> Vec<bool> {
+/// `_`, which matches one fact at most, as does one with `_` only outside
+/// its relation's key, whose columns other atoms fix if it binds nothing of
+/// its own; an atom with `_` and no variable is a test, which counts once, so
+/// a change there isn't followed. But any other atom with `_` whose variables
+/// other atoms bind counts one fact or each, by the order of the join: then
+/// no change to the rule is followed. A key that doesn't hold fails the tick,
+/// and the next runs every rule whole ([`Runtime::check_keys`]).
+fn followed(prog: &Program, rule: &Rule) -> Vec<bool> {
   let atoms: Vec<&Atom> = (rule.body.iter())
     .map_while(|lit| match lit {
       Lit::Atom(atom) => Some(atom),
@@ -1563,12 +1573,15 @@ fn followed(rule: &Rule) -> Vec<bool> {
       out
     })
     .collect();
-  let own = |i: usize| {
-    let alone = |v: &usize| (vars.iter().enumerate()).all(|(j, vs)| j == i || !vs.contains(v));
-    vars[i].iter().any(alone)
+  let elsewhere =
+    |i: usize, v: usize| (vars.iter().enumerate()).any(|(j, vs)| j != i && vs.contains(&v));
+  let own = |i: usize| vars[i].iter().any(|&v| !elsewhere(i, v));
+  let keyed = |i: usize| {
+    let key = &prog.rels[atoms[i].rel].key;
+    !key.is_empty() && key.iter().all(|&c| !loose(&atoms[i].pats[c]))
   };
   let ok: Vec<bool> = (atoms.iter().enumerate())
-    .map(|(i, atom)| !atom.pats.iter().any(loose) || own(i))
+    .map(|(i, atom)| !atom.pats.iter().any(loose) || own(i) || keyed(i))
     .collect();
   let counts = (ok.iter().zip(&vars)).all(|(&yes, vs)| yes || vs.is_empty());
   ok.into_iter().map(|yes| counts && yes).collect()
