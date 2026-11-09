@@ -2,13 +2,14 @@
 -- (pythia/interaction/node/view.py), in a HUD at the top left: the index
 -- first, then each context that's open, in the order opened, as the host
 -- says (Open, the index as 0), and the tab that shows (Shown). Picking a
--- tab asks the host to show it (Show), and closing one, to close it
--- (Close); the index can't be closed. In a browser, web/contexts.js is the
--- host's part.
+-- tab asks the host to show it (Show), closing one, to close it (Close),
+-- and dragging one onto another, to move it there (Move); the index can't
+-- be closed, or moved. In a browser, web/contexts.js is the host's part.
 input Open(n: Int, title: Text, rank: Int) key n
 input Shown(n: Int) one
 effect Show(n: Int)
 effect Close(n: Int)
+effect Move(n: Int, to: Int)
 
 -- Whether each tab shows, and whether it closes.
 rel Showing(n: Int, on: Bool) key n
@@ -23,10 +24,13 @@ id Strip, Strips, TabOf(Int)
 Hud(Strip, place=TopLeft) :- Open():
   Tabs(Strips):
     for Open(n, title, rank):
-      TabItem(TabOf(n), text=title, active=a, closes=c, order=rank) :- Showing(n, a), Closes(n, c)
+      TabItem(TabOf(n), text=title, active=a, closes=c, moves=c, order=rank) :- Showing(n, a), Closes(n, c)
 
 on Chosen(TabOf(n)):
   Show(n)
 
 on Dismissed(TabOf(n)):
   Close(n)
+
+on Moved(TabOf(n), TabOf(m)):
+  Move(n, m)

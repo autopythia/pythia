@@ -195,7 +195,8 @@
   // id as lem writes it: "click", on its element; "check", its checkbox;
   // "type", text into its field; "compose", text with an input method, and
   // "composed", the composition's end; "open" and "close", its entry;
-  // "star", its entry's star; "dismiss", its tab's close button;
+  // "star", its entry's star; "dismiss", its tab's close button; "drag",
+  // its element onto another widget's, by its id;
   // "focus", on its control, if it has one, or its element; and, as for
   // glem's tests, "blur", and "key" with its name and modifiers. A disabled
   // control takes no click, change or text. In a browser, a click and a
@@ -240,6 +241,13 @@
         } else {
           it.doc.fire(button, "click");
         }
+        return;
+      case "drag":
+        var onto = byId.get(step[2]);
+        it.doc.fire(e, "dragstart");
+        it.doc.fire(onto, "dragover");
+        it.doc.fire(onto, "drop");
+        it.doc.fire(e, "dragend");
         return;
       case "dismiss":
         var closer = withClass(e, "g-tab-close");

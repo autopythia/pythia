@@ -687,6 +687,30 @@
       ]
     ],
     [
+      "a tab dragged onto another moves there, and the session keeps their order; the index stays first",
+      function () {
+        var it = tabbed({ kept: { tabs: [7, 3, 5], tab: 7 } });
+        it.tabs.strip.send(["Moved", ["TabOf", 5], ["TabOf", 7]]);
+        var left = strip(it, "Open").concat(it.kept.slice(-1));
+        it.tabs.strip.send(["Moved", ["TabOf", 5], ["TabOf", 3]]);
+        it.tabs.move(3, 0);
+        it.tabs.move(0, 3);
+        return left.concat(strip(it, "Open"), it.kept.slice(-1));
+      },
+      [
+        'Open(0, "Root contexts", 0)',
+        'Open(3, "3", 3)',
+        'Open(5, "5", 1)',
+        'Open(7, "7", 2)',
+        "5-7-3 shows 7",
+        'Open(0, "Root contexts", 0)',
+        'Open(3, "3", 2)',
+        'Open(5, "5", 3)',
+        'Open(7, "7", 1)',
+        "7-3-5 shows 7"
+      ]
+    ],
+    [
       "only the tab shown asks what changed; a log's page opens its tab, which starts at its end",
       function () {
         var it = tabbed({ open: 7 });

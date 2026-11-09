@@ -68,6 +68,10 @@ var contexts = (function () {
   // shown, 0 for the index.
   var TABS = /^([1-9][0-9]{0,8}(-[1-9][0-9]{0,8})*)?$/;
   var TAB = /^(0|[1-9][0-9]{0,8})$/;
+  // The panel's width, in pixels, as its edge was dragged, or "" for as
+  // contexts.css says; and the least it may be.
+  var WIDTH = /^([1-9][0-9]{1,3})?$/;
+  var NARROWEST = 180;
 
   // Shows a page of a compiled program, contexts.lem's, in a view in
   // `o.root`, and is its host:
@@ -387,7 +391,8 @@ var contexts = (function () {
   //   a log's end, where it starts; o.keep(root, update), as start()'s
   //   keep, for the tab shown.
   //
-  // Gives {open(n, show), show(n), close(n), shown(), each(f), tick()}:
+  // Gives {open(n, show), show(n), close(n), move(n, m), shown(), each(f),
+  // tick()}:
   // tick() asks the tab shown what changed, as only it asks.
   function tabs(o) {
     var doc = o.holder.ownerDocument;
@@ -403,6 +408,8 @@ var contexts = (function () {
             show(effect.fields.n);
           } else if (effect.name === "Close") {
             close(effect.fields.n);
+          } else if (effect.name === "Move") {
+            move(effect.fields.n, effect.fields.to);
           }
         });
       },
@@ -576,6 +583,30 @@ var contexts = (function () {
       keep();
     }
 
+    // Moves tab `n` to where tab `m` is: after it, if it was before it, or
+    // before it, if it was after; the index stays first. The tabs' ranks
+    // follow their order.
+    function move(n, m) {
+      var from = order.indexOf(n);
+      var to = order.indexOf(m);
+      if (n === 0 || m === 0 || from < 0 || to < 0 || from === to) {
+        return;
+      }
+      order.splice(from, 1);
+      order.splice(to, 0, n);
+      var steps = [];
+      order.forEach(function (k, at) {
+        var tab = all.get(k);
+        if (tab.rank !== at) {
+          steps.push(["-", "Open", fact(tab)]);
+          tab.rank = at;
+          steps.push(["+", "Open", fact(tab)]);
+        }
+      });
+      strip.update(steps);
+      keep();
+    }
+
     function keep() {
       if (ready) {
         o.keep_tabs(order.filter(function (n) {
@@ -629,6 +660,7 @@ var contexts = (function () {
       open: open,
       show: show,
       close: close,
+      move: move,
       shown: function () {
         return current;
       },
@@ -771,6 +803,59 @@ var contexts = (function () {
     return known() ? value : choices[0][0];
   }
 
+  // The edge of a log's panel, which a drag with the pointer moves, to make
+  // the panel wider or narrower, and a double click puts back, as the page
+  // keeps it: in --contexts-panel, which contexts.css reads, from `width`,
+  // pixels or "", and `keep(width)` as the drag ends.
+  function edged(html, width, keep) {
+    var edge = document.createElement("div");
+    edge.setAttribute("class", "contexts-edge");
+    edge.setAttribute("aria-hidden", "true");
+    document.body.appendChild(edge);
+    var set = function (px) {
+      if (px === "") {
+        html.style.removeProperty("--contexts-panel");
+      } else {
+        html.style.setProperty("--contexts-panel", px + "px");
+      }
+    };
+    set(width);
+    edge.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      var panel = document.querySelector(".g-hud.g-top-right");
+      var right = panel ? parseFloat(window.getComputedStyle(panel).right) || 0 : 0;
+      var widest = Math.max(NARROWEST, Math.round(window.innerWidth * 0.7));
+      var px = width;
+      var move = function (e) {
+        px = String(Math.max(NARROWEST, Math.min(widest, Math.round(window.innerWidth - right - e.clientX))));
+        set(px);
+      };
+      var up = function () {
+        edge.removeEventListener("pointermove", move);
+        edge.removeEventListener("pointerup", up);
+        edge.removeEventListener("pointercancel", up);
+        edge.classList.remove("contexts-dragging");
+        if (px !== width) {
+          width = px;
+          keep(px);
+        }
+      };
+      edge.setPointerCapture(event.pointerId);
+      edge.classList.add("contexts-dragging");
+      edge.addEventListener("pointermove", move);
+      edge.addEventListener("pointerup", up);
+      edge.addEventListener("pointercancel", up);
+    });
+    edge.addEventListener("dblclick", function () {
+      width = "";
+      set("");
+      keep("");
+    });
+  }
+
   // A word that the server's store keeps (`kept`), if it's one that
   // `pattern` takes; else as the browser remembers it, if it lets the page;
   // else "".
@@ -879,6 +964,7 @@ var contexts = (function () {
       runs: remembered("runs", RUNS, kept.runs),
       panel: remembered("panel", PANEL, kept.panel),
       text: remembered("text", TEXT, kept.text),
+      width: rememberedWord("width", WIDTH, kept.width),
       tabs: rememberedWord("tabs", TABS, kept.tabs),
       tab: rememberedWord("tab", TAB, kept.tab)
     };
@@ -961,6 +1047,11 @@ var contexts = (function () {
       });
     }
     bar.appendChild(line);
+    if (log) {
+      edged(html, chosen.width, function (px) {
+        save("width", px);
+      });
+    }
     look(chosen.look);
     theme(chosen.theme);
     aside(chosen.panel);

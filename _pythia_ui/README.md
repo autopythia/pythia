@@ -284,17 +284,18 @@ cargo --offline run --target x86_64-unknown-linux-gnu -- lem lem/host.lem lem/ap
 On the web, `src/glui/glui.js` draws them, with a recipe for each kind for
 glem.js's view. It makes each widget a native element (`button`, `a`,
 `details`, `table`, `pre`, `progress`) with classes: `g-` and its kind's name,
-and its flags. Its widgets send `Edited` and `Toggled`, a tab `Chosen`, and
-its close button `Dismissed`, it shows `Disabled` and `Tooltip`, a link goes
-only to one of the host's own paths, a dot says its text as an image's label
-and in its tooltip, and prose shows Markdown as elements, never as HTML, its
-links to the host's own paths, or to http, https or mailto in a new tab,
-without a referrer, in colors of its own that show on light stages and dark
-ones. It sets a theme's values on the page as CSS variables, `--glui-` and a
-value's name, and a look's stylesheet draws with them, over `web/glui.css`:
-`web/native.css`, the design doc's native look, or `web/log.css`, after wui's
-log. `make js-test` runs its cases in a stand-in DOM (`lem/test/*_dom.txt`),
-with a form of its controls, `lem/test/form.lem`.
+and its flags. Its widgets send `Edited` and `Toggled`, a tab `Chosen`, its
+close button `Dismissed`, and one dragged onto another `Moved`, it shows
+`Disabled` and `Tooltip`, a link goes only to one of the host's own paths, a
+dot says its text as an image's label and in its tooltip, and prose shows
+Markdown as elements, never as HTML, its links to the host's own paths, or to
+http, https or mailto in a new tab, without a referrer, in colors of its own
+that show on light stages and dark ones. It sets a theme's values on the page
+as CSS variables, `--glui-` and a value's name, and a look's stylesheet draws
+with them, over `web/glui.css`: `web/native.css`, the design doc's native
+look, or `web/log.css`, after wui's log. `make js-test` runs its cases in a
+stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
+`lem/test/form.lem`.
 
 In a browser, `make web-serve` serves the web look's two pages.
 `web/demo.html` shows the approval HUD, a page of a log, or the form, in
@@ -357,10 +358,11 @@ In a browser, `web/contexts.js` is the host's part. The node server's pages
 show tabs: the index's, and one for each context that's open, each a runtime
 and a view of its own, of which only the tab shown shows, and asks what
 changed; a click on a link to a context, without a modifier key, opens its
-tab, and the address follows the tab shown, which the server's store keeps,
-with the tabs open. `lem/tabs.lem` is their strip, in a HUD at the top: the
-host says which are open (`Open(n, title, rank)`, the index as 0) and which
-shows (`Shown(n)`), and hears a pick (`Show(n)`) and a close (`Close(n)`); the
+tab, a tab dragged onto another moves there, and the address follows the tab
+shown, which the server's store keeps, with the tabs open. `lem/tabs.lem` is
+their strip, in a HUD at the top: the host says which are open
+(`Open(n, title, rank)`, the index as 0) and which shows (`Shown(n)`), and
+hears a pick (`Show(n)`), a close (`Close(n)`) and a move (`Move(n, to)`); the
 index can't be closed. A page names its facts on its `html` element,
 `data-facts`, and, for a log, where the rows before a line and after one are,
 `data-before`, `data-after` and `data-around`, where a run's items are,
@@ -375,12 +377,12 @@ first row on the screen in place as rows come, above it or below. Every few
 seconds while it shows, a page asks what changed: a log, what it gained; the
 index, its facts anew, whose difference from the last it applies. Its bar
 picks the look and the theme, and, for a log, whether its runs are folded or
-open, whether its panel shows, and whether an assistant's messages show as
-Markdown or as written, which the node server keeps for the view, at
-`data-store`, and the browser too. `make web` writes a sample, an index and a
-log of 13,394 items, the most that one of pythia's contexts had when it was
-first written, in turns of 50, for two pages that show it as the node server's
-do:
+open, whether its panel shows, and how wide, as a drag on its edge makes it,
+and whether an assistant's messages show as Markdown or as written, which the
+node server keeps for the view, at `data-store`, and the browser too.
+`make web` writes a sample, an index and a log of 13,394 items, the most that
+one of pythia's contexts had when it was first written, in turns of 50, for
+two pages that show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

@@ -344,7 +344,11 @@ fn the_stylesheets_read_only_what_glui_js_gives() {
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .unwrap_or(rest.len());
       let var = &rest[..end];
-      let known = var.starts_with("--g-") || given.iter().any(|name| name == var);
+      // contexts.js sets its own, each where its pages need it.
+      let set_by_contexts = var.starts_with("--contexts-")
+        && include_str!("../../web/contexts.js").contains(&format!("\"{var}\""));
+      let known =
+        var.starts_with("--g-") || set_by_contexts || given.iter().any(|name| name == var);
       if !known && !unknown.contains(&var) {
         unknown.push(var);
       }
@@ -355,7 +359,9 @@ fn the_stylesheets_read_only_what_glui_js_gives() {
     } else if open != css.matches('}').count() {
       Some("its braces don't pair".to_string())
     } else if !unknown.is_empty() {
-      Some(format!("it reads {unknown:?}, which glui.js doesn't set"))
+      Some(format!(
+        "it reads {unknown:?}, which neither glui.js nor contexts.js sets"
+      ))
     } else {
       None
     };

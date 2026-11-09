@@ -58,6 +58,8 @@ font:var(--glui-code-size)/var(--glui-code-line) ui-monospace,SFMono-Regular,Men
 cursor:pointer}
 .g-tab-close{opacity:.6}
 .g-tab-close:hover,.g-tab-close:focus-visible{opacity:1}
+.g-tab-label{cursor:pointer}
+.g-tab[data-drop]{outline:1px dashed var(--glui-accent);outline-offset:-1px}
 
 /* A dot, a light of its hue, round wherever it is, and a table's cell, as
    its row's others, where it is one, in colors that show on light stages

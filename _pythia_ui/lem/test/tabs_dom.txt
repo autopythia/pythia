@@ -3,18 +3,22 @@
 # the steps and what they show, as approval_dom.txt says. The host here is
 # the test: it hears Show and Close.
 
-=== the index and a context, which shows: a tab list, each tab its label, and the context's a close button
+=== the index and two contexts, one shown: a tab list, each tab its label, and a context's a close button, and dragged
 ["+", "Open", {"n": 0, "title": "Root contexts", "rank": 0}]
 ["+", "Open", {"n": 10, "title": "ui-0 (10)", "rank": 1}]
+["+", "Open", {"n": 3, "title": "wui-1 (3)", "rank": 2}]
 ["+", "Shown", {"n": 10}]
 ---
 aside.g-hud.g-top-left
   div.g-tabs role="tablist"
     span.g-tab
-      button.g-tab-label type="button" role="tab" aria-selected="false" "Root contexts"
-    span.g-tab.g-active
-      button.g-tab-label type="button" role="tab" aria-selected="true" "ui-0 (10)"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "Root contexts"
+    span.g-tab.g-active draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="true" "ui-0 (10)"
       button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+    span.g-tab draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "wui-1 (3)"
+      button.g-tab-close type="button" aria-label="close wui-1 (3)" "×"
 
 === a click on the index's tab: the host hears Show
 ["click", "TabOf(0)"]
@@ -22,10 +26,13 @@ aside.g-hud.g-top-left
 aside.g-hud.g-top-left
   div.g-tabs role="tablist"
     span.g-tab
-      button.g-tab-label type="button" role="tab" aria-selected="false" "Root contexts"
-    span.g-tab.g-active
-      button.g-tab-label type="button" role="tab" aria-selected="true" "ui-0 (10)"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "Root contexts"
+    span.g-tab.g-active draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="true" "ui-0 (10)"
       button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+    span.g-tab draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "wui-1 (3)"
+      button.g-tab-close type="button" aria-label="close wui-1 (3)" "×"
 effect Show {"n":0}
 
 === the context's close button: the host hears Close, and no Show
@@ -34,8 +41,41 @@ effect Show {"n":0}
 aside.g-hud.g-top-left
   div.g-tabs role="tablist"
     span.g-tab
-      button.g-tab-label type="button" role="tab" aria-selected="false" "Root contexts"
-    span.g-tab.g-active
-      button.g-tab-label type="button" role="tab" aria-selected="true" "ui-0 (10)"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "Root contexts"
+    span.g-tab.g-active draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="true" "ui-0 (10)"
       button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+    span.g-tab draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "wui-1 (3)"
+      button.g-tab-close type="button" aria-label="close wui-1 (3)" "×"
 effect Close {"n":10}
+
+=== a context's tab dragged onto another: the host hears Move
+["drag", "TabOf(3)", "TabOf(10)"]
+---
+aside.g-hud.g-top-left
+  div.g-tabs role="tablist"
+    span.g-tab
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "Root contexts"
+    span.g-tab.g-active draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="true" "ui-0 (10)"
+      button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+    span.g-tab draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "wui-1 (3)"
+      button.g-tab-close type="button" aria-label="close wui-1 (3)" "×"
+effect Move {"n":3,"to":10}
+
+=== the index's can't be dragged, nor dropped on
+["drag", "TabOf(0)", "TabOf(10)"]
+["drag", "TabOf(3)", "TabOf(0)"]
+---
+aside.g-hud.g-top-left
+  div.g-tabs role="tablist"
+    span.g-tab
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "Root contexts"
+    span.g-tab.g-active draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="true" "ui-0 (10)"
+      button.g-tab-close type="button" aria-label="close ui-0 (10)" "×"
+    span.g-tab draggable="true"
+      span.g-tab-label role="tab" tabindex="0" aria-selected="false" "wui-1 (3)"
+      button.g-tab-close type="button" aria-label="close wui-1 (3)" "×"

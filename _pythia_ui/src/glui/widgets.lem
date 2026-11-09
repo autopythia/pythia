@@ -64,14 +64,15 @@ widget Code(text: Text, diff: Bool = False)
 widget Prose(text: Text)
 
 -- Tabs: a strip of tabs, its items, each its text; the active one is the
--- tab of what shows. Picking a tab sends `Chosen`; and one that `closes`
--- has a button that sends `Dismissed`.
+-- tab of what shows. Picking a tab sends `Chosen`; one that `closes` has a
+-- button that sends `Dismissed`; and one that `moves` can be dragged onto
+-- another of its strip, which sends `Moved`, to put it where that one is.
 widget Tabs
-widget TabItem(text: Text, active: Bool = False, closes: Bool = False)
+widget TabItem(text: Text, active: Bool = False, closes: Bool = False, moves: Bool = False)
 
 -- What widgets that hold a value send; and tabs.
 msg Edited(id: Id, text: Text), Toggled(id: Id, value: Bool), Starred(id: Id, value: Bool)
-msg Chosen(id: Id), Dismissed(id: Id)
+msg Chosen(id: Id), Dismissed(id: Id), Moved(id: Id, to: Id)
 
 -- A widget may be disabled for several reasons, which a front end shows,
 -- as in its tooltip; its children are disabled with it.

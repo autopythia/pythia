@@ -627,16 +627,23 @@ var glui = (function () {
     });
   }
 
-  // A tab of a strip: its text, on a button, which is the tab, selected or
-  // not, to a screen reader; and, if it closes, a button that sends
-  // Dismissed. A click on the tab, but on that button, sends Chosen.
-  // g-active marks the active one.
+  // The tab that a drag carries, {view, id}, while it lasts, or null.
+  var dragging = null;
+
+  // A tab of a strip: its text, which is the tab, selected or not, to a
+  // screen reader, and takes the keyboard's focus; and, if it closes, a
+  // button that sends Dismissed. A click on the tab, but on that button, or
+  // Return or space on its text, sends Chosen. One that moves is dragged,
+  // by the browser's drag and drop, which a button within would stop; and
+  // dropped on another that moves, of its strip, it sends Moved, and
+  // data-drop marks that one while it's over it. g-active marks the active
+  // one.
   function tabItem(w, view) {
     var e = element(view, "span");
-    var label = element(view, "button", "g-tab-label");
+    var label = element(view, "span", "g-tab-label");
     var close = element(view, "button", "g-tab-close");
-    label.setAttribute("type", "button");
     label.setAttribute("role", "tab");
+    label.setAttribute("tabindex", "0");
     close.setAttribute("type", "button");
     takesReturn(label);
     takesReturn(close);
@@ -645,14 +652,56 @@ var glui = (function () {
     e.addEventListener("click", function () {
       view.send(["Chosen", w.id]);
     });
+    label.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        view.send(["Chosen", w.id]);
+      }
+    });
     close.addEventListener("click", function (event) {
       event.stopPropagation();
       view.send(["Dismissed", w.id]);
     });
-    return made(w, e, null, label, function () {
+    var onto = function () {
+      return dragging !== null && dragging.view === view && w.fields.moves && lem.key(dragging.id) !== lem.key(w.id);
+    };
+    e.addEventListener("dragstart", function (event) {
+      if (!w.fields.moves) {
+        event.preventDefault();
+        return;
+      }
+      dragging = { view: view, id: w.id };
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", w.fields.text);
+      }
+    });
+    e.addEventListener("dragover", function (event) {
+      if (onto()) {
+        event.preventDefault();
+        attr(e, "data-drop", "");
+      }
+    });
+    e.addEventListener("dragleave", function () {
+      attr(e, "data-drop", null);
+    });
+    e.addEventListener("drop", function (event) {
+      attr(e, "data-drop", null);
+      if (onto()) {
+        event.preventDefault();
+        var from = dragging.id;
+        dragging = null;
+        view.send(["Moved", from, w.id]);
+      }
+    });
+    e.addEventListener("dragend", function () {
+      dragging = null;
+    });
+    return made(w, e, null, null, function () {
       text(label, w.fields.text);
       attr(label, "aria-selected", w.fields.active ? "true" : "false");
       attr(close, "aria-label", "close " + w.fields.text);
+      attr(e, "draggable", w.fields.moves ? "true" : null);
       if (w.fields.closes && close.parentNode !== e) {
         e.appendChild(close);
       } else if (!w.fields.closes && close.parentNode === e) {
