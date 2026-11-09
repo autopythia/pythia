@@ -14,6 +14,12 @@ enum Chord:
   Escape, Return, Tab
 rel Key(chord: Chord, msg: Msg)
 
+-- Widgets that send a message when they come near the screen, within a
+-- screen's height of it, while the rules say so: as a page that loads more
+-- of a log when its end comes near. A widget sends its messages again when
+-- they change while it's near.
+rel Near(id: Id, msg: Msg)
+
 -- Where the pointer and the keyboard are, new each tick.
 input Hovered(id: Id)
 input Pressed(id: Id)

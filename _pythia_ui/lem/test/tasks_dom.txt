@@ -11,6 +11,8 @@
 # - `["key", name]`, `["key", name, modifiers]`: a key, as the DOM names it,
 #   pressed where the focus is, or on the view's root, with modifiers as
 #   {"shiftKey": true};
+# - `["near", widget]`, `["far", widget]`: a widget's element comes near the
+#   screen, or goes from it;
 #
 # then `---`; then the page, as glem's outline writes the widgets, the
 # Focused fact, if any, and what the host heard: each effect, by its name
@@ -120,4 +122,32 @@ Focused(Row("a"))
 Screen(Top, title="Tasks")
   Group(List, title="Open")
     Item(Row("b"), text="second", on=Open("b"))
+  Line(Footer, text="pinned")
+
+=== a watched row, near the screen, sends its message
+["+", "Watched", {"todo": "b"}]
+["near", "Row(\"b\")"]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="second", on=Open("b"))
+  Line(Footer, text="pinned")
+effect Asked {"todo":"b","title":"second"}
+
+=== a new title, while it's near, sends it again
+["+", "Todo", {"id": "b", "title": "renamed", "at": 5}]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="renamed", on=Open("b"))
+  Line(Footer, text="pinned")
+effect Asked {"todo":"b","title":"renamed"}
+
+=== away from the screen, a new title sends nothing
+["far", "Row(\"b\")"]
+["+", "Todo", {"id": "b", "title": "again", "at": 5}]
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Row("b"), text="again", on=Open("b"))
   Line(Footer, text="pinned")

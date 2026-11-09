@@ -66,3 +66,13 @@ Line(Inside, parent=Folder, text="inside") :- Opened(_)
 input Clash(n: Int)
 rel Clashed(k: Int, n: Int) key k
 Clashed(0, n) :- Clash(n)
+
+-- A row that's watched sends its message when it comes near the screen
+-- (Near): with its title, so that a new title sends it again while it's
+-- near.
+input Watched(todo: Text)
+msg More(todo: Text, title: Text)
+effect Asked(todo: Text, title: Text)
+Near(Row(t), msg=More(t, title)) :- Todo(t, title, _), Watched(t)
+on More(t, title):
+  Asked(t, title)

@@ -233,11 +233,12 @@ the widgets that lem's logs say each tick added and removed. Its view keeps
 the widgets in the DOM, and shows only what changed: each widget's element
 comes from a recipe for its kind, from the layer above, and stays from tick to
 tick while the widget does, so that it keeps its focus and caret. Recipes send
-messages from their events; the view fills in `Focused`, and sends what `Key`
-facts give for Escape, Return and Tab. `make js-test` runs glem's ticks on
-`glem.js`, as Rust runs them, checks the tree that it keeps against one built
-anew, and runs the view in a stand-in DOM (`tools/stand_in_dom.js`), with the
-clicks, focus and keys of `lem/test/tasks_dom.txt`.
+messages from their events; the view fills in `Focused`, sends what `Key`
+facts give for Escape, Return and Tab, and sends what `Near` facts give for a
+widget whose element comes near the screen. `make js-test` runs glem's ticks
+on `glem.js`, as Rust runs them, checks the tree that it keeps against one
+built anew, and runs the view in a stand-in DOM (`tools/stand_in_dom.js`),
+with the clicks, focus and keys of `lem/test/tasks_dom.txt`.
 
 ### glui
 

@@ -10,7 +10,55 @@ var standInDom = (function () {
     this.activeElement = null;
     this.made = 0;
     this.title = "";
+    // The elements near the screen (near), and the observers that watch
+    // for them, as a browser's IntersectionObserver does, from the window.
+    this.nearby = new Set();
+    this.observers = [];
+    var doc = this;
+    this.defaultView = {
+      IntersectionObserver: function (callback) {
+        return new Observer(doc, callback);
+      }
+    };
   }
+
+  // A stand-in IntersectionObserver: it tells its callback whether each
+  // element that it starts to watch is near the screen, at once, where a
+  // browser's tells it soon after; and then each time that changes.
+  function Observer(doc, callback) {
+    this.doc = doc;
+    this.callback = callback;
+    this.watched = new Set();
+    doc.observers.push(this);
+  }
+
+  Observer.prototype.observe = function (element) {
+    this.watched.add(element);
+    this.callback([{ target: element, isIntersecting: this.doc.nearby.has(element) }], this);
+  };
+
+  Observer.prototype.unobserve = function (element) {
+    this.watched.delete(element);
+  };
+
+  Observer.prototype.disconnect = function () {
+    this.watched.clear();
+  };
+
+  // An element comes near the screen, or goes from it: each observer that
+  // watches it hears so.
+  Document.prototype.near = function (element, near) {
+    if (near) {
+      this.nearby.add(element);
+    } else {
+      this.nearby.delete(element);
+    }
+    this.observers.forEach(function (observer) {
+      if (observer.watched.has(element)) {
+        observer.callback([{ target: element, isIntersecting: near }], observer);
+      }
+    });
+  };
 
   Document.prototype.createElement = function (tag) {
     this.made++;

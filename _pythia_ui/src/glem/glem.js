@@ -563,7 +563,9 @@ var glem = (function () {
   // The view fills in glem's Focused, the widget whose element holds the
   // keyboard's focus; and on Escape, Return or Tab, without a modifier, and
   // unless a recipe took the key, it sends the messages that glem's Key
-  // facts give for it, a tick each. `host` hears what happens:
+  // facts give for it, a tick each. It sends the messages that glem's Near
+  // facts give for a widget when its element comes near the screen, by the
+  // IntersectionObserver of the root's window, if it has one (watch). `host` hears what happens:
   // host.effects(list) after a tick that sends effects, each as {name,
   // fields}, as JSON (src/lem/host.rs); and host.error(message) after one
   // that fails, which leaves the page as it was.
@@ -611,6 +613,25 @@ var glem = (function () {
     // The id that Focused names, and the one that it will.
     this.focused = null;
     this.focusing = null;
+    // The widgets that Near facts name, each as {msgs, element}, by key;
+    // their elements' keys; and what tells the view when one is near.
+    this.near = new Map();
+    this.nearOf = new Map();
+    var win = root.ownerDocument.defaultView;
+    var Observer = win && typeof win.IntersectionObserver === "function" ? win.IntersectionObserver : null;
+    this.observer =
+      Observer === null
+        ? null
+        : new Observer(
+            function (entries) {
+              entries.forEach(function (entry) {
+                if (entry.isIntersecting) {
+                  view.nearby(entry.target);
+                }
+              });
+            },
+            { rootMargin: "100% 0px" }
+          );
     root.addEventListener("focusin", function (e) {
       view.focus(view.widgetOf(e.target));
     });
@@ -770,6 +791,59 @@ var glem = (function () {
       this.renderSome(this.runtime.touched);
     }
     this.runtime.untouch();
+    this.watch();
+  };
+
+  // Watches the widgets that glem's Near facts name, as the last tick left
+  // them, for when each comes near the screen: anew where its messages or
+  // its element changed, so that one that's near sends them again.
+  View.prototype.watch = function () {
+    if (this.observer === null) {
+      return;
+    }
+    var view = this;
+    var now = new Map();
+    this.runtime.lem.relFacts(this.runtime.prog.lem.rel("Near")).forEach(function (fact) {
+      var key = lem.key(fact.tuple[0]);
+      var w = view.widgets.get(key);
+      if (w === undefined) {
+        return;
+      }
+      if (!now.has(key)) {
+        now.set(key, { msgs: [], element: w.made.element });
+      }
+      now.get(key).msgs.push(fact.tuple[1]);
+    });
+    this.near.forEach(function (was, key) {
+      var is = now.get(key);
+      if (is !== undefined && is.element === was.element && lem.key(is.msgs) === lem.key(was.msgs)) {
+        now.set(key, was);
+      } else {
+        view.observer.unobserve(was.element);
+        view.nearOf.delete(was.element);
+      }
+    });
+    var watched = this.near;
+    this.near = now;
+    now.forEach(function (is, key) {
+      if (watched.get(key) !== is) {
+        view.nearOf.set(is.element, key);
+        view.observer.observe(is.element);
+      }
+    });
+  };
+
+  // An element that the view watches is near the screen: its widget sends
+  // its messages, a tick each.
+  View.prototype.nearby = function (element) {
+    var key = this.nearOf.get(element);
+    if (key === undefined) {
+      return;
+    }
+    var view = this;
+    this.near.get(key).msgs.forEach(function (msg) {
+      view.send(msg);
+    });
   };
 
   // The facts of the relations that the state reads, as the view sees them

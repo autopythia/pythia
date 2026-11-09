@@ -297,6 +297,10 @@
       case "blur":
         it.doc.focus(null);
         return;
+      case "near":
+      case "far":
+        it.doc.near(target(step[1]), step[0] === "near");
+        return;
       case "key":
         var at = it.doc.activeElement !== null && it.root.contains(it.doc.activeElement);
         var init = { key: step[1] };
