@@ -227,16 +227,16 @@ glem, each tick prints the widget tree first.
 On the web, a glem program's compiled form has glem's part too
 (`src/glem/compile.rs`); `pythia-ui lem --compile FILE.lem...` writes it.
 glem's runtime in JavaScript, `src/glem/glem.js`, runs it as `src/glem/mod.rs`
-runs a program, but keeps the widget tree from tick to tick, and changes it
-where a widget's relation changed. Its view keeps the widgets in the DOM, and
-shows only what changed: each widget's element comes from a recipe for its
-kind, from the layer above, and stays from tick to tick while the widget does,
-so that it keeps its focus and caret. Recipes send messages from their events;
-the view fills in `Focused`, and sends what `Key` facts give for Escape,
-Return and Tab. `make js-test` runs glem's ticks on `glem.js`, as Rust runs
-them, checks the tree that it keeps against one built anew, and runs the view
-in a stand-in DOM (`tools/stand_in_dom.js`), with the clicks, focus and keys
-of `lem/test/tasks_dom.txt`.
+runs a program, but keeps the widget tree from tick to tick, and changes it by
+the widgets that lem's logs say each tick added and removed. Its view keeps
+the widgets in the DOM, and shows only what changed: each widget's element
+comes from a recipe for its kind, from the layer above, and stays from tick to
+tick while the widget does, so that it keeps its focus and caret. Recipes send
+messages from their events; the view fills in `Focused`, and sends what `Key`
+facts give for Escape, Return and Tab. `make js-test` runs glem's ticks on
+`glem.js`, as Rust runs them, checks the tree that it keeps against one built
+anew, and runs the view in a stand-in DOM (`tools/stand_in_dom.js`), with the
+clicks, focus and keys of `lem/test/tasks_dom.txt`.
 
 ### glui
 

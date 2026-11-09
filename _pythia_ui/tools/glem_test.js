@@ -350,8 +350,59 @@
     });
   }
 
+  // A tick that changes widgets changes the tree by what lem's tick logged
+  // (glem.Runtime's grow): with 200 rows, a tick that adds one walks no
+  // widget kind's facts and builds nothing anew, and the tree that it keeps
+  // is the one that tree() builds.
+  function logged() {
+    var runtime = new glem.Runtime(new glem.Program(tests.program));
+    var kinds = runtime.prog.kinds;
+    var steps = [];
+    for (var i = 0; i < 200; i++) {
+      steps.push(["+", "Todo", { id: "t" + i, title: "row " + i, at: i }]);
+    }
+    runtime.run(steps, null);
+    var walked = 0;
+    var anew = 0;
+    var grow = runtime.grow;
+    var build = runtime.build;
+    runtime.build = function () {
+      anew++;
+      return build.apply(this, arguments);
+    };
+    runtime.grow = function () {
+      var spied = kinds.map(function (kind) {
+        return runtime.lem.tables[kind.rel].facts;
+      });
+      spied.forEach(function (facts) {
+        facts.forEach = function () {
+          walked++;
+          return Map.prototype.forEach.apply(this, arguments);
+        };
+      });
+      try {
+        return grow.apply(this, arguments);
+      } finally {
+        spied.forEach(function (facts) {
+          delete facts.forEach;
+        });
+      }
+    };
+    runtime.run([["+", "Todo", { id: "t200", title: "row 200", at: 200 }]], null);
+    var why = null;
+    if (walked > 0 || anew > 0) {
+      why = "the tick walked " + walked + " kinds' facts, and built the tree anew " + anew + " times";
+    } else if (treeText(runtime, runtime.nodes()) !== treeText(runtime, runtime.tree())) {
+      why = "the tree that it keeps isn't the one that tree() builds";
+    } else if (runtime.nodes().length !== 203) {
+      why = "the tree has " + runtime.nodes().length + " widgets, not 203";
+    }
+    tap.report("a tick that adds a row to 200 walks no kind's facts", why);
+  }
+
   ticks();
   rendered();
+  logged();
   dom();
   refused();
   tap.finish();

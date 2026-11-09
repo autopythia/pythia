@@ -939,6 +939,10 @@ var lem = (function () {
     this.followed = prog.rules.map(followed);
     // Whether the next tick derives every relation anew (forget).
     this.anew = false;
+    // What the last tick changed, by relation, and how many ticks have
+    // ended (settle).
+    this.changes = null;
+    this.settled = 0;
   }
 
   // The variables that a pattern binds, into `out`.
@@ -1297,11 +1301,19 @@ var lem = (function () {
   };
 
   // The end of a tick that ran the rules, whether or not they failed: each
-  // relation's log begins again.
+  // relation's log begins again. The logs that end are what the tick
+  // changed, by relation (changes), for a layer above lem, such as glem's
+  // tree: null for each relation before the first tick, which logs
+  // nothing. `settled` counts the ticks that ended so, so that a layer
+  // above can tell whether it saw every one.
   Runtime.prototype.settle = function () {
+    var changes = [];
     for (var r = 0; r < this.tables.length; r++) {
+      changes.push(this.tables[r].log);
       this.tables[r].log = new Log();
     }
+    this.changes = changes;
+    this.settled += 1;
   };
 
   // What the `on` blocks of a message would add and delete, each as {rel,

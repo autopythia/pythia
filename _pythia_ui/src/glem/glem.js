@@ -85,26 +85,25 @@ var glem = (function () {
     return j;
   }
 
-  // A glem program's runtime: lem's (lem.Runtime), and the widget tree, as
-  // the last tick left it. The tree stays from tick to tick, and a tick
-  // changes it where a kind's relation has a new version, by the facts that
-  // it gained and lost (grow). It's built anew from tree() the first time,
-  // after a tick whose tree failed, and when a change might break its rules,
-  // so that tree() gives the error, as Rust's does. Its nodes, each {kind,
-  // rel, tuple, id, key, fact, parent, order}, are by their ids, as
-  // lem.key gives them (byId); under each parent's key, or "" for the
-  // surfaces, in order (children); and, for each kind, by their facts'
-  // keys, with the version of the kind's table that they are (byFact,
-  // versions). `touched` is what changed since the view last showed the
-  // tree (untouch): the widgets, and the parents whose children changed, by
-  // key; or all of it. A runtime has one view at most.
+  // A glem program's runtime: lem's (lem.Runtime), and the widget tree, as the
+  // last tick left it. The tree stays from tick to tick, and a tick changes it
+  // by what came to, and went from, each kind's relation (grow). It's built
+  // anew from tree() the first time, after a tick that it didn't follow, as one
+  // whose tree failed, and when a change might break its rules, so that tree()
+  // gives the error, as Rust's does. Its nodes, each {kind, rel, tuple, id,
+  // key, fact, parent, order}, are by their ids, as lem.key gives them (byId);
+  // under each parent's key, or "" for the surfaces, in order (children); and,
+  // for each kind, by their facts' keys (byFact); with the count of lem's ticks
+  // that it's up to (grown). `touched` is what changed since the view last
+  // showed the tree (untouch): the widgets, and the parents whose children
+  // changed, by key; or all of it. A runtime has one view at most.
   function Runtime(prog) {
     this.prog = prog;
     this.lem = new lem.Runtime(prog.lem);
     this.byId = null;
     this.children = null;
     this.byFact = null;
-    this.versions = null;
+    this.grown = -1;
     this.touched = { all: true, ids: new Set(), parents: new Set() };
   }
 
@@ -291,51 +290,53 @@ var glem = (function () {
       }
       list.push(node);
     }
-    var tables = this.lem.tables;
     this.children = children;
     this.byFact = byFact;
-    this.versions = this.prog.kinds.map(function (kind) {
-      return tables[kind.rel].version;
-    });
+    this.grown = this.lem.settled;
     this.byId = byId;
   };
 
-  // Brings the tree up to lem's facts: for each kind whose table has a new
-  // version, the nodes of the facts that it lost go, and those of the facts
-  // that it gained come; or anew (build).
+  // Brings the tree up to lem's facts, by what lem's tick changed in each
+  // kind's relation (lem.Runtime's changes): the nodes of the facts that
+  // went go, and those of the facts that came come, so that it costs what
+  // changed. Or anew (build): the first time; after a tick that it didn't
+  // follow, as one that failed; and when a change might break the tree's
+  // rules.
   Runtime.prototype.grow = function () {
-    if (this.byId === null) {
+    var changes = this.lem.changes;
+    if (this.byId === null || changes === null || this.lem.settled !== this.grown + 1) {
       this.build();
       return;
     }
     var kinds = this.prog.kinds;
-    var tables = this.lem.tables;
     var gone = [];
     var come = [];
     for (var k = 0; k < kinds.length; k++) {
-      var table = tables[kinds[k].rel];
-      if (table.version === this.versions[k]) {
-        continue;
+      var log = changes[kinds[k].rel];
+      if (log === null) {
+        this.build();
+        return;
       }
       var had = this.byFact[k];
-      table.facts.forEach(function (entry, fact) {
-        if (!had.has(fact)) {
-          come.push({ kind: k, tuple: entry.tuple, fact: fact });
-        }
+      var lost = false;
+      log.went.forEach(function (tuple, fact) {
+        var node = had.get(fact);
+        lost = lost || node === undefined;
+        gone.push(node);
       });
-      had.forEach(function (node, fact) {
-        if (!table.facts.has(fact)) {
-          gone.push(node);
-        }
+      if (lost) {
+        this.build();
+        return;
+      }
+      log.came.forEach(function (tuple, fact) {
+        come.push({ kind: k, tuple: tuple, fact: fact });
       });
     }
     if (!this.change(gone, come)) {
       this.build();
       return;
     }
-    this.versions = kinds.map(function (kind) {
-      return tables[kind.rel].version;
-    });
+    this.grown = this.lem.settled;
   };
 
   // Takes the nodes `gone` from the tree, and adds one for each fact that

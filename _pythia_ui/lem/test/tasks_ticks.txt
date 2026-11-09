@@ -188,3 +188,21 @@ Screen(Top, title="Tasks")
       Line(Inside, text="inside")
     Item(Row("g"), text="plain", on=Open("g"))
   Line(Footer, text="pinned")
+
+=== a row comes in a tick whose keys clash: the tick fails
++ Todo("j", "after a clash", 95)
++ Clash(1)
++ Clash(2)
+---
+error: one key, two facts: Clashed(0, 1) (from the rule at lem/test/tasks.lem:68:1) and Clashed(0, 2) (from the rule at lem/test/tasks.lem:68:1)
+
+=== the clash goes: the row is there
+- Clash(2)
+---
+Screen(Top, title="Tasks")
+  Group(List, title="Open")
+    Item(Folder, text="folder", on=Pin("folder"))
+      Line(Inside, text="inside")
+    Item(Row("g"), text="plain", on=Open("g"))
+    Item(Row("j"), text="after a clash", on=Open("j"))
+  Line(Footer, text="pinned")

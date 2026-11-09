@@ -59,3 +59,10 @@ input Opened(open: Bool)
 Group(Folder, parent=List, title="folder", order=0) :- Opened(True)
 Item(Folder, parent=List, text="folder", on=Pin("folder"), order=0) :- Opened(False)
 Line(Inside, parent=Folder, text="inside") :- Opened(_)
+
+-- Keys that clash, for a tick that fails in lem's rules rather than in the
+-- tree: the widgets that it changed come with the next tick that doesn't
+-- fail, which the tree must see, though it didn't see the tick that failed.
+input Clash(n: Int)
+rel Clashed(k: Int, n: Int) key k
+Clashed(0, n) :- Clash(n)
