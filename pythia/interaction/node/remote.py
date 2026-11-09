@@ -45,6 +45,13 @@ LISTING_WAIT = 5.0
 MAX_ANSWER = 64 * 1024 * 1024
 # The lines of its standard error that a remote's failure can say.
 SAID = 20
+# What a remote whose python3 doesn't find pythia says, and what to do about it: pythia's
+# installer (install.py) puts it on PYTHONPATH in the wrappers that it writes alone.
+NO_PYTHIA = "No module named 'pythia'"
+FIND_PYTHIA = ("there, python3 doesn't find pythia, which pythia's installer puts on "
+               "PYTHONPATH in its own commands alone: give --remote NAME=COMMAND, with a "
+               "command that sets it, such as 'ssh -o BatchMode=yes HOST env "
+               "PYTHONPATH=.pythia/lib/pythia-dev python3 -m pythia.interaction.node --stdio'")
 # A remote's root, as its view's index gives it, and what it's doing: each field's type;
 # and the fields that a root may have too, as a node of a later version gives them.
 ROOT = {"id": str, "title": str, "model": str, "turns": int, "lines": int, "size": str,
@@ -268,6 +275,8 @@ class Remote:
             # Its last word, as a clause of why: without the period that ends it, if any.
             last = said[-1].rstrip(". ") if said else ""
             why = f"it ended, with status {status}: {last or 'it said nothing'}"
+            if NO_PYTHIA in last:
+                why += f"; {FIND_PYTHIA}"
         self.why = why
         for answer in waiting.values():
             answer.put(self._unreachable(why))

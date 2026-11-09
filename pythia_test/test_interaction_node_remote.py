@@ -313,6 +313,10 @@ class RemoteTests(RemoteTest):
         app = self.app(("gone", ["/nonexistent/node"]),
                        ("fails", python("import sys; sys.stderr.write('no registry here.\\n'); "
                                         "sys.exit(3)")),
+                       ("lost", python("import sys; sys.stderr.write(\"/usr/bin/python3: Error "
+                                       "while finding module specification for "
+                                       "'pythia.interaction.node' (ModuleNotFoundError: No "
+                                       "module named 'pythia')\\n\"); sys.exit(1)")),
                        ("refuses", python("import json, sys; sys.stdin.readline(); "
                                           "print(json.dumps({'node': 1, 'error': 'nope'}))")),
                        ("other", python("print('hello')")),
@@ -323,6 +327,10 @@ class RemoteTests(RemoteTest):
                     "[Errno 2] No such file or directory: '/nonexistent/node'.\n",
             "fails": "The remote node fails can't be reached: it ended, with status 3: "
                      "no registry here.\n",
+            "lost": "The remote node lost can't be reached: it ended, with status 1: "
+                    "/usr/bin/python3: Error while finding module specification for "
+                    "'pythia.interaction.node' (ModuleNotFoundError: No module named "
+                    f"'pythia'); {remote.FIND_PYTHIA}.\n",
             "refuses": "The remote node refuses can't be reached: it refused: nope.\n",
             "other": "The remote node other can't be reached: it didn't answer as a node "
                      "does.\n",
