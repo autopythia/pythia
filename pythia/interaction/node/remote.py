@@ -45,9 +45,11 @@ LISTING_WAIT = 5.0
 MAX_ANSWER = 64 * 1024 * 1024
 # The lines of its standard error that a remote's failure can say.
 SAID = 20
-# A remote's root, as its view's index gives it, and what it's doing: each field's type.
+# A remote's root, as its view's index gives it, and what it's doing: each field's type;
+# and the fields that a root may have too, as a node of a later version gives them.
 ROOT = {"id": str, "title": str, "model": str, "turns": int, "lines": int, "size": str,
         "changed": str, "rank": int, "to": str}
+ROOT_TOO = {"label": str}
 DOING = {"id": str, "hue": str, "why": str}
 HUES = frozenset((GRAY, GREEN, YELLOW, ORANGE, RED))
 
@@ -279,12 +281,17 @@ class Listing(NamedTuple):
     steps: list
     why: Optional[str]
 
-    def _facts(self, name: str, types: Dict[str, type]) -> List[dict]:
+    def _facts(self, name: str, types: Dict[str, type],
+               too: Optional[Dict[str, type]] = None) -> List[dict]:
+        """The fields of each fact of relation ``name`` that has those of ``types``, and may
+        have those of ``too``, each of its type."""
+        kinds = {**(too or {}), **types}
         found = []
         for step in self.steps:
             if (isinstance(step, list) and len(step) == 3 and step[:2] == ["+", name]
-                    and isinstance(step[2], dict) and step[2].keys() == types.keys()
-                    and all(type(step[2][field]) is kind for field, kind in types.items())):
+                    and isinstance(step[2], dict) and types.keys() <= step[2].keys()
+                    and step[2].keys() <= kinds.keys()
+                    and all(type(step[2][field]) is kinds[field] for field in step[2])):
                 found.append(step[2])
         return found
 
@@ -292,7 +299,8 @@ class Listing(NamedTuple):
         """Its roots, as its index gives them, in its order, each once: the fields of each
         Context that's of their types, and links to a page of its own."""
         roots: Dict[str, dict] = {}
-        for fields in sorted(self._facts("Context", ROOT), key=lambda each: each["rank"]):
+        for fields in sorted(self._facts("Context", ROOT, ROOT_TOO),
+                             key=lambda each: each["rank"]):
             if fields["to"].startswith(f"{self.remote.base}/lem/c/"):
                 roots.setdefault(fields["id"], fields)
         return list(roots.values())

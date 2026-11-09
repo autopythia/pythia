@@ -2001,6 +2001,7 @@ main.g-window
       tr.g-tablerow.g-header
         span.g-label "State"
         span.g-label "Context"
+        span.g-label "Label"
         span.g-label "Title"
         span.g-label "Model"
         span.g-label "Turns"
@@ -2010,6 +2011,7 @@ main.g-window
       tr.g-tablerow
         span.g-dot.g-hue-orange role="img" aria-label="Retrying: a model request failed, and the CLI samples again." title="Retrying: a model request failed, and the CLI samples again."
         a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-strong
         span.g-label "Plan the GUI"
         span.g-label.g-tone-dim "opus"
         span.g-label "12"
@@ -2019,6 +2021,7 @@ main.g-window
       tr.g-tablerow
         span.g-label
         a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-strong
         span.g-label "Let us start"
         span.g-label.g-tone-dim "opus"
         span.g-label "3"
@@ -2040,6 +2043,7 @@ main.g-window
       tr.g-tablerow.g-header
         span.g-label "State"
         span.g-label "Context"
+        span.g-label "Label"
         span.g-label "Title"
         span.g-label "Model"
         span.g-label "Turns"
@@ -2049,6 +2053,7 @@ main.g-window
       tr.g-tablerow
         span.g-dot.g-hue-green role="img" aria-label="Running: sampling." title="Running: sampling."
         a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-strong
         span.g-label "Plan the GUI"
         span.g-label.g-tone-dim "opus"
         span.g-label "12"
@@ -2058,6 +2063,7 @@ main.g-window
       tr.g-tablerow
         span.g-label
         a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-strong
         span.g-label "Let us start"
         span.g-label.g-tone-dim "opus"
         span.g-label "3"
@@ -2081,6 +2087,7 @@ main.g-window
       tr.g-tablerow.g-header
         span.g-label "State"
         span.g-label "Context"
+        span.g-label "Label"
         span.g-label "Title"
         span.g-label "Model"
         span.g-label "Turns"
@@ -2090,6 +2097,7 @@ main.g-window
       tr.g-tablerow
         span.g-dot.g-hue-green role="img" aria-label="Running: sampling." title="Running: sampling."
         a.g-link href="/c/ui-0" "ui-0"
+        span.g-label.g-tone-strong
         span.g-label "Plan the GUI"
         span.g-label.g-tone-dim "opus"
         span.g-label "12"
@@ -2099,6 +2107,7 @@ main.g-window
       tr.g-tablerow
         span.g-label
         a.g-link href="/c/dev-1" "dev-1"
+        span.g-label.g-tone-strong
         span.g-label "Let us start"
         span.g-label.g-tone-dim "opus"
         span.g-label "3"
@@ -2112,6 +2121,7 @@ main.g-window
       tr.g-tablerow
         span.g-label
         a.g-link href="/n/sim/lem/c/10" "sim/ui-0 (10)"
+        span.g-label.g-tone-strong
         span.g-label "There"
         span.g-label.g-tone-dim "opus"
         span.g-label "2"

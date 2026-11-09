@@ -521,7 +521,7 @@
         answer(it, "/f/page", null, later);
         return it.asked.concat(facts(it, "Context"), facts(it, "Page"), it.said.slice(1));
       },
-      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a")', 'Page("Contexts", "", "", 0, "")']
+      ["/f/page", "/f/page", "/f/page", 'Context("a", "One", "m", 2, 30, "3 KB", "now", 0, "/a", "")', 'Page("Contexts", "", "", 0, "")']
     ],
     [
       "a star: set at once, and kept; one that can't be kept is taken back",

@@ -7,8 +7,9 @@ must name loopback (127.0.0.1, localhost or [::1]) at any port, so that a
 DNS-rebinding page can't name it while an SSH forward from another port
 still works. GET and HEAD are answered; and POST, which changes the glui
 view's store (``store.py``), alone: at ``/TOKEN/lem/store/NAME``, which
-replaces its settings, and ``/TOKEN/lem/stars/N``, which sets or clears a
-star in root N's log; from a page of the server's own origin (its Origin
+replaces its settings, ``/TOKEN/lem/stars/N``, which sets or clears a star in
+root N's log, and ``/TOKEN/lem/roots/N``, which sets root N's label and tags;
+from a page of the server's own origin (its Origin
 header), with the header that only the view's scripts send
 (``STORE_HEADER``), as JSON of a few KB at most. Every response has
 ``nosniff``, ``no-store`` and ``no-referrer``, and a CSP: the plain pages'
@@ -178,11 +179,14 @@ class App:
                                 content_type, body)
         stored = rest[len("lem/store/"):] if rest.startswith("lem/store/") else None
         starred = rest[len("lem/stars/"):] if rest.startswith("lem/stars/") else None
+        rooted = rest[len("lem/roots/"):] if rest.startswith("lem/roots/") else None
         own = (hosts[0].strip(), origins, marked, content_type, body)
         if method == "POST" and stored in REPLACED and not parts.query:
             return self._refused(*own) or self._keep(stored, body or b"")
         if method == "POST" and starred and not parts.query:
             return self._refused(*own) or self._star(_unquoted(starred), body or b"")
+        if method == "POST" and rooted and not parts.query:
+            return self._refused(*own) or self._root(_unquoted(rooted), body or b"")
         if method not in ("GET", "HEAD"):
             return plain(405, "The node server reads, with GET and HEAD; it takes POST for its "
                          "view's store alone.", (("Allow", "GET, HEAD"),))
@@ -285,6 +289,15 @@ class App:
             store.star(context.key, line, on)
 
         return self._stored(star)
+
+    def _root(self, number: str, body: bytes) -> Response:
+        """A POST that sets root ``number``'s label and tags: ``{"label": TEXT, "tags":
+        [TAG, ...]}``, kept by the root's key."""
+        context = self.pages.roots.get(number)
+        if context is None:
+            return plain(404, "There's no such root context here.")
+        return self._stored(lambda store: store.root(context.key,
+                                                     json.loads(body.decode("utf-8"))))
 
     def _stored(self, change) -> Response:
         """The response to a change of the view's store: 204 once it's made."""

@@ -20,8 +20,10 @@ input Nav(n: Int, text: Text, to: Text) key n
 -- from Page, which every widget of the page reads.
 input Length(lines: Int) one
 
--- The index: each context, by `rank`, the last changed first.
-input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text) key id
+-- The index: each context, by `rank`, the last changed first, with the
+-- label that it's given, if any; and each of its tags.
+input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text, label: Text = "") key id
+input Tagged(id: CtxId, tag: Text)
 
 -- The remote nodes, whose roots the index shows after this node's, as the
 -- host says: each by its name, and its rank among the index's rows, before
@@ -191,17 +193,19 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
     TableRow(Head, header=True, order=-1):
       Label(Col(7), text="State", order=-1)
       Label(Col(0), text="Context")
+      Label(Col(8), text="Label")
       Label(Col(1), text="Title")
       Label(Col(2), text="Model")
       Label(Col(3), text="Turns")
       Label(Col(4), text="Lines")
       Label(Col(5), text="Size")
       Label(Col(6), text="Changed")
-    for Context(c, title, model, turns, lines, size, changed, rank, to):
+    for Context(c, title, model, turns, lines, size, changed, rank, to, label):
       TableRow(Ctx(c), order=rank):
         Dot(Cell(c, 7), hue=h, text=why, order=-1) :- Activity(c, h, why)
         Label(Cell(c, 7), text="", order=-1) :- not Activity(id=c)
         Link(Cell(c, 0), text=text(c), to=to)
+        Label(Cell(c, 8), text=label, tone=Strong)
         Label(Cell(c, 1), text=title)
         Label(Cell(c, 2), text=model, tone=Dim)
         Label(Cell(c, 3), text=text(turns))

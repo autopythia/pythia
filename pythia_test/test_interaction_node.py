@@ -1459,7 +1459,7 @@ class ViewTests(WorkspaceTest):
                                  "title": 'Fix the bug <script>alert(1)</script> & "quoted"',
                                  "model": "model-a", "turns": 4, "lines": 63,
                                  "size": pages.byte_count(log.stat().st_size),
-                                 "to": f"/{TOKEN}/lem/c/1"})
+                                 "to": f"/{TOKEN}/lem/c/1", "label": ""})
         # The rest, by id: their order is their logs' last change, which may be the same.
         self.assertEqual(sorted((fact["id"], fact["title"], fact["model"], fact["to"])
                                 for fact in found.values()),
@@ -1822,6 +1822,38 @@ class StoreTests(unittest.TestCase):
                 self.store.write("stars", value)
         self.assertEqual(self.store.read("stars"), {KEY_A: [9]})
 
+    def test_labels_and_tags_kept_by_root_one_at_a_time(self):
+        self.assertEqual(self.store.read("roots"), {})
+        self.store.root(KEY_A, {"label": "  glui  ", "tags": ["ui", "glui", "ui"]})
+        self.store.root(KEY_B, {"label": "", "tags": ["old"]})
+        self.store.root(KEY_B, {"label": "", "tags": []})  # with neither, a root goes
+        kept = {KEY_A: {"label": "glui", "tags": ["glui", "ui"]}}
+        self.assertEqual(self.store.read("roots"), kept)
+        label = "a label is text of 120 characters at most"
+        tags = ("a root has 12 tags at most, each a word of lowercase letters, digits, '.', "
+                "'_' and '-', 32 characters at most")
+        for value, why in (([], "a root is"), ({"label": "x"}, "a root is"),
+                           ({"label": "x", "tags": [], "more": 1}, "a root is"),
+                           ({"label": 1, "tags": []}, label),
+                           ({"label": "x" * 121, "tags": []}, label),
+                           ({"label": "a\nb", "tags": []}, label),
+                           ({"label": "a\x85b", "tags": []}, label),
+                           ({"label": "", "tags": "ui"}, tags),
+                           ({"label": "", "tags": ["UI"]}, tags),
+                           ({"label": "", "tags": ["a b"]}, tags),
+                           ({"label": "", "tags": ["-x"]}, tags),
+                           ({"label": "", "tags": ["x" * 33]}, tags),
+                           ({"label": "", "tags": ["x"] * 13}, tags)):
+            with self.assertRaisesRegex(Invalid, re.escape(why)):
+                self.store.root(KEY_A, value)
+        for value, why in (({"x": {"label": "y", "tags": []}}, "'x' isn't a root's key"),
+                           ({KEY_A: {"label": "y"}}, "a root is"), ([], "aren't an object")):
+            with self.assertRaisesRegex(Invalid, re.escape(why)):
+                self.store.write("roots", value)
+        self.assertEqual(self.store.read("roots"), kept)
+        self.store.write("roots", {**kept, KEY_B: {"label": " ", "tags": []}})  # neither
+        self.assertEqual(self.store.read("roots"), kept)
+
     def test_a_post_from_the_views_own_page(self):
         response = self.post(b'{"look": "native", "runs": "open"}')
         self.assertEqual((response.status, response.body), (204, ""))
@@ -1986,6 +2018,49 @@ class GrowTests(unittest.TestCase):
         self.assertEqual(app.respond("POST", f"/{TOKEN}/lem/stars/1", ["127.0.0.1:8765"],
                                      body=b'{"line": 7, "on": true}', **elsewhere).status, 403)
         self.assertEqual(store.read("stars"), {KEY_A: [5]})
+
+    def test_a_roots_label_and_tags_set_from_the_page_by_its_key(self):
+        own = {"origins": ["http://127.0.0.1:8765"], "marked": True,
+               "content_type": "application/json"}
+        store = Store(self.tmp / "node")
+        app = server.App(self.app.pages.roots, TOKEN, store=store)
+
+        def post(path, body, **more):
+            return app.respond("POST", f"/{TOKEN}/{path}", ["127.0.0.1:8765"], body=body,
+                               **dict(own, **more))
+
+        def get(path):
+            return app.respond("GET", f"/{TOKEN}/{path}", ["127.0.0.1:8765"])
+
+        self.assertEqual(post("lem/roots/1", b'{"label": "the bug", "tags": ["ui", "fix"]}')
+                         .status, 204)
+        self.assertEqual(store.read("roots"), {KEY_A: {"label": "the bug", "tags": ["fix", "ui"]}})
+        index = json.loads(get("lem/facts/").body)
+        self.assertEqual(step_problems(json.loads(PROGRAM.read_text()), index), [])
+        self.assertEqual([fields["label"] for _, rel, fields in index if rel == "Context"],
+                         ["the bug"])
+        self.assertEqual([fields for _, rel, fields in index if rel == "Tagged"],
+                         [{"id": "s (1)", "tag": "fix"}, {"id": "s (1)", "tag": "ui"}])
+        # Its log's page, its facts' and its tab's, say its label after its name.
+        facts = json.loads(get("lem/facts/c/1").body)
+        self.assertEqual([fields["title"] for _, rel, fields in facts if rel == "Page"],
+                         ["s (1) · the bug"])
+        self.assertEqual(json.loads(get("lem/tab/1").body)["title"], "s (1) · the bug")
+        self.assertIn("<title>s (1) · the bug · node</title>", get("lem/c/1").body)
+        for path, body, status in (("lem/roots/9", b'{"label": "x", "tags": []}', 404),
+                                   ("lem/roots/1", b'{"label": 1, "tags": []}', 400),
+                                   ("lem/roots/1", b'{"label": "x", "tags": ["X"]}', 400),
+                                   ("lem/roots/1", b'[]', 400), ("lem/store/roots", b'{}', 405)):
+            self.assertEqual(post(path, body).status, status, (path, body))
+        self.assertEqual(post("lem/roots/1", b'{"label": "x", "tags": []}',
+                              origins=["http://evil.example"]).status, 403)
+        self.assertEqual(store.read("roots"), {KEY_A: {"label": "the bug", "tags": ["fix", "ui"]}})
+        self.assertEqual(post("lem/roots/1", b'{"label": "", "tags": []}').status, 204)
+        self.assertEqual(store.read("roots"), {})
+        index = json.loads(get("lem/facts/").body)
+        self.assertEqual([(rel, fields.get("label")) for _, rel, fields in index
+                          if rel in ("Context", "Tagged")], [("Context", "")])
+        self.assertEqual(json.loads(get("lem/tab/1").body)["title"], "s (1)")
 
     def test_pins_of_the_lines_starred_with_the_questions_that_an_answer_answers(self):
         store = Store(self.tmp / "node")

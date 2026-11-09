@@ -5,11 +5,12 @@ browser keeps its profile, in a directory of its own, ``~/.pythia/node/`` unless
 Each of its files is a JSON object that a page of the view reads, and changes by POST,
 from the server's own pages alone (``server.App``): ``session.json``, the view's settings,
 such as its look, its theme and whether a log's runs fold, each a name and a short word,
-which a page replaces whole; and ``stars.json``, the lines starred in each root's log,
-by the root's key, so that they follow a save that moves, which a page sets or clears one
-at a time. A write goes to a temporary file, which then takes the old one's place, so that
-a crash leaves the old file or the new; two pages that write at once each keep what they
-wrote last.
+which a page replaces whole; ``stars.json``, the lines starred in each root's log, by the
+root's key, so that they follow a save that moves, which a page sets or clears one at a
+time; and ``roots.json``, each root's label and tags, by its key, which a page sets for
+one root at a time. A write goes to a temporary file, which then takes the old one's
+place, so that a crash leaves the old file or the new; two pages that write at once each
+keep what they wrote last.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import re
 import tempfile
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 # The most bytes that a page may send to the store, and that a file of it holds.
 MAX_BYTES = 16 * 1024
@@ -30,6 +31,10 @@ MAX_SETTINGS = 32
 # The most roots with stars, and stars in a root's log.
 MAX_ROOTS = 1000
 MAX_STARS = 10_000
+# A root's label, in characters, and its tags, at most; and what a tag is.
+MAX_LABEL = 120
+MAX_TAGS = 12
+_TAG = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}\Z")
 _SETTING = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _WORD = re.compile(r"[A-Za-z0-9_-]{0,64}\Z")
 _ROOT = re.compile(r"context_[0-9a-f]{32}\Z")
@@ -72,9 +77,47 @@ def stars(value: object) -> Dict[str, List[int]]:
     return kept
 
 
+def root(value: object) -> Tuple[str, List[str]]:
+    """``value`` as a root's label and tags, as a page sends them: ``{"label": TEXT,
+    "tags": [TAG, ...]}``, a label of ``MAX_LABEL`` characters at most, none of them a
+    control character, and at most ``MAX_TAGS`` tags, each a word of lowercase letters,
+    digits, '.', '_' and '-', 32 characters at most; the label without spaces around it,
+    and the tags in order, once each. Raises Invalid."""
+    if not isinstance(value, dict) or set(value) != {"label", "tags"}:
+        raise Invalid('a root is {"label": TEXT, "tags": [TAG, ...]}')
+    label, tags = value["label"], value["tags"]
+    if (not isinstance(label, str) or len(label) > MAX_LABEL
+            or any(ord(c) < 0x20 or 0x7f <= ord(c) < 0xa0 for c in label)):
+        raise Invalid(f"a label is text of {MAX_LABEL} characters at most")
+    if (not isinstance(tags, list) or len(tags) > MAX_TAGS
+            or not all(isinstance(tag, str) and _TAG.match(tag) for tag in tags)):
+        raise Invalid(f"a root has {MAX_TAGS} tags at most, each a word of lowercase letters, "
+                      "digits, '.', '_' and '-', 32 characters at most")
+    return label.strip(), sorted(set(tags))
+
+
+def roots(value: object) -> Dict[str, dict]:
+    """``value`` as what the view says of roots: a JSON object of at most ``MAX_ROOTS`` roots,
+    each by its key, with its label and tags (``root``); a root with neither is left out.
+    Raises Invalid."""
+    if not isinstance(value, dict):
+        raise Invalid("the roots aren't an object")
+    if len(value) > MAX_ROOTS:
+        raise Invalid(f"there are labels or tags for more than {MAX_ROOTS} roots")
+    kept = {}
+    for key, said in value.items():
+        if not _ROOT.match(key):
+            raise Invalid(f"{key[:40]!r} isn't a root's key")
+        label, tags = root(said)
+        if label or tags:
+            kept[key] = {"label": label, "tags": tags}
+    return kept
+
+
 # The store's files, each by its name, with what checks a value for it; and those that a
 # page replaces whole.
-FILES: Dict[str, Callable[[object], dict]] = {"session": settings, "stars": stars}
+FILES: Dict[str, Callable[[object], dict]] = {"session": settings, "stars": stars,
+                                              "roots": roots}
 REPLACED = ("session",)
 
 
@@ -112,6 +155,19 @@ class Store:
             (lines.add if on else lines.discard)(line)
             kept[key] = sorted(lines)
             self._replace("stars", stars(kept))
+
+    def root(self, key: str, value: object) -> None:
+        """Gives the root whose key is ``key`` the label and tags that ``value`` says, as
+        ``root`` checks them, or neither, if they're empty: the rest stay as they are.
+        Raises Invalid, or OSError."""
+        label, tags = root(value)
+        with self._lock:
+            kept = self.read("roots")
+            if label or tags:
+                kept[key] = {"label": label, "tags": tags}
+            else:
+                kept.pop(key, None)
+            self._replace("roots", roots(kept))
 
     def _replace(self, name: str, value: dict) -> None:
         """Replaces file ``name`` with ``value``, checked, through a temporary file; with the

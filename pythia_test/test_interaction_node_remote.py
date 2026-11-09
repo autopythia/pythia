@@ -532,7 +532,8 @@ class IndexTests(RemoteTest):
                                                                             "to": "/"}],
                   root("b (2)", 2), root("a (1)", 1), root("a (1)", 3),
                   root("turns", 4, turns="1"), root("away", 5, to="/elsewhere/lem/c/5"),
-                  root("more", 6, extra=1), ["+", "Context", "x"], ["-", "Context", {}], 7,
+                  root("more", 6, extra=1), root("named", 8, label="given"),
+                  root("misnamed", 9, label=5), ["+", "Context", "x"], ["-", "Context", {}], 7,
                   ["+", "Activity", {"id": "a (1)", "hue": "Green", "why": "w"}],
                   ["+", "Activity", {"id": "b (2)", "hue": "Pink", "why": "w"}],
                   ["+", "Activity", {"id": "other", "hue": "Red", "why": "w"}]]
@@ -543,11 +544,14 @@ class IndexTests(RemoteTest):
                   step[2].get("to", "")[len(base):]]
                  for step in steps if step[1] == "Node" or (
                      step[1] in ("Context", "Activity") and step[2]["id"].startswith("fake/"))]
-        local = len([step for step in steps if step[1] == "Context"]) - 2
+        local = len([step for step in steps if step[1] == "Context" and "/" not in step[2]["id"]])
         self.assertEqual(shown, [["Node", "fake", local, "/lem/"],
                                  ["Context", "fake/a (1)", local + 1, "/lem/c/1"],
                                  ["Activity", "fake/a (1)", None, ""],
-                                 ["Context", "fake/b (2)", local + 2, "/lem/c/2"]])
+                                 ["Context", "fake/b (2)", local + 2, "/lem/c/2"],
+                                 ["Context", "fake/named", local + 3, "/lem/c/8"]])
+        self.assertEqual([step[2].get("label") for step in steps if step[1] == "Context"
+                          and step[2]["id"].startswith("fake/")], [None, None, "given"])
 
     def test_a_slow_remote_is_waited_for_briefly_and_left_running(self):
         slow = python("import json, sys, time; sys.stdin.readline(); "
