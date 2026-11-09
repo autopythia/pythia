@@ -1692,6 +1692,99 @@ main.g-window
 effect LoadAround {"line":1}
 revealed TurnMark(0)
 
+=== restoring a place brings its row to the top of the screen, unmarked, and the host hears LoadAround
+["!", ["Restore", 6]]
+---
+page title: "ui-0"
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "Starred"
+    div.g-panel-body
+      span.g-label.g-tone-dim "Turn 1 · 5 items: Plan the GUI"
+      button.g-listrow type="button" "[user] Plan the GUI"
+  section.g-panel
+    div.g-panel-title "Turns"
+    div.g-panel-body
+      button.g-listrow type="button" "The start · 1 item"
+      button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
+main.g-window
+  div.g-row
+    div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong data-revealed
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect LoadAround {"line":6}
+revealed Said(6) at the top
+
 === a log's dot, before its title: what its context is doing, in its tooltip and to a screen reader
 ["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1, "id": "ui-0"}]
 ["+", "Activity", {"id": "ui-0", "hue": "Orange", "why": "Retrying: a model request failed, and the CLI samples again."}]

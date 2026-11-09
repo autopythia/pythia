@@ -246,9 +246,10 @@ var standInDom = (function () {
     }
   });
 
-  // Scrolls the element into view: here, notes that it was.
-  Element.prototype.scrollIntoView = function () {
-    this.ownerDocument.revealed.push(this);
+  // Scrolls the element into view: here, notes that it was, and where to,
+  // as `block` says.
+  Element.prototype.scrollIntoView = function (options) {
+    this.ownerDocument.revealed.push({ element: this, block: options && options.block });
   };
 
   // A details element's `open`, which its attribute holds. When it changes,

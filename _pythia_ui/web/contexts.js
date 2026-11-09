@@ -19,11 +19,12 @@
 // (src/glui/glui.js), with a tab for the index and for each context open, the
 // strip of them at the top (lem/tabs.lem), where the page names them, in the
 // look and the theme that its bar chooses, which the server keeps, and the
-// browser too; a log from its end, with every run folded or every run open,
-// as the bar's Runs says (Opening), with its panel beside it, or not, as the
-// bar's Panel says (Aside), and with an assistant's messages as Markdown
-// writes them, or as written, as the bar's Text says (Formatting). It answers
-// the program's LoadBefore(line) and LoadAfter(line) with rows, or with
+// browser too; a log from its end, or, in a tab, from where the session left
+// it (the program's Restore), with every run folded or every run open, as the
+// bar's Runs says (Opening), with its panel beside it, or not, as the bar's
+// Panel says (Aside), and with an assistant's messages as Markdown writes
+// them, or as written, as the bar's Text says (Formatting). It answers the
+// program's LoadBefore(line) and LoadAfter(line) with rows, or with
 // EarlierFailed(line, why) or LaterFailed(line, why); its LoadAround(line)
 // with rows, or a status that says why not; its LoadRun(run) with the run's
 // items, or with RunFailed(run, why); and its Load(line) with the item's
@@ -72,6 +73,13 @@ var contexts = (function () {
   // contexts.css says; and the least it may be.
   var WIDTH = /^([1-9][0-9]{1,3})?$/;
   var NARROWEST = 180;
+  // Where a log's tab was left, which the session keeps for each tab open,
+  // as `at-N`, a word of the store's: the line of its first row on the
+  // screen, or its end; for PLACES tabs at most, as a scroll settles, once
+  // it has been still for SETTLE_MS.
+  var PLACE = /^(end|[1-9][0-9]{0,8})$/;
+  var PLACES = 16;
+  var SETTLE_MS = 500;
 
   // Shows a page of a compiled program, contexts.lem's, in a view in
   // `o.root`, and is its host:
@@ -382,9 +390,15 @@ var contexts = (function () {
   // - o.settings(), what a log's tab starts with: {opening, aside,
   //   formatting};
   // - o.kept, the tabs that the session kept, {tabs: numbers, tab:
-  //   number}, and o.open, the number of the tab to show at first, if a
-  //   page names one; o.keep_tabs(numbers, shown) keeps them anew as they
-  //   change;
+  //   number, places: {number: line or "end"}}, and o.open, the number of
+  //   the tab to show at first, if a page names one; o.keep_tabs(numbers,
+  //   shown) keeps them anew as they change;
+  // - o.at(tab), where the tab shown is: the line of its first row on the
+  //   screen (placeOf), "end", or null if it can't say; and
+  //   o.keep_place(n, at), which keeps that for tab n, or forgets it, with
+  //   null. A tab that the session kept a line for goes back to it, as the
+  //   program's Restore does, once its facts are shown, when it first shows;
+  //   the rest start at their end;
   // - o.title(text), o.address(url) and o.showing(tab) follow the tab
   //   shown, its window's title, its page's address, and the tab itself;
   //   o.top() and o.go(top), its scroll, which each tab keeps, and o.end(),
@@ -392,10 +406,12 @@ var contexts = (function () {
   //   keep, for the tab shown.
   //
   // Gives {open(n, show), show(n), close(n), move(n, m), shown(), each(f),
-  // tick()}:
-  // tick() asks the tab shown what changed, as only it asks.
+  // tick(), settle()}: tick() asks the tab shown what changed, as only it
+  // asks; settle(), which the host calls as a scroll settles, keeps where
+  // the tab shown is, if that changed.
   function tabs(o) {
     var doc = o.holder.ownerDocument;
+    var places = o.kept.places || {};
     var all = new Map();
     var order = [];
     var rank = 0;
@@ -474,16 +490,42 @@ var contexts = (function () {
           }
         },
         shown: function () {
+          tab.ready = true;
           if (!log) {
             return;
           }
           if (tab === current) {
             o.end();
+            restore(tab);
           } else {
             tab.place = "end";
           }
         }
       });
+    }
+
+    // Sends the tab the program's Restore, to the line that the session
+    // kept for it, once.
+    function restore(tab) {
+      if (tab.restore !== null) {
+        var line = tab.restore;
+        tab.restore = null;
+        tab.view.send(["Restore", line]);
+      }
+    }
+
+    // Keeps where the tab shown is, a log's, as the host says, if that
+    // changed, once its facts are shown, and it has gone back to where it
+    // was, as it then has.
+    function settle() {
+      if (current === null || current.n === 0 || !current.ready) {
+        return;
+      }
+      var at = o.at(current);
+      if (at !== null && at !== current.at) {
+        current.at = at;
+        o.keep_place(current.n, at);
+      }
     }
 
     // Opens tab `n`, the index's if it's 0, if it isn't open; and shows it,
@@ -492,7 +534,13 @@ var contexts = (function () {
     function open(n, andShow) {
       var tab = all.get(n);
       if (tab === undefined) {
-        tab = { n: n, rank: rank++, title: n === 0 ? "Root contexts" : String(n), heading: null, root: doc.createElement("div"), view: null, tick: null, place: null };
+        tab = { n: n, rank: rank++, title: n === 0 ? "Root contexts" : String(n), heading: null, root: doc.createElement("div"), view: null, tick: null, place: null, ready: false, restore: null, at: null };
+        // Where the session left it, only as the page starts.
+        if (n !== 0 && Object.prototype.hasOwnProperty.call(places, n)) {
+          tab.at = places[n];
+          tab.restore = typeof places[n] === "number" ? places[n] : null;
+          delete places[n];
+        }
         tab.root.setAttribute("hidden", "");
         o.holder.appendChild(tab.root);
         all.set(n, tab);
@@ -542,12 +590,16 @@ var contexts = (function () {
         return;
       }
       if (current !== null) {
+        settle();
         current.place = o.top();
         current.root.setAttribute("hidden", "");
       }
       current = tab;
       tab.root.removeAttribute("hidden");
-      if (tab.place === "end") {
+      if (tab.restore !== null && tab.ready) {
+        o.end();
+        restore(tab);
+      } else if (tab.place === "end") {
         o.end();
       } else {
         o.go(tab.place === null ? 0 : tab.place);
@@ -576,6 +628,7 @@ var contexts = (function () {
         tab.root.parentNode.removeChild(tab.root);
       }
       strip.update([["-", "Open", fact(tab)]]);
+      o.keep_place(n, null);
       if (tab === current) {
         current = null;
         show(order[Math.min(at, order.length - 1)]);
@@ -672,8 +725,40 @@ var contexts = (function () {
           current.tick();
         }
       },
+      settle: settle,
       strip: strip
     };
+  }
+
+  // The line of the first of a log's rows, `rows`, in order, that
+  // `below(row)` says reaches below the screen's top, as far as rows say:
+  // a message's or a run's, which the program's Restore goes back to; past
+  // a turn's mark, the row after it. Or null, if none does.
+  function placeOf(view, rows, below) {
+    var low = firstBelow(rows, below);
+    for (var i = low; i < rows.length; i++) {
+      var w = view.elements.get(rows[i]);
+      if (w !== undefined && Array.isArray(w.id) && (w.id[0] === "Said" || w.id[0] === "RunBox")) {
+        return w.id[1];
+      }
+    }
+    return null;
+  }
+
+  // The index of the first of `rows`, in order, that `below(row)` says
+  // reaches below the screen's top, by halves; or rows.length.
+  function firstBelow(rows, below) {
+    var low = 0;
+    var high = rows.length;
+    while (low < high) {
+      var mid = (low + high) >> 1;
+      if (below(rows[mid])) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return low;
   }
 
   // The length that steps say a log has, by their last Length fact, else
@@ -744,17 +829,10 @@ var contexts = (function () {
   function keepRows(root, update) {
     var page = document.scrollingElement;
     var rows = page ? root.querySelectorAll(".g-box > .g-entry") : [];
-    // The first row whose bottom is below the screen's top, by halves.
-    var low = 0;
-    var high = rows.length;
-    while (low < high) {
-      var mid = (low + high) >> 1;
-      if (rows[mid].getBoundingClientRect().bottom > 0) {
-        high = mid;
-      } else {
-        low = mid + 1;
-      }
-    }
+    // The first row whose bottom is below the screen's top.
+    var low = firstBelow(rows, function (row) {
+      return row.getBoundingClientRect().bottom > 0;
+    });
     var anchor = low < rows.length ? rows[low] : null;
     var top = anchor !== null ? anchor.getBoundingClientRect().top : 0;
     update();
@@ -925,15 +1003,27 @@ var contexts = (function () {
     var line = document.createElement("span");
     var root = document.createElement("div");
     var stripRoot = document.createElement("div");
+    var top = null;
     bar.setAttribute("class", "contexts-bar");
     line.setAttribute("class", "contexts-status");
     if (tabbing) {
-      var top = document.createElement("div");
+      top = document.createElement("div");
       top.setAttribute("class", "contexts-strip");
       top.appendChild(stripRoot);
       top.appendChild(bar);
       document.body.appendChild(top);
       html.classList.add("contexts-tabbed");
+      // How tall the strip is, which a row that goes to the top of the
+      // screen goes below (contexts.css).
+      var tall = function () {
+        html.style.setProperty("--contexts-strip", Math.ceil(top.getBoundingClientRect().height) + "px");
+      };
+      if (typeof ResizeObserver === "function") {
+        new ResizeObserver(tall).observe(top);
+      } else {
+        window.addEventListener("resize", tall);
+        window.setTimeout(tall, 0);
+      }
     } else {
       document.body.appendChild(bar);
     }
@@ -968,11 +1058,19 @@ var contexts = (function () {
       tabs: rememberedWord("tabs", TABS, kept.tabs),
       tab: rememberedWord("tab", TAB, kept.tab)
     };
+    // Where each tab open was left, as the store keeps it, if it does.
+    var places = {};
+    var open_ = chosen.tabs === "" ? [] : chosen.tabs.split("-");
+    open_.forEach(function (n) {
+      var at = kept["at-" + n];
+      if (typeof at === "string" && PLACE.test(at)) {
+        chosen["at-" + n] = at;
+        places[n] = at === "end" ? at : Number(at);
+      }
+    });
     // Settings that changed: the browser remembers them, and the server's
-    // store keeps them all.
-    var save = function (name, value) {
-      chosen[name] = value;
-      remember(name, value);
+    // store keeps them all (keep), with where each tab was left.
+    var keep = function () {
       if (store !== undefined) {
         keepIn(store, chosen, function (why) {
           if (why !== null) {
@@ -980,6 +1078,11 @@ var contexts = (function () {
           }
         });
       }
+    };
+    var save = function (name, value) {
+      chosen[name] = value;
+      remember(name, value);
+      keep();
     };
     // The view, or the tabs, once the program has come; and whether the
     // page shows logs.
@@ -1088,8 +1191,9 @@ var contexts = (function () {
             home: html.getAttribute("data-home"),
             open: open !== null && TAB.test(open) ? Number(open) : null,
             kept: {
-              tabs: chosen.tabs === "" ? [] : chosen.tabs.split("-").map(Number),
-              tab: Number(chosen.tab)
+              tabs: open_.map(Number),
+              tab: Number(chosen.tab),
+              places: places
             },
             keep_tabs: function (numbers, n) {
               var words = numbers.map(String);
@@ -1098,7 +1202,42 @@ var contexts = (function () {
               }
               chosen.tabs = words.join("-");
               remember("tabs", chosen.tabs);
+              Object.keys(chosen).forEach(function (name) {
+                if (/^at-/.test(name) && words.indexOf(name.slice(3)) < 0) {
+                  delete chosen[name];
+                }
+              });
               save("tab", String(n));
+            },
+            at: function (tab) {
+              if (!page || tab.view === null) {
+                return null;
+              }
+              if (page.scrollTop + page.clientHeight >= page.scrollHeight - 8) {
+                return "end";
+              }
+              var below = top.getBoundingClientRect().bottom;
+              return placeOf(tab.view, tab.root.querySelectorAll(".g-box > .g-entry"), function (row) {
+                return row.getBoundingClientRect().bottom > below;
+              });
+            },
+            keep_place: function (n, at) {
+              var name = "at-" + n;
+              if (at === null) {
+                if (Object.prototype.hasOwnProperty.call(chosen, name)) {
+                  delete chosen[name];
+                  keep();
+                }
+                return;
+              }
+              var others = Object.keys(chosen).filter(function (one) {
+                return /^at-/.test(one) && one !== name;
+              });
+              if (others.length >= PLACES) {
+                delete chosen[others[0]];
+              }
+              chosen[name] = String(at);
+              keep();
             },
             get: get,
             post: keepIn,
@@ -1138,6 +1277,20 @@ var contexts = (function () {
           });
           aside(chosen.panel);
           every(shown.tick);
+          var settling = null;
+          window.addEventListener(
+            "scroll",
+            function () {
+              if (settling !== null) {
+                window.clearTimeout(settling);
+              }
+              settling = window.setTimeout(function () {
+                settling = null;
+                shown.settle();
+              }, SETTLE_MS);
+            },
+            { passive: true }
+          );
         });
         return;
       }
@@ -1180,5 +1333,5 @@ var contexts = (function () {
     }
   }
 
-  return { start: start, tabs: tabs, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL, TEXT: TEXT };
+  return { start: start, tabs: tabs, placeOf: placeOf, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL, TEXT: TEXT };
 })();

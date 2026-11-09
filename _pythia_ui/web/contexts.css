@@ -29,10 +29,13 @@ overflow:hidden;overflow-wrap:anywhere;padding-top:.15em;padding-bottom:.15em}
 
 /* A page of tabs (contexts.js): the strip of tabs and the bar on a line at
    the top, which stays as the page scrolls, in the stage's color; the
-   strip's HUD in that line; and a log's panel below it. */
+   strip's HUD in that line; a log's panel below it; and a row that goes to
+   the top of the screen, below it too, as tall as contexts.js says it is
+   (--contexts-strip). */
 .contexts-strip{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;align-items:flex-end;
 justify-content:space-between;gap:.4rem .75rem;padding:.35rem .75rem 0;background:var(--glui-stage)}
 .contexts-strip .g-hud{position:static;max-width:none}
+.contexts-tabbed{scroll-padding-top:var(--contexts-strip,3.4rem)}
 .contexts-tabbed .contexts-bar{position:static;margin-bottom:.3rem}
 .contexts-tabbed .g-hud.g-top-right,.contexts-tabbed .contexts-edge{top:3.4rem}
 @media print{.contexts-strip{display:none}}

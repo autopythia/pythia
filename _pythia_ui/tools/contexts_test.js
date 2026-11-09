@@ -126,10 +126,11 @@
 
   // A page of tabs, as contexts.tabs shows one in a browser, and what it
   // asks for, says and keeps: the index's tab first, and those that `more`
-  // says, as {kept: {tabs, tab}} or {open: n}.
+  // says, as {kept: {tabs, tab, places}} or {open: n}. Where the tab shown
+  // is, as a browser would say, is it.at.
   function tabbed(more) {
     var doc = new standInDom.Document();
-    var it = { doc: doc, asked: [], waiting: new Map(), said: [], kept: [], titles: [], addresses: [], top: 0, ends: 0 };
+    var it = { doc: doc, asked: [], waiting: new Map(), said: [], kept: [], titles: [], addresses: [], top: 0, ends: 0, at: null, places: [] };
     var o = {
       holder: doc.createElement("div"),
       strip: doc.createElement("div"),
@@ -156,6 +157,12 @@
       open: null,
       keep_tabs: function (numbers, shown) {
         it.kept.push(numbers.join("-") + " shows " + shown);
+      },
+      at: function () {
+        return it.at;
+      },
+      keep_place: function (n, at) {
+        it.places.push(n + " at " + at);
       },
       title: function (text) {
         it.titles.push(text);
@@ -216,6 +223,31 @@
       }
     }
     return null;
+  }
+
+  // A log's rows, in the view in `root`: the entries of its first box.
+  function rowsOf(root) {
+    var box = null;
+    var find = function (e) {
+      if (box === null && e.nodeType === 1) {
+        if ((" " + e.getAttribute("class") + " ").indexOf(" g-box ") >= 0) {
+          box = e;
+          return;
+        }
+        e.childNodes.forEach(find);
+      }
+    };
+    find(root);
+    return box === null ? [] : box.childNodes.filter(function (e) {
+      return (" " + e.getAttribute("class") + " ").indexOf(" g-entry ") >= 0;
+    });
+  }
+
+  // How many times the page said something went wrong.
+  function wrong(it) {
+    return it.said.filter(function (text) {
+      return text.indexOf("wrong: ") === 0;
+    }).length;
   }
 
   // Which of the holder's tabs show, by order.
@@ -597,7 +629,7 @@
         "/f/page",
         "/f/around/1",
         "/f/around/2",
-        "Reveal(RunBox(1), 3)",
+        "Reveal(RunBox(1), 3, False)",
         "kept 1",
         "wrong: couldn't load the rows around line 2: 502 Bad Gateway"
       ]
@@ -725,6 +757,95 @@
         return asked.concat(it.asked.slice(asked.length), it.ends + " ends", it.titles.slice(-1));
       },
       ["/f/index", "/f/tab/7", "/f/page/7", "/f/grow/7/6", "/f/index", "1 ends", "Contexts"]
+    ],
+    [
+      "a tab that the session left at a line goes back to it once its facts are shown, as the program's Restore, which asks for the rows around it",
+      function () {
+        var it = tabbed({ kept: { tabs: [3], tab: 3, places: { 3: 6 } } });
+        answer(it, "/f/tab/3", null, tabOf(3));
+        answer(it, "/f/page/3", null, LOG);
+        var shown = { view: it.tabs.shown().view };
+        return [it.ends + " ends"].concat(facts(shown, "Jumped"), facts(shown, "Reveal"), it.asked.slice(-1), it.places);
+      },
+      ["1 ends", "Jumped(6, 1, AtRow)", "Reveal(Said(6), 1, True)", "/f/around/6"]
+    ],
+    [
+      "a tab closed and opened again starts at its end: where the session left it was for the page's start",
+      function () {
+        var it = tabbed({ kept: { tabs: [3], tab: 3, places: { 3: 6 } } });
+        answer(it, "/f/tab/3", null, tabOf(3));
+        answer(it, "/f/page/3", null, LOG);
+        it.tabs.close(3);
+        it.tabs.open(3, true);
+        answer(it, "/f/tab/3", null, tabOf(3));
+        answer(it, "/f/page/3", null, LOG);
+        var shown = { view: it.tabs.shown().view };
+        return [it.ends + " ends", facts(shown, "Jumped").length + " jumps"].concat(it.places);
+      },
+      ["2 ends", "0 jumps", "3 at null"]
+    ],
+    [
+      "a hidden tab goes back to where it was left when it first shows, a run's row opening nothing; one left at its end starts there",
+      function () {
+        var it = tabbed({ kept: { tabs: [7, 3], tab: 3, places: { 7: 4, 3: "end" } } });
+        answer(it, "/f/tab/7", null, tabOf(7));
+        answer(it, "/f/tab/3", null, tabOf(3));
+        answer(it, "/f/page/3", null, LOG);
+        answer(it, "/f/page/7", null, LOG);
+        var seven = null;
+        it.tabs.each(function (tab) {
+          if (tab.n === 7) {
+            seven = { view: tab.view };
+          }
+        });
+        var before = [it.ends + " ends", facts(seven, "Jumped").length + " jumps"];
+        it.tabs.show(7);
+        return before.concat(it.ends + " ends", facts(seven, "Jumped"), facts(seven, "Reveal"), facts(seven, "RunOpen"), wrong(it) + " wrong");
+      },
+      ["1 ends", "0 jumps", "2 ends", "Jumped(4, 1, AtRow)", "Reveal(RunBox(4), 1, True)", "RunOpen(4, False)", "0 wrong"]
+    ],
+    [
+      "where the tab shown is, the session keeps as a scroll settles, once its facts are shown, and as another tab shows; not the index's; and it forgets a tab's that closes",
+      function () {
+        var it = tabbed({ kept: { tabs: [7, 3], tab: 3 } });
+        answer(it, "/f/index", null, INDEX);
+        answer(it, "/f/tab/7", null, tabOf(7));
+        answer(it, "/f/tab/3", null, tabOf(3));
+        it.at = 2;
+        it.tabs.settle();
+        answer(it, "/f/page/3", null, LOG);
+        answer(it, "/f/page/7", null, LOG);
+        it.at = 5;
+        it.tabs.settle();
+        it.tabs.settle();
+        it.at = "end";
+        it.tabs.show(7);
+        it.at = 3;
+        it.tabs.settle();
+        it.tabs.show(0);
+        it.at = 1;
+        it.tabs.settle();
+        it.tabs.close(7);
+        return it.places;
+      },
+      ["3 at 5", "3 at end", "7 at 3", "7 at null"]
+    ],
+    [
+      "a place is the line of the first row below the screen's top that a message or a run starts; past a turn's mark, the row after it",
+      function () {
+        var it = page();
+        answer(it, "/f/page", null, LOG);
+        var rows = rowsOf(it.view.root);
+        var from = function (at) {
+          return String(
+            contexts.placeOf(it.view, rows, function (row) {
+              return rows.indexOf(row) >= at;
+            })
+          );
+        };
+        return [rows.length + " rows", from(0), from(2), from(3), from(4)];
+      },
+      ["4 rows", "3", "4", "6", "null"]
     ],
     [
       "an assistant's messages as Markdown writes them, as the bar says, from the start",

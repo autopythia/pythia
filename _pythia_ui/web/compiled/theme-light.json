@@ -7,7 +7,7 @@
 {"name":"Within","kind":"rel","fields":[["id","Id"],["outer","Id"]],"key":[],"lazy":true},
 {"name":"Key","kind":"rel","fields":[["chord","Chord"],["msg","Msg"]],"key":[]},
 {"name":"Near","kind":"rel","fields":[["id","Id"],["msg","Msg"]],"key":[]},
-{"name":"Reveal","kind":"rel","fields":[["id","Id"],["at","Int"]],"key":[]},
+{"name":"Reveal","kind":"rel","fields":[["id","Id"],["at","Int"],["top","Bool",false]],"key":[]},
 {"name":"Hovered","kind":"input","fields":[["id","Id"]],"key":[]},
 {"name":"Pressed","kind":"input","fields":[["id","Id"]],"key":[]},
 {"name":"Focused","kind":"input","fields":[["id","Id"]],"key":[]},

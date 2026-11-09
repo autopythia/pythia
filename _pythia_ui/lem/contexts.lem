@@ -94,19 +94,27 @@ StarOf(i, False) :- Item(line=i), not Stars(i)
 -- message, or its item, comes into view (glem's Reveal); before the item's
 -- run has its items, the run. Visiting a turn, as the panel's outline
 -- does, is a jump to the line where it first shows, which brings the
--- turn's mark into view, and opens nothing. Each jump counts, so that one
--- to the same line again brings it into view again.
-msg Jump(line: Int), Visit(turn: Int)
+-- turn's mark into view, and opens nothing. Restoring a place, as a page
+-- does where it was left, is a jump to the row that starts at a line,
+-- which opens nothing either, and brings the row to the top of the screen,
+-- unmarked. Each jump counts, so that one to the same line again brings it
+-- into view again; and each has its aim.
+enum Aim:
+  AtLine, AtTurn, AtRow
+msg Jump(line: Int), Visit(turn: Int), Restore(line: Int)
 effect LoadAround(line: Int)
-state Jumped(line: Int, n: Int, turn: Bool) one
+state Jumped(line: Int, n: Int, aim: Aim) one
 rel Reached(run: Int)
-Reached(r) :- Jumped(l, _, False), Run(r, _, last, _), r <= l, l <= last, not Message(line=l)
+Reached(r) :- Jumped(l, _, AtLine), Run(r, _, last, _), r <= l, l <= last, not Message(line=l)
 rel Target(id: Id)
-Target(TurnMark(t)) :- Jumped(l, _, True), Turn(t, _, _, l)
-Target(Said(l)) :- Jumped(l, _, False), Message(line=l)
-Target(Ent(l)) :- Jumped(l, _, False), Item(line=l), not Message(line=l)
-Target(RunBox(r)) :- Reached(r), Jumped(l, _, False), not Item(line=l)
-Reveal(id, at=n) :- Target(id), Jumped(_, n, _)
+Target(TurnMark(t)) :- Jumped(l, _, AtTurn), Turn(t, _, _, l)
+Target(Said(l)) :- Jumped(l, _, AtLine), Message(line=l)
+Target(Ent(l)) :- Jumped(l, _, AtLine), Item(line=l), not Message(line=l)
+Target(RunBox(r)) :- Reached(r), Jumped(l, _, AtLine), not Item(line=l)
+Target(Said(l)) :- Jumped(l, _, AtRow), Message(line=l)
+Target(RunBox(l)) :- Jumped(l, _, AtRow), Run(line=l)
+Reveal(id, at=n) :- Target(id), Jumped(_, n, a), a /= AtRow
+Reveal(id, at=n, top=True) :- Target(id), Jumped(_, n, AtRow)
 
 -- The panel beside a log, which shows as the host says, from its bar
 -- (Aside): the lines starred, by turn, as the host sends them (Pin), each
@@ -246,14 +254,19 @@ on Fill(l):
   LoadRun(l) :- Run(line=l), not RunLoaded(run=l)
 
 on Jump(l):
-  Jumped(l, n + 1, False) :- Jumped(_, n, _)
-  Jumped(l, 1, False) :- not Jumped()
+  Jumped(l, n + 1, AtLine) :- Jumped(_, n, _)
+  Jumped(l, 1, AtLine) :- not Jumped()
   LoadAround(l)
 
 on Visit(t):
-  Jumped(l, n + 1, True) :- Turn(t, _, _, l), Jumped(_, n, _)
-  Jumped(l, 1, True) :- Turn(t, _, _, l), not Jumped()
+  Jumped(l, n + 1, AtTurn) :- Turn(t, _, _, l), Jumped(_, n, _)
+  Jumped(l, 1, AtTurn) :- Turn(t, _, _, l), not Jumped()
   LoadAround(l) :- Turn(t, _, _, l)
+
+on Restore(l):
+  Jumped(l, n + 1, AtRow) :- Jumped(_, n, _)
+  Jumped(l, 1, AtRow) :- not Jumped()
+  LoadAround(l)
 
 on Starred(Said(l), v):
   Star(l, v)

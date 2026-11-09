@@ -805,13 +805,16 @@ var glem = (function () {
 
   // Brings into view each widget that glem's Reveal facts name, as the last
   // tick left them, once for each `at`, as soon as its element shows; in a
-  // browser, at its next frame, after what the host did with the page.
+  // browser, at its next frame, after what the host did with the page. One
+  // that's `top` goes to the top of the screen, unmarked; the rest to its
+  // middle, marked.
   View.prototype.reveal = function () {
     var view = this;
     var now = new Map();
     this.runtime.lem.relFacts(this.runtime.prog.lem.rel("Reveal")).forEach(function (fact) {
       var key = lem.key(fact.tuple[0]);
       var at = fact.tuple[1];
+      var top = fact.tuple[2] === true;
       var w = view.widgets.get(key);
       now.set(key, view.revealed.get(key));
       if (w !== undefined && view.revealed.get(key) !== at) {
@@ -819,6 +822,12 @@ var glem = (function () {
         var element = w.made.element;
         var win = view.root.ownerDocument.defaultView;
         var show = function () {
+          if (top) {
+            if (typeof element.scrollIntoView === "function") {
+              element.scrollIntoView({ block: "start" });
+            }
+            return;
+          }
           if (view.marked !== null && view.marked !== element) {
             view.marked.removeAttribute("data-revealed");
           }

@@ -155,8 +155,9 @@
       elements(it.view).forEach(function (element, id) {
         ids.set(element, id);
       });
-      revealed = it.doc.revealed.map(function (element) {
-        return "revealed " + (ids.has(element) ? ids.get(element) : "an element that went");
+      revealed = it.doc.revealed.map(function (r) {
+        var what = ids.has(r.element) ? ids.get(r.element) : "an element that went";
+        return "revealed " + what + (r.block === "start" ? " at the top" : "");
       });
       it.doc.revealed = [];
     }

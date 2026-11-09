@@ -249,11 +249,12 @@ tick while the widget does, so that it keeps its focus and caret. Recipes send
 messages from their events; the view fills in `Focused`, sends what `Key`
 facts give for Escape, Return and Tab, sends what `Near` facts give for a
 widget whose element comes near the screen, and scrolls into view the widget
-that a `Reveal` fact names, once for each of its `at`, as soon as it shows.
-`make js-test` runs glem's ticks on `glem.js`, as Rust runs them, checks the
-tree that it keeps against one built anew, and runs the view in a stand-in DOM
-(`tools/stand_in_dom.js`), with the clicks, focus and keys of
-`lem/test/tasks_dom.txt`.
+that a `Reveal` fact names, once for each of its `at`, as soon as it shows: to
+the middle of the screen, marked for a look to show, or, if the fact says
+`top`, to the top, unmarked. `make js-test` runs glem's ticks on `glem.js`, as
+Rust runs them, checks the tree that it keeps against one built anew, and runs
+the view in a stand-in DOM (`tools/stand_in_dom.js`), with the clicks, focus
+and keys of `lem/test/tasks_dom.txt`.
 
 ### glui
 
@@ -349,28 +350,32 @@ clears `Stars(line)`. A log's panel shows beside it as the host says
 sends them (`Pin`), a starred answer with the user's messages that it answers;
 and the outline of the log's turns. A click on a pin jumps to its line, and
 one on a turn visits it (`Visit(turn)`): a jump to the line where it first
-shows that brings its mark into view, and opens nothing. An item's body comes
-the same way, when its entry is first opened: the program sends `Load(line)`,
-and the host answers with `Body` facts, or `Failed(line, why)`.
-`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
+shows that brings its mark into view, and opens nothing. Restoring a place
+(`Restore(line)`), as a page does where it was left, is a jump to the row that
+starts at a line, which opens nothing either, and brings the row to the top of
+the screen, unmarked. An item's body comes the same way, when its entry is
+first opened: the program sends `Load(line)`, and the host answers with `Body`
+facts, or `Failed(line, why)`. `lem/test/contexts_ticks.txt` and
+`contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. The node server's pages
 show tabs: the index's, and one for each context that's open, each a runtime
 and a view of its own, of which only the tab shown shows, and asks what
 changed; a click on a link to a context, without a modifier key, opens its
 tab, a tab dragged onto another moves there, and the address follows the tab
-shown, which the server's store keeps, with the tabs open. `lem/tabs.lem` is
-their strip, in a HUD at the top: the host says which are open
-(`Open(n, title, rank)`, the index as 0) and which shows (`Shown(n)`), and
-hears a pick (`Show(n)`), a close (`Close(n)`) and a move (`Move(n, to)`); the
-index can't be closed. A page names its facts on its `html` element,
-`data-facts`, and, for a log, where the rows before a line and after one are,
-`data-before`, `data-after` and `data-around`, where a run's items are,
-`data-run`, where an item's body is, `data-body`, each with `{line}` or
-`{run}`, where what the log gained since it had `{lines}` lines is,
-`data-grow`, where its stars are kept, `data-stars`, by the root's key, and
-where its panel's pins are, `data-pins`, which it asks for anew once a star is
-kept; the script fetches the program and the themes, compiled, from
+shown, which the server's store keeps, with the tabs open and where each was
+left: the line of its first row on the screen, or its end, to which it goes
+back after a reload. `lem/tabs.lem` is their strip, in a HUD at the top: the
+host says which are open (`Open(n, title, rank)`, the index as 0) and which
+shows (`Shown(n)`), and hears a pick (`Show(n)`), a close (`Close(n)`) and a
+move (`Move(n, to)`); the index can't be closed. A page names its facts on its
+`html` element, `data-facts`, and, for a log, where the rows before a line and
+after one are, `data-before`, `data-after` and `data-around`, where a run's
+items are, `data-run`, where an item's body is, `data-body`, each with
+`{line}` or `{run}`, where what the log gained since it had `{lines}` lines
+is, `data-grow`, where its stars are kept, `data-stars`, by the root's key,
+and where its panel's pins are, `data-pins`, which it asks for anew once a
+star is kept; the script fetches the program and the themes, compiled, from
 `web/compiled/`, which `make compiled` writes, and a test checks against the
 files they're compiled from. A log's page starts at its end, and keeps the
 first row on the screen in place as rows come, above it or below. Every few
