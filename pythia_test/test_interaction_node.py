@@ -1419,7 +1419,8 @@ class ViewTests(WorkspaceTest):
                       "<title>local-0 (1) · node</title>", f'<a href="/{TOKEN}/c/1">the plain'):
             self.assertIn(shown, log.body)
         self.assertRegex(log.body, f'data-grow="/{TOKEN}/lem/grow/1/[1-9][0-9]*/{{lines}}" '
-                                   f'data-stars="/{TOKEN}/lem/stars/1">')
+                                   f'data-stars="/{TOKEN}/lem/stars/1" '
+                                   f'data-pins="/{TOKEN}/lem/pins/1">')
         second = self.get(f"lem/c/{SECOND}")  # another number of 1's
         self.assertEqual((second.status, second.location), (303, f"/{TOKEN}/lem/c/1"))
         self.assertEqual((self.get("lem").status, self.get("lem").location),
@@ -1941,6 +1942,36 @@ class GrowTests(unittest.TestCase):
         self.assertEqual(app.respond("POST", f"/{TOKEN}/lem/stars/1", ["127.0.0.1:8765"],
                                      body=b'{"line": 7, "on": true}', **elsewhere).status, 403)
         self.assertEqual(store.read("stars"), {KEY_A: [5]})
+
+    def test_pins_of_the_lines_starred_with_the_questions_that_an_answer_answers(self):
+        store = Store(self.tmp / "node")
+        app = server.App(self.app.pages.roots, TOKEN, store=store)
+        self.append([*answer(), summary(), *turn("Two.")])  # lines 8 to 21: turn 2 from 12
+
+        def pins(path):
+            response = app.respond("GET", f"/{TOKEN}/{path}", ["127.0.0.1"])
+            self.assertEqual(response.status, 200, response.body[:300])
+            return [(fields["line"], fields["turn"], fields["tone"], fields["label"])
+                    for _, rel, fields in json.loads(response.body) if rel == "Pin"]
+
+        self.assertEqual(pins("lem/pins/1"), [])
+        # Turn 1's answer, turn 2's tool call, a boundary, which shows nothing, and a line
+        # past the log's end.
+        for line in (8, 14, 3, 99):
+            store.star(KEY_A, line, True)
+        want = [(2, 1, "User", "[user]"), (8, 1, "Assistant", "[assistant]"),
+                (14, 2, "Tool", "[tool-call] exec_command")]
+        self.assertEqual(pins("lem/pins/1"), want)
+        self.assertEqual(pins("lem/facts/c/1"), want)
+        store.star(KEY_A, 18, True)  # turn 2's answer, with its question, line 12
+        self.assertEqual([pin[0] for pin in pins("lem/pins/1")], [2, 8, 12, 14, 18])
+        store.star(KEY_A, 12, True)  # the question starred too: still one pin
+        self.assertEqual([pin[0] for pin in pins("lem/pins/1")], [2, 8, 12, 14, 18])
+        steps = json.loads(app.respond("GET", f"/{TOKEN}/lem/pins/1", ["127.0.0.1"]).body)
+        self.assertEqual(step_problems(json.loads(PROGRAM.read_text()), steps), [])
+        for path in ("lem/pins/9", "lem/pins/", "lem/pins/x"):
+            self.assertEqual(app.respond("GET", f"/{TOKEN}/{path}", ["127.0.0.1"]).status, 404,
+                             path)
 
     def test_the_rows_after_a_run_that_went_on_start_with_it(self):
         # Lines 4 to 7 are a run, which the log ends with; four more lines go on with it.

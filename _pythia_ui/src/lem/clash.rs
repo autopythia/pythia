@@ -19,10 +19,11 @@
 //!   Chunk(f, _), Chunk(g, _), g < f`, since two values can't both be least.
 //!
 //! The two facts can't clash if they must then agree in full; if one rule
-//! has a negation that the other's atom would refute; or if two constants
-//! that differ must be equal, so that the two solutions can't both hold, as
-//! `Opened(True)` and `Opened(False)` of a relation that's `one`. Else the
-//! check warns, at the rule, or at the later of the two.
+//! has a negation that the other's atom would refute; if two constants that
+//! differ must be equal, so that the two solutions can't both hold, as
+//! `Opened(True)` and `Opened(False)` of a relation that's `one`; or if a
+//! test of either rule must fail, as `title /= ""` where the title must be
+//! "". Else the check warns, at the rule, or at the later of the two.
 
 use super::check::{Atom, Expr, Lit, Pat, Program, Rule, Test};
 use super::parse::Cmp;
@@ -101,7 +102,7 @@ fn clash(prog: &Program, kinds: &[usize], r1: usize, r2: usize) -> Option<String
       break;
     }
   }
-  if same.impossible {
+  if same.impossible || same.fails(a, 0) || same.fails(b, 1) {
     return None;
   }
   if a.head == b.head
@@ -288,6 +289,31 @@ impl Same {
       (Expr::Text(t, x), Expr::Text(u, y)) => t == u && self.equal(x, ca, y, cb),
       _ => false,
     }
+  }
+
+  /// The constant that a value of copy `c` must be, if any.
+  fn constant(&mut self, e: &Expr, c: u8) -> Option<Value> {
+    match e {
+      Expr::Const(v) => Some(v.clone()),
+      Expr::Var(v) => {
+        let id = self.id(Term::Var(c, *v));
+        let root = self.root(id);
+        self.value.get(&root).cloned()
+      }
+      _ => None,
+    }
+  }
+
+  /// Whether a test of `rule`, of copy `c`, must fail: `x /= y` of values
+  /// that must be equal, or `x = y` of constants that differ.
+  fn fails(&mut self, rule: &Rule, c: u8) -> bool {
+    rule.body.iter().any(|lit| match lit {
+      Lit::Test(Test::Ne(x, y)) | Lit::NotTest(Test::Eq(x, y)) => self.equal(x, c, y, c),
+      Lit::Test(Test::Eq(x, y)) | Lit::NotTest(Test::Ne(x, y)) => {
+        matches!((self.constant(x, c), self.constant(y, c)), (Some(p), Some(q)) if p != q)
+      }
+      _ => false,
+    })
   }
 
   fn equal_pats(&mut self, p: &Pat, cp: u8, q: &Pat, cq: u8) -> bool {

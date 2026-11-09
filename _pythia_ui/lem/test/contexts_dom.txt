@@ -1395,11 +1395,288 @@ main.g-window
       div.g-entry-body
         pre.g-code "Here's a plan."
 
+=== the panel shows, as the host says: a pin, under its turn, and the turns
+["+", "Aside", {"shown": true}]
+["+", "Pin", {"line": 2, "turn": 1, "tone": "User", "label": "[user]", "gist": "Plan the GUI"}]
+---
+page title: "ui-0"
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "Starred"
+    div.g-panel-body
+      span.g-label.g-tone-dim "Turn 1 · 5 items: Plan the GUI"
+      button.g-listrow type="button" "[user] Plan the GUI"
+  section.g-panel
+    div.g-panel-title "Turns"
+    div.g-panel-body
+      button.g-listrow type="button" "The start · 1 item"
+      button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
+=== a click on a pin jumps to its line: it comes into view, and the host hears LoadAround
+["click", "PinRow(2)"]
+---
+page title: "ui-0"
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "Starred"
+    div.g-panel-body
+      span.g-label.g-tone-dim "Turn 1 · 5 items: Plan the GUI"
+      button.g-listrow type="button" "[user] Plan the GUI"
+  section.g-panel
+    div.g-panel-title "Turns"
+    div.g-panel-body
+      button.g-listrow type="button" "The start · 1 item"
+      button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect LoadAround {"line":2}
+revealed Said(2)
+
+=== a click on a turn visits it: its mark comes into view, and nothing opens
+["click", "TurnRow(0)"]
+---
+page title: "ui-0"
+aside.g-hud.g-top-right
+  section.g-panel
+    div.g-panel-title "Starred"
+    div.g-panel-body
+      span.g-label.g-tone-dim "Turn 1 · 5 items: Plan the GUI"
+      button.g-listrow type="button" "[user] Plan the GUI"
+  section.g-panel
+    div.g-panel-title "Turns"
+    div.g-panel-body
+      button.g-listrow type="button" "The start · 1 item"
+      button.g-listrow type="button" "Turn 1 · 5 items: Plan the GUI"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              button.g-entry-star type="button" aria-pressed="false" aria-label="star" "☆"
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        button.g-entry-star type="button" aria-pressed="true" aria-label="starred" "★"
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect LoadAround {"line":1}
+revealed TurnMark(0)
+
 === the index, in place of the log
 ["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1}]
 ["-", "Length", {"lines": 6}]
 ["-", "Chunk", {"first": 1, "last": 1}]
 ["-", "Chunk", {"first": 2, "last": 6}]
+["-", "Aside", {"shown": true}]
+["-", "Pin", {"line": 2, "turn": 1, "tone": "User", "label": "[user]", "gist": "Plan the GUI"}]
 ["+", "Page", {"title": "Contexts"}]
 ["+", "Context", {"id": "ui-0", "title": "Plan the GUI", "model": "opus", "turns": 12, "lines": 2563, "size": "13.7 MB", "changed": "5 min ago", "rank": 0, "to": "/c/ui-0"}]
 ["+", "Context", {"id": "dev-1", "title": "Let us start", "model": "opus", "turns": 3, "lines": 120, "size": "1.2 MB", "changed": "2 h ago", "rank": 1, "to": "/c/dev-1"}]

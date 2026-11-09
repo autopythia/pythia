@@ -74,25 +74,38 @@ StarOf(l, True) :- Stars(l)
 StarOf(l, False) :- Message(line=l), not Stars(l)
 StarOf(i, False) :- Item(line=i), not Stars(i)
 
--- Jumping to a line, as the panel does: the rows around it come, as the
--- host sends them (LoadAround); the run that it's in opens; and its turn's
--- mark, if a turn starts there, else its message, or its item, comes into
--- view (glem's Reveal); before the item's run has its items, the run.
--- Each jump counts, so that one to the same line again brings it into view
--- again.
-msg Jump(line: Int)
+-- Jumping to a line, as the panel's pins do: the rows around it come, as
+-- the host sends them (LoadAround); the run that it's in opens; and its
+-- message, or its item, comes into view (glem's Reveal); before the item's
+-- run has its items, the run. Visiting a turn, as the panel's outline
+-- does, is a jump to the line where it first shows, which brings the
+-- turn's mark into view, and opens nothing. Each jump counts, so that one
+-- to the same line again brings it into view again.
+msg Jump(line: Int), Visit(turn: Int)
 effect LoadAround(line: Int)
-state Jumped(line: Int, n: Int) one
-rel TurnAt(line: Int)
-TurnAt(l) :- Turn(_, _, _, l)
+state Jumped(line: Int, n: Int, turn: Bool) one
 rel Reached(run: Int)
-Reached(r) :- Jumped(l, _), Run(r, _, last, _), r <= l, l <= last, not Message(line=l)
+Reached(r) :- Jumped(l, _, False), Run(r, _, last, _), r <= l, l <= last, not Message(line=l)
 rel Target(id: Id)
-Target(TurnMark(n)) :- Jumped(l, _), TurnAt(l), Turn(n, _, _, l)
-Target(Said(l)) :- Jumped(l, _), Message(line=l), not TurnAt(l)
-Target(Ent(l)) :- Jumped(l, _), Item(line=l), not Message(line=l), not TurnAt(l)
-Target(RunBox(r)) :- Reached(r), Jumped(l, _), not Item(line=l), not Message(line=l), not TurnAt(l)
-Reveal(id, at=n) :- Target(id), Jumped(_, n)
+Target(TurnMark(t)) :- Jumped(l, _, True), Turn(t, _, _, l)
+Target(Said(l)) :- Jumped(l, _, False), Message(line=l)
+Target(Ent(l)) :- Jumped(l, _, False), Item(line=l), not Message(line=l)
+Target(RunBox(r)) :- Reached(r), Jumped(l, _, False), not Item(line=l)
+Reveal(id, at=n) :- Target(id), Jumped(_, n, _)
+
+-- The panel beside a log, which shows as the host says, from its bar
+-- (Aside): the lines starred, by turn, as the host sends them (Pin), each
+-- with its turn, tone, label and gist; for a starred answer, the user's
+-- messages before it in its turn, which it answers, come with it. Then the
+-- outline of the log's turns, each with its label and the user's input. A
+-- click on a line, or a turn, jumps to it.
+input Aside(shown: Bool) one
+input Pin(line: Int, turn: Int, tone: Tone, label: Text, gist: Text) key line
+rel Pinned(turn: Int)
+Pinned(n) :- Pin(turn=n)
+rel TurnText(n: Int, text: Text) key n
+TurnText(n, head + ": " + title) :- Turn(n, head, title, _), title /= ""
+TurnText(n, head) :- Turn(n, head, "", _)
 
 -- Each run open or folded: open as the host says (Opens), or as a jump
 -- reaches into it.
@@ -128,6 +141,7 @@ Gap(t, f) :- Ahead(t, f), not Farther(t, f), not Continues(t)
 id Top, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
 id Log, Before, After, TurnMark(Int), Said(Int), SaidText(Int), RunBox(Int), RunWait(Int)
 id Ent(Int), Part(Int, Int), Wait(Int), GapAfter(Int), GapBefore(Int)
+id Side, Pins, NoPins, PinTurn(Int), PinRow(Int), TurnList, TurnRow(Int)
 
 Window(Top, title=t) :- Page(t, items, turnto, begin):
   Heading(Title, text=t)
@@ -177,6 +191,17 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
     Label(After, text="later rows", tone=Dim, order=finish * 2 + 1) :- Last(upto), Length(finish), upto < finish, not LaterFailed(line=upto)
     Label(After, text="couldn't load the later rows: " + why, tone=Error, order=finish * 2 + 1) :- Last(upto), Length(finish), upto < finish, LaterFailed(upto, why)
 
+Hud(Side, place=TopRight) :- Aside(True):
+  Panel(Pins, title="Starred"):
+    Label(NoPins, text="Nothing is starred yet.", tone=Dim) :- not Pin()
+    for Pinned(n):
+      Label(PinTurn(n), text=words, tone=Dim, order=start * 2 - 1) :- TurnText(n, words), Turn(n, _, _, start)
+    for Pin(l, n, tone, label, gist):
+      ListRow(PinRow(l), text=label + " " + gist, on=Jump(l), order=l * 2)
+  Panel(TurnList, title="Turns"):
+    for TurnText(n, words):
+      ListRow(TurnRow(n), text=words, on=Visit(n), order=n)
+
 -- Either end of the rows that came asks for more as it comes near the
 -- screen, unless the host couldn't send them.
 Near(Before, msg=Earlier(f)) :- First(f), Page(first=p), f > p, not EarlierFailed(line=f)
@@ -200,9 +225,14 @@ on Fill(l):
   LoadRun(l) :- Run(line=l), not RunLoaded(run=l)
 
 on Jump(l):
-  Jumped(l, n + 1) :- Jumped(_, n)
-  Jumped(l, 1) :- not Jumped()
+  Jumped(l, n + 1, False) :- Jumped(_, n, _)
+  Jumped(l, 1, False) :- not Jumped()
   LoadAround(l)
+
+on Visit(t):
+  Jumped(l, n + 1, True) :- Turn(t, _, _, l), Jumped(_, n, _)
+  Jumped(l, 1, True) :- Turn(t, _, _, l), not Jumped()
+  LoadAround(l) :- Turn(t, _, _, l)
 
 on Starred(Said(l), v):
   Star(l, v)

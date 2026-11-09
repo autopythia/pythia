@@ -5,9 +5,9 @@
 // contexts_tests.js, in a stand-in DOM (tools/stand_in_dom.js), with a
 // `get` that holds each request until a case answers it: the page's
 // facts; the rows before a line, which it asks for when the program sends
-// LoadBefore; a run's items, when it sends LoadRun; and items' bodies,
-// when it sends Load; each once while it comes, and again after it
-// failed. `make js-test` runs
+// LoadBefore; a run's items, when it sends LoadRun; items' bodies, when
+// it sends Load; each once while it comes, and again after it failed; and
+// the panel's pins, once a star is kept. `make js-test` runs
 // lem.js, glem.js, glui.js, contexts.js, the program, tools/tap.js,
 // tools/stand_in_dom.js and this as one script.
 
@@ -100,6 +100,10 @@
     ["+", "Chunk", { first: 1, last: 2 }],
     ["+", "Run", { line: 1, turn: 0, last: 2, text: "2 other" }]
   ];
+
+  // The panel's pins: the user's message, and the answer, line 6.
+  var PIN3 = ["+", "Pin", { line: 3, turn: 1, tone: "User", label: "[user]", gist: "Plan the GUI" }];
+  var PIN6 = ["+", "Pin", { line: 6, turn: 1, tone: "Assistant", label: "[assistant]", gist: "Done." }];
 
   var RUN = [
     ["+", "RunLoaded", { run: 4 }],
@@ -378,6 +382,65 @@
         "Stars(3)",
         "Stars(6)",
         "wrong: couldn't keep the star: 403 Forbidden"
+      ]
+    ],
+    [
+      "the panel shows from the start, as the bar says; a star kept asks for its pins anew, in place of those before",
+      function () {
+        var answers = [];
+        var it = page({
+          aside: true,
+          stars: "/f/stars",
+          pins: "/f/pins",
+          post: function (url, value, done) {
+            answers.push(done);
+          }
+        });
+        answer(it, "/f/page", null, LOG.concat([["+", "Stars", { line: 3 }], PIN3]));
+        var before = facts(it, "Aside").concat(facts(it, "Pin"), facts(it, "Hud"));
+        it.view.send(["Starred", ["Said", 6], true]);
+        var asked = it.asked.length + " asked";
+        answers.shift()(null);
+        answer(it, "/f/pins", null, [PIN6]);
+        return before.concat(asked, it.asked.slice(1), facts(it, "Pin"), it.said.slice(1));
+      },
+      [
+        "Aside(True)",
+        'Pin(3, 1, User, "[user]", "Plan the GUI")',
+        "Hud(Side, TopRight)",
+        "1 asked",
+        "/f/pins",
+        'Pin(6, 1, Assistant, "[assistant]", "Done.")'
+      ]
+    ],
+    [
+      "stars kept while the pins come: the page asks once more, after; pins that can't come, the page says why",
+      function () {
+        var it = page({
+          stars: "/f/stars",
+          pins: "/f/pins",
+          post: function (url, value, done) {
+            done(null);
+          }
+        });
+        answer(it, "/f/page", null, LOG.concat([["+", "Stars", { line: 3 }], PIN3]));
+        it.view.send(["Starred", ["Said", 6], true]);
+        it.view.send(["Starred", ["Said", 3], false]);
+        it.view.send(["Starred", ["Said", 3], true]);
+        var asked = it.asked.slice(1);
+        answer(it, "/f/pins", null, [PIN3, PIN6]);
+        var again = it.asked.slice(1 + asked.length);
+        var pinned = facts(it, "Pin");
+        answer(it, "/f/pins", "503 Service Unavailable", null);
+        return asked.concat(again, pinned, facts(it, "Aside").length + " asides", it.said.slice(1));
+      },
+      [
+        "/f/pins",
+        "/f/pins",
+        'Pin(3, 1, User, "[user]", "Plan the GUI")',
+        'Pin(6, 1, Assistant, "[assistant]", "Done.")',
+        "0 asides",
+        "wrong: couldn't load the starred lines: 503 Service Unavailable"
       ]
     ],
     [

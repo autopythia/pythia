@@ -9,12 +9,13 @@ first written. `make web` writes it, and `make web-serve` serves the pages.
 usage: contexts_sample.py DIR [ITEMS]
 
 In DIR: index.json and log.json, each page's facts as JSON steps
-(src/lem/host.rs), the log's its turns and its last rows;
-before/LINE.json, the rows before line LINE, which the log's page asks
-for as its top comes near the screen; run/LINE.json, the items of the run
-that starts at line LINE, which it asks for when the run opens; and
-body/LINE.json, the body of each item that has one, as Body facts, which
-it asks for when the item's entry opens.
+(src/lem/host.rs), the log's its turns, its last rows, and two lines
+starred, with its panel's pins; before/LINE.json, the rows before line
+LINE, which the log's page asks for as its top comes near the screen;
+run/LINE.json, the items of the run that starts at line LINE, which it
+asks for when the run opens; and body/LINE.json, the body of each item
+that has one, as Body facts, which it asks for when the item's entry
+opens.
 """
 
 import json
@@ -64,6 +65,22 @@ def summary(labels):
     return "; ".join(parts)
 
 
+def pins(shown, starred):
+    """Pin facts for the lines `starred`, as the node server sends them
+    (view.View.pin_facts): each line, and for an answer, the user's messages
+    before it in its turn, which it answers. `shown` has each line's turn,
+    tone, label and gist."""
+    pinned = set()
+    for line in starred:
+        turn, _, label, _ = shown[line]
+        pinned.add(line)
+        if label == "[assistant]":
+            pinned.update(n for n in range(1, line)
+                          if shown[n][0] == turn and shown[n][2] == "[user]")
+    return [["+", "Pin", {"line": n, "turn": shown[n][0], "tone": shown[n][1],
+                          "label": shown[n][2], "gist": shown[n][3]}] for n in sorted(pinned)]
+
+
 def main():
     if len(sys.argv) not in (2, 3):
         sys.exit(__doc__.split("\n\n")[1])
@@ -90,10 +107,11 @@ def main():
            ["+", "Length", {"lines": items}],
            ["+", "Nav", {"n": 0, "text": "Contexts", "to": INDEX_PAGE}]]
     # Its rows, each [step, first line, last line]; and each run's items.
-    rows, runs, bodies, marked = [], {}, 0, -1
+    rows, runs, bodies, marked, shown = [], {}, 0, -1, {}
     for line in range(1, items + 1):
         tone, label, gist, body = CYCLE[(line - 1) % len(CYCLE)]
         turn = min((line - 1) // ITEMS_PER_TURN, turns - 1)
+        shown[line] = (turn, tone, label, gist.format(n=line))
         if turn > marked:  # its first line: the turn's mark
             marked = turn
             count = ITEMS_PER_TURN if turn < turns - 1 else items - turn * ITEMS_PER_TURN
@@ -127,6 +145,14 @@ def main():
             row[0][2]["text"] = summary([item[2]["label"] for item in mine])
             write(os.path.join(out, "run", f"{row[1]}.json"),
                   [["+", "RunLoaded", {"run": row[1]}]] + mine)
+    # Lines starred, with the panel's pins: the first answer, which brings
+    # the question it answers, and the last turn's first tool call.
+    last = (turns - 1) * ITEMS_PER_TURN + 1
+    starred = [line for line in range(1, items + 1)
+               if shown[line][2] == "[assistant]"][:1] + [
+        line for line in range(last, items + 1)
+        if shown[line][2].startswith("[tool-call]")][:1]
+    log += [["+", "Stars", {"line": line}] for line in starred] + pins(shown, starred)
     # The rows in chunks, the last with the page, and each other as the rows
     # before the first line of the chunk after it.
     end, after = len(rows), None

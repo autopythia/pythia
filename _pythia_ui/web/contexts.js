@@ -1,31 +1,29 @@
-// web/contexts.js: the host's part of pythia's contexts (lem/contexts.lem)
-// in a browser, which the glui view of pythia's node server runs on its
-// pages, for the root contexts and for a context's log
+// web/contexts.js: the host's part of pythia's contexts (lem/contexts.lem) in
+// a browser, which the glui view of pythia's node server runs on its pages,
+// for the root contexts and for a context's log
 // (pythia/interaction/node/view.py). A page gives, on its <html> element,
-// `data-facts`, the URL of its facts, JSON steps (src/lem/host.rs); and,
-// for a log, `data-before`, `data-after` and `data-around`, the URLs of the
-// rows before a line, after one and around one, `data-run`, the URL of a
-// run's items, and
-// `data-body`, the URL of an item's body, each with `{line}` or `{run}` in
-// place of its line; and `data-grow`, the URL of what the log gained since it
-// had `{lines}` lines, and `data-stars`, the URL that keeps its stars; and,
-// on each page, `data-store`, the URL of the settings that the server keeps
-// for the view (pythia/interaction/node/store.py). The compiled program and
-// glui's themes are beside
-// this script, in compiled/. It shows the page in glui's widgets
-// (src/glui/glui.js), in the look and the theme that its bar chooses,
-// which the server keeps, and the browser too, from the log's end, with
-// every run folded or every run open, as the bar's Runs says (Opening); and
-// it answers the
+// `data-facts`, the URL of its facts, JSON steps (src/lem/host.rs); and, for
+// a log, `data-before`, `data-after` and `data-around`, the URLs of the rows
+// before a line, after one and around one, `data-run`, the URL of a run's
+// items, and `data-body`, the URL of an item's body, each with `{line}` or
+// `{run}` in place of its line; `data-grow`, the URL of what the log gained
+// since it had `{lines}` lines; `data-stars`, the URL that keeps its stars;
+// and `data-pins`, the URL of its panel's pins; and, on each page,
+// `data-store`, the URL of the settings that the server keeps for the view
+// (pythia/interaction/node/store.py). The compiled program and glui's themes
+// are beside this script, in compiled/. It shows the page in glui's widgets
+// (src/glui/glui.js), in the look and the theme that its bar chooses, which
+// the server keeps, and the browser too; a log from its end, with every run
+// folded or every run open, as the bar's Runs says (Opening), and with its
+// panel beside it, or not, as the bar's Panel says (Aside). It answers the
 // program's LoadBefore(line) and LoadAfter(line) with rows, or with
 // EarlierFailed(line, why) or LaterFailed(line, why); its LoadAround(line)
-// with rows, or a status that says why not; its LoadRun(run)
-// with the run's items, or with RunFailed(run, why); and its Load(line)
-// with the item's body, or with Failed(line, why). Every few seconds, while
-// the page shows, it asks what a log gained, or an index's facts anew, and
-// tells the program what changed. Like lem.js, it's a plain script that
-// defines one global, `contexts`, and it starts itself on a page that gives
-// `data-facts`.
+// with rows, or a status that says why not; its LoadRun(run) with the run's
+// items, or with RunFailed(run, why); and its Load(line) with the item's
+// body, or with Failed(line, why). Every few seconds, while the page shows,
+// it asks what a log gained, or an index's facts anew, and tells the program
+// what changed. Like lem.js, it's a plain script that defines one global,
+// `contexts`, and it starts itself on a page that gives `data-facts`.
 var contexts = (function () {
   "use strict";
 
@@ -46,6 +44,12 @@ var contexts = (function () {
     ["folded", "folded"],
     ["open", "open"]
   ];
+  // Whether a log's panel, of its starred lines and its turns, hides, the
+  // default, or shows beside it.
+  var PANEL = [
+    ["hidden", "hidden"],
+    ["shown", "shown"]
+  ];
 
   // Shows a page of a compiled program, contexts.lem's, in a view in
   // `o.root`, and is its host:
@@ -63,7 +67,8 @@ var contexts = (function () {
   //   or a run's items or a body, keeping what's on the screen in place; and
   //   o.shown(), if given, hears that the page's facts are shown;
   // - o.opening, for a log, says whether every run opens, as an Opening
-  //   fact from the start, which the bar changes later (boot);
+  //   fact from the start, and o.aside whether its panel shows, as an Aside
+  //   fact, both of which the bar changes later (boot);
   // - o.grow, for a log, is the URL of what it gained since it had {lines}
   //   lines; and o.every(tick), if given, calls tick() every few seconds
   //   while the page shows, when a log asks what it gained, and an index its
@@ -74,7 +79,11 @@ var contexts = (function () {
   //   o.post(url, value, done) sends it JSON, and calls done(null), or
   //   done(why): the program's Star(line, on) changes Stars on the page at
   //   once, and then in the server's store; one that can't be kept is
-  //   taken back, and the page says why.
+  //   taken back, and the page says why;
+  // - o.pins, for a log, is the URL of its panel's pins, which the page
+  //   asks for anew once a star is kept, one request at a time: the Pin
+  //   facts that come take the place of those before. Should they fail, the
+  //   page says why.
   //
   // It asks for rows, a run's items, or a body, once while they're coming,
   // and again when the program asks again after they failed; meanwhile the
@@ -115,8 +124,13 @@ var contexts = (function () {
     var facts = null;
     var asking = false;
     var live = true;
-    // The lines starred, as the page shows them (Stars).
+    // The lines starred, as the page shows them (Stars); the panel's pins,
+    // as they last came, by their text; whether a request for them is out;
+    // and whether to ask again once it's back, as a star was kept meanwhile.
     var starred = new Set();
+    var pins = new Map();
+    var pinning = false;
+    var again = false;
     var view = glui.view(runtime, o.root, {
       effects: function (effects) {
         effects.forEach(function (effect) {
@@ -135,8 +149,15 @@ var contexts = (function () {
         status("error: " + message, true);
       }
     });
+    var settings = [];
     if (typeof o.opening === "boolean") {
-      view.update([["+", "Opening", { open: o.opening }]]);
+      settings.push(["+", "Opening", { open: o.opening }]);
+    }
+    if (typeof o.aside === "boolean") {
+      settings.push(["+", "Aside", { shown: o.aside }]);
+    }
+    if (settings.length > 0) {
+      view.update(settings);
     }
 
     // Sets or clears the star of line `line`: on the page at once, and then
@@ -162,9 +183,49 @@ var contexts = (function () {
               change(!on);
             }
             status("couldn't keep the star: " + why, true);
+            return;
           }
+          pin();
         });
       }
+    }
+
+    // Asks for the panel's pins anew, as a star was kept: one request at a
+    // time, and once more if another star was kept meanwhile.
+    function pin() {
+      if (typeof o.pins !== "string") {
+        return;
+      }
+      if (pinning) {
+        again = true;
+        return;
+      }
+      pinning = true;
+      o.get(o.pins, function (why, steps) {
+        pinning = false;
+        if (why === null && !Array.isArray(steps)) {
+          why = "they aren't a list of steps";
+        }
+        if (why === null) {
+          var now = byText(steps);
+          var change = changed(pins, now);
+          refused = null;
+          if (change.length > 0) {
+            view.update(change);
+          }
+          why = refused;
+          if (why === null) {
+            pins = now;
+          }
+        }
+        if (why !== null) {
+          status("couldn't load the starred lines: " + why, true);
+        }
+        if (again) {
+          again = false;
+          pin();
+        }
+      });
     }
 
     // What was asked for, `value`, fails: the turn or the entry says why;
@@ -227,6 +288,8 @@ var contexts = (function () {
         steps.forEach(function (step) {
           if (step[0] === "+" && step[1] === "Stars") {
             starred.add(step[2].line);
+          } else if (step[0] === "+" && step[1] === "Pin") {
+            pins.set(JSON.stringify([step[1], step[2]]), step);
           }
         });
         length = lengthOf(steps, length);
@@ -478,7 +541,8 @@ var contexts = (function () {
     var chosen = {
       look: remembered("look", LOOKS, kept.look),
       theme: remembered("theme", THEMES, kept.theme),
-      runs: remembered("runs", RUNS, kept.runs)
+      runs: remembered("runs", RUNS, kept.runs),
+      panel: remembered("panel", PANEL, kept.panel)
     };
     // A setting that changed: the browser remembers it, and the server's
     // store keeps them all.
@@ -496,6 +560,10 @@ var contexts = (function () {
     // The view, once the program has come; and whether the page is a log.
     var shown = null;
     var log = html.getAttribute("data-run") !== null;
+    // A log's panel shows beside it, as contexts.css makes room for it.
+    var aside = function (name) {
+      html.classList.toggle("contexts-aside", log && name === "shown");
+    };
     menu(bar, "Look", LOOKS, chosen.look, function (value) {
       save("look", value);
       look(value);
@@ -514,10 +582,21 @@ var contexts = (function () {
         }
         save("runs", value);
       });
+      menu(bar, "Panel", PANEL, chosen.panel, function (value) {
+        if (shown !== null) {
+          shown.update([
+            ["-", "Aside", { shown: chosen.panel === "shown" }],
+            ["+", "Aside", { shown: value === "shown" }]
+          ]);
+        }
+        save("panel", value);
+        aside(value);
+      });
     }
     bar.appendChild(line);
     look(chosen.look);
     theme(chosen.theme);
+    aside(chosen.panel);
     get(new URL("compiled/contexts.json", here).href, function (why, program) {
       if (why !== null) {
         status("couldn't load the program: " + why, true);
@@ -527,8 +606,10 @@ var contexts = (function () {
         root: root,
         program: program,
         opening: log ? chosen.runs === "open" : undefined,
+        aside: log ? chosen.panel === "shown" : undefined,
         grow: html.getAttribute("data-grow"),
         stars: html.getAttribute("data-stars"),
+        pins: html.getAttribute("data-pins"),
         post: keepIn,
         every: function (tick) {
           var showing = function () {
@@ -566,5 +647,5 @@ var contexts = (function () {
     }
   }
 
-  return { start: start, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS };
+  return { start: start, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS, PANEL: PANEL };
 })();

@@ -187,11 +187,11 @@ with its key; two facts that a tick derives with one key fail it. A relation
 declared `one` has one fact at most, as a key of no columns would give: a
 page's title, a log's length, a setting. Before a tick runs, the checker warns
 of a rule that may give one key two facts, or one id two widgets, where keys,
-constructors, `one` and negations don't show that it can't
-(`src/lem/clash.rs`); `pythia-ui lem` prints the warnings. A `rel` declared
-`lazy` is derived only when something reads it: a rule of a relation that's
-derived, an `on` block, or the host, with `?`. glem's `Within` is lazy, since
-few programs read it.
+constructors, `one`, negations and tests that must fail don't show that it
+can't (`src/lem/clash.rs`); `pythia-ui lem` prints the warnings. A `rel`
+declared `lazy` is derived only when something reads it: a rule of a relation
+that's derived, an `on` block, or the host, with `?`. glem's `Within` is lazy,
+since few programs read it.
 
 A tick runs a relation's rules only when a relation that they read has changed
 since they last ran; if its facts come out the same, what reads it doesn't run
@@ -332,28 +332,36 @@ and brings its row into view (glem's `Reveal`); where the stretches of rows
 that came don't meet, a marker at either side asks for the rows between as it
 comes near the screen. A message, and an item, has a star (glui's `Entry`'s
 `star`), faint until it's set: setting or clearing it sends `Star(line, on)`,
-and the host sets or clears `Stars(line)`. An item's body comes the same way,
-when its entry is first opened: the program sends `Load(line)`, and the host
-answers with `Body` facts, or `Failed(line, why)`.
-`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
+and the host sets or clears `Stars(line)`. A log's panel shows beside it as
+the host says (`Aside(shown)`), in a HUD: the lines starred, under their
+turns, as the host sends them (`Pin`), a starred answer with the user's
+messages that it answers; and the outline of the log's turns. A click on a pin
+jumps to its line, and one on a turn visits it (`Visit(turn)`): a jump to the
+line where it first shows that brings its mark into view, and opens nothing.
+An item's body comes the same way, when its entry is first opened: the program
+sends `Load(line)`, and the host answers with `Body` facts, or
+`Failed(line, why)`. `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test
+it.
 
 In a browser, `web/contexts.js` is the host's part. A page names its facts on
 its `html` element, `data-facts`, and, for a log, where the rows before a line
 and after one are, `data-before`, `data-after` and `data-around`, where a
 run's items are, `data-run`, where an item's body is, `data-body`, each with
 `{line}` or `{run}`, where what the log gained since it had `{lines}` lines
-is, `data-grow`, and where its stars are kept, `data-stars`, by the root's
-key; the script fetches the program and the themes, compiled, from
+is, `data-grow`, where its stars are kept, `data-stars`, by the root's key,
+and where its panel's pins are, `data-pins`, which it asks for anew once a
+star is kept; the script fetches the program and the themes, compiled, from
 `web/compiled/`, which `make compiled` writes, and a test checks against the
 files they're compiled from. A log's page starts at its end, and keeps the
 first row on the screen in place as rows come, above it or below. Every few
 seconds while it shows, a page asks what changed: a log, what it gained; the
 index, its facts anew, whose difference from the last it applies. Its bar
 picks the look and the theme, and, for a log, whether its runs are folded or
-open, which the node server keeps for the view, at `data-store`, and the
-browser too. `make web` writes a sample, an index and a log of 13,394 items,
-the most that one of pythia's contexts had when it was first written, in turns
-of 50, for two pages that show it as the node server's do:
+open and whether its panel shows, which the node server keeps for the view, at
+`data-store`, and the browser too. `make web` writes a sample, an index and a
+log of 13,394 items, the most that one of pythia's contexts had when it was
+first written, in turns of 50, for two pages that show it as the node server's
+do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

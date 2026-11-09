@@ -133,3 +133,29 @@ Shown(0, "open") :- Opened(True)
 Shown(0, "closed") :- Opened(False)
 ---
 (none)
+
+=== two rules that a test keeps apart, through a key
+input Turn(n: Int, title: Text) key n
+rel Shown(n: Int, text: Text) key n
+Shown(n, "Turn: " + title) :- Turn(n, title), title /= ""
+Shown(n, "The start") :- Turn(n, "")
+---
+(none)
+
+=== a test that doesn't keep them apart
+input Turn(n: Int, title: Text) key n
+rel Shown(n: Int, text: Text) key n
+Shown(n, "Turn: " + title) :- Turn(n, title), title /= "x"
+Shown(n, "The start") :- Turn(n, "")
+---
+t.lem:4:1: warning: this rule and the one at t.lem:3:1 may give Shown two facts with one key, which differ in `text`:
+Shown(n, "The start") :- Turn(n, "")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+=== two rules that an equality keeps apart, through a key
+input Turn(n: Int, title: Text) key n
+rel Shown(n: Int, text: Text) key n
+Shown(n, "the plan") :- Turn(n, "plan")
+Shown(n, "the rest") :- Turn(n, t), t = "rest"
+---
+(none)

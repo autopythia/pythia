@@ -1,26 +1,29 @@
 """The glui view: the node's root contexts, in glui's widgets, in a browser.
 
 Its two pages, ``/TOKEN/lem/`` for the roots and ``/TOKEN/lem/c/N`` for root
-N's log, each load glui's scripts and stylesheets, and the program that
-shows them, ``lem/contexts.lem`` compiled, from ``_pythia_ui/`` beside the
-package (``Files``), at ``/TOKEN/lem/files/NAME``. A page's facts come as
-JSON steps (``_pythia_ui/src/lem/host.rs``), from ``/TOKEN/lem/facts/`` and
+N's log, each load glui's scripts and stylesheets, and the program that shows
+them, ``lem/contexts.lem`` compiled, from ``_pythia_ui/`` beside the package
+(``Files``), at ``/TOKEN/lem/files/NAME``. A page's facts come as JSON steps
+(``_pythia_ui/src/lem/host.rs``), from ``/TOKEN/lem/facts/`` and
 ``/TOKEN/lem/facts/c/N``: for a log, its turns, each with the line where it
-starts, and its last rows. A log's rows are its messages, each with its
-text, and its runs, the other items between two messages within a turn,
-each with what's in it. More rows come as either end of those on the page
-comes near the screen, from ``/TOKEN/lem/rows/N/before/LINE`` and
+starts, and its last rows. A log's rows are its messages, each with its text,
+and its runs, the other items between two messages within a turn, each with
+what's in it. More rows come as either end of those on the page comes near the
+screen, from ``/TOKEN/lem/rows/N/before/LINE`` and
 ``/TOKEN/lem/rows/N/after/LINE``, so that a page holds what's been scrolled
-through; a run's items when it's opened, from ``/TOKEN/lem/run/N/LINE``; and
-an item's body when its entry opens, from ``/TOKEN/lem/body/N/LINE``. A log
-that grows says so, to a page that asks every few seconds what it gained
-since it had LINES lines, from ``/TOKEN/lem/grow/N/GENERATION/LINES``: its
-length, and the turns that changed; its later rows then come as others do,
-the run that it ended with whole, if it went on. A log's facts hold the lines
-starred in it, which a page sets or clears at ``/TOKEN/lem/stars/N``, and the
-server keeps by the root's key (``store.py``). An
-item's label and gist are those of the
-server's plain pages, and its body holds what they show for it
+through, and those around a line that the page jumps to, from
+``/TOKEN/lem/rows/N/around/LINE``; a run's items when it's opened, from
+``/TOKEN/lem/run/N/LINE``; and an item's body when its entry opens, from
+``/TOKEN/lem/body/N/LINE``. A log that grows says so, to a page that asks
+every few seconds what it gained since it had LINES lines, from
+``/TOKEN/lem/grow/N/GENERATION/LINES``: its length, and the turns that
+changed; its later rows then come as others do, the run that it ended with
+whole, if it went on. A log's facts hold the lines starred in it, which a page
+sets or clears at ``/TOKEN/lem/stars/N``, and the server keeps by the root's
+key (``store.py``); and the pins of its page's panel: each line starred, and
+the user's messages that a starred answer answers, which come anew from
+``/TOKEN/lem/pins/N`` once a star changes. An item's label and gist are those
+of the server's plain pages, and its body holds what they show for it
 (``pages.Renderer``), as text, cut as they cut it. Every text is as pythia's
 terminal shows it, each character to escape as its code point.
 
@@ -289,6 +292,8 @@ class View:
         if what == "run":
             cid, _, line = name.partition("/")
             return self.run(pages, cid, line)
+        if what == "pins":
+            return self.pins(pages, name)
         if what == "grow":
             cid, _, rest = name.partition("/")
             generation, _, lines = rest.partition("/")
@@ -305,12 +310,13 @@ class View:
     def _page(self, pages: Pages, title: str, facts: str, body: Optional[str] = None, *,
               rows: Optional[str] = None, run: Optional[str] = None,
               grow: Optional[str] = None, stars: Optional[str] = None,
-              plain: Optional[str] = None) -> Response:
-        """A page of the view: the URLs of its facts, its rows before a line and after one
-        (``rows``, with ``{way}`` for ``before`` or ``after``), its runs' items, its bodies,
-        and what its log gained since it had ``{lines}`` lines (``grow``); the settings
-        that the server keeps for the view (``store.py``); what it loads; and, for a browser
-        without script, a link to the same in the plain pages, ``plain``."""
+              pins: Optional[str] = None, plain: Optional[str] = None) -> Response:
+        """A page of the view: the URLs of its facts, its rows before a line, after one and
+        around one (``rows``, with ``{way}`` for ``before``, ``after`` or ``around``), its
+        runs' items, its bodies, what its log gained since it had ``{lines}`` lines
+        (``grow``), where it keeps a star (``stars``) and its panel's pins (``pins``); the
+        settings that the server keeps for the view (``store.py``); what it loads; and, for
+        a browser without script, a link to the same in the plain pages, ``plain``."""
         missing = self.files.missing()
         if missing:
             return pages.not_found(f"The glui view needs files that aren't in "
@@ -324,7 +330,8 @@ class View:
         data += ("" if run is None else f' data-run="{h(run)}"') + (
             "" if body is None else f' data-body="{h(body)}"') + (
             "" if grow is None else f' data-grow="{h(grow)}"') + (
-            "" if stars is None else f' data-stars="{h(stars)}"')
+            "" if stars is None else f' data-stars="{h(stars)}"') + (
+            "" if pins is None else f' data-pins="{h(pins)}"')
         plain = f"{pages.base}/" if plain is None else plain
         return Response(200, (
             f"<!doctype html>\n<html lang=en{data}>\n<head>\n<meta charset=utf-8>\n"
@@ -356,6 +363,7 @@ class View:
                           run=f"{pages.base}/lem/run/{number}/{{run}}",
                           grow=f"{pages.base}/lem/grow/{number}/{generation}/{{lines}}",
                           stars=f"{pages.base}/lem/stars/{number}",
+                          pins=f"{pages.base}/lem/pins/{number}",
                           plain=f"{pages.base}/c/{number}")
 
     # The facts.
@@ -412,12 +420,39 @@ class View:
                                    "first": 1}],
                     ["+", "Length", {"lines": len(index)}],
                     *(["+", "Stars", {"line": line}] for line in self._stars(context)),
+                    *self.pin_facts(pages, context),
                     ["+", "Nav", {"n": 0, "text": "Root contexts", "to": f"{pages.base}/lem/"}],
                     ["+", "Nav", {"n": 1, "text": "Plain pages", "to": f"{pages.base}/c/{number}"}]]
                 steps.extend(self.turn_facts(context, 0))
                 steps.extend(self.chunk(pages, context, *spans(context, len(index) - 1, False)))
         except OSError:
             return None
+        return steps
+
+    def pin_facts(self, pages: Pages, context: Context) -> list:
+        """A Pin for each line starred in ``context``'s log, for the page's panel, with its
+        turn, tone, label and gist, as an item has them; and for a starred answer, the
+        assistant's, one for each of the user's messages before it in its turn, which it
+        answers; once for each line, in order. Holds the index's lock."""
+        index = context.index
+        pinned: Dict[int, int] = {}  # line, from 1: its turn
+        for line in self._stars(context):
+            if line > len(index):
+                continue
+            turn = context.turn_of(line - 1)
+            pinned[line] = turn
+            if index.kind(line - 1) == ("message", "assistant"):
+                start = context.turn_range(turn)[0]
+                pinned.update((each + 1, turn) for each in range(start, line - 1)
+                              if index.kind(each) == ("message", "user"))
+        renderer = pages._renderer(context, fold=frozenset())
+        steps: list = []
+        for line in sorted(pinned):
+            fact = item(renderer, line, 0, context.records(line - 1, line)[0][1])
+            if fact is not None:
+                steps.append(["+", "Pin", {"line": line, "turn": pinned[line],
+                                           "tone": fact["tone"], "label": fact["label"],
+                                           "gist": fact["gist"]}])
         return steps
 
     def _stars(self, context: Context) -> List[int]:
@@ -517,6 +552,19 @@ class View:
                 if fact is not None:
                     steps.append(["+", "Item", fact])
         return _steps(steps)
+
+    def pins(self, pages: Pages, cid: str) -> Response:
+        """Root ``cid``'s pins, for its page's panel, as ``pin_facts`` gives them, which a
+        page asks for anew once a star changes."""
+        context = pages.roots.get(cid)
+        if context is None:
+            return _plain(404, "There's no such root context here.")
+        try:
+            context.refresh()
+            with context.index.lock:
+                return _steps(self.pin_facts(pages, context))
+        except OSError as exc:
+            return _plain(404, f"{context.label}'s log can't be read: {exc}")
 
     def grow(self, pages: Pages, cid: str, generation: str, text: str) -> Response:
         """What root ``cid``'s log gained since it had ``text`` lines, for a page from when
