@@ -15,13 +15,14 @@
   "use strict";
 
   // A page that starts, as contexts.start would in a browser, and what it
-  // asks for and says.
-  function page() {
+  // asks for and says; with every run open, if `opening`.
+  function page(opening) {
     var doc = new standInDom.Document();
     var it = { asked: [], waiting: new Map(), said: [], kept: 0, shown: 0 };
     it.view = contexts.start({
       root: doc.createElement("div"),
       program: CONTEXTS_TESTS.program,
+      opening: opening,
       facts: "/f/page",
       before: "/f/before/{line}",
       after: "/f/after/{line}",
@@ -242,6 +243,31 @@
         "wrong: error: Body's `part` is an Int, not a string",
         "0 parts",
         'Failed(5, "Body\'s `part` is an Int, not a string")'
+      ]
+    ],
+    [
+      "every run open from the start: it asks for its items near the screen, once while they come",
+      function () {
+        var it = page(true);
+        answer(it, "/f/page", null, LOG);
+        var asked = it.asked.slice();
+        var near = facts(it, "Near");
+        it.view.send(["Fill", 4]);
+        it.view.send(["Fill", 4]);
+        asked = asked.concat(it.asked.slice(asked.length));
+        answer(it, "/f/run/4", null, RUN);
+        var runs = facts(it, "Entry").filter(function (fact) {
+          return fact.indexOf("Entry(RunBox(") === 0;
+        });
+        return asked.concat(near, runs, facts(it, "Near").length + " near");
+      },
+      [
+        "/f/page",
+        "/f/run/4",
+        "Near(Before, Earlier(3))",
+        "Near(RunBox(4), Fill(4))",
+        'Entry(RunBox(4), "2 tool calls: exec_command 2", "", "4", Dim, True, "/f/item/4", True, Log, 8)',
+        "1 near"
       ]
     ],
     [

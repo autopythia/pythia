@@ -244,17 +244,23 @@ var standInDom = (function () {
     }
   });
 
-  // A details element's `open`, which its attribute holds.
+  // A details element's `open`, which its attribute holds. When it changes,
+  // the element fires toggle, as a browser does; at once, where a browser
+  // fires it a little later.
   Object.defineProperty(Element.prototype, "open", {
     get: function () {
       return this.getAttribute("open") !== null;
     },
     set: function (open) {
+      if (Boolean(open) === this.open) {
+        return;
+      }
       if (open) {
         this.setAttribute("open", "");
       } else {
         this.removeAttribute("open");
       }
+      this.ownerDocument.fire(this, "toggle");
     }
   });
 

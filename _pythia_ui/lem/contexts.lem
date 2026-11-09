@@ -47,9 +47,18 @@ effect LoadBefore(line: Int)
 effect LoadAfter(line: Int)
 effect LoadRun(run: Int)
 effect Load(line: Int)
-msg Earlier(line: Int), Later(line: Int)
+msg Earlier(line: Int), Later(line: Int), Fill(run: Int)
 state Opened(run: Int) key run
 state Asked(line: Int) key line
+
+-- Whether every run is open, as the host says, from its bar (Opening); or
+-- folded, as when it doesn't say. Each run, and each item, still opens and
+-- folds alone; and a run that's open asks for its items as it comes near
+-- the screen.
+input Opening(open: Bool)
+rel Opens(open: Bool)
+Opens(o) :- Opening(o)
+Opens(False) :- not Opening()
 
 -- The lines that came, from the first to the last; and where rows are.
 rel Below(line: Int)
@@ -100,7 +109,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin, finish):
       Entry(Said(l), label=label, text="", mark=text(l), tone=tone, to=items + text(l), order=l * 2):
         Code(SaidText(l), text=said)
     for Run(l, n, last, what):
-      Entry(RunBox(l), label=what, text="", mark=text(l), tone=Dim, fold=True, to=items + text(l), order=l * 2):
+      Entry(RunBox(l), label=what, text="", mark=text(l), tone=Dim, fold=True, to=items + text(l), order=l * 2, open=o) :- Opens(o):
         Label(RunWait(l), text="loading", tone=Dim) :- Opened(l), not RunLoaded(run=l), not RunFailed(run=l)
         Label(RunWait(l), text="couldn't load it: " + why, tone=Error) :- RunFailed(l, why), not RunLoaded(run=l)
         for Item(i, l, tone, label, gist, body):
@@ -115,6 +124,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin, finish):
 -- screen, unless the host couldn't send them.
 Near(Before, msg=Earlier(f)) :- First(f), Page(first=p), f > p, not EarlierFailed(line=f)
 Near(After, msg=Later(t)) :- Last(t), Page(last=p), t < p, not LaterFailed(line=t)
+Near(RunBox(l), msg=Fill(l)) :- Opens(True), Run(line=l), not RunLoaded(run=l), not RunFailed(run=l)
 
 on Earlier(f):
   LoadBefore(f)
@@ -123,6 +133,10 @@ on Later(t):
   LoadAfter(t)
 
 on Toggled(RunBox(l), True):
+  Opened(l) :- Run(line=l), not RunLoaded(run=l)
+  LoadRun(l) :- Run(line=l), not RunLoaded(run=l)
+
+on Fill(l):
   Opened(l) :- Run(line=l), not RunLoaded(run=l)
   LoadRun(l) :- Run(line=l), not RunLoaded(run=l)
 

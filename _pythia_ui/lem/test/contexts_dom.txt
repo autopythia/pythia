@@ -412,6 +412,378 @@ main.g-window
       div.g-entry-body
         pre.g-code "Here's a plan."
 
+=== every run opens, as the host says, and asks for nothing until it's near the screen
+["+", "Opening", {"open": true}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
+=== the start's run, near the screen, asks the host for its items
+["near", "RunBox(1)"]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+effect LoadRun {"run":1}
+
+=== the reader folds it alone, which the program hears, and asks for nothing
+["close", "RunBox(1)"]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
+=== the run changes while the reader has it folded, and stays folded
+["-", "Run", {"line": 1, "turn": 0, "last": 1, "text": "1 other"}]
+["+", "Run", {"line": 1, "turn": 0, "last": 1, "text": "1 other, and more"}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
+=== every run folds again
+["-", "Opening", {"open": true}]
+["+", "Opening", {"open": false}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=0" "0"
+        span.g-entry-label "The start · 1 item"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=1" "1"
+          span.g-entry-label "1 other, and more"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+    div.g-entry.g-tone-strong
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?turn=1" "1"
+        span.g-entry-label "Turn 1 · 5 items"
+        span.g-entry-text
+      div.g-entry-body
+    div.g-entry.g-tone-user
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=2" "2"
+        span.g-entry-label "[user]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Plan the GUI"
+    div.g-entry.g-fold.g-tone-dim
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?line=3" "3"
+          span.g-entry-label "2 tool calls: exec_command 2"
+          span.g-entry-text
+        div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "ls"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command"
+                span.g-entry-text "2 lines"
+              div.g-entry-body
+                pre.g-code "a.txt\nb.txt"
+                pre.g-code.g-diff
+                  span.g-diff-add "+one line"
+          div.g-entry.g-tone-dim
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=5" "5"
+              span.g-entry-label "[note]"
+              span.g-entry-text "all of it"
+            div.g-entry-body
+    div.g-entry.g-tone-assistant
+      div.g-entry-head
+        a.g-entry-mark href="/c/ui-0?line=6" "6"
+        span.g-entry-label "[assistant]"
+        span.g-entry-text
+      div.g-entry-body
+        pre.g-code "Here's a plan."
+
 === the index, in place of the log
 ["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn=", "first": 1, "last": 6}]
 ["-", "Chunk", {"first": 1, "last": 1}]

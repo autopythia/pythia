@@ -9,7 +9,8 @@
 // place of its line. The compiled program and glui's themes are beside
 // this script, in compiled/. It shows the page in glui's widgets
 // (src/glui/glui.js), in the look and the theme that its bar chooses,
-// which the browser remembers, from the log's end; and it answers the
+// which the browser remembers, from the log's end, with every run folded
+// or every run open, as the bar's Runs says (Opening); and it answers the
 // program's LoadBefore(line) and LoadAfter(line) with rows, or with
 // EarlierFailed(line, why) or LaterFailed(line, why); its LoadRun(run)
 // with the run's items, or with RunFailed(run, why); and its Load(line)
@@ -29,6 +30,11 @@ var contexts = (function () {
     ["dark", "dark"],
     ["light", "light"]
   ];
+  // Whether a log's runs fold, the default, or open, all at once.
+  var RUNS = [
+    ["folded", "folded"],
+    ["open", "open"]
+  ];
 
   // Shows a page of a compiled program, contexts.lem's, in a view in
   // `o.root`, and is its host:
@@ -43,7 +49,9 @@ var contexts = (function () {
   //   page took to show, and what went wrong;
   // - o.keep(update), if given, runs update(), which shows rows that came
   //   before those on the page, keeping what's on the screen in place; and
-  //   o.shown(), if given, hears that the page's facts are shown.
+  //   o.shown(), if given, hears that the page's facts are shown;
+  // - o.opening, for a log, says whether every run opens, as an Opening
+  //   fact from the start, which the bar changes later (boot).
   //
   // It asks for rows, a run's items, or a body, once while they're coming,
   // and again when the program asks again after they failed; meanwhile the
@@ -87,6 +95,9 @@ var contexts = (function () {
         status("error: " + message, true);
       }
     });
+    if (typeof o.opening === "boolean") {
+      view.update([["+", "Opening", { open: o.opening }]]);
+    }
 
     // What was asked for, `value`, fails: the turn or the entry says why.
     function fail(ask, value, why) {
@@ -261,7 +272,10 @@ var contexts = (function () {
         glui.paint(html, it.lem);
       });
     };
-    var chosen = { look: remembered("look", LOOKS), theme: remembered("theme", THEMES) };
+    var chosen = { look: remembered("look", LOOKS), theme: remembered("theme", THEMES), runs: remembered("runs", RUNS) };
+    // The view, once the program has come; and whether the page is a log.
+    var shown = null;
+    var log = html.getAttribute("data-run") !== null;
     menu(bar, "Look", LOOKS, chosen.look, function (value) {
       remember("look", value);
       look(value);
@@ -270,6 +284,18 @@ var contexts = (function () {
       remember("theme", value);
       theme(value);
     });
+    if (log) {
+      menu(bar, "Runs", RUNS, chosen.runs, function (value) {
+        remember("runs", value);
+        if (shown !== null) {
+          shown.update([
+            ["-", "Opening", { open: chosen.runs === "open" }],
+            ["+", "Opening", { open: value === "open" }]
+          ]);
+        }
+        chosen.runs = value;
+      });
+    }
     bar.appendChild(line);
     look(chosen.look);
     theme(chosen.theme);
@@ -278,9 +304,10 @@ var contexts = (function () {
         status("couldn't load the program: " + why, true);
         return;
       }
-      start({
+      shown = start({
         root: root,
         program: program,
+        opening: log ? chosen.runs === "open" : undefined,
         facts: html.getAttribute("data-facts"),
         before: html.getAttribute("data-before"),
         after: html.getAttribute("data-after"),
@@ -307,5 +334,5 @@ var contexts = (function () {
     }
   }
 
-  return { start: start, LOOKS: LOOKS, THEMES: THEMES };
+  return { start: start, LOOKS: LOOKS, THEMES: THEMES, RUNS: RUNS };
 })();

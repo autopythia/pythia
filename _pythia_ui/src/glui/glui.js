@@ -264,7 +264,11 @@ var glui = (function () {
   // links to `to`, if that's one of the host's own paths, as a link does;
   // and to nothing for "". With `fold`, it's a details element, whose
   // summary shows the first three, and which sends Toggled when it opens or
-  // closes; its children show when it's open.
+  // closes; its children show when it's open. It opens or closes as `open`
+  // says when it's made, and whenever `open` changes, but not otherwise,
+  // so that it stays as it was opened or closed in between; and the toggle
+  // event that follows, which a browser fires later, sends nothing, since
+  // the program knows.
   function entry(w, view) {
     var e = element(view, "div");
     var mark = element(view, "a");
@@ -273,6 +277,12 @@ var glui = (function () {
     var gist = element(view, "span", "g-entry-text");
     var body = element(view, "div", "g-entry-body");
     var folds = null;
+    // The details element, with fold; the `open` last shown in it, or null
+    // for none yet; and whether it's open as `open` made it, until its
+    // toggle event comes, or null.
+    var details = null;
+    var shown = null;
+    var echo = null;
     // Makes the entry's parts anew, for `fold`, with the same mark, label,
     // text and body, the body holding the children still.
     function build(fold) {
@@ -285,13 +295,20 @@ var glui = (function () {
       head.appendChild(label_);
       head.appendChild(gist);
       var holder = e;
+      details = null;
+      shown = null;
+      echo = null;
       if (fold) {
-        var details = view.doc.createElement("details");
-        details.addEventListener("toggle", function () {
-          view.send(["Toggled", w.id, details.open]);
+        var it = view.doc.createElement("details");
+        it.addEventListener("toggle", function () {
+          var mine = echo !== null && it.open === echo;
+          echo = null;
+          if (!mine) {
+            view.send(["Toggled", w.id, it.open]);
+          }
         });
-        e.appendChild(details);
-        holder = details;
+        e.appendChild(it);
+        holder = details = it;
       }
       holder.appendChild(head);
       holder.appendChild(body);
@@ -300,6 +317,13 @@ var glui = (function () {
     return made(w, e, body, null, function () {
       if (folds !== w.fields.fold) {
         build(w.fields.fold);
+      }
+      if (details !== null && shown !== w.fields.open) {
+        shown = w.fields.open;
+        if (details.open !== shown) {
+          echo = shown;
+          details.open = shown;
+        }
       }
       var to = w.fields.to;
       text(mark, w.fields.mark);

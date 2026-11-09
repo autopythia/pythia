@@ -242,7 +242,6 @@
       case "close":
         var details = find(e, ["details"]);
         details.open = step[0] === "open";
-        it.doc.fire(details, "toggle");
         return;
       case "focus":
         it.doc.focus(find(e, ["button", "input", "a", "summary"]) || e);

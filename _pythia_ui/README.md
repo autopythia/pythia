@@ -305,10 +305,13 @@ rows comes near the screen, the program sends `LoadBefore(line)` or
 with `EarlierFailed` or `LaterFailed`; so a page holds what's been scrolled
 through. A run's items come when it's first opened: the program sends
 `LoadRun(run)`, and the host answers with `RunLoaded(run)` and an `Item` for
-each, or with `RunFailed(run, why)`. An item's body comes the same way, when
-its entry is first opened: the program sends `Load(line)`, and the host
-answers with `Body` facts, or `Failed(line, why)`.
-`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
+each, or with `RunFailed(run, why)`. The host's `Opening(open)` opens every
+run, or folds them all, through glui's `Entry`'s `open`, and each still opens
+and folds alone; a run that's open asks for its items as it comes near the
+screen. An item's body comes the same way, when its entry is first opened: the
+program sends `Load(line)`, and the host answers with `Body` facts, or
+`Failed(line, why)`. `lem/test/contexts_ticks.txt` and `contexts_dom.txt` test
+it.
 
 In a browser, `web/contexts.js` is the host's part. A page names its facts on
 its `html` element, `data-facts`, and, for a log, where the rows before a line
@@ -318,10 +321,10 @@ and after one are, `data-before` and `data-after`, where a run's items are,
 `web/compiled/`, which `make compiled` writes, and a test checks against the
 files they're compiled from. A log's page starts at its end, and keeps what's
 on the screen in place as rows come above it. Its bar picks the look and the
-theme, which the browser remembers. `make web` writes a sample, an index and a
-log of 13,394 items, the most that one of pythia's contexts had when it was
-first written, in turns of 50, for two pages that show it as the node server's
-do:
+theme, and, for a log, whether its runs are folded or open, which the browser
+remembers. `make web` writes a sample, an index and a log of 13,394 items, the
+most that one of pythia's contexts had when it was first written, in turns of
+50, for two pages that show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html
