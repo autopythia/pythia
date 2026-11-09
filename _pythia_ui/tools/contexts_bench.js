@@ -1,11 +1,13 @@
 // tools/contexts_bench.js: times pythia's contexts (lem/contexts.lem) in
 // JavaScript at the size of a long log, as tools/lem_bench.py times lem in
 // Rust. For each size, up to 13,394 items, the most that one of pythia's
-// contexts has had: the first tick, from the log's facts to its widgets'
-// elements, through glui's recipes, in a stand-in DOM
-// (tools/stand_in_dom.js); then a tick that changes an item, and one that
-// opens an entry. It checks that each shows what it should, and fails if
-// one doesn't. `make js-bench` runs it, in JavaScriptCore through
+// contexts has had: the first tick, from the log's turns, folded, to their
+// widgets' elements, through glui's recipes, in a stand-in DOM
+// (tools/stand_in_dom.js); opening a turn, with the two ticks that it
+// takes, one that asks for its items and one that shows them; and opening
+// an entry in it. Then, with every turn's items there, as when each was
+// opened, opening an entry again. It checks that each shows what it
+// should, and fails if one doesn't. `make js-bench` runs it, in JavaScriptCore through
 // osascript on a Mac, or in another engine, as JS=qjs, on the program that
 // `make js-test` uses, CONTEXTS_TESTS.program.
 (function () {
@@ -23,21 +25,23 @@
     }
   }
 
-  // A log's facts, as JSON steps: its turns, and its items, a third of
-  // them with a body.
+  // A log's facts, as JSON steps: its turns, folded; and each turn's items,
+  // as the host sends them when it's opened, a third of them with a body.
   function log(items) {
     var turns = Math.max(1, Math.floor(items / ITEMS_PER_TURN));
-    var steps = [["+", "Page", { title: "log", items: "/c/log?line=" }]];
+    var steps = [["+", "Page", { title: "log", items: "/c/log?line=", turns: "/c/log?turn=" }]];
+    var byTurn = [];
     for (var t = 0; t < turns; t++) {
-      steps.push(["+", "Turn", { n: t, title: "Turn " + (t + 1) }]);
+      steps.push(["+", "Turn", { n: t, label: "Turn " + t, title: "Turn " + (t + 1) }]);
+      byTurn.push([["+", "Loaded", { turn: t }]]);
     }
     for (var line = 1; line <= items; line++) {
       var item = { line: line, turn: (line - 1) % turns, tone: TONES[line % 6], label: "[tool-call] exec_command" };
       item.gist = "item " + line;
       item.body = line % 3 === 0;
-      steps.push(["+", "Item", item]);
+      byTurn[item.turn].push(["+", "Item", item]);
     }
-    return steps;
+    return { steps: steps, byTurn: byTurn };
   }
 
   function ms(f) {
@@ -73,9 +77,11 @@
     }
   }
 
-  out(pad("items", 6) + pad("first tick", 13) + pad("a change", 11) + pad("an opening", 13));
+  out(pad("items", 6) + pad("first tick", 13) + pad("a turn", 10) + pad("an entry", 11) +
+      pad("every turn open: an entry", 28));
   SIZES.forEach(function (items) {
-    var steps = log(items);
+    var made = log(items);
+    var turns = made.byTurn.length;
     var effects = [];
     var doc = new standInDom.Document();
     var root = doc.createElement("div");
@@ -89,19 +95,31 @@
       }
     });
     var first = ms(function () {
-      view.update(steps);
+      view.update(made.steps);
     });
-    check("the first tick shows " + count(root, "g-entry") + " entries", count(root, "g-entry") === items);
-    var last = steps[steps.length - 1][2];
-    var changed = { line: last.line, turn: last.turn, tone: last.tone, label: last.label, gist: "changed", body: last.body };
-    var change = ms(function () {
-      view.update([["+", "Item", changed]]);
-    });
-    check("the change shows", runtime.lem.relFacts(runtime.prog.lem.rel("Item")).length === items);
+    check("the first tick shows " + count(root, "g-entry") + " entries", count(root, "g-entry") === turns);
+    var last = turns - 1;
+    var turn = made.byTurn[last];
     var opening = ms(function () {
+      view.send(["Toggled", ["TurnBox", last], true]);
+      view.update(turn);
+    });
+    check("opening the turn asks for its items", effects.length === 1 && effects[0].name === "LoadTurn");
+    check("the turn shows its items", count(root, "g-entry") === turns + turn.length - 1);
+    var line = turn.filter(function (step) {
+      return step[1] === "Item" && step[2].body;
+    })[0][2].line;
+    var entry = ms(function () {
+      view.send(["Toggled", ["Ent", line], true]);
+    });
+    check("the entry asks for its body", effects.length === 2 && effects[1].name === "Load");
+    view.update([].concat.apply([], made.byTurn.slice(0, last)));
+    check("every turn shows its items", count(root, "g-entry") === turns + items);
+    var all = ms(function () {
       view.send(["Toggled", ["Ent", 3], true]);
     });
-    check("the opening asks for the body", effects.length === 1 && effects[0].name === "Load");
-    out(pad(commas(items), 6) + pad(first + " ms", 13) + pad(change + " ms", 11) + pad(opening + " ms", 13));
+    check("that entry asks for its body", effects.length === 3 && effects[2].name === "Load");
+    out(pad(commas(items), 6) + pad(first + " ms", 13) + pad(opening + " ms", 10) + pad(entry + " ms", 11) +
+        pad(all + " ms", 28));
   });
 })();

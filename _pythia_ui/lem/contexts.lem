@@ -1,34 +1,44 @@
--- contexts.lem: pythia's contexts, as wui serves them (wui/ in pythia): the
--- index of contexts, or one context's log, a page each, in glui's widgets.
--- The host sends a page's facts; an entry's body comes once it's opened,
--- when the program asks for it (Load). In a browser, web/contexts.js is
--- the host's part.
+-- contexts.lem: pythia's contexts, as its node server's glui view shows
+-- them (pythia/interaction/node/view.py): the index of root contexts, or
+-- one context's log, a page each, in glui's widgets. The host sends a
+-- page's facts; a turn's items come once it's opened, and an entry's body
+-- once it's opened, when the program asks for them (LoadTurn, Load). In a
+-- browser, web/contexts.js is the host's part.
 type CtxId = Text
 
 -- A page: its title; for a log, where each item has a page of its own:
--- `items`, then its line; and links to other pages, in order.
-input Page(title: Text, items: Text = "")
+-- `items`, then its line; where each turn has one: `turns`, then its
+-- number; and links to other pages, in order.
+input Page(title: Text, items: Text = "", turns: Text = "")
 input Nav(n: Int, text: Text, to: Text) key n
 
 -- The index: each context, by `rank`, the last changed first.
 input Context(id: CtxId, title: Text, model: Text, turns: Int, lines: Int, size: Text, changed: Text, rank: Int, to: Text) key id
 
--- A log: its turns; its items, by line, each in a turn, with its tone, its
--- label and gist, and whether it has a body; and for an item that was
--- opened, its body's parts, or why the host couldn't send them.
-input Turn(n: Int, title: Text) key n
+-- A log: its turns, each with its label, such as `Turn 12 · 51 items`, and
+-- its title, the user's input; for a turn that was opened, that its items
+-- came, or why the host couldn't send them. Its items, by line, each in a
+-- turn, with its tone, its label and gist, and whether it has a body; and
+-- for an item that was opened, its body's parts, or why the host couldn't
+-- send them.
+input Turn(n: Int, label: Text, title: Text) key n
+input Loaded(turn: Int) key turn
+input TurnFailed(turn: Int, why: Text) key turn
 input Item(line: Int, turn: Int, tone: Tone, label: Text, gist: Text, body: Bool) key line
 input Body(line: Int, part: Int, text: Text, diff: Bool) key line, part
 input Failed(line: Int, why: Text) key line
 
--- What the program asks the host for: an item's body, when it's opened.
+-- What the program asks the host for: a turn's items, and an item's body,
+-- when each is opened.
+effect LoadTurn(turn: Int)
 effect Load(line: Int)
+state Opened(turn: Int) key turn
 state Asked(line: Int) key line
 
 id Top, Title, Crumbs, Crumb(Int), Rows, Head, Col(Int), Ctx(CtxId), Cell(CtxId, Int)
-id Log, TurnBox(Int), Ent(Int), Part(Int, Int), Wait(Int)
+id Log, TurnBox(Int), TurnWait(Int), Ent(Int), Part(Int, Int), Wait(Int)
 
-Window(Top, title=t) :- Page(t, items):
+Window(Top, title=t) :- Page(t, items, turnto):
   Heading(Title, text=t)
   Row(Crumbs) :- Nav():
     for Nav(n, text, to):
@@ -52,13 +62,19 @@ Window(Top, title=t) :- Page(t, items):
         Label(Cell(c, 5), text=size)
         Label(Cell(c, 6), text=changed, tone=Dim)
   Box(Log) :- Turn():
-    for Turn(n, title):
-      Panel(TurnBox(n), title=title, order=n):
+    for Turn(n, head, title):
+      Entry(TurnBox(n), label=head, text=title, mark=text(n), tone=Strong, fold=True, to=turnto + text(n), order=n):
+        Label(TurnWait(n), text="loading", tone=Dim) :- Opened(n), not Loaded(turn=n), not TurnFailed(turn=n)
+        Label(TurnWait(n), text="couldn't load it: " + why, tone=Error) :- TurnFailed(n, why), not Loaded(turn=n)
         for Item(l, n, tone, label, gist, body):
           Entry(Ent(l), label=label, text=gist, mark=text(l), tone=tone, fold=body, to=items + text(l), order=l):
             Code(Part(l, k), text=b, diff=d, order=k) :- Body(l, k, b, d)
             Label(Wait(l), text="loading", tone=Dim) :- Asked(l), not Body(line=l), not Failed(line=l)
             Label(Wait(l), text="couldn't load it: " + why, tone=Error) :- Failed(l, why), not Body(line=l)
+
+on Toggled(TurnBox(n), True):
+  Opened(n) :- Turn(n=n), not Loaded(turn=n)
+  LoadTurn(n) :- Turn(n=n), not Loaded(turn=n)
 
 on Toggled(Ent(l), True):
   Asked(l) :- Item(line=l, body=True), not Body(line=l)

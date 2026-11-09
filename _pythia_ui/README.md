@@ -262,8 +262,9 @@ In a browser, `make web-serve` serves the web look's two pages.
 `web/demo.html` shows the approval HUD, a page of a log, or the form, in
 either look and any theme, with the page as their host. `web/test.html` runs
 the tests in JavaScript, and some of glui's cases in the page's own DOM too.
-Both pages carry the CSP that wui will send its pages, and run only the
-crate's files:
+Both pages carry the CSP that pythia's node server sends the pages of its
+glui view, but `frame-ancestors`, which only a header can give, and run
+only the crate's files:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
@@ -271,23 +272,27 @@ make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
 
 ### The contexts
 
-`lem/contexts.lem` shows pythia's contexts, as wui will serve them: its
-index of contexts, and one context's log, a page each, in glui's widgets.
-The host, wui, sends a page's facts: `Context` for each context; or
-`Turn` and `Item` for a log. An item's body comes when its entry is first
-opened: the program sends `Load(line)`, and the host answers with `Body`
-facts, or `Failed(line, why)`. `lem/test/contexts_ticks.txt` and
-`contexts_dom.txt` test it.
+`lem/contexts.lem` shows pythia's contexts in glui's widgets: the index of the
+root contexts, and one context's log, a page each. Its host is the glui view
+of pythia's node server (`pythia/interaction/node/view.py` in pythia), at
+`/TOKEN/lem/`. It sends a page's facts: `Context` for each context; or, for a
+log, a `Turn` for each turn, folded. A turn's items come when it's first
+opened: the program sends `LoadTurn(turn)`, and the host answers with
+`Loaded(turn)` and an `Item` for each, or with `TurnFailed(turn, why)`; so a
+page holds only the turns that were opened. An item's body comes the same way,
+when its entry is first opened: the program sends `Load(line)`, and the host
+answers with `Body` facts, or `Failed(line, why)`.
+`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
-In a browser, `web/contexts.js` is the host's part. A page names its
-facts on its `html` element, `data-facts`, and, for a log, where an
-item's body is, `data-body`, with `{line}`; the script fetches the
-program and the themes, compiled, from `web/compiled/`, which `make
-compiled` writes, and a test checks against the files they're compiled
-from. Its bar picks the look and the theme, which the browser remembers.
-`make web` writes a sample, an index and a log of 13,394 items, the most
-that one of pythia's contexts has had, for two pages that show it as
-wui's will:
+In a browser, `web/contexts.js` is the host's part. A page names its facts on
+its `html` element, `data-facts`, and, for a log, where a turn's items are,
+`data-turn`, with `{turn}`, and where an item's body is, `data-body`, with
+`{line}`; the script fetches the program and the themes, compiled, from
+`web/compiled/`, which `make compiled` writes, and a test checks against the
+files they're compiled from. Its bar picks the look and the theme, which the
+browser remembers. `make web` writes a sample, an index and a log of 13,394
+items, the most that one of pythia's contexts has had, in turns of 50, for two
+pages that show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

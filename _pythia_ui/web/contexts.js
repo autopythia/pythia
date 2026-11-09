@@ -1,20 +1,23 @@
 // web/contexts.js: the host's part of pythia's contexts (lem/contexts.lem)
-// in a browser, which the pages that wui serves for its index of contexts,
-// and for a context's log, run. A page gives, on its <html> element,
+// in a browser, which the glui view of pythia's node server runs on its
+// pages, for the root contexts and for a context's log
+// (pythia/interaction/node/view.py). A page gives, on its <html> element,
 // `data-facts`, the URL of its facts, JSON steps (src/lem/host.rs); and,
-// for a log, `data-body`, the URL of an item's body, steps of Body facts,
-// with `{line}` in place of the item's line. The compiled program and
+// for a log, `data-turn`, the URL of a turn's items, with `{turn}` in
+// place of its number, and `data-body`, the URL of an item's body, steps
+// of Body facts, with `{line}` in place of its line. The compiled program and
 // glui's themes are beside this script, in compiled/. It shows the page
 // in glui's widgets (src/glui/glui.js), in the look and the theme that its
 // bar chooses, which the browser remembers; and it answers the program's
-// Load(line) with the item's body, or with Failed(line, why). Like lem.js,
+// LoadTurn(turn) with the turn's items, or with TurnFailed(turn, why); and
+// its Load(line) with the item's body, or with Failed(line, why). Like lem.js,
 // it's a plain script that defines one global, `contexts`, and it starts
 // itself on a page that gives `data-facts`.
 var contexts = (function () {
   "use strict";
 
   // The looks and themes, each [name, what the bar calls it], the first the
-  // default: wui's own default is Log dark.
+  // default, as the node server's plain pages are in Log dark.
   var LOOKS = [
     ["log", "Log"],
     ["native", "Native"]
@@ -29,18 +32,28 @@ var contexts = (function () {
   //
   // - o.get(url, done) fetches JSON, and calls done(null, value), or
   //   done(why, null) if it can't, later rather than at once;
-  // - o.facts is the URL of the page's facts, and o.body the URL of an
-  //   item's body, with {line}, or null;
+  // - o.facts is the URL of the page's facts; o.turn, the URL of a turn's
+  //   items, with {turn}, or null; and o.body, the URL of an item's body,
+  //   with {line}, or null;
   // - o.status(text, wrong), if given, hears how it went: how long the
   //   page took to show, and what went wrong.
   //
-  // It asks for a body once while it's coming, and again when the program
-  // asks again after it failed; meanwhile the entry no longer says why. A
-  // body that can't come, or that the program refuses, fails, which the
-  // entry says. Gives the view.
+  // It asks for a turn's items, or a body, once while they're coming, and
+  // again when the program asks again after they failed; meanwhile the turn
+  // or the entry no longer says why. What can't come, or what the program
+  // refuses, fails, which the turn or the entry says. Gives the view.
   function start(o) {
     var status = o.status || function () {};
     var runtime = new glem.Runtime(new glem.Program(o.program));
+    // What the program asks for, by its effect: where it comes from; the
+    // field that names it, in the effect and in the fact that says it
+    // failed; that fact; and why steps that aren't a list are wrong.
+    var asks = {
+      LoadTurn: { url: o.turn, field: "turn", failed: "TurnFailed", wrong: "its items aren't a list of steps" },
+      Load: { url: o.body, field: "line", failed: "Failed", wrong: "its body isn't a list of steps" }
+    };
+    // What's coming, and what failed, with its fact's fields, each by its
+    // fact's name and the value that names it.
     var loading = new Set();
     var failed = new Map();
     // Why the program refused the host's last change, or null.
@@ -48,8 +61,9 @@ var contexts = (function () {
     var view = glui.view(runtime, o.root, {
       effects: function (effects) {
         effects.forEach(function (effect) {
-          if (effect.name === "Load") {
-            load(effect.fields.line);
+          var ask = asks[effect.name];
+          if (ask !== undefined) {
+            load(ask, effect.fields[ask.field]);
           }
         });
       },
@@ -59,34 +73,37 @@ var contexts = (function () {
       }
     });
 
-    // An item's body fails: the entry says why.
-    function fail(line, why) {
-      failed.set(line, why);
-      view.update([["+", "Failed", { line: line, why: why }]]);
+    // What was asked for, `value`, fails: the turn or the entry says why.
+    function fail(ask, value, why) {
+      var fields = { why: why };
+      fields[ask.field] = value;
+      failed.set(ask.failed + " " + value, fields);
+      view.update([["+", ask.failed, fields]]);
     }
 
-    function load(line) {
-      if (o.body === null || loading.has(line)) {
+    function load(ask, value) {
+      var name = ask.failed + " " + value;
+      if (ask.url === null || ask.url === undefined || loading.has(name)) {
         return;
       }
-      loading.add(line);
-      if (failed.has(line)) {
-        view.update([["-", "Failed", { line: line, why: failed.get(line) }]]);
-        failed.delete(line);
+      loading.add(name);
+      if (failed.has(name)) {
+        view.update([["-", ask.failed, failed.get(name)]]);
+        failed.delete(name);
       }
-      o.get(o.body.split("{line}").join(String(line)), function (why, steps) {
-        loading.delete(line);
+      o.get(ask.url.split("{" + ask.field + "}").join(String(value)), function (why, steps) {
+        loading.delete(name);
         if (why === null && !Array.isArray(steps)) {
-          why = "its body isn't a list of steps";
+          why = ask.wrong;
         }
         if (why !== null) {
-          fail(line, why);
+          fail(ask, value, why);
           return;
         }
         refused = null;
         view.update(steps);
         if (refused !== null) {
-          fail(line, refused);
+          fail(ask, value, refused);
         }
       });
     }
@@ -228,6 +245,7 @@ var contexts = (function () {
         root: root,
         program: program,
         facts: html.getAttribute("data-facts"),
+        turn: html.getAttribute("data-turn"),
         body: html.getAttribute("data-body"),
         get: get,
         status: status

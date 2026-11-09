@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Write a sample of pythia's contexts, as wui will send them, for the
-pages that show them in a browser before wui does: web/contexts-index.html,
-an index of contexts, and web/contexts-log.html, a log of ITEMS items, by
+"""Write a sample of pythia's contexts, as the glui view of pythia's node
+server sends them (pythia/interaction/node/view.py), for pages that show
+them in a browser without it: web/contexts-index.html, an index of
+contexts, and web/contexts-log.html, a log of ITEMS items, by
 default 13,394, the most that one of pythia's contexts has had. `make web`
 writes it, and `make web-serve` serves the pages.
 
 usage: contexts_sample.py DIR [ITEMS]
 
 In DIR: index.json and log.json, each page's facts as JSON steps
-(src/lem/host.rs); and body/LINE.json, the body of each item that has one,
-as Body facts, which the log's page asks for when the item's entry opens.
+(src/lem/host.rs), the log's its turns; turn/TURN.json, each turn's items,
+which the log's page asks for when the turn opens; and body/LINE.json, the
+body of each item that has one, as Body facts, which the log's page asks
+for when the item's entry opens.
 """
 
 import json
@@ -49,8 +52,9 @@ def main():
     out = sys.argv[1]
     items = int(sys.argv[2]) if len(sys.argv) == 3 else ITEMS
     turns = max(1, items // ITEMS_PER_TURN)
-    shutil.rmtree(os.path.join(out, "body"), ignore_errors=True)
-    os.makedirs(os.path.join(out, "body"))
+    for sub in ("body", "turn"):
+        shutil.rmtree(os.path.join(out, sub), ignore_errors=True)
+        os.makedirs(os.path.join(out, sub))
     size = f"{items * 820 / 1e6:.1f} MB"
     index = [["+", "Page", {"title": "Contexts"}]]
     for rank, (cid, title, model, changed) in enumerate((
@@ -63,22 +67,28 @@ def main():
             "to": LOG_PAGE}])
     write(os.path.join(out, "index.json"), index)
     log = [["+", "Page", {"title": f"A sample log: {items:,} items",
-                          "items": LOG_PAGE + "#L"}],
+                          "items": LOG_PAGE + "#L", "turns": LOG_PAGE + "#T"}],
            ["+", "Nav", {"n": 0, "text": "Contexts", "to": INDEX_PAGE}]]
-    log += [["+", "Turn", {"n": t, "title": f"Turn {t + 1}"}] for t in range(turns)]
+    by_turn = [[["+", "Loaded", {"turn": t}]] for t in range(turns)]
     bodies = 0
     for line in range(1, items + 1):
         tone, label, gist, body = CYCLE[(line - 1) % len(CYCLE)]
-        log.append(["+", "Item", {
-            "line": line, "turn": min((line - 1) // ITEMS_PER_TURN, turns - 1),
-            "tone": tone, "label": label, "gist": gist.format(n=line),
-            "body": body is not None}])
+        turn = min((line - 1) // ITEMS_PER_TURN, turns - 1)
+        by_turn[turn].append(["+", "Item", {
+            "line": line, "turn": turn, "tone": tone, "label": label,
+            "gist": gist.format(n=line), "body": body is not None}])
         if body is not None:
             text, diff = body
             write(os.path.join(out, "body", f"{line}.json"),
                   [["+", "Body", {"line": line, "part": 0, "text": text.format(n=line),
                                   "diff": diff}]])
             bodies += 1
+    for turn, steps in enumerate(by_turn):
+        count = len(steps) - 1
+        log.append(["+", "Turn", {"n": turn, "label": f"Turn {turn + 1} \u00b7 {count:,} "
+                                  f"item{'' if count == 1 else 's'}",
+                                  "title": f"Let's look at items {steps[1][2]['line']:,} and on."}])
+        write(os.path.join(out, "turn", f"{turn}.json"), steps)
     write(os.path.join(out, "log.json"), log)
     print(f"contexts_sample: {out}: an index, and a log of {items:,} items, "
           f"{bodies:,} with a body")

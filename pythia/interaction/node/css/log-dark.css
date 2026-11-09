@@ -1,0 +1,29 @@
+/* The node server's Log dark style: every item, in order, as the log has it,
+   each with a colored rule by its kind. Always dark, regardless of the
+   browser's color preference. Log light inherits this layout and overrides
+   the palette. The server reads this file for each page: edit it, and
+   reload. */
+:root{color-scheme:only dark;--fg:#e6edf3;--dim:#8d96a0;--bg:#0d1117;--rule:#30363d;
+--box:#161b22;--a:#4493f8;--user:#4493f8;--asst:#3fb950;--tool:#a371f7;--err:#f85149;--esc:#4d3800;
+--escfg:#f2cc60;--add:#3fb950;--del:#f85149;--hunk:#4493f8}
+body{margin:1em auto;max-width:130ch;padding:0 1em;color:var(--fg);background:var(--bg);
+font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--a);text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:1.25em;margin:.3em 0 .4em}nav{color:var(--dim);font-size:13px}
+pre,.mono,.lb,.ln{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{font-size:13px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;margin:.2em 0;
+padding:.35em .6em;background:var(--box);border-radius:4px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:3px 7px;text-align:left;vertical-align:top;border-bottom:1px solid var(--rule)}
+.r{text-align:right;white-space:nowrap}.nw{white-space:nowrap}.dim{color:var(--dim)}
+.esc{background:var(--esc);color:var(--escfg);border-radius:2px}
+.it{border-left:3px solid var(--rule);padding:.1em .7em;margin:.45em 0}
+.it.user{border-color:var(--user)}.it.assistant{border-color:var(--asst)}
+.it.tool{border-color:var(--tool)}.it.err{border-color:var(--err)}
+.it.meta{border-color:transparent;color:var(--dim)}
+.lb{font-weight:600;font-size:13px}.err>.lb{color:var(--err)}
+.ln{color:var(--dim);font-size:11px;margin-right:.5em}.cut{font-size:12px;color:var(--dim)}
+.nest{margin-left:1em}.pager{margin:.6em 0}summary{cursor:pointer}
+.d-add{color:var(--add)}.d-del{color:var(--del)}.d-hunk{color:var(--hunk)}.d-file{font-weight:600}
+dl{display:grid;grid-template-columns:max-content auto;gap:.2em 1em;font-size:13px}
+dt{color:var(--dim)}dd{margin:0}form{margin:.6em 0}

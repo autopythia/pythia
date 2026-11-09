@@ -1,0 +1,28 @@
+/* The node server's base stylesheet, under every style's own: the style menu
+   at the top right, and notes about stylesheets. A style may set the colors
+   that these use: --fg, --bg, --dim, --rule, --box, and --menu-bg for the
+   menu. */
+body>nav{margin-right:10rem}
+.node-menu{position:fixed;top:.5rem;right:.75rem;z-index:100;
+font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+.node-menu>summary{display:block;list-style:none;cursor:pointer;user-select:none;
+padding:.2rem .7rem;border:1px solid var(--rule,GrayText);border-radius:999px;
+color:var(--dim,GrayText);background:var(--menu-bg,var(--bg,Canvas))}
+.node-menu>summary::-webkit-details-marker{display:none}
+.node-menu>summary::after{content:" \25BE"}
+.node-menu[open]>summary::after{content:" \25B4"}
+.node-menu>summary:hover,.node-menu[open]>summary{color:var(--fg,CanvasText)}
+.node-menu>ul{position:absolute;right:0;top:calc(100% + .3rem);margin:0;padding:.3rem 0;
+list-style:none;width:max-content;min-width:14rem;max-width:min(24rem,90vw);
+color:var(--fg,CanvasText);background:var(--menu-bg,var(--bg,Canvas));
+border:1px solid var(--rule,GrayText);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.2)}
+.node-menu li>a{position:relative;display:block;padding:.3rem .9rem .3rem 1.8rem;
+color:inherit;text-decoration:none}
+.node-menu li>a:hover,.node-menu li>a:focus{background:var(--box,Highlight)}
+.node-menu li>a[aria-current]{font-weight:600}
+.node-menu li>a[aria-current]::before{content:"\2713";position:absolute;left:.7rem}
+.node-menu .note{display:block;font-size:12px;font-weight:400;color:var(--dim,GrayText)}
+.node-menu li.note{padding:.3rem .9rem;border-top:1px solid var(--rule,GrayText)}
+.node-note{margin:.4rem 0;padding:.3rem .7rem;font-size:13px;border-left:3px solid #d4a72c;
+background:var(--box,transparent)}
+@media print{.node-menu{display:none}}

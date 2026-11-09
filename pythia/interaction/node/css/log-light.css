@@ -1,0 +1,7 @@
+/* The node server's Log light style: the original log layout, always in
+   light colors.
+   Loaded after log-dark.css, so only the palette changes: every item,
+   label, line number and fold stays the same. Edit it, and reload. */
+:root{color-scheme:only light;--fg:#1f2328;--dim:#656d76;--bg:#fff;--rule:#d0d7de;--box:#f6f8fa;
+--a:#0969da;--user:#0969da;--asst:#1a7f37;--tool:#8250df;--err:#cf222e;--esc:#fff1b3;
+--escfg:#7a4b00;--add:#1a7f37;--del:#cf222e;--hunk:#0969da}

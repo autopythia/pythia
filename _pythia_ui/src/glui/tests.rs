@@ -17,7 +17,8 @@
 //! - the looks' stylesheets, in `web/`, read only the variables that
 //!   `glui.js` sets from a theme, which `theme.lem` names;
 //! - the web look's pages, `web/demo.html` and `web/test.html`, and the
-//!   contexts' sample pages, give themselves the CSP that wui will send,
+//!   contexts' sample pages, give themselves the CSP that pythia's node
+//!   server sends its glui view's pages,
 //!   and run only the crate's own files, and those that `make web` writes:
 //!   no script or style inline;
 //! - the compiled programs in `web/compiled/`, which the contexts' pages
@@ -332,10 +333,12 @@ const PAGE_SCRIPTS: [(&str, &str); 3] = [
   ("web/contexts.js", include_str!("../../web/contexts.js")),
 ];
 
-/// The CSP that wui will send with the pages that run lem, which the web
-/// look's pages give themselves.
+/// The CSP that pythia's node server sends with its glui view's pages
+/// (pythia/interaction/node/view.py), which the web look's pages give
+/// themselves, but `frame-ancestors`, which only a header can give.
 const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" \
-  content=\"script-src 'self'; connect-src 'self'; style-src 'self'\">";
+  content=\"default-src 'none'; script-src 'self'; style-src 'self'; \
+  connect-src 'self'; base-uri 'none'; form-action 'none'\">";
 
 /// What's wrong with a page: its CSP; script or style inline; and a script
 /// or stylesheet that isn't a file in the crate, or under target/, which
@@ -348,7 +351,7 @@ fn page_faults(page: &str) -> Vec<String> {
     faults.push("a character beyond ASCII".to_string());
   }
   if !page.contains(CSP) {
-    faults.push("not the CSP that wui sends".to_string());
+    faults.push("not the CSP that the node server sends".to_string());
   }
   for inline in ["<style", " style=", "javascript:"] {
     if lower.contains(inline) {

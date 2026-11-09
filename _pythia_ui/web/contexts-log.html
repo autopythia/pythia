@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="en" data-facts="../target/web/sample/log.json" data-body="../target/web/sample/body/{line}.json">
+<html lang="en" data-facts="../target/web/sample/log.json" data-turn="../target/web/sample/turn/{turn}.json" data-body="../target/web/sample/body/{line}.json">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="script-src 'self'; connect-src 'self'; style-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- web/contexts-log.html: a sample of a context's log, as wui will
-     serve it: contexts.js shows the facts that the html element names,
-     which `make web` writes (tools/contexts_sample.py); `make web-serve`
-     serves it. -->
+<!-- web/contexts-log.html: a sample of a context's log, as the glui view
+     of pythia's node server serves one (pythia/interaction/node/view.py):
+     contexts.js shows the facts that the html element names, which `make
+     web` writes (tools/contexts_sample.py); `make web-serve` serves it. -->
 <title>A sample log</title>
 <link rel="stylesheet" href="glui.css">
 <link rel="stylesheet" href="native.css">

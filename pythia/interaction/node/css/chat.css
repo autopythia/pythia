@@ -1,0 +1,108 @@
+/* The node server's Chat style: the conversation first. The user's messages
+   are bubbles on the right, and the assistant's are cards. Tool calls, their
+   results, reasoning and compaction checkpoints are one line each, which
+   opens in place (the style's layout, in styles.py); samples' token counts
+   are hidden, and each turn ends with a thin rule. The server reads this
+   file for each page: edit it, and reload. */
+
+:root{color-scheme:light dark;
+--fg:#1d1d1f;--dim:#6e6e73;--bg:#f2f2f5;--card:#fff;--box:#f4f4f7;--rule:#d7d7dc;
+--a:#0063c6;--user:#0a7cff;--user-fg:#fff;--tool:#7d3cc8;--err:#d70015;
+--esc:#ffe9a8;--esc-fg:#6b4a00;--add:#1f7a37;--del:#c4001a;--hunk:#0063c6;
+--shadow:0 1px 2px rgba(0,0,0,.08);--menu-bg:#fff}
+@media (prefers-color-scheme:dark){:root{
+--fg:#ececf1;--dim:#9a9aa1;--bg:#18181b;--card:#26262a;--box:#1f1f23;--rule:#3a3a40;
+--a:#5aa9ff;--user:#0a64c8;--user-fg:#fff;--tool:#c08bff;--err:#ff6259;
+--esc:#4d3800;--esc-fg:#ffd60a;--add:#4fd27a;--del:#ff6259;--hunk:#5aa9ff;
+--shadow:0 1px 2px rgba(0,0,0,.5);--menu-bg:#26262a}}
+
+body{margin:0 auto;max-width:60rem;padding:.8rem 1.2rem 4rem;color:var(--fg);
+background:var(--bg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--a);text-decoration:none}
+a:hover{text-decoration:underline}
+nav{min-height:1.7rem;font-size:13px;color:var(--dim)}
+h1{font-size:1.3em;margin:.4em 0 .3em}
+h2{font-size:1.05em;margin:1.4em 0 .5em}
+pre,.mono,.ln,.gist{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{font-size:13px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;
+margin:.35em 0;padding:.5em .75em;background:var(--box);border-radius:8px}
+.dim{color:var(--dim)}
+.r{text-align:right;white-space:nowrap}
+.nw{white-space:nowrap}
+.esc{background:var(--esc);color:var(--esc-fg);border-radius:3px}
+.d-add{color:var(--add)}
+.d-del{color:var(--del)}
+.d-hunk{color:var(--hunk)}
+.d-file{font-weight:600}
+.cut{font-size:12px;color:var(--dim)}
+.pager{margin:.8em 0;font-size:14px}
+.nest{margin-left:1em}
+summary{cursor:pointer}
+
+/* The contexts, a context's facts, and its turns. */
+table{border-collapse:collapse;width:100%;font-size:13px;background:var(--card);
+border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
+th,td{padding:5px 9px;text-align:left;vertical-align:top;border-bottom:1px solid var(--rule)}
+th{font-weight:600;color:var(--dim)}
+tr:last-child>td{border-bottom:0}
+dl{display:grid;grid-template-columns:max-content auto;gap:.25em 1em;margin:.6em 0;
+padding:.7em 1em;font-size:13px;background:var(--card);border-radius:10px;
+box-shadow:var(--shadow)}
+dt{color:var(--dim)}
+dd{margin:0;overflow-wrap:anywhere}
+form{margin:.8em 0;font-size:14px}
+input,button{font:inherit}
+
+/* Items: a line number and a label, then what the item holds. */
+.it{margin:.7em 0}
+.ln{font-size:10px;color:var(--dim);opacity:.75}
+.ln:hover{opacity:1}
+.lb{margin-right:.45em;font-size:12px;font-weight:600;color:var(--dim)}
+.it.tool>.lb{color:var(--tool)}
+.it.err>.lb{color:var(--err)}
+.it.meta{font-size:13px;color:var(--dim)}
+div.it.tool{padding:.3em .8em;background:var(--card);border-radius:10px;
+box-shadow:var(--shadow)}
+
+/* Messages: the user's on the right, the assistant's on the left, each with
+   its line number at its foot. */
+.it.t-message{display:flex;flex-direction:column}
+.it.t-message>.ln{order:1;align-self:flex-end;margin-top:.2em}
+.it.t-message.user>.lb,.it.t-message.assistant>.lb{display:none}
+.it.t-message.user{width:fit-content;max-width:min(85%,44rem);margin-left:auto;
+padding:.55em .95em;color:var(--user-fg);background:var(--user);
+border-radius:18px 18px 5px 18px}
+.it.t-message.assistant{padding:.65em 1em;background:var(--card);
+border-radius:5px 18px 18px 18px;box-shadow:var(--shadow)}
+.it.t-message pre{margin:.1em 0;padding:0;font:inherit;color:inherit;background:none}
+.it.t-message.user .ln,.it.t-message.user .cut,.it.t-message.user a{color:inherit}
+.it.t-message.user pre a{text-decoration:underline}
+
+/* Tool calls, their results, reasoning and checkpoints: one line each, which
+   opens in place. */
+details.it{margin:.1em 0}
+details.it>summary{display:block;list-style:none;overflow:hidden;white-space:nowrap;
+text-overflow:ellipsis;padding:.2em .6em;border-radius:7px;font-size:13px;
+color:var(--dim)}
+details.it>summary::-webkit-details-marker{display:none}
+details.it>summary::before{content:"\25B8";display:inline-block;width:1.1em}
+details.it[open]>summary::before{content:"\25BE"}
+details.it>summary:hover{background:var(--card)}
+details.it>summary>.ln{margin-right:.45em}
+details.it>summary>.gist{color:var(--fg)}
+details.it.t-reasoning>summary>.gist,
+details.it.t-context_prefix>summary>.gist{font-family:inherit;font-style:italic}
+details.it[open]{margin:.45em 0;padding:0 .7em .5em;background:var(--card);
+border-radius:10px;box-shadow:var(--shadow)}
+details.it[open]>summary{white-space:normal}
+
+/* What isn't the conversation, quietly. */
+.it.t-sample_metadata,.it.t-turn_metadata{display:none}
+.it.t-turn_summary{margin:1.3em 0 1.1em;padding-top:.35em;border-top:1px solid var(--rule);
+font-size:11px;color:var(--dim);text-align:center}
+.it.t-user_tool_call,.it.t-user_tool_result,.it.t-compaction_metadata,
+.it.t-opaque_compaction{padding:.3em .8em;font-size:13px;color:var(--dim);
+border:1px dashed var(--rule);border-radius:10px}
+.it.t-model_failure,.it.t-bad{padding:.45em .9em;background:var(--card);
+border:1px solid var(--err);border-radius:10px}
+.it.t-other{padding:.3em .8em;border:1px solid var(--rule);border-radius:10px}

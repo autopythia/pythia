@@ -1,7 +1,7 @@
 // web/demo.js: glui's demo (web/demo.html). It shows one of the programs
 // that `make web` compiles to target/web/ in a view, through glui's
 // recipes (src/glui/glui.js), in either look, and in any theme that `make
-// web` compiles; and it's the program's host, as pythia or wui will be:
+// web` compiles; and it's the program's host, as pythia's node server is:
 // its buttons send the program's facts, as JSON steps (src/lem/host.rs),
 // and it lists what the program sends back, and answers some of it. The
 // page's address keeps its choices, as ?program=approval&look=native&

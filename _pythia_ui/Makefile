@@ -94,8 +94,9 @@ web:
 	echo '[$(subst " ","$(comma) ",$(patsubst %,"%",$(WEB_THEMES)))]' > $(WEB)/themes.json
 	$(PYTHON) tools/contexts_sample.py $(WEB)/sample
 
-# The compiled programs that the contexts' pages fetch, which wui will
-# serve: lem/contexts.lem, and glui's themes, each alone, in web/compiled/.
+# The compiled programs that the contexts' pages fetch, which pythia's node
+# server serves (pythia/interaction/node/view.py): lem/contexts.lem, and
+# glui's themes, each alone, in web/compiled/.
 # A test compiles them again and compares (src/glui/tests.rs): after a
 # change to what they're compiled from, this writes them anew.
 compiled:

@@ -1,14 +1,64 @@
 # pythia's contexts (contexts.lem) through glui's recipes, in a stand-in
 # DOM, for the tests in JavaScript alone (tools/glui_test.js): the steps
 # and what they show, as approval_dom.txt says. The host here is the test:
-# it hears Load, and answers with Body or Failed in the next case's steps.
+# it hears LoadTurn and Load, and answers with Loaded and Item, or
+# TurnFailed; and with Body, or Failed, in the next case's steps.
 
-=== a log: its turns and items, each mark linking to its item's page
-["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line="}]
+=== a log: its turns, each folded, each mark linking to its turn's page
+["+", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn="}]
 ["+", "Nav", {"n": 0, "text": "Contexts", "to": "/"}]
-["+", "Turn", {"n": 0, "title": "The start"}]
-["+", "Turn", {"n": 1, "title": "Turn 1: Plan the GUI"}]
-["+", "Item", {"line": 1, "turn": 0, "tone": "Dim", "label": "[init]", "gist": "model opus", "body": false}]
+["+", "Turn", {"n": 0, "label": "The start \u00b7 1 item", "title": ""}]
+["+", "Turn", {"n": 1, "label": "Turn 1 \u00b7 3 items", "title": "Plan the GUI"}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+
+=== opening a turn asks the host for its items
+["open", "TurnBox(1)"]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          span.g-label.g-tone-dim "loading"
+effect LoadTurn {"turn":1}
+
+=== its items come, each mark linking to its item's page
+["+", "Loaded", {"turn": 1}]
 ["+", "Item", {"line": 2, "turn": 1, "tone": "User", "label": "[user]", "gist": "Plan the GUI", "body": false}]
 ["+", "Item", {"line": 3, "turn": 1, "tone": "Tool", "label": "[tool-call] exec_command", "gist": "git diff", "body": true}]
 ["+", "Item", {"line": 4, "turn": 1, "tone": "Tool", "label": "[tool-ret] exec_command [ok]", "gist": "3 lines", "body": true}]
@@ -19,38 +69,40 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    section.g-panel
-      div.g-panel-title "The start"
-      div.g-panel-body
-        div.g-entry.g-tone-dim
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=1" "1"
-            span.g-entry-label "[init]"
-            span.g-entry-text "model opus"
-          div.g-entry-body
-    section.g-panel
-      div.g-panel-title "Turn 1: Plan the GUI"
-      div.g-panel-body
-        div.g-entry.g-tone-user
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=2" "2"
-            span.g-entry-label "[user]"
-            span.g-entry-text "Plan the GUI"
-          div.g-entry-body
-        div.g-entry.g-fold.g-tone-tool
-          details
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=3" "3"
-              span.g-entry-label "[tool-call] exec_command"
-              span.g-entry-text "git diff"
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          div.g-entry.g-tone-user
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=2" "2"
+              span.g-entry-label "[user]"
+              span.g-entry-text "Plan the GUI"
             div.g-entry-body
-        div.g-entry.g-fold.g-tone-tool
-          details
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=4" "4"
-              span.g-entry-label "[tool-ret] exec_command [ok]"
-              span.g-entry-text "3 lines"
-            div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "git diff"
+              div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command [ok]"
+                span.g-entry-text "3 lines"
+              div.g-entry-body
 
 === opening an entry asks the host for its body
 ["open", "Ent(3)"]
@@ -61,39 +113,41 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    section.g-panel
-      div.g-panel-title "The start"
-      div.g-panel-body
-        div.g-entry.g-tone-dim
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=1" "1"
-            span.g-entry-label "[init]"
-            span.g-entry-text "model opus"
-          div.g-entry-body
-    section.g-panel
-      div.g-panel-title "Turn 1: Plan the GUI"
-      div.g-panel-body
-        div.g-entry.g-tone-user
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=2" "2"
-            span.g-entry-label "[user]"
-            span.g-entry-text "Plan the GUI"
-          div.g-entry-body
-        div.g-entry.g-fold.g-tone-tool
-          details open
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=3" "3"
-              span.g-entry-label "[tool-call] exec_command"
-              span.g-entry-text "git diff"
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          div.g-entry.g-tone-user
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=2" "2"
+              span.g-entry-label "[user]"
+              span.g-entry-text "Plan the GUI"
             div.g-entry-body
-              span.g-label.g-tone-dim "loading"
-        div.g-entry.g-fold.g-tone-tool
-          details
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=4" "4"
-              span.g-entry-label "[tool-ret] exec_command [ok]"
-              span.g-entry-text "3 lines"
-            div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "git diff"
+              div.g-entry-body
+                span.g-label.g-tone-dim "loading"
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command [ok]"
+                span.g-entry-text "3 lines"
+              div.g-entry-body
 effect Load {"line":3}
 
 === its body comes, in parts, one of them a diff
@@ -106,43 +160,45 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    section.g-panel
-      div.g-panel-title "The start"
-      div.g-panel-body
-        div.g-entry.g-tone-dim
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=1" "1"
-            span.g-entry-label "[init]"
-            span.g-entry-text "model opus"
-          div.g-entry-body
-    section.g-panel
-      div.g-panel-title "Turn 1: Plan the GUI"
-      div.g-panel-body
-        div.g-entry.g-tone-user
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=2" "2"
-            span.g-entry-label "[user]"
-            span.g-entry-text "Plan the GUI"
-          div.g-entry-body
-        div.g-entry.g-fold.g-tone-tool
-          details open
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=3" "3"
-              span.g-entry-label "[tool-call] exec_command"
-              span.g-entry-text "git diff"
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          div.g-entry.g-tone-user
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=2" "2"
+              span.g-entry-label "[user]"
+              span.g-entry-text "Plan the GUI"
             div.g-entry-body
-              pre.g-code "git diff"
-              pre.g-code.g-diff
-                span.g-diff-hunk "@@ -1 +1 @@\n"
-                span.g-diff-del "-old\n"
-                span.g-diff-add "+new"
-        div.g-entry.g-fold.g-tone-tool
-          details
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=4" "4"
-              span.g-entry-label "[tool-ret] exec_command [ok]"
-              span.g-entry-text "3 lines"
-            div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "git diff"
+              div.g-entry-body
+                pre.g-code "git diff"
+                pre.g-code.g-diff
+                  span.g-diff-hunk "@@ -1 +1 @@\n"
+                  span.g-diff-del "-old\n"
+                  span.g-diff-add "+new"
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command [ok]"
+                span.g-entry-text "3 lines"
+              div.g-entry-body
 
 === closing it and opening it again asks for nothing
 ["close", "Ent(3)"]
@@ -154,43 +210,45 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    section.g-panel
-      div.g-panel-title "The start"
-      div.g-panel-body
-        div.g-entry.g-tone-dim
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=1" "1"
-            span.g-entry-label "[init]"
-            span.g-entry-text "model opus"
-          div.g-entry-body
-    section.g-panel
-      div.g-panel-title "Turn 1: Plan the GUI"
-      div.g-panel-body
-        div.g-entry.g-tone-user
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=2" "2"
-            span.g-entry-label "[user]"
-            span.g-entry-text "Plan the GUI"
-          div.g-entry-body
-        div.g-entry.g-fold.g-tone-tool
-          details open
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=3" "3"
-              span.g-entry-label "[tool-call] exec_command"
-              span.g-entry-text "git diff"
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          div.g-entry.g-tone-user
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=2" "2"
+              span.g-entry-label "[user]"
+              span.g-entry-text "Plan the GUI"
             div.g-entry-body
-              pre.g-code "git diff"
-              pre.g-code.g-diff
-                span.g-diff-hunk "@@ -1 +1 @@\n"
-                span.g-diff-del "-old\n"
-                span.g-diff-add "+new"
-        div.g-entry.g-fold.g-tone-tool
-          details
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=4" "4"
-              span.g-entry-label "[tool-ret] exec_command [ok]"
-              span.g-entry-text "3 lines"
-            div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "git diff"
+              div.g-entry-body
+                pre.g-code "git diff"
+                pre.g-code.g-diff
+                  span.g-diff-hunk "@@ -1 +1 @@\n"
+                  span.g-diff-del "-old\n"
+                  span.g-diff-add "+new"
+          div.g-entry.g-fold.g-tone-tool
+            details
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command [ok]"
+                span.g-entry-text "3 lines"
+              div.g-entry-body
 
 === the host couldn't send another's body: its entry says why
 ["open", "Ent(4)"]
@@ -202,50 +260,105 @@ main.g-window
   div.g-row
     a.g-link href="/" "Contexts"
   div.g-box
-    section.g-panel
-      div.g-panel-title "The start"
-      div.g-panel-body
-        div.g-entry.g-tone-dim
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=1" "1"
-            span.g-entry-label "[init]"
-            span.g-entry-text "model opus"
-          div.g-entry-body
-    section.g-panel
-      div.g-panel-title "Turn 1: Plan the GUI"
-      div.g-panel-body
-        div.g-entry.g-tone-user
-          div.g-entry-head
-            a.g-entry-mark href="/c/ui-0?line=2" "2"
-            span.g-entry-label "[user]"
-            span.g-entry-text "Plan the GUI"
-          div.g-entry-body
-        div.g-entry.g-fold.g-tone-tool
-          details open
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=3" "3"
-              span.g-entry-label "[tool-call] exec_command"
-              span.g-entry-text "git diff"
+    div.g-entry.g-fold.g-tone-strong
+      details
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          div.g-entry.g-tone-user
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=2" "2"
+              span.g-entry-label "[user]"
+              span.g-entry-text "Plan the GUI"
             div.g-entry-body
-              pre.g-code "git diff"
-              pre.g-code.g-diff
-                span.g-diff-hunk "@@ -1 +1 @@\n"
-                span.g-diff-del "-old\n"
-                span.g-diff-add "+new"
-        div.g-entry.g-fold.g-tone-tool
-          details open
-            summary.g-entry-head
-              a.g-entry-mark href="/c/ui-0?line=4" "4"
-              span.g-entry-label "[tool-ret] exec_command [ok]"
-              span.g-entry-text "3 lines"
-            div.g-entry-body
-              span.g-label.g-tone-error "couldn't load it: 404 Not Found"
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "git diff"
+              div.g-entry-body
+                pre.g-code "git diff"
+                pre.g-code.g-diff
+                  span.g-diff-hunk "@@ -1 +1 @@\n"
+                  span.g-diff-del "-old\n"
+                  span.g-diff-add "+new"
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command [ok]"
+                span.g-entry-text "3 lines"
+              div.g-entry-body
+                span.g-label.g-tone-error "couldn't load it: 404 Not Found"
 effect Load {"line":4}
 
+=== the host couldn't send a turn's items: its entry says why
+["open", "TurnBox(0)"]
+["+", "TurnFailed", {"turn": 0, "why": "502 Bad Gateway"}]
+---
+page title: "ui-0"
+main.g-window
+  div.g-heading.g-level-1 role="heading" aria-level="1" "ui-0"
+  div.g-row
+    a.g-link href="/" "Contexts"
+  div.g-box
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=0" "0"
+          span.g-entry-label "The start · 1 item"
+          span.g-entry-text
+        div.g-entry-body
+          span.g-label.g-tone-error "couldn't load it: 502 Bad Gateway"
+    div.g-entry.g-fold.g-tone-strong
+      details open
+        summary.g-entry-head
+          a.g-entry-mark href="/c/ui-0?turn=1" "1"
+          span.g-entry-label "Turn 1 · 3 items"
+          span.g-entry-text "Plan the GUI"
+        div.g-entry-body
+          div.g-entry.g-tone-user
+            div.g-entry-head
+              a.g-entry-mark href="/c/ui-0?line=2" "2"
+              span.g-entry-label "[user]"
+              span.g-entry-text "Plan the GUI"
+            div.g-entry-body
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=3" "3"
+                span.g-entry-label "[tool-call] exec_command"
+                span.g-entry-text "git diff"
+              div.g-entry-body
+                pre.g-code "git diff"
+                pre.g-code.g-diff
+                  span.g-diff-hunk "@@ -1 +1 @@\n"
+                  span.g-diff-del "-old\n"
+                  span.g-diff-add "+new"
+          div.g-entry.g-fold.g-tone-tool
+            details open
+              summary.g-entry-head
+                a.g-entry-mark href="/c/ui-0?line=4" "4"
+                span.g-entry-label "[tool-ret] exec_command [ok]"
+                span.g-entry-text "3 lines"
+              div.g-entry-body
+                span.g-label.g-tone-error "couldn't load it: 404 Not Found"
+effect LoadTurn {"turn":0}
+
 === the index, in place of the log
-["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line="}]
-["-", "Turn", {"n": 0, "title": "The start"}]
-["-", "Turn", {"n": 1, "title": "Turn 1: Plan the GUI"}]
+["-", "Page", {"title": "ui-0", "items": "/c/ui-0?line=", "turns": "/c/ui-0?turn="}]
+["-", "Turn", {"n": 0, "label": "The start \u00b7 1 item", "title": ""}]
+["-", "Turn", {"n": 1, "label": "Turn 1 \u00b7 3 items", "title": "Plan the GUI"}]
 ["+", "Page", {"title": "Contexts"}]
 ["+", "Context", {"id": "ui-0", "title": "Plan the GUI", "model": "opus", "turns": 12, "lines": 2563, "size": "13.7 MB", "changed": "5 min ago", "rank": 0, "to": "/c/ui-0"}]
 ["+", "Context", {"id": "dev-1", "title": "Let us start", "model": "opus", "turns": 3, "lines": 120, "size": "1.2 MB", "changed": "2 h ago", "rank": 1, "to": "/c/dev-1"}]

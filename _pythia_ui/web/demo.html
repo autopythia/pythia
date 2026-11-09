@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="script-src 'self'; connect-src 'self'; style-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- web/demo.html: glui's demo (demo.js), after `make web`, which `make
-     web-serve` serves, with the CSP that wui will send its pages: they run
-     only the crate's files. -->
+     web-serve` serves, with the CSP that pythia's node server sends the
+     pages of its glui view: they run only the crate's files. -->
 <title>glui</title>
 <link rel="stylesheet" href="glui.css">
 <link rel="stylesheet" href="native.css">
