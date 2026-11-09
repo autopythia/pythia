@@ -822,7 +822,8 @@ Window(Top, title="Contexts")
       Label(Cell("x", "ui-0", 6), text="6 min ago", tone=Dim)
       Button(EditCell("x", "ui-0"), text="✎", on=Edit("x", "ui-0"))
 
-=== a remote node, after this node's roots: its row, then its roots, by ids of their own
+=== a remote node, after this node's roots: its row, then its roots, by ids of their own; and a tag's group before it, though the tag's rank is one of thousands
++ Tag("x", 1500, 2)
 + Node("sim", 2, "autopythia-cloud-0: 1 root context", True, "/n/sim/lem/")
 + Context("sim/ui-0 (10)", "Plan the GUI", "opus", 12, 2563, "13.7 MB", "now", 3, "/n/sim/lem/c/10", "", "", "", "sim")
 + Activity("sim/ui-0 (10)", Green, "Working: sampling.")
@@ -972,7 +973,7 @@ Window(Top, title="Contexts")
 - Tagged("ui-0", "x")
 - Tagged("dev-1", "x")
 - Tag("glui", 0, 1)
-- Tag("x", 1, 2)
+- Tag("x", 1500, 2)
 ---
 Window(Top, title="Contexts")
   Row(TitleRow, aligned=False)

@@ -33,17 +33,18 @@ input Tagged(id: CtxId, tag: Text)
 -- under each of its tags; then this node's contexts without one, under a
 -- row of their own, once a tag is used; then the remote nodes, each with
 -- its contexts. Each context's row is in a group, `""` for none, at an
--- order among the index's rows (Placed): the tags' groups first, from
--- below -10^9, then this node's contexts without a tag and the remote
--- nodes, by rank, each with the row that edits it after its own (orders
--- of 2 apart); and, below them all, the header.
+-- order among the index's rows (Placed): the tags' groups first, below
+-- zero, 10^7 apart, for as many tags as the store keeps; then this node's
+-- contexts without a tag and the remote nodes, by rank, each with the row
+-- that edits it after its own (orders of 2 apart); and, below them all,
+-- the header.
 input Tag(name: Text, rank: Int, count: Int) key name
 msg Fold(tag: Text)
 state Folded(tag: Text, on: Bool) key tag
 rel Grouped(id: CtxId)
 Grouped(c) :- Tagged(c, t), Tag(name=t)
 rel Placed(group: Text, id: CtxId, order: Int) key group, id
-Placed(t, c, (r - 1000) * 1000000 + 2 + k * 2) :- Tagged(c, t), Tag(t, r, _), Grouped(c), Context(id=c, rank=k), not Folded(t, True)
+Placed(t, c, (r - 1000000) * 10000000 + 2 + k * 2) :- Tagged(c, t), Tag(t, r, _), Grouped(c), Context(id=c, rank=k), not Folded(t, True)
 Placed("", c, k * 2) :- Context(id=c, rank=k), not Grouped(c)
 rel Untagged(any: Bool) one
 Untagged(True) :- Tag(), Context(id=c, node=""), not Grouped(c)
@@ -239,7 +240,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
     for Nav(n, text, to):
       Link(Crumb(n), text=text, to=to, order=n)
   Table(Rows) :- Indexed(True):
-    TableRow(Head, header=True, order=-2000000000):
+    TableRow(Head, header=True, order=-20000000000000):
       Label(Col(7), text="State", order=-1)
       Label(Col(0), text="Context")
       Label(Col(8), text="Label")
@@ -250,7 +251,7 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
       Label(Col(5), text="Size")
       Label(Col(6), text="Changed")
     for Tag(g, r, n):
-      TableRow(TagRow(g), order=(r - 1000) * 1000000):
+      TableRow(TagRow(g), order=(r - 1000000) * 10000000):
         Button(TagFold(g), text=arrow, on=Fold(g), order=-1) :- TagArrow(g, arrow)
         Label(TagName(g), text=g, tone=Strong)
         Label(TagSize(g), text=size, tone=Dim) :- TagCount(g, size)
