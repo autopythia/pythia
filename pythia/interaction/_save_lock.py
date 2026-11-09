@@ -6,9 +6,11 @@ held means that a CLI runs on the save, and one that's free, that none does,
 though one may have crashed there. A reboot keeps it, as the restarted CLI
 inherits its descriptor (``adopt``). The file holds a line of JSON that names
 the holder: the program, its PID, the node, the kernel's boot ID, and when it
-took the lock (``describe``). ``1`` is the root context's number, as the
-contexts plan names the file. A save in the original format has no private
-directory, and no lock.
+took the lock (``describe``); and what the CLI is doing, as it changes, its
+``phase`` and whether an automatic retry is under way (``retrying``), which
+the CLI rewrites in place (``SaveLock.note``). ``1`` is the root context's
+number, as the contexts plan names the file. A save in the original format
+has no private directory, and no lock.
 
 On Linux the lock is an open file description lock (``F_OFD_SETLK``), which a
 reader tests without taking it (``F_OFD_GETLK``); elsewhere it's ``flock``,
@@ -43,8 +45,14 @@ _FLOCK = "hhqqi0q"
 # reader may hold it, shared, for a moment.
 _TRIES = 10
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
-# The most of a holder's line that a reader reads.
+# The most of a holder's line that a reader reads; and its size, newline
+# included, padded with spaces, so that a CLI rewrites it in place, the same
+# size, as what it's doing changes.
 _MAX_LINE = 4096
+_LINE_BYTES = 512
+# A holder's fields, each with its kind.
+_FIELDS = {"program": str, "pid": int, "node": str, "boot": str, "since": float,
+           "phase": str, "retrying": bool}
 _FLAGS = os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
 _BUSY = (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK)
 
@@ -55,14 +63,25 @@ def lock_path(private) -> Path:
 
 
 class SaveLock:
-    """A save's lock, held for as long as its descriptor stays open."""
+    """A save's lock, held for as long as its descriptor stays open; ``owner`` is its
+    line, as the holder last wrote it."""
 
-    def __init__(self, path: Path, descriptor: int) -> None:
+    def __init__(self, path: Path, descriptor: int, owner: Optional[dict] = None) -> None:
         self.path = path
         self.descriptor = descriptor
+        self.owner = {} if owner is None else owner
 
     def fileno(self) -> int:
         return self.descriptor
+
+    def note(self, **fields) -> None:
+        """Say more in the holder's line, such as what the CLI is doing, in place of what
+        it said; at best: a line that can't be written changes nothing."""
+        owner = {**self.owner, **fields}
+        if owner != self.owner and self.descriptor >= 0:
+            with suppress(OSError):
+                _write(self.descriptor, owner)
+                self.owner = owner
 
     def close(self) -> None:
         """Let the lock go; the file stays."""
@@ -82,10 +101,10 @@ def take(private) -> Tuple[Optional[SaveLock], Optional[dict]]:
     try:
         if not _lock(descriptor):
             return None, _line(descriptor)
-        os.ftruncate(descriptor, 0)
-        os.pwrite(descriptor, _own_line(), 0)
+        owner = _own()
+        _write(descriptor, owner)
         taken = True
-        return SaveLock(path, descriptor), None
+        return SaveLock(path, descriptor, owner), None
     finally:
         if not taken:
             os.close(descriptor)
@@ -119,7 +138,7 @@ def adopt(descriptor: int, private) -> Optional[SaveLock]:
         mine, there = os.fstat(descriptor), os.stat(path, follow_symlinks=False)
         if (mine.st_dev, mine.st_ino) == (there.st_dev, there.st_ino) and _lock(descriptor):
             os.set_inheritable(descriptor, False)
-            return SaveLock(path, descriptor)
+            return SaveLock(path, descriptor, _line(descriptor))
     except OSError:
         pass
     with suppress(OSError):
@@ -180,15 +199,22 @@ def _held(descriptor: int) -> bool:
     return False
 
 
-def _own_line() -> bytes:
-    """The line that names this process as the holder."""
+def _own() -> dict:
+    """The fields that name this process as the holder."""
     try:
         boot = _BOOT_ID.read_text(encoding="ascii").strip()
     except (OSError, ValueError):
         boot = ""
-    owner = {"program": PROGRAM, "pid": os.getpid(), "node": socket.gethostname(),
-             "boot": boot, "since": round(time.time(), 3)}
-    return (json.dumps(owner, ensure_ascii=True) + "\n").encode("ascii")
+    return {"program": PROGRAM, "pid": os.getpid(), "node": socket.gethostname(),
+            "boot": boot, "since": round(time.time(), 3)}
+
+
+def _write(descriptor: int, owner: dict) -> None:
+    """Write the holder's line, ``owner``, padded, in place of the file's contents."""
+    data = json.dumps(owner, ensure_ascii=True).encode("ascii")
+    data += b" " * max(0, _LINE_BYTES - 1 - len(data)) + b"\n"
+    os.pwrite(descriptor, data, 0)
+    os.ftruncate(descriptor, len(data))
 
 
 def _line(descriptor: int) -> dict:
@@ -199,10 +225,19 @@ def _line(descriptor: int) -> dict:
         return {}
     if not isinstance(value, dict):
         return {}
-    kinds = {"program": str, "pid": int, "node": str, "boot": str, "since": (int, float)}
-    return {name: value[name] for name, kind in kinds.items()
-            if isinstance(value.get(name), kind) and not isinstance(value[name], bool)
-            and (name != "since" or 0 <= value[name] < 1e11)}
+    return {name: value[name] for name in _FIELDS if _sensible(name, value.get(name))}
+
+
+def _sensible(name: str, value) -> bool:
+    """Whether ``value`` makes sense as the holder's field ``name``."""
+    kind = _FIELDS[name]
+    if kind is bool or isinstance(value, bool):
+        return kind is bool and isinstance(value, bool)
+    if kind is float:
+        return isinstance(value, (int, float)) and 0 <= value < 1e11
+    if kind is str:
+        return isinstance(value, str) and len(value) <= 256
+    return isinstance(value, kind)
 
 
 __all__ = ["LOCK_NAME", "SaveLock", "adopt", "describe", "holder", "lock_path", "take"]

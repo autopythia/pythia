@@ -666,6 +666,10 @@ class _UIState:
     # The config snapshot of the turn running, or the last one (_turn): the
     # one its automatic retries followed, which a failure's notice names.
     turn_config: Optional[object] = None
+    # The save's lifetime lock, which this CLI holds (_save_lock), or None:
+    # its line says what the CLI is doing, for the node server's view
+    # (note_activity).
+    lock: Optional[SaveLock] = field(default=None, repr=False)
 
     @property
     def outbox(self) -> Optional[Outbox]:
@@ -682,6 +686,13 @@ class _UIState:
             self.auto_retrying = False
             self.retry_cancel_level = None
             self.retry_progress = None
+        self.note_activity()
+
+    def note_activity(self) -> None:
+        """Say in the save's lock, if this CLI holds it, what the CLI is doing: its
+        phase, and whether an automatic retry is under way."""
+        if self.lock is not None:
+            self.lock.note(phase=self.phase, retrying=self.auto_retrying)
 
     def notice(self, text: str) -> None:
         text = text.rstrip("\r\n")
@@ -1887,6 +1898,7 @@ def _end_auto_retry(state: _UIState) -> None:
     state.auto_retrying = False
     state.retry_cancel_level = None
     state.retry_progress = None
+    state.note_activity()
 
 
 def _set_retry_progress(state: _UIState, progress) -> None:
@@ -3249,6 +3261,7 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
     state.auto_retrying = False
     state.retry_cancel_level = None
     state.retry_progress = None
+    state.note_activity()
     state.turn_config = snapshot
     _apply_workspace(environment, snapshot)
     host = _CliHost(state, writer, asyncio.get_running_loop(), steering, snapshot,
@@ -4087,8 +4100,9 @@ def _carry_over(state: _UIState, config: InteractionConfig, rebooted: _Rebooted)
 
 
 async def _run_headless(model, environment, args, path, *, trace=None, icron=None,
-                        media=None, ui=None, rebooted=None):
-    """One explicit task, quiet context display, and orderly effect draining."""
+                        media=None, ui=None, rebooted=None, lock=None):
+    """One explicit task, quiet context display, and orderly effect draining. ``lock``
+    is the save's lifetime lock, if this CLI holds it (_UIState.lock)."""
     if model is None:
         raise ValueError("Headless execution requires an available model.")
     if getattr(args, "require_tool_approval", False):
@@ -4105,7 +4119,9 @@ async def _run_headless(model, environment, args, path, *, trace=None, icron=Non
         media=media,
         ui=ui,
         rebooted=rebooted,
+        lock=lock,
     )
+    state.note_activity()
     _startup_notices(state, args, save, config)
     if rebooted is not None:
         _carry_over(state, config, rebooted)
@@ -4161,9 +4177,11 @@ async def _run(
     ui: Optional[UiTool] = None,
     rebooted: Optional[_Rebooted] = None,
     afk: Optional[AfkDefaults] = None,
+    lock: Optional[SaveLock] = None,
 ) -> int:
     """The interactive CLI. ``afk`` is the model catalog's [afk] section,
-    for /afk, which comes with icron."""
+    for /afk, which comes with icron. ``lock`` is the save's lifetime lock,
+    if this CLI holds it (_UIState.lock)."""
     save = _prepared_save(path, args)
     config = _runtime_config(environment, args, save.shown)
     prompt = args.prompt or ""
@@ -4178,7 +4196,9 @@ async def _run(
         media=media,
         ui=ui,
         rebooted=rebooted,
+        lock=lock,
     )
+    state.note_activity()
     if icron is not None:
         state.afk = Afk(icron, AfkDefaults() if afk is None else afk, state.notice)
         state.auto = Auto(state.afk, state.notice,
@@ -4638,12 +4658,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.headless:
                 return asyncio.run(_run_headless(
                     model, environment, args, path=save, trace=trace, icron=icron,
-                    media=media, ui=ui, rebooted=rebooted,
+                    media=media, ui=ui, rebooted=rebooted, lock=lock,
                 ))
             terminal = PosixTerminal(sys.stdin, sys.stdout)
             return asyncio.run(_run(
                 model, environment, terminal, args, path=save, trace=trace, icron=icron,
-                media=media, ui=ui, rebooted=rebooted, afk=catalog.afk,
+                media=media, ui=ui, rebooted=rebooted, afk=catalog.afk, lock=lock,
             ))
     except _Rebooting as rebooting:
         reboot_state = rebooting.state  # the session has shut down: restart once it's closed

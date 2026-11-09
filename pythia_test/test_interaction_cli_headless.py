@@ -21,6 +21,8 @@ from pythia.interaction import (
     TurnSummary, cli, demo, load_interaction_save, save_interaction_save,
 )
 from pythia.interaction._save_lock import holder, take
+from pythia.interaction.loop import kernel
+from pythia_test.test_interaction_cli_retry import _rejected
 from pythia.interaction.codex_auth import CodexAuthUnavailable
 from pythia_test.test_interaction_cli import _Model, _Terminal, _answer
 from pythia_test.test_interaction_cli_pty import _SCRIPT
@@ -134,6 +136,34 @@ class HeadlessCLITests(unittest.TestCase):
         self.assertEqual((seen[0]["program"], seen[0]["pid"]), ("pythia", os.getpid()))
         self.assertIsNone(holder(private))  # it let go as it ended
         self.assertNotIn("lock", stderr)
+
+    def test_its_lock_says_what_it_is_doing(self):
+        private = self.root / "session._private"
+        seen = []
+
+        def noted(want):  # the note comes through the event loop, a moment later
+            deadline = time.monotonic() + 10
+            while True:
+                owner = holder(private) or {}
+                found = (owner.get("phase"), owner.get("retrying"))
+                if found == want or time.monotonic() > deadline:
+                    seen.append(found)
+                    return
+
+        def rejected(context):
+            noted(("sampling", False))
+            raise _rejected()
+
+        def answer(context):
+            noted(("sampling", True))  # the automatic retry's attempt
+            return _answer()
+
+        with mock.patch.object(kernel, "AUTO_RETRY_DELAYS_SECONDS", (0,)):
+            code, _, _, stderr = self.run_main(
+                ["--prompt", "hello", "--enable-default-tools=False"], rejected, answer)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(seen, [("sampling", False), ("sampling", True)])
+        self.assertIsNone(holder(private))
 
     def test_a_save_that_another_cli_holds_warns_and_goes_on(self):
         code, _, _, stderr = self.run_main(["--prompt", "first"], _answer())
