@@ -1,26 +1,29 @@
 """``python3 -m pythia.interaction.node``: serve this node's root contexts, read-only.
 
 The root contexts are those that the node's registry lists, wherever their
-saves are: ``--registry``, else ``$PYTHIA_REGISTRY``, else ``~/.pythia/root``,
-as the CLI finds it. The glui view's settings are kept in ``--store``, else
+saves are: ``--registry``, else the settings' (``config.py``), else
+``$PYTHIA_REGISTRY``, else ``~/.pythia/root``, as the CLI finds it. The glui
+view's settings are kept in ``--store``, else the settings', else
 ``~/.pythia/node``; ``--store none`` keeps nothing. A relative path is taken
 from the launch directory. With ``--stdio``, the server answers on its
 standard streams instead, as lines of JSON, for a node server elsewhere that
-reaches this node by ssh (``stdio.py``); and with ``--remote HOST``, a server
-shows HOST's root contexts too, reaching it so (``remote.py``).
+reaches this node by ssh (``stdio.py``); and with ``--remote HOST``, or a
+``[remote HOST]`` section of its settings, a server shows HOST's root contexts
+too, reaching it so (``remote.py``). Its settings, in ``~/.pythia/node.ini``,
+give its options' defaults, which the options override (``config.py``).
 """
 
 import argparse
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence
 
 from .._cli_editor import safe_text
 from ..registry import abbreviate, registry_path, save_prefix_of
 from .contexts import Roots, shown_path
 from .pages import _KEY, absent_note, when
-from . import remote, stdio
+from . import config, remote, stdio
 from .server import ADDRESS, App, Server
 from .store import Store
 from .styles import DEFAULT_STYLE, Styles
@@ -29,9 +32,30 @@ PROG = "python3 -m pythia.interaction.node"
 DEFAULT_PORT = 8765
 # --list cuts a row's last column to the terminal's width, but leaves at least this much.
 MIN_TITLE = 12
+# What --help says of the settings, after the options.
+SETTINGS = f"""\
+settings: ~/.pythia/node.ini, if it's there, unless --config or
+${config.ENV} names another file, or none. Its [node] section gives the
+defaults of --registry, --store, --port and --style, as registry = DIR, and so
+on; and each [remote NAME] section, a remote node to show, which ssh reaches,
+and runs a node server on, with pythia where its install.py -e links it:
+
+  [remote NAME]
+  host = HOST          what ssh reaches (default: NAME)
+  user = USER          ssh -l USER
+  port = N             ssh -p N
+  identity = FILE      ssh -i FILE
+  options = ...        more of ssh's options
+  pythia = DIR         where pythia is there (default: {remote.PYTHIA})
+  python = COMMAND     its Python (default: python3)
+  registry = DIR       its registry (default: its own)
+  timeout = SECONDS    how long a request waits for it (default: {remote.TIMEOUT:g})
+  command = ...        the command that reaches it, in the place of all but timeout
+
+pythia/interaction/node/config.py says more."""
 
 
-def remote_node(text: str) -> Tuple[str, List[str]]:
+def remote_node(text: str) -> remote.Way:
     """A --remote's value, as remote.parse takes it."""
     try:
         return remote.parse(text)
@@ -55,36 +79,41 @@ STORE = Path.home() / ".pythia" / "node"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog=PROG,
+        prog=PROG, epilog=SETTINGS, formatter_class=argparse.RawDescriptionHelpFormatter,
         description=("Serve this node's root contexts, those that its registry lists, as web "
                      "pages, read-only but for the view's store, on 127.0.0.1."))
     parser.add_argument("--registry", metavar="DIR", default=None, help=(
         "the registry whose root contexts to show, read and never written. A relative "
-        "path is from the launch directory (default: $PYTHIA_REGISTRY, else "
-        "~/.pythia/root)"))
-    parser.add_argument("--port", metavar="N", type=port_number, default=DEFAULT_PORT, help=(
+        "path is from the launch directory (default: the settings' registry, else "
+        "$PYTHIA_REGISTRY, else ~/.pythia/root)"))
+    parser.add_argument("--port", metavar="N", type=port_number, default=None, help=(
         "the port to serve on, on 127.0.0.1 only; 0 picks a free one (default: "
-        "%(default)s)"))
+        f"{DEFAULT_PORT})"))
     way = parser.add_mutually_exclusive_group()
     way.add_argument("--list", action="store_true", help=(
         "print the root contexts and exit, serving nothing"))
     way.add_argument("--stdio", action="store_true", help=(
         "serve on standard input and output, as lines of JSON, for a node server elsewhere "
         "that reaches this node by ssh, with no port and no token"))
-    parser.add_argument("--style", metavar="NAME", default=DEFAULT_STYLE, help=(
+    parser.add_argument("--style", metavar="NAME", default=None, help=(
         "the style that pages show in, unless their URL names another: log-dark, "
         "log-light, chat, or another in the server's css/. The menu at each page's top "
-        "right switches (default: %(default)s)"))
+        f"right switches (default: {DEFAULT_STYLE})"))
     parser.add_argument("--remote", metavar="HOST", type=remote_node, action="append",
                         default=[], help=(
         "show HOST's root contexts too, at /TOKEN/n/HOST/, as a node server that it runs "
-        "with --stdio, reached by 'ssh -o BatchMode=yes HOST'; NAME=COMMAND reaches a node "
-        "named NAME by COMMAND instead, such as 'python3 -m pythia.interaction.node --stdio "
-        "--registry DIR'. Give it once for each remote node"))
+        "with --stdio, reached by 'ssh -o BatchMode=yes HOST', as a [remote HOST] section "
+        "of the settings with no keys does, in that section's place; NAME=COMMAND reaches "
+        "a node named NAME by COMMAND instead, such as 'python3 -m pythia.interaction.node "
+        "--stdio --registry DIR'. Give it once for each remote node"))
     parser.add_argument("--store", metavar="DIR", default=None, help=(
         "where the glui view keeps what it keeps across the server's runs, such as its "
         "settings, as a browser keeps its profile; 'none' keeps nothing. A relative path is "
         "from the launch directory (default: ~/.pythia/node)"))
+    parser.add_argument("--config", metavar="FILE", default=None, help=(
+        "the settings to read, in place of ~/.pythia/node.ini, as below; 'none' reads none. "
+        f"A relative path is from the launch directory (default: ${config.ENV}, else "
+        "~/.pythia/node.ini, if it's there)"))
     return parser
 
 
@@ -166,45 +195,70 @@ def render_list(roots: Roots, width: int) -> str:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        settings = config.read(args.config)
+    except config.Invalid as exc:
+        _error(f"{exc}.")
+        return 2
+    where = shown_path(settings.path) if settings.path else "node.ini"
     styles = Styles()
-    if styles.get(args.style) is None:
-        names = ", ".join(style.name for style in styles.all())
-        parser.error(f"argument --style: {args.style!r} isn't a style: give one of {names}")
-    path = registry_path(args.registry)
+    style = next(each for each in (args.style, settings.style, DEFAULT_STYLE)
+                 if each is not None)
+    if styles.get(style) is None:
+        names = ", ".join(each.name for each in styles.all())
+        if args.style is not None:
+            parser.error(f"argument --style: {style!r} isn't a style: give one of {names}")
+        _error(f"{where}: [node] style: {style!r} isn't a style: give one of {names}.")
+        return 2
+    option, off = args.registry, "--registry none"
+    if option is None:
+        option, off = ((settings.registry, f"registry = none in {where}")
+                       if settings.registry is not None else (None, "PYTHIA_REGISTRY=none"))
+    path = registry_path(option)
     if path is None:
-        _error("the registry is off (--registry none, or PYTHIA_REGISTRY=none), and the node "
-               "server shows its root contexts: give one with --registry.")
+        _error(f"the registry is off ({off}), and the node server shows its root contexts: "
+               "give one with --registry.")
         return 1
     roots = Roots(path)
     if args.list:
         width = shutil.get_terminal_size((80, 24)).columns
         print(render_list(roots, width), flush=True)
         return 0
-    stored = Path(args.store).expanduser().absolute() if args.store else STORE
-    store = None if args.store == "none" else Store(stored)
+    kept = args.store if args.store is not None else settings.store
+    stored = Path(kept).expanduser().absolute() if kept else STORE
+    store = None if kept == "none" else Store(stored)
     if args.stdio and args.remote:
         parser.error("argument --remote: not allowed with argument --stdio")
     if args.stdio:
-        return stdio.serve(roots, store=store, style=args.style, styles=styles)
-    names = [name for name, _ in args.remote]
+        # A node reached so shows its own roots alone: its settings' remotes are for its
+        # own server.
+        return stdio.serve(roots, store=store, style=style, styles=styles)
+    names = [way.name for way in args.remote]
     twice = next((name for name in names if names.count(name) > 1), None)
     if twice is not None:
         parser.error(f"argument --remote: {twice} is given twice")
-    app = App(roots, style=args.style, styles=styles, store=store, remotes=args.remote)
+    # The settings' remotes, each in its place, unless --remote names it, then the others
+    # that --remote names.
+    given = {way.name: way for way in args.remote}
+    remotes = [given.pop(way.name, way) for way in settings.remotes] + list(given.values())
+    port = next(each for each in (args.port, settings.port, DEFAULT_PORT) if each is not None)
+    app = App(roots, style=style, styles=styles, store=store, remotes=remotes)
     try:
-        server = Server(app, args.port)
+        server = Server(app, port)
     except OSError as exc:
-        _error(f"can't serve on {ADDRESS}:{args.port}: {exc}; give another port with --port, "
+        _error(f"can't serve on {ADDRESS}:{port}: {exc}; give another port with --port, "
                "or --port 0 for a free one.")
         return 1
     try:
-        return _serve(server, roots)
+        return _serve(server, roots, settings.path)
     finally:
         app.close()
 
 
-def _serve(server: Server, roots: Roots) -> int:
+def _serve(server: Server, roots: Roots, settings: Optional[Path] = None) -> int:
     with server:
+        if settings is not None:
+            _say(f"settings: {shown_path(settings)}")
         _say(roots.problem() or _counted(roots))
         _say(server.url)
         files = server.app.view.files

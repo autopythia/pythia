@@ -22,14 +22,14 @@ and no request is logged.
 Every plain page takes ``?style=NAME``, one of the styles that ``css/``
 holds (``styles.py``); a name that isn't one is a bad request.
 
-Behind ``/TOKEN/n/NAME/`` are the pages of remote node NAME (``--remote``,
-``remote.py``), as it answers them, a site within this server's, with its own
-store: GET, HEAD and its view's POSTs go to it, which checks them as this
-server does. What it answers passes on only as this server's own pages would:
-as HTML, plain text or JSON, with none of its headers but Allow, under this
-server's content security policies, and with redirects within its own pages;
-and its view's scripts, styles and programs are this server's own, so that its
-pages run nothing that it sent.
+Behind ``/TOKEN/n/NAME/`` are the pages of remote node NAME (node.ini's
+``[remote NAME]``, or ``--remote``; ``remote.py``), as it answers them, a site
+within this server's, with its own store: GET, HEAD and its view's POSTs go to
+it, which checks them as this server does. What it answers passes on only as
+this server's own pages would: as HTML, plain text or JSON, with none of its
+headers but Allow, under this server's content security policies, and with
+redirects within its own pages; and its view's scripts, styles and programs
+are this server's own, so that its pages run nothing that it sent.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 from .contexts import Roots
 from .pages import BadRequest, Pages, Response
-from .remote import Remote, listings
+from .remote import Remote, Way, listings
 from .store import FILES, MAX_BYTES, REPLACED, Store
 from .styles import DEFAULT_STYLE, FIELD, NAME, Styles
 from .view import DATA_CSP, PAGE_CSP, View
@@ -129,7 +129,7 @@ class App:
                  style: str = DEFAULT_STYLE, styles: Optional[Styles] = None,
                  view: Optional[View] = None, store: Optional[Store] = None,
                  base: Optional[str] = None,
-                 remotes: Sequence[Tuple[str, Sequence[str]]] = ()) -> None:
+                 remotes: Sequence[Sequence] = ()) -> None:
         self.token = token or new_token()
         self.base = f"/{self.token}" if base is None else base
         self._base = self.base.encode("latin-1", "replace")
@@ -137,10 +137,12 @@ class App:
         self.pages = Pages(roots, self.token, style=style, styles=styles, base=self.base)
         self.view = View(store=store) if view is None else view
         self.store = store
-        # The remote nodes, each by its name, and the command that reaches it, whose roots
-        # the index shows after this node's.
+        # The remote nodes, each by its name, as it's reached (a Way, or its fields), whose
+        # roots the index shows after this node's.
+        ways = [Way(*each) for each in remotes]
         self.remotes: Dict[str, Remote] = {
-            name: Remote(name, argv, f"{self.base}/n/{name}") for name, argv in remotes}
+            way.name: Remote(way.name, way.argv, f"{self.base}/n/{way.name}",
+                             timeout=way.timeout) for way in ways}
         if self.remotes:
             self.pages.listings = lambda: listings(list(self.remotes.values()))
 

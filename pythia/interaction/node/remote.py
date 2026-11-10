@@ -1,17 +1,21 @@
-"""The node server's remotes (``--remote``): other nodes, each reached by a command that
-runs a node server there on its standard streams (``stdio.py``), as ssh does, whose
-pages the local server answers ``/TOKEN/n/NAME/...`` with (``server.py``).
+"""The node server's remotes (each ``[remote NAME]`` of node.ini, ``config.py``, and
+``--remote``): other nodes, each reached by a command that runs a node server there on
+its standard streams (``stdio.py``), as ssh does, whose pages the local server answers
+``/TOKEN/n/NAME/...`` with (``server.py``).
 
-``--remote HOST`` reaches HOST by ``ssh -o BatchMode=yes HOST python3 -m
-pythia.interaction.node --stdio``; ``--remote NAME=COMMAND`` by COMMAND, split into words
-as a shell splits them, for a node that's reached otherwise, or one tried on this node. A
-remote's process starts at its first request, and again after it ends, once in ``RETRY``
-seconds at most, and it ends with the local server, as its input does. A request that it
-doesn't answer in ``TIMEOUT`` seconds gets 504, and the process ends, to start again;
-one while it can't be reached gets 502, which says why, by what it said last on its
-standard error. The index asks every remote for its roots at once (``listings``), and
-waits ``LISTING_WAIT`` seconds at most; a remote that's slow goes on, unless a request
-has waited ``TIMEOUT`` seconds for it, as one of a connection that stalled does.
+By default, ssh reaches a remote, logging in by a key or an agent alone
+(``ssh_command``), and runs its node server there, with pythia where pythia's installer
+links it, as the installer's own commands run pythia (``node_words``). ``--remote HOST``
+reaches HOST so; ``--remote NAME=COMMAND`` by COMMAND, split into words as a shell
+splits them, as node.ini's ``command`` does, for a node that's reached otherwise, or one
+tried on this node. A remote's process starts at its first request, and again after it
+ends, once in ``RETRY`` seconds at most, and it ends with the local server, as its input
+does. A request that it doesn't answer in ``TIMEOUT`` seconds gets 504, and the process
+ends, to start again; one while it can't be reached gets 502, which says why, by what it
+said last on its standard error. The index asks every remote for its roots at once
+(``listings``), and waits ``LISTING_WAIT`` seconds at most; a remote that's slow goes
+on, unless a request has waited ``TIMEOUT`` seconds for it, as one of a connection that
+stalled does.
 """
 
 from __future__ import annotations
@@ -27,15 +31,23 @@ import shlex
 import subprocess
 import threading
 import time
-from typing import Deque, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, NamedTuple, Optional, Sequence
 
 from .activity import GRAY, GREEN, ORANGE, RED, YELLOW
 from .pages import Response
 
 # The protocol of a node on its standard streams, which its first line says.
 PROTOCOL = 1
+# What reaches a remote node by default: ssh, in batch mode, which logs in by a key or an
+# agent alone, never by a password that it would wait for; and, there, its Python, with
+# pythia where pythia's installer (install.py -e) links its checkout, from the home
+# directory, where ssh starts; which runs the node server as the installer's commands
+# run pythia, without the launch directory on sys.path, whose files could shadow imports.
 SSH = ("ssh", "-o", "BatchMode=yes")
-STDIO = ("python3", "-m", "pythia.interaction.node", "--stdio")
+PYTHIA = ".pythia/lib/pythia-dev"
+PYTHON = ("python3",)
+RUN = ('import sys; sys.path[:] = [p for p in sys.path if p]; import runpy; '
+       'runpy.run_module("pythia.interaction.node", run_name="__main__", alter_sys=True)')
 # A node's name, which its pages' paths hold: as a host's, with no user and no port.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
 TIMEOUT = 30.0
@@ -45,13 +57,11 @@ LISTING_WAIT = 5.0
 MAX_ANSWER = 64 * 1024 * 1024
 # The lines of its standard error that a remote's failure can say.
 SAID = 20
-# What a remote whose python3 doesn't find pythia says, and what to do about it: pythia's
-# installer (install.py) puts it on PYTHONPATH in the wrappers that it writes alone.
+# What a remote whose Python doesn't find pythia says, and what to do about it.
 NO_PYTHIA = "No module named 'pythia'"
-FIND_PYTHIA = ("there, python3 doesn't find pythia, which pythia's installer puts on "
-               "PYTHONPATH in its own commands alone: give --remote NAME=COMMAND, with a "
-               "command that sets it, such as 'ssh -o BatchMode=yes HOST env "
-               "PYTHONPATH=.pythia/lib/pythia-dev python3 -m pythia.interaction.node --stdio'")
+FIND_PYTHIA = ("there, Python doesn't find pythia: install it there with pythia's "
+               "install.py -e, or say where it is, as pythia = DIR in the remote's section "
+               "of node.ini, with python = COMMAND for another Python")
 # A remote's root, as its view's index gives it, and what it's doing: each field's type;
 # and the fields that a root may have too, as a node of a later version gives them.
 ROOT = {"id": str, "title": str, "model": str, "turns": int, "lines": int, "size": str,
@@ -61,7 +71,45 @@ DOING = {"id": str, "hue": str, "why": str}
 HUES = frozenset((GRAY, GREEN, YELLOW, ORANGE, RED))
 
 
-def parse(text: str) -> Tuple[str, List[str]]:
+class Way(NamedTuple):
+    """A remote node, as the server reaches it: its name, the command that does, and how
+    long a request waits for it (``Remote``)."""
+
+    name: str
+    argv: List[str]
+    timeout: float = TIMEOUT
+
+
+def node_words(pythia: str = PYTHIA, python: Sequence[str] = PYTHON,
+               registry: Optional[str] = None) -> List[str]:
+    """The words of the command that runs a node server on a remote's standard streams,
+    each quoted for the remote's shell, which ssh hands them to, joined: by ``python``,
+    with ``pythia`` on PYTHONPATH, unless it's empty, and for ``registry``, if given."""
+    words = ["env", "PYTHONPATH=" + shlex.quote(pythia)] if pythia else []
+    words += [*map(shlex.quote, python), "-c", shlex.quote(RUN), "--stdio"]
+    if registry is not None:
+        words += ["--registry", shlex.quote(registry)]
+    return words
+
+
+def ssh_command(host: str, *, user: Optional[str] = None, port: Optional[int] = None,
+                identity: Optional[str] = None, options: Sequence[str] = (),
+                pythia: str = PYTHIA, python: Sequence[str] = PYTHON,
+                registry: Optional[str] = None) -> List[str]:
+    """The command that reaches a remote node at ``host`` by ssh, with ``-l user``, ``-p
+    port``, ``-i identity`` and ``options``, as given, and runs its node server there
+    (``node_words``)."""
+    argv = list(SSH)
+    if user is not None:
+        argv += ["-l", user]
+    if port is not None:
+        argv += ["-p", str(port)]
+    if identity is not None:
+        argv += ["-i", identity]
+    return [*argv, *options, host, *node_words(pythia, python, registry)]
+
+
+def parse(text: str) -> Way:
     """A ``--remote``'s value, as the node's name and the command that reaches it.
     Raises ValueError, which says why it isn't one."""
     name, given, command = text.partition("=")
@@ -70,11 +118,11 @@ def parse(text: str) -> Tuple[str, List[str]]:
                          "from a letter or a digit; for a host that isn't, give "
                          "NAME=COMMAND")
     if not given:
-        return name, [*SSH, name, *STDIO]
+        return Way(name, ssh_command(name))
     argv = shlex.split(command)
     if not argv:
         raise ValueError(f"{name}'s command is empty")
-    return name, argv
+    return Way(name, argv)
 
 
 def _plain(status: int, text: str) -> Response:

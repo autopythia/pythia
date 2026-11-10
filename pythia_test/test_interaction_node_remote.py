@@ -236,12 +236,13 @@ class ProcessTests(RemoteTest):
 
 class ParseTests(unittest.TestCase):
     def test_a_host_is_reached_by_ssh_and_a_name_by_its_command(self):
-        self.assertEqual(remote.parse("cloud-0"), (
-            "cloud-0", ["ssh", "-o", "BatchMode=yes", "cloud-0", "python3", "-m",
-                        "pythia.interaction.node", "--stdio"]))
+        self.assertEqual(remote.parse("cloud-0"), remote.Way(
+            "cloud-0", ["ssh", "-o", "BatchMode=yes", "cloud-0", "env",
+                        "PYTHONPATH=.pythia/lib/pythia-dev", "python3", "-c",
+                        f"'{remote.RUN}'", "--stdio"]))
         self.assertEqual(remote.parse("sim=python3 -m x --registry 'a b'"),
-                         ("sim", ["python3", "-m", "x", "--registry", "a b"]))
-        self.assertEqual(remote.parse("a.b_c=x=y"), ("a.b_c", ["x=y"]))
+                         remote.Way("sim", ["python3", "-m", "x", "--registry", "a b"]))
+        self.assertEqual(remote.parse("a.b_c=x=y"), remote.Way("a.b_c", ["x=y"]))
 
     def test_what_isnt_a_remote(self):
         name = ("isn't a node's name: letters, digits, '.', '_' and '-', from a letter or a "

@@ -2595,8 +2595,8 @@ class OptionTests(WorkspaceTest):
         self.assertIn("local-0", out)
 
     def test_the_registry_is_found_as_the_cli_finds_it(self):
-        off = ("node: the registry is off (--registry none, or PYTHIA_REGISTRY=none), and the "
-               "node server shows its root contexts: give one with --registry.\n")
+        off = ("node: the registry is off ({}), and the node server shows its root contexts: "
+               "give one with --registry.\n")
         with mock.patch.dict(os.environ, {"HOME": str(self.ws.tmp), "COLUMNS": "200"}):
             os.environ.pop("PYTHIA_REGISTRY", None)
             self.assertEqual(run_main("--list"),
@@ -2604,13 +2604,14 @@ class OptionTests(WorkspaceTest):
             os.environ["PYTHIA_REGISTRY"] = "~/registry"
             status, out, _ = run_main("--list")
             self.assertTrue(out.startswith("Root contexts in ~/registry/: 6,"), out)
-            self.assertEqual(run_main("--list", "--registry", "none"), (1, "", off))
+            self.assertEqual(run_main("--list", "--registry", "none"),
+                             (1, "", off.format("--registry none")))
             with chdir(self.ws.tmp):  # a relative path is taken from the launch directory
                 status, out, _ = run_main("--list", "--registry", "registry")
                 shown = contexts.shown_path(Path.cwd() / "registry")
                 self.assertTrue(out.startswith(f"Root contexts in {shown}/: 6,"), out)
             os.environ["PYTHIA_REGISTRY"] = "none"
-            self.assertEqual(run_main("--list"), (1, "", off))
+            self.assertEqual(run_main("--list"), (1, "", off.format("PYTHIA_REGISTRY=none")))
             status, out, _ = run_main("--list", "--registry", str(self.ws.registry))
             self.assertEqual(status, 0)
             self.assertIn("local-0", out)
