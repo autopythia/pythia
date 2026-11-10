@@ -354,20 +354,21 @@ the screen. A jump to a line (`Jump(line)`) asks for the rows around it
 (`LoadAround(line)`), opens the run that holds it, and brings its row into
 view (glem's `Reveal`); where the stretches of rows that came don't meet, a
 marker at either side asks for the rows between as it comes near the screen. A
-message, and an item, has a star (glui's `Entry`'s `star`), faint until it's
-set: setting or clearing it sends `Star(line, on)`, and the host sets or
-clears `Stars(line)`. A log's panel shows beside it as the host says
-(`Aside(shown)`), in a HUD: the lines starred, under their turns, as the host
-sends them (`Pin`), a starred answer with the user's messages that it answers;
-and the outline of the log's turns. A click on a pin jumps to its line, and
-one on a turn visits it (`Visit(turn)`): a jump to the line where it first
-shows that brings its mark into view, and opens nothing. Restoring a place
-(`Restore(line)`), as a page does where it was left, is a jump to the row that
-starts at a line, which opens nothing either, and brings the row to the top of
-the screen, unmarked. An item's body comes the same way, when its entry is
-first opened: the program sends `Load(line)`, and the host answers with `Body`
-facts, or `Failed(line, why)`. `lem/test/contexts_ticks.txt` and
-`contexts_dom.txt` test it.
+message, and an item, has a star (glui's `Entry`'s `star`), after its line's
+number, faint until it's set: setting or clearing it sends `Star(line, on)`,
+and the host sets or clears `Stars(line)`. A log's panel shows beside it as
+the host says (`Aside(shown)`), in a HUD: the lines starred, under their
+turns, as the host sends them (`Pin`), a starred answer with the user's
+messages that it answers; and the outline of the log's turns. A click on a pin
+jumps to its line, and one on a turn visits it (`Visit(turn)`): a jump to the
+line where it first shows that brings its mark into view, and opens nothing.
+Restoring a place (`Restore(line)`), as a page does where it was left, is a
+jump to the row that starts at a line, which opens nothing either, and brings
+the row to the top of the screen, unmarked; and going to the log's start
+(`Start`) brings its first turn's mark there so. An item's body comes the same
+way, when its entry is first opened: the program sends `Load(line)`, and the
+host answers with `Body` facts, or `Failed(line, why)`.
+`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. The node server's pages
 show tabs: the index's, and one for each context that's open, each a runtime
@@ -391,16 +392,20 @@ as words, in lowercase, and then asks for the index's facts anew; the script
 fetches the program and the themes, compiled, from `web/compiled/`, which
 `make compiled` writes, and a test checks against the files they're compiled
 from. A log's page starts at its end, and keeps the first row on the screen in
-place as rows come, above it or below. Every few seconds while it shows, a
-page asks what changed: a log, what it gained; the index, its facts anew,
-whose difference from the last it applies. Its bar picks the look and the
-theme, and, for a log, whether its runs are folded or open, whether its panel
-shows, and how wide, as a drag on its edge makes it, and whether an
-assistant's messages show as Markdown or as written, which the node server
-keeps for the view, at `data-store`, and the browser too. `make web` writes a
-sample, an index and a log of 13,394 items, the most that one of pythia's
-contexts had when it was first written, in turns of 50, for two pages that
-show it as the node server's do:
+place as rows come, above it or below, but for a screen at the log's end,
+which stays at its end as the log grows; its title stays at the top of the
+screen as it scrolls, and two buttons, at the bottom right, go to its start
+and its end. Every few seconds while it shows, a page asks what changed: a
+log, what it gained; the index, its facts anew, whose difference from the last
+it applies. Its bar, a button at the top right that unfolds a menu, and what
+went wrong beside it, if something did, picks the look and the theme, and, for
+a log, whether its runs are folded or open, whether its panel shows, and how
+wide, as a drag on its edge makes it, and whether an assistant's messages show
+as Markdown or as written, which the node server keeps for the view, at
+`data-store`, and the browser too. `make web` writes a sample, an index and a
+log of 13,394 items, the most that one of pythia's contexts had when it was
+first written, in turns of 50, for two pages that show it as the node server's
+do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html

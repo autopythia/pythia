@@ -883,8 +883,8 @@ var glui = (function () {
   // says when it's made, and whenever `open` changes, but not otherwise,
   // so that it stays as it was opened or closed in between; and the toggle
   // event that follows, which a browser fires later, sends nothing, since
-  // the program knows. With `star`, a star comes first, a button that sends
-  // Starred, as set or cleared, and that opens or folds nothing.
+  // the program knows. With `star`, a star comes after its mark, a button
+  // that sends Starred, as set or cleared, and that opens or folds nothing.
   function entry(w, view) {
     var e = element(view, "div");
     var star = element(view, "button", "g-entry-star");
@@ -918,10 +918,10 @@ var glui = (function () {
       if (fold) {
         takesReturn(head);
       }
+      head.appendChild(mark);
       if (w.fields.star) {
         head.appendChild(star);
       }
-      head.appendChild(mark);
       head.appendChild(label_);
       head.appendChild(gist);
       var holder = e;

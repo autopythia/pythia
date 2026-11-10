@@ -94,7 +94,8 @@ var contexts = (function () {
   // - o.status(text, wrong), if given, hears how it went: how long the
   //   page took to show, and what went wrong;
   // - o.keep(update), if given, runs update(), which shows what came, rows
-  //   or a run's items or a body, keeping what's on the screen in place; and
+  //   or a run's items or a body, or what a log gained, keeping what's on
+  //   the screen in place, or a screen at the log's end at its end; and
   //   o.shown(), if given, hears that the page's facts are shown;
   // - o.opening, for a log, says whether every run opens, as an Opening
   //   fact from the start, o.aside whether its panel shows, as an Aside
@@ -393,7 +394,13 @@ var contexts = (function () {
         var change = why === null && !log ? changed(facts, byText(steps)) : steps;
         if (why === null && change.length > 0) {
           refused = null;
-          view.update(change);
+          if (log) {
+            keep(function () {
+              view.update(change);
+            });
+          } else {
+            view.update(change);
+          }
           why = refused;
         }
         if (why !== null) {
@@ -867,10 +874,17 @@ var contexts = (function () {
 
   // Shows what came, by update(), keeping what's on the screen in place:
   // the first of the log's rows in `root` that shows stays where it is,
-  // though rows come above it, or a run above it opens. The page's own
-  // scroll anchoring is off (web/contexts.css), so that only this moves it.
+  // though rows come above it, or a run above it opens; but a screen at the
+  // log's end stays at its end, as rows come after, so that it follows a
+  // log that grows. The page's own scroll anchoring is off
+  // (web/contexts.css), so that only this moves it.
   function keepRows(root, update) {
     var page = document.scrollingElement;
+    if (page && page.scrollTop + page.clientHeight >= page.scrollHeight - 8) {
+      update();
+      page.scrollTop = page.scrollHeight;
+      return;
+    }
     var rows = page ? root.querySelectorAll(".g-box > .g-entry") : [];
     // The first row whose bottom is below the screen's top.
     var low = firstBelow(rows, function (row) {
@@ -1043,12 +1057,41 @@ var contexts = (function () {
     // on a line of their own at the top; else one page, the bar over it.
     var tabbing = html.getAttribute("data-tab") !== null;
     var bar = document.createElement("nav");
+    // The bar's settings, in a menu that its button, a trigram, unfolds
+    // below it, with a line of status at its end; and, in the bar, what went
+    // wrong, if something did, whole in its tooltip.
+    var menus = document.createElement("details");
+    var button = document.createElement("summary");
+    var settings = document.createElement("div");
     var line = document.createElement("span");
+    var alarm = document.createElement("span");
     var root = document.createElement("div");
     var stripRoot = document.createElement("div");
     var top = null;
     bar.setAttribute("class", "contexts-bar");
+    menus.setAttribute("class", "contexts-menus");
+    button.textContent = "\u2630";
+    button.setAttribute("title", "the view's settings");
+    button.setAttribute("aria-label", "the view's settings");
+    settings.setAttribute("class", "contexts-menu");
+    menus.appendChild(button);
+    menus.appendChild(settings);
+    bar.appendChild(alarm);
+    bar.appendChild(menus);
     line.setAttribute("class", "contexts-status");
+    alarm.setAttribute("class", "contexts-status contexts-wrong");
+    // A click elsewhere folds the menu, and so does Escape in it.
+    document.addEventListener("click", function (event) {
+      if (menus.open && !menus.contains(event.target)) {
+        menus.open = false;
+      }
+    });
+    menus.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && menus.open) {
+        menus.open = false;
+        button.focus();
+      }
+    });
     if (tabbing) {
       top = document.createElement("div");
       top.setAttribute("class", "contexts-strip");
@@ -1056,24 +1099,38 @@ var contexts = (function () {
       top.appendChild(bar);
       document.body.appendChild(top);
       html.classList.add("contexts-tabbed");
-      // How tall the strip is, which a row that goes to the top of the
-      // screen goes below (contexts.css).
-      var tall = function () {
-        html.style.setProperty("--contexts-strip", Math.ceil(top.getBoundingClientRect().height) + "px");
-      };
-      if (typeof ResizeObserver === "function") {
-        new ResizeObserver(tall).observe(top);
-      } else {
-        window.addEventListener("resize", tall);
-        window.setTimeout(tall, 0);
-      }
     } else {
       document.body.appendChild(bar);
     }
     document.body.appendChild(root);
+    // How tall the strip of tabs is, if there's one, under which a log's
+    // title stays, and how tall the two are with the title of the page
+    // shown, under which a row that goes to the top of the screen goes
+    // (contexts.css): measured anew as either changes its size, or as the
+    // window does, or another tab shows.
+    var watched = typeof ResizeObserver === "function" ? new ResizeObserver(function () {
+      heads();
+    }) : null;
+    var heads = function () {
+      var strip = top !== null ? Math.ceil(top.getBoundingClientRect().height) : 0;
+      var holder = !tabbing ? root : shown !== null && shown.shown() !== null ? shown.shown().root : null;
+      var title = holder !== null ? holder.querySelector(".g-window > .g-row") : null;
+      var head = title !== null ? Math.ceil(title.getBoundingClientRect().height) : 0;
+      html.style.setProperty("--contexts-strip", strip + "px");
+      html.style.setProperty("--contexts-head", strip + head + "px");
+      if (watched !== null && title !== null) {
+        watched.observe(title);
+      }
+    };
+    if (watched !== null && top !== null) {
+      watched.observe(top);
+    }
+    window.addEventListener("resize", heads);
     var status = function (text, wrong) {
       line.textContent = text;
       line.setAttribute("class", wrong ? "contexts-status contexts-wrong" : "contexts-status");
+      alarm.textContent = wrong ? text : "";
+      alarm.setAttribute("title", wrong ? text : "");
     };
     var look = function (name) {
       LOOKS.forEach(function (one) {
@@ -1131,10 +1188,20 @@ var contexts = (function () {
     // page shows logs.
     var shown = null;
     var log = tabbing || html.getAttribute("data-run") !== null;
-    // A log's panel shows beside it, as contexts.css makes room for it.
+    // The log shown, if one is, and its view; a log's panel shows beside it,
+    // as contexts.css makes room for it, and the buttons to its start and
+    // end show with it (contexts-log).
+    var logShown = function () {
+      if (!tabbing) {
+        return log ? shown : null;
+      }
+      var tab = shown !== null ? shown.shown() : null;
+      return tab !== null && tab.n !== 0 ? tab.view : null;
+    };
     var aside = function (name) {
       var now = tabbing ? shown !== null && shown.shown() !== null && shown.shown().n !== 0 : log;
       html.classList.toggle("contexts-aside", now && name === "shown");
+      html.classList.toggle("contexts-log", now);
     };
     // Each view of a log, for a setting that changes.
     var logs = function (f) {
@@ -1151,16 +1218,16 @@ var contexts = (function () {
         }
       });
     };
-    menu(bar, "Look", LOOKS, chosen.look, function (value) {
+    menu(settings, "Look", LOOKS, chosen.look, function (value) {
       save("look", value);
       look(value);
     });
-    menu(bar, "Theme", THEMES, chosen.theme, function (value) {
+    menu(settings, "Theme", THEMES, chosen.theme, function (value) {
       save("theme", value);
       theme(value);
     });
     if (log) {
-      menu(bar, "Runs", RUNS, chosen.runs, function (value) {
+      menu(settings, "Runs", RUNS, chosen.runs, function (value) {
         var was = chosen.runs;
         logs(function (view) {
           view.update([
@@ -1170,7 +1237,7 @@ var contexts = (function () {
         });
         save("runs", value);
       });
-      menu(bar, "Panel", PANEL, chosen.panel, function (value) {
+      menu(settings, "Panel", PANEL, chosen.panel, function (value) {
         var was = chosen.panel;
         logs(function (view) {
           view.update([
@@ -1181,7 +1248,7 @@ var contexts = (function () {
         save("panel", value);
         aside(value);
       });
-      menu(bar, "Text", TEXT, chosen.text, function (value) {
+      menu(settings, "Text", TEXT, chosen.text, function (value) {
         var was = chosen.text;
         logs(function (view) {
           view.update([
@@ -1192,11 +1259,36 @@ var contexts = (function () {
         save("text", value);
       });
     }
-    bar.appendChild(line);
+    settings.appendChild(line);
     if (log) {
       edged(html, chosen.width, function (px) {
         save("width", px);
       });
+      // The log's start and end, a click away, at the bottom right.
+      var ends = document.createElement("div");
+      ends.setAttribute("class", "contexts-ends");
+      [
+        ["\u2912", "the log's start", function () {
+          var view = logShown();
+          if (view !== null) {
+            view.send(["Start"]);
+          }
+        }],
+        ["\u2913", "the log's end", function () {
+          if (page) {
+            page.scrollTop = page.scrollHeight;
+          }
+        }]
+      ].forEach(function (end) {
+        var b = document.createElement("button");
+        b.setAttribute("type", "button");
+        b.setAttribute("title", end[1]);
+        b.setAttribute("aria-label", end[1]);
+        b.textContent = end[0];
+        b.addEventListener("click", end[2]);
+        ends.appendChild(b);
+      });
+      document.body.appendChild(ends);
     }
     look(chosen.look);
     theme(chosen.theme);
@@ -1259,7 +1351,9 @@ var contexts = (function () {
               if (page.scrollTop + page.clientHeight >= page.scrollHeight - 8) {
                 return "end";
               }
-              var below = top.getBoundingClientRect().bottom;
+              // Below the strip, and the log's title, which stays under it.
+              var title = tab.root.querySelector(".g-window > .g-row");
+              var below = Math.max(top.getBoundingClientRect().bottom, title !== null ? title.getBoundingClientRect().bottom : 0);
               return placeOf(tab.view, tab.root.querySelectorAll(".g-box > .g-entry"), function (row) {
                 return row.getBoundingClientRect().bottom > below;
               });
@@ -1294,6 +1388,7 @@ var contexts = (function () {
             },
             title: function (text) {
               document.title = text;
+              heads();
             },
             address: function (url) {
               if (window.location.pathname !== url) {
@@ -1302,6 +1397,7 @@ var contexts = (function () {
             },
             showing: function () {
               aside(chosen.panel);
+              heads();
             },
             top: function () {
               return page ? page.scrollTop : 0;
@@ -1360,6 +1456,7 @@ var contexts = (function () {
           keepRows(document, update);
         },
         shown: function () {
+          heads();
           if (page && html.getAttribute("data-before") !== null) {
             page.scrollTop = page.scrollHeight;
           }

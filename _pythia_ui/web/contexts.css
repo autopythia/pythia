@@ -1,15 +1,46 @@
 /* web/contexts.css: what pythia's contexts' pages (contexts.js) add to
-   glui's looks: their bar, at the top right, with its menus and a line of
-   status, in the theme's colors; a log's panel, beside it; a page of tabs;
-   and how a page scrolls as rows come. */
-.contexts-bar{position:fixed;top:.5rem;right:.75rem;z-index:20;display:flex;flex-wrap:wrap;align-items:center;
-gap:.3em .8em;max-width:calc(100vw - 1.5rem);padding:.2rem .7rem;
-font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--glui-text-dim);
-background:var(--glui-popup-back);border:1px solid var(--glui-popup-line);border-radius:999px}
+   glui's looks: their bar, at the top right, a button, faint until the
+   pointer comes, that unfolds its menus and a line of status, and what went
+   wrong, beside it, in the theme's colors; a log's title, which stays at
+   the top as it scrolls, and the buttons to its start and end; a log's
+   panel, beside it; a page of tabs; and how a page scrolls as rows come. */
+.contexts-bar{position:fixed;top:.5rem;right:.75rem;z-index:20;display:flex;align-items:center;gap:.6em;
+font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--glui-text-dim)}
+.contexts-menus{position:relative}
+.contexts-menus>summary{list-style:none;cursor:pointer;user-select:none;padding:.05rem .45rem;
+border:1px solid transparent;border-radius:.35rem;opacity:.5}
+.contexts-menus>summary::-webkit-details-marker{display:none}
+.contexts-menus>summary:hover,.contexts-menus>summary:focus-visible,.contexts-menus[open]>summary{opacity:1;
+background:var(--glui-popup-back);border-color:var(--glui-popup-line)}
+.contexts-menu{position:absolute;top:calc(100% + .3rem);right:0;display:flex;flex-direction:column;gap:.45em;
+min-width:12rem;padding:.6rem .8rem;background:var(--glui-popup-back);border:1px solid var(--glui-popup-line);
+border-radius:.5rem;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+.contexts-menu label{display:flex;align-items:center;justify-content:space-between;gap:1em;white-space:nowrap}
 .contexts-bar select{font:inherit}
 .contexts-status:empty{display:none}
+.contexts-bar>.contexts-status{max-width:45vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .contexts-wrong{color:var(--glui-error-text)}
 @media print{.contexts-bar{display:none}}
+
+/* A log's title, at the top of the screen, below the strip of tabs, if
+   there's one, as its rows scroll below it, in its stage's color; and the
+   row that the page goes back to comes below it (--contexts-head, which
+   contexts.js measures). The buttons to the log's start and end, at the
+   bottom right, faint until the pointer comes, left of its panel while it
+   shows. */
+.contexts-log .g-window>.g-row:first-child{position:sticky;top:var(--contexts-strip,0px);z-index:5;
+padding:.3rem 0;border-bottom:1px solid var(--glui-rule-line)}
+.g-native.contexts-log .g-window>.g-row:first-child{background:var(--glui-region)}
+.g-log.contexts-log .g-window>.g-row:first-child{background:var(--glui-stage)}
+.contexts-log{scroll-padding-top:calc(var(--contexts-head,3.4rem) + .25rem)}
+.contexts-ends{display:none;position:fixed;right:1rem;bottom:1rem;z-index:15;flex-direction:column;gap:.35rem}
+.contexts-log .contexts-ends{display:flex}
+.contexts-aside .contexts-ends{right:calc(var(--contexts-panel,min(22rem,40vw)) + 2rem)}
+.contexts-ends>button{width:2rem;height:2rem;padding:0;font:16px/1 system-ui,-apple-system,"Segoe UI",sans-serif;
+color:var(--glui-text-dim);background:var(--glui-popup-back);border:1px solid var(--glui-popup-line);
+border-radius:50%;cursor:pointer;opacity:.55}
+.contexts-ends>button:hover,.contexts-ends>button:focus-visible{opacity:1;color:var(--glui-text-normal)}
+@media print{.contexts-ends{display:none}.contexts-log .g-window>.g-row:first-child{position:static}}
 
 /* A log's panel, of its starred lines and its turns (contexts.lem's Side):
    at the right, below the bar, as tall as the screen lets it be, as wide as
@@ -35,7 +66,6 @@ overflow:hidden;overflow-wrap:anywhere;padding-top:.15em;padding-bottom:.15em}
 .contexts-strip{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;align-items:flex-end;
 justify-content:space-between;gap:.4rem .75rem;padding:.35rem .75rem 0;background:var(--glui-stage)}
 .contexts-strip .g-hud{position:static;max-width:none}
-.contexts-tabbed{scroll-padding-top:var(--contexts-strip,3.4rem)}
 .contexts-tabbed .contexts-bar{position:static;margin-bottom:.3rem}
 .contexts-tabbed .g-hud.g-top-right,.contexts-tabbed .contexts-edge{top:3.4rem}
 @media print{.contexts-strip{display:none}}

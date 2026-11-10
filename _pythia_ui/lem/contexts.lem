@@ -162,24 +162,32 @@ StarOf(i, False) :- Item(line=i), not Stars(i)
 -- turn's mark into view, and opens nothing. Restoring a place, as a page
 -- does where it was left, is a jump to the row that starts at a line,
 -- which opens nothing either, and brings the row to the top of the screen,
--- unmarked. Each jump counts, so that one to the same line again brings it
--- into view again; and each has its aim.
+-- unmarked; and going to the log's start, as the page's button does, is a
+-- visit to its first turn, which brings its mark to the top so. Each jump
+-- counts, so that one to the same line again brings it into view again;
+-- and each has its aim.
 enum Aim:
-  AtLine, AtTurn, AtRow
-msg Jump(line: Int), Visit(turn: Int), Restore(line: Int)
+  AtLine, AtTurn, AtRow, AtStart
+msg Jump(line: Int), Visit(turn: Int), Restore(line: Int), Start
+rel Preceded(turn: Int)
+Preceded(t) :- Turn(t, _, _, _), Turn(u, _, _, _), u < t
+rel FirstTurn(turn: Int, line: Int) one
+FirstTurn(t, l) :- Turn(t, _, _, l), not Preceded(t)
 effect LoadAround(line: Int)
 state Jumped(line: Int, n: Int, aim: Aim) one
 rel Reached(run: Int)
 Reached(r) :- Jumped(l, _, AtLine), Run(r, _, last, _), r <= l, l <= last, not Message(line=l)
 rel Target(id: Id)
 Target(TurnMark(t)) :- Jumped(l, _, AtTurn), Turn(t, _, _, l)
+Target(TurnMark(t)) :- Jumped(l, _, AtStart), FirstTurn(t, l)
 Target(Said(l)) :- Jumped(l, _, AtLine), Message(line=l)
 Target(Ent(l)) :- Jumped(l, _, AtLine), Item(line=l), not Message(line=l)
 Target(RunBox(r)) :- Reached(r), Jumped(l, _, AtLine), not Item(line=l)
 Target(Said(l)) :- Jumped(l, _, AtRow), Message(line=l)
 Target(RunBox(l)) :- Jumped(l, _, AtRow), Run(line=l)
-Reveal(id, at=n) :- Target(id), Jumped(_, n, a), a /= AtRow
+Reveal(id, at=n) :- Target(id), Jumped(_, n, a), a /= AtRow, a /= AtStart
 Reveal(id, at=n, top=True) :- Target(id), Jumped(_, n, AtRow)
+Reveal(id, at=n, top=True) :- Target(id), Jumped(_, n, AtStart)
 
 -- The panel beside a log, which shows as the host says, from its bar
 -- (Aside): the lines starred, by turn, as the host sends them (Pin), each
@@ -380,6 +388,11 @@ on Edited(TagsField(c), t):
 on Fold(g):
   Folded(g, False) :- Folded(g, True)
   Folded(g, True) :- not Folded(g, True)
+
+on Start:
+  Jumped(l, n + 1, AtStart) :- FirstTurn(_, l), Jumped(_, n, _)
+  Jumped(l, 1, AtStart) :- FirstTurn(_, l), not Jumped()
+  LoadAround(l) :- FirstTurn(_, l)
 
 on Restore(l):
   Jumped(l, n + 1, AtRow) :- Jumped(_, n, _)
