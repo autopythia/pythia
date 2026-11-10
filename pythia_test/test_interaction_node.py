@@ -1501,7 +1501,8 @@ class ViewTests(WorkspaceTest):
             (2, "Turn 2 · 10 items", "/compact", 22), (3, "Turn 3 · 13 items", "Next step.", 34),
             (4, "Turn 4 · 10 items", "/config · Look at this.", 52)])
         # The whole log, which holds fewer rows than a chunk: its messages, each with its
-        # text, and its runs, each with what's in it.
+        # text, its compactions, each a row alone with its item, and its runs, each with
+        # what's in it.
         self.assertEqual(self.facts(steps, "Chunk"), [{"first": 1, "last": 63}])
         messages = {fact["line"]: fact for fact in self.facts(steps, "Message")}
         runs = {fact["line"]: fact for fact in self.facts(steps, "Run")}
@@ -1510,13 +1511,23 @@ class ViewTests(WorkspaceTest):
             (1, 2, "2 other"),
             (5, 17, "3 tool calls: apply_patch 1, exec_command 1, update_plan 1; 1 reasoning; "
              "3 other"),
-            (19, 21, "2 other"), (22, 29, "2 tool calls: compact 1, exec_command 1; 3 other"),
-            (31, 33, "2 other"),
+            (19, 21, "2 other"), (22, 23, "1 tool call: compact 1"),
+            (25, 29, "1 tool call: exec_command 1; 2 other"), (31, 33, "2 other"),
             (36, 47, "3 tool calls: exec_command 1, icron 1, retry 1; 3 other"),
-            (49, 51, "2 other"), (52, 53, "1 tool call: config 1"), (56, 59, "4 other"),
+            (49, 51, "2 other"), (52, 53, "1 tool call: config 1"), (57, 59, "3 other"),
             (61, 63, "2 other")])
+        # A compaction, between the runs before and after it: a row alone, whose item, of
+        # its own run, comes with it, in the tone of what's read.
+        lones = {fact["line"]: fact for fact in self.facts(steps, "Lone")}
+        alone = {fact["line"]: fact for fact in self.facts(steps, "Item")}
+        self.assertEqual(sorted(lones), [24, 56])
+        self.assertEqual([(line, fact["run"], fact["tone"], fact["label"], fact["body"])
+                          for line, fact in sorted(alone.items())],
+                         [(24, 24, "Normal", "[context prefix] 1 item", True),
+                          (56, 56, "Normal", "[compaction]", False)])
+        self.assertEqual(self.get("lem/run/1/24").status, 404)  # no run's
         context = contexts.Roots(self.ws.registry).get(LOCAL).refresh()
-        rows = {**messages, **runs}
+        rows = {**messages, **runs, **lones}
         self.assertEqual({line: fact["turn"] for line, fact in rows.items()},
                          {line: context.turn_of(line - 1) for line in rows})
         for line, tone, label, text in (
@@ -1529,7 +1540,7 @@ class ViewTests(WorkspaceTest):
                                               "tone": tone, "label": label, "text": text}, line)
         # A run's items come when it's opened: with the messages, every line but the
         # boundaries, each in its run.
-        items, run_of = {}, {}
+        items, run_of = dict(alone), {line: line for line in alone}
         for line, run in runs.items():
             loaded = self.steps(f"lem/run/1/{line}")
             self.assertEqual(loaded[0], ["+", "RunLoaded", {"run": line}])
@@ -1544,6 +1555,7 @@ class ViewTests(WorkspaceTest):
                          [line for line in range(1, 64) if line not in boundaries])
         for line, tone, label, line_gist, body in (
                 (1, "Dim", "[init]", f"{KEY_A} model=model-a", False),
+                (5, "Normal", "[reasoning]", "Looking at the files.", True),
                 (6, "Tool", "[tool-call] exec_command", "ls", True),
                 (9, "Tool", "[tool-ret] exec_command [ok]", "a.py … 2 lines", True),
                 (13, "Tool", "[tool-ret] apply_patch [ok]", "Done!", False),
@@ -1582,14 +1594,14 @@ class ViewTests(WorkspaceTest):
         # after it, to its end. Each chunk ends where a row ends, and they tile the log,
         # each row in one.
         whole = [(rel, fields["line"]) for _, rel, fields in self.steps("lem/facts/c/1")
-                 if rel in ("Message", "Run")]
+                 if rel in ("Message", "Lone", "Run")]
         with mock.patch.object(view, "CHUNK_ROWS", 3):
             chunks = []
             steps = self.steps("lem/facts/c/1")
             while True:
                 chunk = self.facts(steps, "Chunk")[0]
                 rows = [(rel, fields["line"]) for _, rel, fields in steps
-                        if rel in ("Message", "Run")]
+                        if rel in ("Message", "Lone", "Run")]
                 self.assertLessEqual(len(rows), 3, chunk)
                 chunks.insert(0, (chunk["first"], chunk["last"], rows))
                 if chunk["first"] == 1:
@@ -1604,7 +1616,7 @@ class ViewTests(WorkspaceTest):
                 chunk = self.facts(steps, "Chunk")[0]
                 self.assertEqual(chunk["first"], after + 1)
                 forward += [(rel, fields["line"]) for _, rel, fields in steps
-                            if rel in ("Message", "Run")]
+                            if rel in ("Message", "Lone", "Run")]
                 after = chunk["last"]
             self.assertEqual(forward, whole)
             self.assertEqual(self.facts(self.steps("lem/rows/1/after/63"), "Chunk"),
@@ -2704,10 +2716,11 @@ class ViewInJavaScriptTests(WorkspaceTest):
                 for _, rel, fields in log if rel == "Run"}
         items = [fields for loaded in runs.values() for _, rel, fields in loaded
                  if rel == "Item"]
+        lones = [fields for _, rel, fields in log if rel == "Item"]  # compactions' rows
         marks = [fields for _, rel, fields in log if rel == "Turn"]
         messages = [fields for _, rel, fields in log if rel == "Message"]
         bodies = {item["line"]: steps(f"lem/body/1/{item['line']}")
-                  for item in items if item["body"]}
+                  for item in items + lones if item["body"]}
         node = {"program": json.loads(PROGRAM.read_text()), "index": steps("lem/facts/"),
                 "log": log, "runs": runs, "bodies": bodies}
         scripts = ("src/lem/lem.js", "src/glem/glem.js", "src/glui/glui.js",
@@ -2725,7 +2738,8 @@ class ViewInJavaScriptTests(WorkspaceTest):
         self.assertEqual(got["index"], {"wrong": [], "entries": 0, "codes": 0, "rows": 4,
                                         "ran": 0, "opened": 0})
         self.assertEqual(got["log"], {
-            "wrong": [], "entries": len(marks) + len(messages) + len(runs) + len(items),
+            "wrong": [], "entries": len(marks) + len(messages) + len(lones) + len(runs)
+            + len(items),
             "codes": len(messages) + sum(map(len, bodies.values())), "rows": 0,
             "ran": len(runs), "opened": len(bodies)})
 

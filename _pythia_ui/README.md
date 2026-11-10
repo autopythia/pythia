@@ -329,17 +329,20 @@ the index shows after this node's, a `Node`, which says how many it has, or
 why it can't be reached, and dims its row, before its roots, by ids of their
 own, as `NAME/ID`; or, for a log, its length, `Length`, a `Turn` for each
 turn, with the line where it starts, and the log's last rows: a `Chunk`, the
-lines that they cover, and a row for each message, with its text, `Message`,
-and for each run of other items between two messages within a turn, with
-what's in it, `Run`. Before each context, in the index, and before a log's
-title, a dot (glui's `Dot`) says what the context is doing, as the host says
-(`Activity`): gray, no CLI runs on it; green, a CLI works on a turn; yellow, a
-CLI waits, for input, a login or icron; orange, it retries a model request
-that failed; red, its last turn failed, or its CLI stopped in the middle of
-one. An assistant's messages show as Markdown writes them, as the host says
-(`Formatting`), and a user's as written. A log's page shows its rows in order,
-each turn marked where it starts, and each run folded. As either end of the
-rows comes near the screen, the program sends `LoadBefore(line)` or
+lines that they cover, and a row for each message, with its text, `Message`;
+for each compaction, a row alone, `Lone`, with its `Item`, which shows in the
+log where its row is, as a run's items show in their run; and for each run of
+other items between two of those within a turn, with what's in it, `Run`.
+Reasoning and compactions are in the normal tone, to be read; the rest of what
+isn't said or a tool's, dim. Before each context, in the index, and before a
+log's title, a dot (glui's `Dot`) says what the context is doing, as the host
+says (`Activity`): gray, no CLI runs on it; green, a CLI works on a turn;
+yellow, a CLI waits, for input, a login or icron; orange, it retries a model
+request that failed; red, its last turn failed, or its CLI stopped in the
+middle of one. An assistant's messages show as Markdown writes them, as the
+host says (`Formatting`), and a user's as written. A log's page shows its rows
+in order, each turn marked where it starts, and each run folded. As either end
+of the rows comes near the screen, the program sends `LoadBefore(line)` or
 `LoadAfter(line)` (glem's `Near`), and the host answers with another chunk, or
 with `EarlierFailed` or `LaterFailed`; so a page holds what's been scrolled
 through. As a log grows, the host says its new `Length`, in place of the last,

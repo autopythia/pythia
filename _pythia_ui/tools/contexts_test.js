@@ -889,6 +889,22 @@
       ]
     ],
     [
+      "a place can be a compaction's row, a row alone, as well as a message's or a run's",
+      function () {
+        var it = page();
+        answer(it, "/f/page", null, LOG.concat([
+          ["+", "Chunk", { first: 7, last: 7 }],
+          ["+", "Lone", { line: 7, turn: 1 }],
+          ["+", "Item", { line: 7, run: 7, tone: "Normal", label: "[compaction]", gist: "x", body: false }]
+        ]));
+        var rows = rowsOf(it.view.root);
+        return [rows.length + " rows", String(contexts.placeOf(it.view, rows, function (row) {
+          return rows.indexOf(row) >= 4;
+        }))];
+      },
+      ["5 rows", "7"]
+    ],
+    [
       "an assistant's messages as Markdown writes them, as the bar says, from the start",
       function () {
         var it = page({ formatting: true });

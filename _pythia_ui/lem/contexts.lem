@@ -99,16 +99,19 @@ input Activity(id: CtxId, hue: Hue, why: Text) key id
 -- items`, its title, the user's input, and the line where it starts. The
 -- stretches of it that came (Chunk), each from one line to another, and
 -- the rows there: messages, user and assistant, each with its text whole;
--- and runs, the other items between two messages within a turn, each with
--- what's in it and its last line. For a run that was opened, its items, by
--- line, each with its tone, label and gist, and whether it has a body, or
--- why the host couldn't send them; for an item that was opened, its body's
--- parts, or why the host couldn't send them; and why the host couldn't
--- send the rows before a line, or after one.
+-- compactions, each a row alone (Lone), whose item comes with it, its own
+-- run's, and shows in the log where its row is, as a run's items show in
+-- their run; and runs, the other items between two of those within a turn,
+-- each with what's in it and its last line. For a run that was opened, its
+-- items, by line, each with its tone, label and gist, and whether it has a
+-- body, or why the host couldn't send them; for an item that was opened,
+-- its body's parts, or why the host couldn't send them; and why the host
+-- couldn't send the rows before a line, or after one.
 input Turn(n: Int, label: Text, title: Text, line: Int) key n
 input Chunk(first: Int, last: Int) key first
 input Message(line: Int, turn: Int, tone: Tone, label: Text, text: Text) key line
 input Run(line: Int, turn: Int, last: Int, text: Text) key line
+input Lone(line: Int, turn: Int) key line
 input RunLoaded(run: Int) key run
 input RunFailed(run: Int, why: Text) key run
 input Item(line: Int, run: Int, tone: Tone, label: Text, gist: Text, body: Bool) key line
@@ -185,6 +188,7 @@ Target(Ent(l)) :- Jumped(l, _, AtLine), Item(line=l), not Message(line=l)
 Target(RunBox(r)) :- Reached(r), Jumped(l, _, AtLine), not Item(line=l)
 Target(Said(l)) :- Jumped(l, _, AtRow), Message(line=l)
 Target(RunBox(l)) :- Jumped(l, _, AtRow), Run(line=l)
+Target(Ent(l)) :- Jumped(l, _, AtRow), Lone(line=l)
 Reveal(id, at=n) :- Target(id), Jumped(_, n, a), a /= AtRow, a /= AtStart
 Reveal(id, at=n, top=True) :- Target(id), Jumped(_, n, AtRow)
 Reveal(id, at=n, top=True) :- Target(id), Jumped(_, n, AtStart)
@@ -221,6 +225,7 @@ Last(t) :- Chunk(_, t), not Above(t)
 rel RowAt(line: Int)
 RowAt(l) :- Message(l, _, _, _, _)
 RowAt(l) :- Run(l, _, _, _)
+RowAt(l) :- Lone(l, _)
 
 -- Where the stretches that came don't meet, as after a jump: after each,
 -- the next, if rows lie between them, which a marker at either side asks
@@ -308,6 +313,11 @@ Window(Top, title=t) :- Page(t, items, turnto, begin):
             Code(Part(i, k), text=b, diff=d, order=k) :- Body(i, k, b, d)
             Label(Wait(i), text="loading", tone=Dim) :- Asked(i), not Body(line=i), not Failed(line=i)
             Label(Wait(i), text="couldn't load it: " + why, tone=Error) :- Failed(i, why), not Body(line=i)
+    for Lone(l, _):
+      Entry(Ent(l), label=label, text=gist, mark=text(l), tone=tone, fold=body, to=items + text(l), order=l * 2, star=True, starred=s) :- Item(l, l, tone, label, gist, body), not Run(line=l), StarOf(l, s):
+        Code(Part(l, k), text=b, diff=d, order=k) :- Body(l, k, b, d)
+        Label(Wait(l), text="loading", tone=Dim) :- Asked(l), not Body(line=l), not Failed(line=l)
+        Label(Wait(l), text="couldn't load it: " + why, tone=Error) :- Failed(l, why), not Body(line=l)
     for Gap(above, below):
       Label(GapAfter(above), text="later rows", tone=Dim, order=above * 2 + 1) :- not LaterFailed(line=above)
       Label(GapAfter(above), text="couldn't load the later rows: " + why, tone=Error, order=above * 2 + 1) :- LaterFailed(above, why)

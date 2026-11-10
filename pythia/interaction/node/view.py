@@ -9,15 +9,15 @@ tabs needs: the index's facts, where a root's tab finds its log's URLs,
 come as JSON steps (``_pythia_ui/src/lem/host.rs``), from
 ``/TOKEN/lem/facts/`` and ``/TOKEN/lem/facts/c/N``: for a log, its turns, each
 with the line where it starts, and its last rows. A log's rows are its
-messages, each with its text, and its runs, the other items between two
-messages within a turn, each with what's in it. More rows come as either end
-of those on the page comes near the screen, from
-``/TOKEN/lem/rows/N/before/LINE`` and ``/TOKEN/lem/rows/N/after/LINE``, so
-that a page holds what's been scrolled through, and those around a line that
-the page jumps to, from ``/TOKEN/lem/rows/N/around/LINE``; a run's items when
-it's opened, from ``/TOKEN/lem/run/N/LINE``; and an item's body when its entry
-opens, from ``/TOKEN/lem/body/N/LINE``. A log that grows says so, to a page
-that asks every few seconds what it gained since it had LINES lines, from
+messages, each with its text, its compactions, each with its item, and its
+runs, the other items between two of those within a turn, each with what's in
+it. More rows come as either end of those on the page comes near the screen,
+from ``/TOKEN/lem/rows/N/before/LINE`` and ``/TOKEN/lem/rows/N/after/LINE``,
+so that a page holds what's been scrolled through, and those around a line
+that the page jumps to, from ``/TOKEN/lem/rows/N/around/LINE``; a run's items
+when it's opened, from ``/TOKEN/lem/run/N/LINE``; and an item's body when its
+entry opens, from ``/TOKEN/lem/body/N/LINE``. A log that grows says so, to a
+page that asks every few seconds what it gained since it had LINES lines, from
 ``/TOKEN/lem/grow/N/GENERATION/LINES``: its length, and the turns that
 changed; its later rows then come as others do, the run that it ended with
 whole, if it went on. A log's facts hold the lines starred in it, which a page
@@ -85,9 +85,13 @@ STYLESHEETS = ("glui.css", "native.css", "log.css", "contexts.css")
 PAGE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 DATA_CSP = "default-src 'none'; frame-ancestors 'none'"
-# An item's tone, by its kind's class on the plain pages; any other is Dim.
+# An item's tone, by its kind's class on the plain pages; any other is Dim. But for one of
+# these types, which is read as a message is, and which would be Dim by its class: reasoning,
+# and a compaction.
 TONES = {"user": "User", "assistant": "Assistant", "tool": "Tool", "tool err": "Error",
          "err": "Error"}
+TYPE_TONES = {"reasoning": "Normal", "context_prefix": "Normal", "context_compaction": "Normal",
+              "opaque_compaction": "Normal"}
 # How far back a result's body looks for its call, which may make it a diff.
 CALL_LINES = 64
 # A line's number in a body's URL, and a turn's in a turn's.
@@ -102,8 +106,15 @@ CHUNK_ROWS = 200
 MESSAGE_CUT = 100_000
 # A run's summary names this many tools at most.
 SUMMARY_TOOLS = 3
-# The lines that are rows alone: a user's message, or the assistant's.
+# The lines that are rows alone: a user's message, or the assistant's; and a compaction,
+# which stands between the runs before it and after it.
 _TALK = (("message", "user"), ("message", "assistant"))
+_COMPACTIONS = frozenset(("context_prefix", "context_compaction", "opaque_compaction"))
+
+
+def _alone(kind) -> bool:
+    """Whether a line of ``kind``, as the index gives it, is a row alone (``spans``)."""
+    return kind in _TALK or kind[0] in _COMPACTIONS
 
 
 class Files:
@@ -188,19 +199,21 @@ def item(renderer: Renderer, line: int, run: int, record: dict) -> Optional[dict
     body = texts(renderer, shown.parts)
     line_gist = gist(record) or (cut(_one_line(body[0][0]), GIST_CHARS) if body else "")
     whole = len(body) == 1 and not body[0][1] and body[0][0].strip() == line_gist
-    return {"line": line, "run": run, "tone": TONES.get(shown.css, "Dim"),
+    tone = TYPE_TONES.get(record.get("type")) or TONES.get(shown.css, "Dim")
+    return {"line": line, "run": run, "tone": tone,
             "label": safe_text(shown.label), "gist": safe_text(line_gist),
             "body": bool(body) and not whole}
 
 
 def spans(context: Context, start: int, forward: bool, most: Optional[int] = None
           ) -> Tuple[int, int, List[Tuple[int, int]]]:
-    """Up to about ``most`` of ``context``'s rows, ``CHUNK_ROWS`` by default, from line ``start`` (from 0), forward or
-    back, in order, stopping where a row ends: a user's or the assistant's message is a row
-    alone, and the other lines that show, from one message to the next within a turn, are
-    a run. Each row is its first and last lines, from 0; and the lines that the rows cover,
-    from 0, as a range, hold those that show nothing too, and, at an end of the log, the
-    lines before its first row or after its last."""
+    """Up to about ``most`` of ``context``'s rows, ``CHUNK_ROWS`` by default, from line
+    ``start`` (from 0), forward or back, in order, stopping where a row ends: a user's or the
+    assistant's message is a row alone, and so is a compaction, and the other lines that
+    show, from one of those to the next within a turn, are a run. Each row is its first and
+    last lines, from 0; and the lines that the rows cover, from 0, as a range, hold those
+    that show nothing too, and, at an end of the log, the lines before its first row or after
+    its last."""
     index = context.index
     most = CHUNK_ROWS if most is None else most
     found: List[Tuple[int, int]] = []
@@ -209,7 +222,7 @@ def spans(context: Context, start: int, forward: bool, most: Optional[int] = Non
     while 0 <= line < len(index):
         kind = index.kind(line)
         if not hidden(kind[0]):
-            talk = kind in _TALK
+            talk = _alone(kind)
             turn = context.turn_of(line)
             if run is not None and (talk or run[2] != turn):
                 found.append((min(run[0], run[1]), max(run[0], run[1])))
@@ -604,8 +617,8 @@ class View:
               found: List[Tuple[int, int]]) -> list:
         """The rows ``found`` (``spans``) of ``context``'s log, which cover lines ``low`` to
         ``high - 1``, from 0: a Chunk, those lines from 1; and a Message, with its text,
-        whole, up to ``MESSAGE_CUT`` characters, or a Run, with what's in it, for each
-        row."""
+        whole, up to ``MESSAGE_CUT`` characters, or a compaction's row (Lone), with its
+        Item, as a run's items come, or a Run, with what's in it, for each row."""
         renderer = pages._renderer(context, cut=MESSAGE_CUT, fold=frozenset())
         index = context.index
         steps: list = [["+", "Chunk", {"first": low + 1, "last": high}]]
@@ -621,6 +634,12 @@ class View:
                     "tone": "Dim" if shown is None else TONES.get(shown.css, "Dim"),
                     "label": "" if shown is None else safe_text(shown.label),
                     "text": safe_text(said)}])
+            elif first == last and _alone(index.kind(first)):
+                record = parse(index.read(first, first + 1)[0])
+                fact = item(renderer, first + 1, first + 1, record)
+                if fact is not None:
+                    steps.append(["+", "Lone", {"line": first + 1, "turn": turn}])
+                    steps.append(["+", "Item", fact])
             else:
                 steps.append(["+", "Run", {"line": first + 1, "turn": turn, "last": last + 1,
                                            "text": summary(context, first, last)}])
@@ -648,7 +667,7 @@ class View:
                 elif way == "after" and 0 <= line <= len(index):
                     back = spans(context, line - 1, False, 1)[2] if line > 0 else []
                     start = back[0][0] if back else line
-                    run = back and not (back[0] == (start, start) and index.kind(start) in _TALK)
+                    run = back and not (back[0] == (start, start) and _alone(index.kind(start)))
                     ahead = spans(context, start, True, 1)[2] if run else []
                     grown = (start, ahead[0][1]) if ahead and ahead[0][1] >= line else None
                     found = spans(context, start if grown else line, True)
@@ -722,7 +741,7 @@ class View:
                 start = line - 1
                 back = spans(context, start, False, 1)[2] if 1 <= line <= len(index) else []
                 kind = index.kind(start) if back else None
-                if not back or back[0][0] != start or kind in _TALK or hidden(kind[0]):
+                if not back or back[0][0] != start or _alone(kind) or hidden(kind[0]):
                     return _plain(404, f"{context.label} has no run at line {text[:24]}.")
                 first, last = spans(context, start, True, 1)[2][0]
                 records = context.records(first, last + 1)

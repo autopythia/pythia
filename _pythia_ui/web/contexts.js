@@ -782,13 +782,13 @@ var contexts = (function () {
 
   // The line of the first of a log's rows, `rows`, in order, that
   // `below(row)` says reaches below the screen's top, as far as rows say:
-  // a message's or a run's, which the program's Restore goes back to; past
-  // a turn's mark, the row after it. Or null, if none does.
+  // a message's, a compaction's or a run's, which the program's Restore goes
+  // back to; past a turn's mark, the row after it. Or null, if none does.
   function placeOf(view, rows, below) {
     var low = firstBelow(rows, below);
     for (var i = low; i < rows.length; i++) {
       var w = view.elements.get(rows[i]);
-      if (w !== undefined && Array.isArray(w.id) && (w.id[0] === "Said" || w.id[0] === "RunBox")) {
+      if (w !== undefined && Array.isArray(w.id) && (w.id[0] === "Said" || w.id[0] === "Ent" || w.id[0] === "RunBox")) {
         return w.id[1];
       }
     }
