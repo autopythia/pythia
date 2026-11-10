@@ -15,10 +15,10 @@ linker = "rust-lld"
 rustflags = ["-C", "target-cpu=apple-m1"]
 
 [env]
-# rustc hands SDKROOT to the linker as -syslibroot. Values already set in the
-# environment take precedence, e.g. SDKROOT="$(xcrun --show-sdk-path)" to
-# cross-check the stubs against the real SDK on a Mac.
-SDKROOT = { value = "stub-sdk", relative = true }
+# rustc hands SDKROOT to the linker as -syslibroot; `force` keeps the stubs
+# even where the environment sets SDKROOT. To link against the real SDK:
+#   cargo build --config "env.SDKROOT.value='$(xcrun --show-sdk-path)'"
+SDKROOT = { value = "stub-sdk", relative = true, force = true }
 # The oldest macOS this runs on: capture picks its path at run time
 # (src/macos/capture.rs).
 MACOSX_DEPLOYMENT_TARGET = "11.0"

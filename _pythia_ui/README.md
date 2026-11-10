@@ -486,9 +486,10 @@ If a link fails with `undefined symbol`:
 
 A symbol listed in the wrong library links, but shows up at launch as
 `dyld: Symbol not found`; `python3 tools/macho_info.py -v BINARY` lists the
-symbols per library. On a Mac with Xcode or its command-line tools,
-`SDKROOT="$(xcrun --show-sdk-path)" cargo build` links against the real SDK
-instead, as a cross-check.
+symbols per library. The build links against the stubs even where the
+environment sets `SDKROOT`. On a Mac with Xcode or its command-line tools,
+`cargo build --config "env.SDKROOT.value='$(xcrun --show-sdk-path)'"` links
+against the real SDK instead, as a cross-check.
 
 ## From research-gui
 
