@@ -67,6 +67,20 @@ CONFIG_KEYS = (
     "tool_approval_ui_countdown_seconds",
     "extra_sample_params",
 )
+# The keys that automatic compaction reads: whether it runs and at what size
+# (compaction.auto_compaction_due; a server's trigger, through SampleParams),
+# how (InteractionConfigSnapshot.compaction_settings), and whether the CLI
+# reboots after a coldstart one. A turn reads them at each of its compaction
+# points, as its host gives them (loop.TurnHost.compaction_config), and the
+# rest of its config at its start.
+COMPACTION_KEYS = (
+    "enable_auto_compaction",
+    "auto_compaction_context_tokens",
+    "compaction_mode",
+    "compaction_pi_keep_recent_tokens",
+    "compaction_pi_max_output_tokens",
+    "compaction_coldstart_reboot",
+)
 # The automatic-retry keys (endpoint_<field> for ERROR_RETRY_FIELDS): the
 # general one first, then the classes with a key of their own, which follow
 # the general one while unset.
@@ -641,6 +655,15 @@ class InteractionConfigSnapshot:
             max_output_tokens=self.compaction_pi_max_output_tokens,
         )
 
+    def with_compaction(self, other: InteractionConfigSnapshot) -> InteractionConfigSnapshot:
+        """This snapshot with ``other``'s compaction settings (``COMPACTION_KEYS``),
+        as a turn's config takes the session's at each of its compaction points
+        (``loop.TurnHost.compaction_config``); this one itself where they're the
+        same."""
+        changed = {key: getattr(other, key) for key in COMPACTION_KEYS
+                   if getattr(other, key) != getattr(self, key)}
+        return replace(self, **changed) if changed else self
+
 
 class InteractionConfig:
     """Thread-safe effective policy with immutable launch and default baselines.
@@ -1200,6 +1223,7 @@ class InteractionConfig:
 
 
 __all__ = [
+    "COMPACTION_KEYS",
     "CONFIG_KEYS",
     "CompactionRoute",
     "ConfigError",

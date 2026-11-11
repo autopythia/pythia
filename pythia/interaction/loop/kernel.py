@@ -25,6 +25,13 @@ stopped. A compaction runs the config's sequence of methods
 (``compaction.run_compaction``); each failed attempt is saved as a
 ``ModelFailure`` before the next one.
 
+Each compaction point, before a sample and on an overflow, reads the
+compaction settings that the host gives it (``TurnHost.compaction_config``),
+and so do the next sample's params, for a model that compacts on its server:
+the CLI's are the session's as they are then, so that a /config change to
+one reaches the turn's next compaction point. The rest of the config is the
+turn's, as it was at its start.
+
 A stop ends the turn at one of three levels (``Urgency``): at the next
 interrupt point, after the tool batch (``stop_requested``); once the operation
 in flight ends (``should_stop``); or by also cancelling it.
@@ -351,6 +358,16 @@ class TurnHost:
         after a coldstart compaction with ``compaction_coldstart_reboot``.
         """
 
+    def compaction_config(self, config):
+        """The config that a compaction point reads, ``config`` being the
+        turn's: whether a compaction is due, how it runs, and the compaction
+        policy of the sample after it, for a model that compacts on its
+        server. The default is the turn's own; the CLI gives its compaction
+        settings as they are now, which /config may have changed since the
+        turn started (``runtime_config.COMPACTION_KEYS``).
+        """
+        return config
+
     def preemptible(self, cancel, *, retry=False):
         """Bracket one sample or tool call; ``cancel`` (or None) ends it early.
 
@@ -425,15 +442,17 @@ def run_turn(context, model, environment, config, host: TurnHost, *,
              sample_params=None, control=None) -> TurnResult:
     """Run one turn on the context thread until it ends, stops, or fails.
 
-    ``config`` is an ``InteractionConfig`` snapshot. Returns ``ended`` with
-    the final text, ``yielded`` with a handoff note, or ``stopped``; raises on
-    failure. The model is retired when the turn stops or fails. After a final
-    answer it may keep its work for the next turn, as the Claude relay keeps
-    its native process (doc/claude-relay-warm-delivery-plan.md); after a yield
-    it is parked (``park_model``): the relay's process waits for the batch's
+    ``config`` is an ``InteractionConfig`` snapshot, whose compaction settings
+    each compaction point takes from the host
+    (``TurnHost.compaction_config``). Returns ``ended`` with the final text,
+    ``yielded`` with a handoff note, or ``stopped``; raises on failure. The
+    model is retired when the turn stops or fails. After a final answer it may
+    keep its work for the next turn, as the Claude relay keeps its native
+    process (doc/claude-relay-warm-delivery-plan.md); after a yield it is
+    parked (``park_model``): the relay's process waits for the batch's
     results, which the turn that resumes delivers
-    (doc/claude-relay-warm-yield-plan.md).
-    ``sample_params`` overrides ``config.sample_params()``.
+    (doc/claude-relay-warm-yield-plan.md). ``sample_params`` overrides
+    ``config.sample_params()``.
 
     ``control`` (only supervised main passes one) lets a tool end the turn:
     after each batch is saved, ``control.request()`` returns the recorded
@@ -476,9 +495,12 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
     while config.max_samples is None or samples < config.max_samples:
         if host.stop_requested():
             return STOPPED
-        if auto_compaction_due(model, context, config):
+        # The compaction settings as they are at this point, which may have
+        # changed since the turn started (TurnHost.compaction_config).
+        current = host.compaction_config(config)
+        if auto_compaction_due(model, context, current):
             try:
-                compact(context, model, environment, config, host, sample_params)
+                compact(context, model, environment, current, host, sample_params)
             except _CompactionStopped:
                 return STOPPED
         if retried is not None and host.retry_cancelled():
@@ -505,7 +527,7 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                 with host.trace("sample", context_revision=len(context)):
                     sample = model.sample(
                         context.copy(), tools=environment.tool_specs,
-                        sample_params=own_params,
+                        sample_params=_compacting(own_params, config, current),
                     )
         except ModelError as exc:
             # The central handler of failed samples, for every frontend and
@@ -553,12 +575,15 @@ def _run_turn(context, model, environment, config, host, sample_params, control)
                     recovery.append(label)
                     retried = exc
                     continue
+            if isinstance(exc, ModelContextWindowError):
+                # The settings as they are now: the sample may have run long.
+                current = host.compaction_config(config)
             if (isinstance(exc, ModelContextWindowError) and not overflow_recovered
-                    and config.enable_auto_compaction and uses_host_auto_compaction(model)):
+                    and current.enable_auto_compaction and uses_host_auto_compaction(model)):
                 overflow_recovered = True
                 host.notice(OVERFLOW_NOTICE)
                 try:
-                    compacted = compact(context, model, environment, config, host,
+                    compacted = compact(context, model, environment, current, host,
                                         sample_params, reason="overflow")
                 except _CompactionStopped:
                     return STOPPED
@@ -649,6 +674,19 @@ def _save_summary(context, host, started) -> None:
     summary = summarize_turn_usage(context.items, elapsed_seconds=perf_counter() - started)
     host.append(context, (summary,))
     host.show(render_interaction_items((summary,)))
+
+
+def _compacting(params, config, current):
+    """A sample's params, ``params``, with the compaction policy of ``current``,
+    the config at its compaction point (``TurnHost.compaction_config``), where
+    that differs from the turn's, ``config``: the policy that a model that
+    compacts on its server reads. The params as they are, where it doesn't."""
+    fields = ("enable_auto_compaction", "auto_compaction_context_tokens")
+    changed = {name: getattr(current, name, None) for name in fields
+               if getattr(current, name, None) != getattr(config, name, None)}
+    if not changed or not isinstance(params, SampleParams):
+        return params
+    return replace(params, **changed)
 
 
 def compact(context, model, environment, config, host, sample_params, *,

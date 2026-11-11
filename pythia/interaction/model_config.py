@@ -570,7 +570,8 @@ def build_model(
             )
         # In provider mode the endpoint always carries server compaction; the
         # config's per-call enable_auto_compaction suppresses it, so a later
-        # /config change applies to the next turn. Pi mode attaches none.
+        # /config change applies from the next sample (loop.TurnHost.
+        # compaction_config). Pi mode attaches none.
         compaction_options = (
             MessagesServerCompaction() if server else None
         )

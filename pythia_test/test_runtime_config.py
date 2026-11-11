@@ -15,11 +15,29 @@ from pythia.interaction import ModelConfigurationError
 from pythia.interaction import SampleParams
 from pythia.interaction import cli
 from pythia.interaction import demo
+from pythia.interaction.runtime_config import COMPACTION_KEYS
 from pythia.interaction.runtime_config import parse_config_literal
 from pythia.interaction.runtime_config import resolve_compaction_mode
 
 
 class InteractionConfigTests(unittest.TestCase):
+    def test_with_compaction_takes_the_compaction_settings_alone(self):
+        # As a turn's config takes the session's at each of its compaction
+        # points (loop.TurnHost.compaction_config): those, and nothing else.
+        turn = InteractionConfigSnapshot(max_output_tokens=7)
+        live = InteractionConfigSnapshot(
+            max_output_tokens=99, enable_auto_compaction=False,
+            auto_compaction_context_tokens=100, compaction_mode="coldstart",
+            compaction_pi_keep_recent_tokens=0, compaction_pi_max_output_tokens=512,
+            compaction_coldstart_reboot=True)
+        merged = turn.with_compaction(live)
+        self.assertEqual({key: getattr(merged, key) for key in COMPACTION_KEYS},
+                         {key: getattr(live, key) for key in COMPACTION_KEYS})
+        self.assertEqual(merged.max_output_tokens, 7)
+        # The same settings: the turn's own snapshot.
+        self.assertIs(turn.with_compaction(InteractionConfigSnapshot(max_output_tokens=99)), turn)
+        self.assertLessEqual(set(COMPACTION_KEYS), set(CONFIG_KEYS))
+
     def test_output_limit_uses_the_explicit_shared_name(self):
         self.assertIn("max_output_tokens", CONFIG_KEYS)
         self.assertNotIn("max_tokens", CONFIG_KEYS)

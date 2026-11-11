@@ -1206,12 +1206,15 @@ class _UIState:
     def _config_command(self, text: str) -> None:
         """/config and /config.json, at once, even while a turn runs.
 
-        A read answers with a notice. A change applies at once, so a running
+        A read answers with a notice. A change applies at once: a running
         turn, which keeps the config it started with (_turn), sees it from
-        its next turn on, but tool approval's timers from its next approval
-        prompt. It shows with its result, and its record is logged
-        at the next safe point (_RecordEntry), before what's queued after it.
-        Usage errors are notices, which never quote the argument.
+        its next turn on; but tool approval's timers from its next approval
+        prompt, and the compaction settings, such as
+        auto_compaction_context_tokens, from its next compaction point
+        (_CliHost.compaction_config). It shows with its result, and its
+        record is logged at the next safe point (_RecordEntry), before what's
+        queued after it. Usage errors are notices, which never quote the
+        argument.
         """
         self.editor = Editor()
         if self.config is None:
@@ -3179,10 +3182,25 @@ class _CliHost(TurnHost):
         note = _drift_note(self._writer) if result.protocol == "coldstart" else None
         if note is not None:
             self.notice(note)
-        if (result.protocol == "coldstart" and self._config is not None
-                and self._config.compaction_coldstart_reboot):
+        # Whether to reboot, as the live config says now: a /config change
+        # during the turn counts, as for the compaction itself (compaction_config).
+        live = self._state.config
+        snapshot = self._config if live is None else live.snapshot()
+        if (result.protocol == "coldstart" and snapshot is not None
+                and snapshot.compaction_coldstart_reboot):
             # Synchronously: the interrupt point that follows must see it.
             self._on_loop(_coldstart_reboot, self._state)
+
+    def compaction_config(self, config):
+        """The turn's config, ``config``, with the live config's compaction
+        settings as they are at this compaction point: a /config change to
+        one, such as auto_compaction_context_tokens, reaches the turn's next
+        compaction point, as tool approval's timers reach its next prompt,
+        while the rest of the config stays the turn's. A host without the
+        session's config (in tests) takes the turn's."""
+        live = self._state.config
+        merge = getattr(config, "with_compaction", None)
+        return config if live is None or merge is None else merge(live.snapshot())
 
     def preemptible(self, cancel, *, retry=False):
         return self._state.preemption.operation(cancel, retry=retry)
@@ -3249,8 +3267,10 @@ async def _turn(context, model, environment, state, writer, config, *, steering=
 
     The turn runs on the config as it is when it starts: a /config change
     during the turn applies from the next one. That includes the tools'
-    workspace policy (enable_workspace), set here. Tool approval's timers are
-    the exception: each approval prompt reads them (_CliHost._approval_timers).
+    workspace policy (enable_workspace), set here. The exceptions: each
+    approval prompt reads tool approval's timers (_CliHost._approval_timers),
+    and each compaction point the compaction settings
+    (_CliHost.compaction_config), as they are then.
     """
     # Each explicit attempt consumes the preceding failure's ticket; only a
     # failure the loop reports as retryable arms a new one.

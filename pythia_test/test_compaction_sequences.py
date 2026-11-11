@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -134,7 +136,8 @@ class _Script:
 
 
 class _Model:
-    """Plays scripted outcomes for model.sample, recording each request."""
+    """Plays scripted outcomes for model.sample, recording each request; an
+    outcome that's a function gives the outcome, from the request."""
 
     def __init__(self, *outcomes):
         self.outcomes = deque(outcomes)
@@ -143,6 +146,8 @@ class _Model:
     def sample(self, context, *, tools=(), sample_params=None):
         self.calls.append(context.copy())
         outcome = self.outcomes.popleft()
+        if callable(outcome):
+            outcome = outcome(context)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -935,10 +940,30 @@ class _Terminal:
     def render(self, editor, status, items, prompt=":> "):
         self.items.extend(items)
         if status == "idle" and self.commands and not self.keys:
-            from types import SimpleNamespace
-            for key, data in (("c-u", ""), ("c-k", ""),
-                              ("<bracketed-paste>", self.commands.popleft()), ("c-m", "\r")):
-                self.keys.append(SimpleNamespace(key=key, data=data))
+            self.type(self.commands.popleft())
+
+    def type(self, text):
+        for key, data in (("c-u", ""), ("c-k", ""), ("<bracketed-paste>", text), ("c-m", "\r")):
+            self.keys.append(SimpleNamespace(key=key, data=data))
+
+
+class _BusyTerminal(_Terminal):
+    """A terminal that also types ``during`` while a turn runs, once
+    ``entered`` is set, as a user types while a sample runs, and sets
+    ``shown`` once the user tools' results of all of them show."""
+
+    def __init__(self, commands, during, entered, shown):
+        super().__init__(commands)
+        self.during, self.entered, self.shown = deque(during), entered, shown
+        self.typed = len(self.during)
+
+    def render(self, editor, status, items, prompt=":> "):
+        if self.entered.is_set() and self.during and not self.keys:
+            self.type(self.during.popleft())
+        super().render(editor, status, items, prompt)
+        results = [item for item in self.items if item.text.startswith("[user-tool-ret]")]
+        if len(results) >= self.typed:
+            self.shown.set()
 
 
 class CLITests(unittest.IsolatedAsyncioTestCase):
@@ -1031,6 +1056,65 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<user-message>\nnext\n</user-message>", pointer.content)
         metadata = next(item for item in saved if isinstance(item, CompactionMetadata))
         self.assertEqual(metadata.protocol, "coldstart")
+
+    async def test_a_threshold_set_during_a_turn_compacts_at_its_next_compaction_point(self):
+        # The turn starts with no threshold, and pi's mode; /config sets a
+        # threshold, and coldstart's mode, while its first sample runs, and the
+        # compaction point before its second sample reads both, as the
+        # session's compaction settings are then: it compacts cold, with no
+        # request of its own.
+        entered, shown = threading.Event(), threading.Event()
+
+        def first(context):
+            entered.set()
+            if not shown.wait(2):
+                raise AssertionError("the config's results never showed")
+            return ModelSample((ToolCall("probe", "p1", "{}"),),
+                               usage=TokenUsage(total_tokens=5000))
+
+        model = _Model(first, _answer("done"))
+        terminal = _BusyTerminal(
+            ("next", "/quit"), ("/config compaction_mode coldstart",
+                                "/config auto_compaction_context_tokens 100"), entered, shown)
+        args = cli._build_parser().parse_args(["--resume", "--compaction-mode", "pi"])
+        with DefaultEnvironment(cwd=self.path.parent) as environment:
+            await asyncio.wait_for(cli._run(model, environment, terminal, args, self.path),
+                                   timeout=8)
+        self.assertTrue(terminal.exited)
+        saved = load_interaction_save(full_log(self.path))
+        first_request, second = model.calls
+        self.assertFalse(is_coldstart_pointer(first_request.model_items()[0]))
+        self.assertTrue(is_coldstart_pointer(second.model_items()[0]))
+        # It compacted within the turn: after the first sample's tool result,
+        # before the turn's end.
+        kinds = [type(item).__name__ for item in saved]
+        result = next(i for i, item in enumerate(saved)
+                      if isinstance(item, ToolResult) and item.call_id == "p1")
+        metadata = next(i for i, item in enumerate(saved) if isinstance(item, CompactionMetadata))
+        self.assertEqual(saved[metadata].protocol, "coldstart")
+        self.assertLess(result, metadata)
+        self.assertLess(metadata, len(kinds) - 1 - kinds[::-1].index("TurnSummary"))
+
+    async def test_the_cli_host_gives_the_live_compaction_settings_and_the_turns_others(self):
+        config = InteractionConfig()
+        state = cli._UIState(ready=True, turn_active=True, config=config)
+        writer = SimpleNamespace(drift_note=lambda: None)
+        host = cli._CliHost(state, writer, asyncio.get_running_loop(), config=config.snapshot())
+        # As /config sets them, during the turn.
+        config.set("auto_compaction_context_tokens", 100)
+        config.set("compaction_coldstart_reboot", True)
+        config.set("max_output_tokens", 99)
+        current = host.compaction_config(host._config)
+        self.assertEqual((current.auto_compaction_context_tokens,
+                          current.compaction_coldstart_reboot, current.max_output_tokens),
+                         (100, True, None))
+        # Whether a coldstart compaction reboots, as the live config says.
+        with mock.patch.object(host, "_on_loop") as on_loop:
+            host.compacted(SimpleNamespace(protocol="coldstart"))
+        on_loop.assert_called_once_with(cli._coldstart_reboot, state)
+        # A host without the session's config takes the turn's.
+        state.config = None
+        self.assertIs(host.compaction_config(host._config), host._config)
 
     async def test_compact_lists_failed_attempts_in_its_result_only(self):
         model = _Model(_timeout(), _answer("Summary updated."))

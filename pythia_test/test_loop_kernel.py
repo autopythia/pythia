@@ -197,6 +197,32 @@ class _ErrorHost(_Host):
         self.shown.append(exc)
 
 
+class _LiveHost(_Host):
+    """A host whose compaction settings change during a turn, as /config
+    changes the CLI's (TurnHost.compaction_config): ``live`` gives them as they
+    are at each compaction point, the last of them from then on."""
+
+    def __init__(self, *live):
+        super().__init__()
+        self.live = list(live)
+
+    def compaction_config(self, config):
+        now = self.live.pop(0) if len(self.live) > 1 else self.live[0]
+        return config.with_compaction(now)
+
+
+class _ParamsModel(_Model):
+    """Also records each sample's params."""
+
+    def __init__(self, host, *script):
+        super().__init__(host, *script)
+        self.params = []
+
+    def sample(self, context, *, tools=(), sample_params=None):
+        self.params.append(sample_params)
+        return super().sample(context, tools=tools, sample_params=sample_params)
+
+
 def _environment(host, *, inject=None):
     def handler(arguments, *, timeout_seconds=None):
         host.calls_run += 1
@@ -521,6 +547,41 @@ class RunTurnTests(unittest.TestCase):
                  if e[0] in ("compacted", "interrupt", "sample", "trace")]
         self.assertEqual(order, [("trace", "compact"), "compacted", "interrupt",
                                  ("trace", "sample"), "sample"])
+
+    def test_each_compaction_point_reads_the_compaction_settings_that_the_host_gives(self):
+        # As /config changes them during a turn: the threshold at each point, and
+        # the next sample's compaction policy, for a model that compacts on its
+        # server; the rest of the config stays the turn's.
+        host = _LiveHost(_config(), _config(auto_compaction_context_tokens=100,
+                                            max_output_tokens=99))
+        model = _ParamsModel(host, _calls(_call("a")), _answer("done"))
+        seen = []
+
+        def due(model, context, config):
+            seen.append(config.auto_compaction_context_tokens)
+            return False
+        with mock.patch.object(kernel, "auto_compaction_due", side_effect=due):
+            result = run_turn(_context(), model, _environment(host),
+                              _config(max_output_tokens=7), host)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(seen, [None, 100])
+        self.assertEqual([(params.auto_compaction_context_tokens, params.max_output_tokens)
+                          for params in model.params], [(None, 7), (100, 7)])
+        # A host that gives none of its own: the turn's.
+        config = _config()
+        self.assertIs(TurnHost().compaction_config(config), config)
+
+    def test_an_overflow_recovers_as_the_hosts_compaction_settings_say(self):
+        # The turn started with automatic compaction off; the host's settings,
+        # now on, recover the overflow with a compaction, and the turn goes on.
+        host = _LiveHost(_config(enable_auto_compaction=True))
+        model = _Model(host, ModelContextWindowError("full"), _answer("done"))
+        with _fake_compaction(host, due=False):
+            result = run_turn(_context(), model, _environment(host),
+                              _config(enable_auto_compaction=False), host)
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual([e for e in host.events if e[0] == "compacted"], [("compacted",)])
+        self.assertEqual(host.notices, [kernel.OVERFLOW_NOTICE])
 
     def test_compaction_pause_samples_again(self):
         host, context = _Host(), _context()
