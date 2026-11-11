@@ -2517,11 +2517,12 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(headers["content-security-policy"], csp, path)
             self.assertEqual(headers["content-type"], f"{kind}; charset=utf-8", path)
             self.assertEqual(headers["x-content-type-options"], "nosniff", path)
-        # The view's pages run the server's scripts, styles and fetches, and nothing else;
-        # its facts, bodies and files, nothing at all.
+        # The view's pages run the server's scripts, styles and fetches, and draw images
+        # from data: URLs alone, as Prose's figures are; its facts, bodies and files,
+        # nothing at all.
         self.assertEqual(view.PAGE_CSP, "default-src 'none'; script-src 'self'; style-src 'self'; "
-                         "connect-src 'self'; base-uri 'none'; form-action 'none'; "
-                         "frame-ancestors 'none'")
+                         "img-src data:; connect-src 'self'; base-uri 'none'; "
+                         "form-action 'none'; frame-ancestors 'none'")
         self.assertEqual(view.DATA_CSP, "default-src 'none'; frame-ancestors 'none'")
         self.assertEqual(self.get(f"/{TOKEN}/lem")[1]["location"], f"/{TOKEN}/lem/")
         for path in (f"/{TOKEN}/lem/?x=1", f"/{TOKEN}/lem/facts/c/1?line=2"):

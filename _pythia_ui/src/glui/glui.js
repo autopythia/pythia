@@ -176,7 +176,8 @@ var glui = (function () {
   // Prose: text as Markdown writes it, as elements, never as HTML, which
   // shows as written. Its blocks: paragraphs; headings, by #; rules;
   // quotes, by >; lists, by -, * or +, or by 1. or 1); fenced code, by ```
-  // or ~~~, a diff's lines as a diff's; and tables, as GitHub writes them.
+  // or ~~~, a diff's lines as a diff's, and SVG's, as a figure, if it's a
+  // whole document (mdFigure); and tables, as GitHub writes them.
   // Its inlines: code, emphasis, strong, struck, links, autolinks and bare
   // URLs, and backslash's escapes; a line that ends in two spaces or a
   // backslash breaks. A link goes to one of the host's own paths, or to
@@ -217,6 +218,29 @@ var glui = (function () {
   var AUTOLINK = /<((?:https?:\/\/|mailto:)[^\s<>]*)>/iy;
   var BARE = /https?:\/\/[^\s<>`]+/iy;
   var LINK_TAIL = /[ \t]*(?:<([^<>\n]*)>|((?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))*))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*\)/y;
+  // How long an SVG's text is at most, for a figure (mdFigure): so that its
+  // data: URL, nine characters at most for each of its own, stays within
+  // 2 MB, the most that some browsers take in a URL.
+  var MD_FIGURE = 200000;
+  // A whole SVG document, as a file holds one: before its root, svg, an XML
+  // declaration, comments, and a DOCTYPE without entities of its own, at
+  // most; the root's start tag, quotes and all; a title, its first child,
+  // which says what it shows; and the root's end, last. A comment ends at
+  // its first -->, so that there's one way to read many, which a text that
+  // fails to match takes no longer to try than another.
+  var SVG_START = /^\s*(?:<\?xml\b[^>]*\?>\s*)?(?:(?:<!--(?:[^-]|-(?!->))*-->|<!DOCTYPE\b[^\[>]*>)\s*)*<svg(?=[\s\/>])/;
+  var SVG_TAG = /<svg(?:[^>"']|"[^"]*"|'[^']*')*>/y;
+  var SVG_TITLE = /(?:\s|<!--(?:[^-]|-(?!->))*-->)*<title\b[^>]*>([^<]*)<\/title\s*>/y;
+  var SVG_END = /<\/svg\s*>\s*$/;
+  // An attribute of the root's start tag, from its lastIndex; and a length,
+  // in px, or with no unit, of a few digits, which can't be read in more
+  // than one way.
+  var SVG_ATTRIBUTE = /\s+([^\s=\/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+  var SVG_LENGTH = /^\s*(\d{1,6}(?:\.\d{1,6})?|\.\d{1,6})(?:px)?\s*$/;
+  // The most that a figure's width or height says, in px: beyond, it says
+  // nothing.
+  var SVG_MOST = 100000;
+  var XML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" };
 
   // Whether a line starts a block that ends a paragraph.
   function mdStarts(line) {
@@ -379,11 +403,14 @@ var glui = (function () {
         e.setAttribute("aria-level", String(Math.min(b.level + 2, 6)));
         mdInline(view, e, b.text);
       } else if (b.type === "code") {
-        e = element(view, "pre", b.info === "diff" ? "g-code g-diff" : "g-code");
-        if (b.info === "diff") {
-          diff(view, e, b.text);
-        } else {
-          e.textContent = b.text;
+        e = b.info === "svg" ? mdFigure(view, b.text) : null;
+        if (e === null) {
+          e = element(view, "pre", b.info === "diff" ? "g-code g-diff" : "g-code");
+          if (b.info === "diff") {
+            diff(view, e, b.text);
+          } else {
+            e.textContent = b.text;
+          }
         }
       } else if (b.type === "rule") {
         e = element(view, "hr");
@@ -426,6 +453,142 @@ var glui = (function () {
         parent.appendChild(e);
       }
     });
+  }
+
+  // A fenced block of SVG as a figure, if its text is a whole SVG document
+  // (SVG_START, SVG_TAG, SVG_END), MD_FIGURE long at most; else null, for
+  // code. The figure is an image of the SVG, from a data: URL, which a
+  // browser draws apart from the page, as it draws any image: with no
+  // script, no fetch and no link of its own, whatever the SVG says. It's
+  // on a light ground (glui.css), since an SVG's own colors seldom suit a
+  // dark one; described by the SVG's title, else its root's aria-label;
+  // with the room that the root's width and height give it, in px, or its
+  // viewBox's ratio, across the width, so that its place is kept before
+  // it's drawn; and, below it, its text, as written, in a fold, which
+  // opens, and says so, if the browser can't draw it. The image's root
+  // gets SVG's namespace, and XLink's, where the text uses them without
+  // saying so, as HTML's parser gives them to an svg element in a page.
+  function mdFigure(view, source) {
+    var start = source.length <= MD_FIGURE ? SVG_START.exec(source) : null;
+    if (start === null || !SVG_END.test(source)) {
+      return null;
+    }
+    var at = start[0].length - "<svg".length;
+    SVG_TAG.lastIndex = at;
+    var tag = SVG_TAG.exec(source);
+    if (tag === null) {
+      return null;
+    }
+    var end = at + tag[0].length;
+    var fields = new Map();
+    SVG_ATTRIBUTE.lastIndex = at + "<svg".length;
+    for (var a = SVG_ATTRIBUTE.exec(source); a !== null && SVG_ATTRIBUTE.lastIndex <= end; a = SVG_ATTRIBUTE.exec(source)) {
+      if (!fields.has(a[1])) {
+        fields.set(a[1], a[2] !== undefined ? a[2] : a[3]);
+      }
+    }
+    var named = "";
+    if (!fields.has("xmlns")) {
+      named += ' xmlns="http://www.w3.org/2000/svg"';
+    }
+    if (!fields.has("xmlns:xlink") && source.indexOf("xlink:") >= 0) {
+      named += ' xmlns:xlink="http://www.w3.org/1999/xlink"';
+    }
+    var drawn = source.slice(0, at + "<svg".length) + named + source.slice(at + "<svg".length);
+    var url;
+    try {
+      url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(drawn);
+    } catch (e) {
+      return null; // a lone surrogate, which no URL carries
+    }
+    SVG_TITLE.lastIndex = end;
+    var title = SVG_TITLE.exec(source);
+    var said = xmlText(title !== null ? title[1] : fields.get("aria-label") || "");
+    var figure = element(view, "figure", "g-prose-figure");
+    var size = svgSize(fields);
+    var img = element(view, "img", size !== null && size.across ? "g-prose-across" : null);
+    img.setAttribute("src", url);
+    img.setAttribute("alt", said || "an SVG figure");
+    if (size !== null && size.width !== null) {
+      img.setAttribute("width", String(Math.max(1, Math.round(size.width))));
+    }
+    if (size !== null && size.height !== null) {
+      img.setAttribute("height", String(Math.max(1, Math.round(size.height))));
+    }
+    var fold = element(view, "details", "g-prose-source");
+    var summary = element(view, "summary");
+    summary.textContent = "source";
+    var code = element(view, "pre", "g-code");
+    code.textContent = source;
+    fold.appendChild(summary);
+    fold.appendChild(code);
+    img.addEventListener("error", function () {
+      if (img.parentNode === figure) {
+        figure.removeChild(img);
+        summary.textContent = "source: the browser couldn't draw it";
+        fold.open = true;
+      }
+    });
+    figure.appendChild(img);
+    figure.appendChild(fold);
+    return figure;
+  }
+
+  // An SVG root's size, by its attributes, `fields`: {width, height, across},
+  // in px, or null for each that it doesn't give; or null. With one of them
+  // and a viewBox, the other follows from the viewBox's ratio; with neither,
+  // the ratio alone, at a scale that keeps it, and the image goes across the
+  // width (across), as a browser draws an SVG of no size.
+  function svgSize(fields) {
+    var width = svgPx(fields.get("width"));
+    var height = svgPx(fields.get("height"));
+    var box = svgBox(fields.get("viewBox"));
+    if (width !== null && height !== null) {
+      return { width: width, height: height, across: false };
+    }
+    if (box === null) {
+      return width === null && height === null ? null : { width: width, height: height, across: false };
+    }
+    if (width !== null) {
+      return { width: width, height: (width * box[1]) / box[0], across: false };
+    }
+    if (height !== null) {
+      return { width: (height * box[0]) / box[1], height: height, across: false };
+    }
+    var scale = 1000 / Math.max(box[0], box[1]);
+    return { width: box[0] * scale, height: box[1] * scale, across: true };
+  }
+
+  // A length in px, as an SVG root's width or height gives it, or with no
+  // unit, more than 0 and SVG_MOST at most; else null.
+  function svgPx(value) {
+    var m = value === undefined || value.length > 64 ? null : SVG_LENGTH.exec(value);
+    var px = m === null ? 0 : Number(m[1]);
+    return px > 0 && px <= SVG_MOST ? px : null;
+  }
+
+  // A viewBox's width and height, as [width, height], if they're numbers
+  // more than 0; else null.
+  function svgBox(value) {
+    var parts = value === undefined || value.length > 200 ? [] : value.trim().split(/[\s,]+/);
+    var width = parts.length === 4 ? Number(parts[2]) : 0;
+    var height = parts.length === 4 ? Number(parts[3]) : 0;
+    return width > 0 && height > 0 && width < Infinity && height < Infinity ? [width, height] : null;
+  }
+
+  // Text as XML writes it: its references to characters, as the characters,
+  // and its runs of whitespace, as a space each, trimmed.
+  function xmlText(raw) {
+    return raw
+      .replace(/&(?:#x([0-9a-fA-F]{1,6})|#([0-9]{1,7})|([A-Za-z]{1,8}));/g, function (all, hex, decimal, name) {
+        if (name !== undefined) {
+          return Object.prototype.hasOwnProperty.call(XML_ENTITIES, name) ? XML_ENTITIES[name] : all;
+        }
+        var code = hex !== undefined ? parseInt(hex, 16) : parseInt(decimal, 10);
+        return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : all;
+      })
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   // Inline Markdown, as nodes in `parent`: "\u0000" is a line's break.

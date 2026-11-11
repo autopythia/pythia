@@ -82,8 +82,10 @@ FILES = {
 TYPES = {".js": "text/javascript", ".css": "text/css", ".json": "application/json"}
 SCRIPTS = ("lem.js", "glem.js", "glui.js", "contexts.js")
 STYLESHEETS = ("glui.css", "native.css", "log.css", "contexts.css")
-PAGE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+# The view's pages run this server's scripts, styles and fetches, and draw images from
+# data: URLs alone, such as Prose's figures of SVG (glui.js); its data, nothing at all.
+PAGE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; "
+            "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 DATA_CSP = "default-src 'none'; frame-ancestors 'none'"
 # An item's tone, by its kind's class on the plain pages; any other is Dim. But for one of
 # these types, which is read as a message is, and which would be Dim by its class: reasoning,

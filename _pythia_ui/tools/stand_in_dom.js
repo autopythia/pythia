@@ -72,7 +72,7 @@ var standInDom = (function () {
   };
 
   // The events that don't bubble, as a browser fires them.
-  var ALONE = ["toggle", "focus", "blur"];
+  var ALONE = ["toggle", "focus", "blur", "load", "error"];
 
   // An event, as the tests make them, on `target`: its listeners, then,
   // unless it's one that doesn't bubble or a listener stops it, its

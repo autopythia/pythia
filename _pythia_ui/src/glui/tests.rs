@@ -423,7 +423,7 @@ const PAGE_SCRIPTS: [(&str, &str); 3] = [
 /// themselves, but `frame-ancestors`, which only a header can give.
 const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" \
   content=\"default-src 'none'; script-src 'self'; style-src 'self'; \
-  connect-src 'self'; base-uri 'none'; form-action 'none'\">";
+  img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'\">";
 
 /// What's wrong with a page: its CSP; script or style inline; and a script
 /// or stylesheet that isn't a file in the crate, or under target/, which

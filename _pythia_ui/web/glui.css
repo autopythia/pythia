@@ -103,6 +103,16 @@ font:.92em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .g-prose .g-align-right{text-align:right}
 .g-prose .g-align-center{text-align:center}
 .g-prose-link{color:var(--glui-text-link)}
+/* A figure, an SVG's image: on a light ground, since an SVG's own colors
+   seldom suit a dark one; no wider than its place, and across it when the
+   SVG gives no size (g-prose-across); then its source, in a fold, under a
+   faint line of its own. */
+.g-prose figure{margin:.5em 0}
+.g-prose-figure>img{display:block;box-sizing:content-box;max-width:calc(100% - 1em - 2px);height:auto;
+padding:.5em;border:1px solid var(--glui-rule-line);border-radius:3px;background:#fff}
+.g-prose-figure>img.g-prose-across{width:calc(100% - 1em - 2px)}
+.g-prose-source>summary{width:max-content;color:var(--glui-text-dim);font-size:.85em;cursor:pointer}
+.g-prose-source>pre{margin:.3em 0 0}
 
 /* A log's entry: its mark, label and text on a line, then its body, with
    its children, if it has any. */

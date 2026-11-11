@@ -195,9 +195,11 @@
   // What a user does, as lem/test/*_dom.txt writes it, to a widget, by its
   // id as lem writes it: "click", on its element; "check", its checkbox;
   // "type", text into its field; "compose", text with an input method, and
-  // "composed", the composition's end; "open" and "close", its entry;
+  // "composed", the composition's end; "open" and "close", the first fold
+  // in it, as an entry's;
   // "star", its entry's star; "dismiss", its tab's close button; "drag",
-  // its element onto another widget's, by its id;
+  // its element onto another widget's, by its id; "fail", the first image
+  // in it, which fails to load, as one that the browser can't draw does;
   // "focus", on its control, if it has one, or its element; and, as for
   // glem's tests, "blur", and "key" with its name and modifiers. A disabled
   // control takes no click, change or text. In a browser, a click and a
@@ -301,6 +303,9 @@
       case "near":
       case "far":
         it.doc.near(e, step[0] === "near");
+        return;
+      case "fail":
+        it.doc.fire(find(e, ["img"]), "error");
         return;
     }
     throw new Error("there's no step " + JSON.stringify(step));
@@ -445,6 +450,55 @@
     tap.report("prose of " + text.length + " characters that nothing closes, in seconds", took < 4000 ? null : "it took " + took + " ms");
   }
 
+  // Fenced SVG at its limits: a text of 200,000 characters, the most that
+  // a figure takes, is one, and a longer one, code; one with a lone
+  // surrogate, which no URL carries, code, after a figure, so that what
+  // shows is its own; and texts of about as many characters that nearly
+  // make a figure take no longer than their length.
+  function figures() {
+    var suite = tests.suites.filter(function (s) {
+      return s.name === "prose_dom.txt";
+    })[0];
+    var doc = new standInDom.Document();
+    var root = doc.createElement("div");
+    var view = glui.view(new glem.Runtime(new glem.Program(suite.program)), root, {
+      effects: function () {},
+      error: function () {}
+    });
+    var shows = function (svg) {
+      try {
+        view.update([["+", "Text", { n: 1, text: "```svg\n" + svg + "\n```" }]]);
+      } catch (e) {
+        return "an error: " + e;
+      }
+      return find(root, ["figure"]) !== null ? "a figure" : find(root, ["pre"]) !== null ? "code" : "nothing";
+    };
+    var head = '<svg xmlns="http://www.w3.org/2000/svg"><desc>';
+    var tail = "</desc></svg>";
+    var sized = function (length) {
+      return head + "x".repeat(length - head.length - tail.length) + tail;
+    };
+    [
+      ["SVG of 200001 characters", sized(200001), "code"],
+      ["SVG of 200000 characters", sized(200000), "a figure"],
+      ["SVG with a lone surrogate", head + "\ud800" + tail, "code"]
+    ].forEach(function (c) {
+      var got = shows(c[1]);
+      tap.report(c[0] + " shows as " + c[2], got === c[2] ? null : "it shows as " + got);
+    });
+    var began = Date.now();
+    [
+      "<!--".repeat(49000),
+      "<!--x-->".repeat(24000) + "<p>",
+      "<svg" + ' a="b"'.repeat(30000) + ' c="</svg>',
+      '<svg width="1' + " ".repeat(190000) + 'x">' + tail,
+      "<svg>" + "</svg >  ".repeat(20000) + "x",
+      '<svg xmlns="http://www.w3.org/2000/svg"><title>' + "&amp;".repeat(30000) + "</title></svg>"
+    ].forEach(shows);
+    var took = Date.now() - began;
+    tap.report("SVG that nearly makes a figure, 200000 characters at a time, in seconds", took < 4000 ? null : "it took " + took + " ms");
+  }
+
   tests.suites.forEach(suite);
   if (typeof document !== "undefined" && document.body) {
     tests.suites.forEach(inThePage);
@@ -453,6 +507,7 @@
   paths();
   if (typeof standInDom !== "undefined") {
     long();
+    figures();
   }
   tap.finish();
 })();

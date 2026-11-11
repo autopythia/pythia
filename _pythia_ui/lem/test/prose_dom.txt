@@ -153,3 +153,94 @@ main.g-window
       "my_var_ and "
       em "real"
       " emphasis"
+
+=== SVG, fenced, as a figure: an image of it, from a data: URL, with SVG's namespace, described by its title, at its width and height; and its source, in a fold
+["+", "Text", {"n": 1, "text": "A bar:\n\n```svg\n<svg width=\"40\" height=\"20\" viewBox=\"0 0 40 20\"><title>A &amp; B</title><rect width=\"40\" height=\"20\" fill=\"#08f\"/></svg>\n```\n\nThen text."}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    p "A bar:"
+    figure.g-prose-figure
+      img src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2240%22%20height%3D%2220%22%20viewBox%3D%220%200%2040%2020%22%3E%3Ctitle%3EA%20%26amp%3B%20B%3C%2Ftitle%3E%3Crect%20width%3D%2240%22%20height%3D%2220%22%20fill%3D%22%2308f%22%2F%3E%3C%2Fsvg%3E" alt="A & B" width="40" height="20"
+      details.g-prose-source
+        summary "source"
+        pre.g-code "<svg width=\"40\" height=\"20\" viewBox=\"0 0 40 20\"><title>A &amp; B</title><rect width=\"40\" height=\"20\" fill=\"#08f\"/></svg>"
+    p "Then text."
+
+=== a figure's source unfolds
+["open", "Block(1)"]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    p "A bar:"
+    figure.g-prose-figure
+      img src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2240%22%20height%3D%2220%22%20viewBox%3D%220%200%2040%2020%22%3E%3Ctitle%3EA%20%26amp%3B%20B%3C%2Ftitle%3E%3Crect%20width%3D%2240%22%20height%3D%2220%22%20fill%3D%22%2308f%22%2F%3E%3C%2Fsvg%3E" alt="A & B" width="40" height="20"
+      details.g-prose-source open
+        summary "source"
+        pre.g-code "<svg width=\"40\" height=\"20\" viewBox=\"0 0 40 20\"><title>A &amp; B</title><rect width=\"40\" height=\"20\" fill=\"#08f\"/></svg>"
+    p "Then text."
+
+=== an SVG of no size, but a viewBox, across the width at its ratio, described by its aria-label, with XLink's namespace too
+["+", "Text", {"n": 1, "text": "```svg\n<svg viewBox=\"0 0 30 10\" aria-label=\"three  dots\"><circle id=\"c\" cx=\"5\" cy=\"5\" r=\"4\"/><use xlink:href=\"#c\" x=\"10\"/><use xlink:href=\"#c\" x=\"20\"/></svg>\n```"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    figure.g-prose-figure
+      img.g-prose-across src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20xmlns%3Axlink%3D%22http%3A%2F%2Fwww.w3.org%2F1999%2Fxlink%22%20viewBox%3D%220%200%2030%2010%22%20aria-label%3D%22three%20%20dots%22%3E%3Ccircle%20id%3D%22c%22%20cx%3D%225%22%20cy%3D%225%22%20r%3D%224%22%2F%3E%3Cuse%20xlink%3Ahref%3D%22%23c%22%20x%3D%2210%22%2F%3E%3Cuse%20xlink%3Ahref%3D%22%23c%22%20x%3D%2220%22%2F%3E%3C%2Fsvg%3E" alt="three dots" width="1000" height="333"
+      details.g-prose-source
+        summary "source"
+        pre.g-code "<svg viewBox=\"0 0 30 10\" aria-label=\"three  dots\"><circle id=\"c\" cx=\"5\" cy=\"5\" r=\"4\"/><use xlink:href=\"#c\" x=\"10\"/><use xlink:href=\"#c\" x=\"20\"/></svg>"
+
+=== an SVG that the browser can't draw: its source opens, and says so
+["fail", "Block(1)"]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    figure.g-prose-figure
+      details.g-prose-source open
+        summary "source: the browser couldn't draw it"
+        pre.g-code "<svg viewBox=\"0 0 30 10\" aria-label=\"three  dots\"><circle id=\"c\" cx=\"5\" cy=\"5\" r=\"4\"/><use xlink:href=\"#c\" x=\"10\"/><use xlink:href=\"#c\" x=\"20\"/></svg>"
+
+=== before the root, a declaration, a comment and a DOCTYPE; a width in px, and a height by the viewBox; a title after a comment, with characters' references
+["+", "Text", {"n": 1, "text": "```svg\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- made by hand - in a text -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300px\" viewBox=\"0 0 60 30\">\n  <!-- what it shows -->\n  <title>caf&#xe9; &#8212; &lt;menu&gt; &bogus;</title>\n  <rect width=\"60\" height=\"30\"/>\n</svg>\n```"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    figure.g-prose-figure
+      img src="data:image/svg+xml;charset=utf-8,%3C%3Fxml%20version%3D%221.0%22%20encoding%3D%22UTF-8%22%3F%3E%0A%3C!--%20made%20by%20hand%20-%20in%20a%20text%20--%3E%0A%3C!DOCTYPE%20svg%20PUBLIC%20%22-%2F%2FW3C%2F%2FDTD%20SVG%201.1%2F%2FEN%22%20%22http%3A%2F%2Fwww.w3.org%2FGraphics%2FSVG%2F1.1%2FDTD%2Fsvg11.dtd%22%3E%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22300px%22%20viewBox%3D%220%200%2060%2030%22%3E%0A%20%20%3C!--%20what%20it%20shows%20--%3E%0A%20%20%3Ctitle%3Ecaf%26%23xe9%3B%20%26%238212%3B%20%26lt%3Bmenu%26gt%3B%20%26bogus%3B%3C%2Ftitle%3E%0A%20%20%3Crect%20width%3D%2260%22%20height%3D%2230%22%2F%3E%0A%3C%2Fsvg%3E" alt="café — <menu> &bogus;" width="300" height="150"
+      details.g-prose-source
+        summary "source"
+        pre.g-code "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- made by hand - in a text -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300px\" viewBox=\"0 0 60 30\">\n  <!-- what it shows -->\n  <title>caf&#xe9; &#8212; &lt;menu&gt; &bogus;</title>\n  <rect width=\"60\" height=\"30\"/>\n</svg>"
+
+=== fenced SVG that isn't a whole document, that has entities of its own, or text after its root, and another language's SVG, as code
+["+", "Text", {"n": 1, "text": "```svg\n<rect width=\"1\" height=\"1\"/>\n```\n\n```svg\n<!DOCTYPE svg [<!ENTITY a \"aaa\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>&a;</text></svg>\n```\n\n```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n<p>after</p>\n```\n\n```xml\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n```"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    pre.g-code "<rect width=\"1\" height=\"1\"/>"
+    pre.g-code "<!DOCTYPE svg [<!ENTITY a \"aaa\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>&a;</text></svg>"
+    pre.g-code "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n<p>after</p>"
+    pre.g-code "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+
+=== sizes: a width beyond what a figure takes, and a height in em, say nothing, so the viewBox's ratio goes across the width; a height alone gives the width by the ratio; and a > in a quote of the root's start tag is the quote's
+["+", "Text", {"n": 1, "text": "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200000\" height=\"2em\" viewBox=\"0 0 40 20\"><rect width=\"40\" height=\"20\"/></svg>\n```\n\n```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"30\" viewBox=\"0 0 60 30\" aria-label=\"x > y\"><rect width=\"60\" height=\"30\"/></svg>\n```"}]
+---
+page title: "prose"
+main.g-window
+  div.g-prose
+    figure.g-prose-figure
+      img.g-prose-across src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22200000%22%20height%3D%222em%22%20viewBox%3D%220%200%2040%2020%22%3E%3Crect%20width%3D%2240%22%20height%3D%2220%22%2F%3E%3C%2Fsvg%3E" alt="an SVG figure" width="1000" height="500"
+      details.g-prose-source
+        summary "source"
+        pre.g-code "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200000\" height=\"2em\" viewBox=\"0 0 40 20\"><rect width=\"40\" height=\"20\"/></svg>"
+    figure.g-prose-figure
+      img src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20height%3D%2230%22%20viewBox%3D%220%200%2060%2030%22%20aria-label%3D%22x%20%3E%20y%22%3E%3Crect%20width%3D%2260%22%20height%3D%2230%22%2F%3E%3C%2Fsvg%3E" alt="x > y" width="60" height="30"
+      details.g-prose-source
+        summary "source"
+        pre.g-code "<svg xmlns=\"http://www.w3.org/2000/svg\" height=\"30\" viewBox=\"0 0 60 30\" aria-label=\"x > y\"><rect width=\"60\" height=\"30\"/></svg>"

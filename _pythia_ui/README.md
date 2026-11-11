@@ -291,20 +291,23 @@ close button `Dismissed`, and one dragged onto another `Moved`, it shows
 dot says its text as an image's label and in its tooltip, and prose shows
 Markdown as elements, never as HTML, its links to the host's own paths, or to
 http, https or mailto in a new tab, without a referrer, in colors of its own
-that show on light stages and dark ones. It sets a theme's values on the page
-as CSS variables, `--glui-` and a value's name, and a look's stylesheet draws
-with them, over `web/glui.css`: `web/native.css`, the design doc's native
-look, or `web/log.css`, after wui's log. `make js-test` runs its cases in a
-stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
+that show on light stages and dark ones, and a fenced block of SVG, a whole
+document, as a figure: an image of it, from a `data:` URL, which the browser
+draws apart from the page, with no script, fetch or link of its own, on a
+light ground, with its source in a fold under it. It sets a theme's values on
+the page as CSS variables, `--glui-` and a value's name, and a look's
+stylesheet draws with them, over `web/glui.css`: `web/native.css`, the design
+doc's native look, or `web/log.css`, after wui's log. `make js-test` runs its
+cases in a stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
 `lem/test/form.lem`.
 
 In a browser, `make web-serve` serves the web look's two pages.
 `web/demo.html` shows the approval HUD, a page of a log, or the form, in
 either look and any theme, with the page as their host. `web/test.html` runs
 the tests in JavaScript, and some of glui's cases in the page's own DOM too.
-Both pages carry the CSP that pythia's node server sends the pages of its
-glui view, but `frame-ancestors`, which only a header can give, and run
-only the crate's files:
+Both pages carry the CSP that pythia's node server sends the pages of its glui
+view, but `frame-ancestors`, which only a header can give, and run only the
+crate's files, with images from `data:` URLs alone, as prose's figures are:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/demo.html, and test.html
