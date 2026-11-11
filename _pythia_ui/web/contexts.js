@@ -1069,6 +1069,7 @@ var contexts = (function () {
     var stripRoot = document.createElement("div");
     var top = null;
     bar.setAttribute("class", "contexts-bar");
+    root.setAttribute("class", "contexts-page");
     menus.setAttribute("class", "contexts-menus");
     button.textContent = "\u2630";
     button.setAttribute("title", "the view's settings");
@@ -1103,16 +1104,18 @@ var contexts = (function () {
       document.body.appendChild(bar);
     }
     document.body.appendChild(root);
-    // How tall the strip of tabs is, if there's one, under which a log's
+    // How tall the strip of tabs is, if there's one, under which a page's
     // title stays, and how tall the two are with the title of the page
     // shown, under which a row that goes to the top of the screen goes
     // (contexts.css): measured anew as either changes its size, or as the
-    // window does, or another tab shows.
+    // window does, or another tab shows. The strip's height is rounded
+    // down, so that the title goes under its last fraction of a pixel,
+    // rather than leave a sliver between them that rows show through.
     var watched = typeof ResizeObserver === "function" ? new ResizeObserver(function () {
       heads();
     }) : null;
     var heads = function () {
-      var strip = top !== null ? Math.ceil(top.getBoundingClientRect().height) : 0;
+      var strip = top !== null ? Math.floor(top.getBoundingClientRect().height) : 0;
       var holder = !tabbing ? root : shown !== null && shown.shown() !== null ? shown.shown().root : null;
       var title = holder !== null ? holder.querySelector(".g-window > .g-row") : null;
       var head = title !== null ? Math.ceil(title.getBoundingClientRect().height) : 0;

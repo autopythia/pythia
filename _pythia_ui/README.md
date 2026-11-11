@@ -399,19 +399,20 @@ fetches the program and the themes, compiled, from `web/compiled/`, which
 `make compiled` writes, and a test checks against the files they're compiled
 from. A log's page starts at its end, and keeps the first row on the screen in
 place as rows come, above it or below, but for a screen at the log's end,
-which stays at its end as the log grows; its title stays at the top of the
-screen as it scrolls, and two buttons, at the bottom right, go to its start
-and its end. Every few seconds while it shows, a page asks what changed: a
-log, what it gained; the index, its facts anew, whose difference from the last
-it applies. Its bar, a button at the top right that unfolds a menu, and what
-went wrong beside it, if something did, picks the look and the theme, and, for
-a log, whether its runs are folded or open, whether its panel shows, and how
-wide, as a drag on its edge makes it, and whether an assistant's messages show
-as Markdown or as written, which the node server keeps for the view, at
-`data-store`, and the browser too. `make web` writes a sample, an index and a
-log of 13,394 items, the most that one of pythia's contexts had when it was
-first written, in turns of 50, for two pages that show it as the node server's
-do:
+which stays at its end as the log grows, and two buttons, at the bottom right,
+go to its start and its end. A page's title, a log's or the index's, stays at
+the top of the screen as it scrolls, right below the strip of tabs, which is
+as wide on every tab, the panel's room being the log's alone. Every few
+seconds while it shows, a page asks what changed: a log, what it gained; the
+index, its facts anew, whose difference from the last it applies. Its bar, a
+button at the top right that unfolds a menu, and what went wrong beside it, if
+something did, picks the look and the theme, and, for a log, whether its runs
+are folded or open, whether its panel shows, and how wide, as a drag on its
+edge makes it, and whether an assistant's messages show as Markdown or as
+written, which the node server keeps for the view, at `data-store`, and the
+browser too. `make web` writes a sample, an index and a log of 13,394 items,
+the most that one of pythia's contexts had when it was first written, in turns
+of 50, for two pages that show it as the node server's do:
 
 ```sh
 make web-serve     # then http://127.0.0.1:8000/web/contexts-index.html
