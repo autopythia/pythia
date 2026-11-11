@@ -27,9 +27,10 @@ Behind ``/TOKEN/n/NAME/`` are the pages of remote node NAME (node.ini's
 within this server's, with its own store: GET, HEAD and its view's POSTs go to
 it, which checks them as this server does. What it answers passes on only as
 this server's own pages would: as HTML, plain text or JSON, with none of its
-headers but Allow, under this server's content security policies, and with
-redirects within its own pages; and its view's scripts, styles and programs
-are this server's own, so that its pages run nothing that it sent.
+headers but Allow, under the content security policy that this server gives
+its own of that kind, whatever the remote's says, and with redirects within
+its own pages; and its view's scripts, styles and programs are this server's
+own, so that its pages run nothing that it sent.
 """
 
 from __future__ import annotations
@@ -245,11 +246,21 @@ class App:
         if answer.content_type not in REMOTE_TYPES or not within:
             return plain(502, f"The remote node {name} answered with what this server "
                          "doesn't pass on.")
+        # Its policy is the one that this server gives an answer of its own of that kind,
+        # whatever the remote's says, so that the pages of a remote of another version, whose
+        # policy differs, show as this server's do: a page of the view runs this server's
+        # scripts; the view's other answers run nothing; and the rest, as its plain pages.
+        if not path.startswith("lem/"):
+            csp = None
+        elif answer.content_type != "text/html":
+            csp = DATA_CSP
+        else:
+            csp = PAGE_CSP if answer.status == 200 else None
         return Response(answer.status, answer.body, content_type=answer.content_type,
                         location=answer.location,
                         headers=[header for header in answer.headers
                                  if header[0] in REMOTE_HEADERS],
-                        csp=answer.csp if answer.csp in (PAGE_CSP, DATA_CSP) else None)
+                        csp=csp)
 
     def _refused(self, host: str, origins: Sequence[str], marked: bool,
                  content_type: Optional[str], body: Optional[bytes]) -> Optional[Response]:

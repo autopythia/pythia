@@ -384,7 +384,18 @@ class RemoteTests(RemoteTest):
             "/loose": {"status": 200, "type": "text/html", "body": "<p>hi",
                        "csp": "default-src *", "headers": [["Set-Cookie", "a=b"],
                                                            ["Allow", "GET"]]},
-            "/view": {"status": 200, "type": "text/html", "body": "", "csp": view.PAGE_CSP},
+            # Policies, which the local server gives as it gives its own, whatever these say:
+            # a plain page that claims the view's; the view's pages, with another version's
+            # policy, or none; the view's data, and an error; and a bad request, whose page
+            # is a plain one, as the local server's is.
+            "/claims": {"status": 200, "type": "text/html", "body": "", "csp": view.PAGE_CSP},
+            "/lem/": {"status": 200, "type": "text/html", "body": "",
+                      "csp": "default-src 'none'; script-src 'self'; style-src 'self'"},
+            "/lem/c/1": {"status": 200, "type": "text/html", "body": ""},
+            "/lem/facts/": {"status": 200, "type": "application/json", "body": "[]",
+                            "csp": "default-src *"},
+            "/lem/c/9": {"status": 404, "type": "text/plain", "body": "", "csp": view.PAGE_CSP},
+            "/lem/?x=1": {"status": 400, "type": "text/html", "body": "", "csp": view.PAGE_CSP},
             "/broken": {"status": "200", "type": "text/html", "body": ""},
         }
         app = self.app(("fake", python(FAKE, json.dumps(answers))))
@@ -398,7 +409,10 @@ class RemoteTests(RemoteTest):
         self.assertEqual(got["/near"].location, f"{base}/lem/c/1")
         self.assertEqual((got["/loose"].body, got["/loose"].csp, got["/loose"].headers),
                          ("<p>hi", None, (("Allow", "GET"),)))
-        self.assertEqual(got["/view"].csp, view.PAGE_CSP)
+        self.assertEqual({path: got[path].csp for path in (
+            "/claims", "/lem/", "/lem/c/1", "/lem/facts/", "/lem/c/9", "/lem/?x=1")}, {
+            "/claims": None, "/lem/": view.PAGE_CSP, "/lem/c/1": view.PAGE_CSP,
+            "/lem/facts/": view.DATA_CSP, "/lem/c/9": view.DATA_CSP, "/lem/?x=1": None})
 
     def test_the_views_posts_go_to_the_remotes_store(self):
         with tempfile.TemporaryDirectory() as tmp:
