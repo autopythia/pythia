@@ -1061,6 +1061,11 @@ var glui = (function () {
     var mark = element(view, "a");
     takesReturn(mark);
     var label_ = element(view, "span", "g-entry-label");
+    // A fold's arrow, after the star, which glui.css turns as the fold
+    // opens, in the place of the browser's own marker, which would come
+    // first: so that entries that fold and those that don't start alike.
+    var arrow = element(view, "span", "g-entry-arrow");
+    arrow.setAttribute("aria-hidden", "true");
     var gist = element(view, "span", "g-entry-text");
     var body = element(view, "div", "g-entry-body");
     var folds = null;
@@ -1070,8 +1075,10 @@ var glui = (function () {
     var details = null;
     var shown = null;
     var echo = null;
-    // Makes the entry's parts anew, for `fold`, with the same mark, label,
-    // text and body, the body holding the children still.
+    // Makes the entry's parts anew, for `fold`, with the same label, mark,
+    // text and body, the body holding the children still: its head is its
+    // label, its line's mark, its star, if it has one, its arrow, if it
+    // folds, then its text.
     function build(fold) {
       if (star.parentNode !== null) {
         star.parentNode.removeChild(star);
@@ -1081,11 +1088,14 @@ var glui = (function () {
       if (fold) {
         takesReturn(head);
       }
+      head.appendChild(label_);
       head.appendChild(mark);
       if (w.fields.star) {
         head.appendChild(star);
       }
-      head.appendChild(label_);
+      if (fold) {
+        head.appendChild(arrow);
+      }
       head.appendChild(gist);
       var holder = e;
       details = null;

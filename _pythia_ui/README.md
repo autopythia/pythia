@@ -288,18 +288,20 @@ glem.js's view. It makes each widget a native element (`button`, `a`,
 and its flags. Its widgets send `Edited` and `Toggled`, a tab `Chosen`, its
 close button `Dismissed`, and one dragged onto another `Moved`, it shows
 `Disabled` and `Tooltip`, a link goes only to one of the host's own paths, a
-dot says its text as an image's label and in its tooltip, and prose shows
-Markdown as elements, never as HTML, its links to the host's own paths, or to
-http, https or mailto in a new tab, without a referrer, in colors of its own
-that show on light stages and dark ones, and a fenced block of SVG, a whole
-document, as a figure: an image of it, from a `data:` URL, which the browser
-draws apart from the page, with no script, fetch or link of its own, on a
-light ground, with its source in a fold under it. It sets a theme's values on
-the page as CSS variables, `--glui-` and a value's name, and a look's
-stylesheet draws with them, over `web/glui.css`: `web/native.css`, the design
-doc's native look, or `web/log.css`, after wui's log. `make js-test` runs its
-cases in a stand-in DOM (`lem/test/*_dom.txt`), with a form of its controls,
-`lem/test/form.lem`.
+dot says its text as an image's label and in its tooltip, an entry's head is
+its label, its line's mark, its star, and, if it folds, an arrow that turns as
+it opens, in the place of the browser's own marker, so that entries start
+alike, then its text, and prose shows Markdown as elements, never as HTML, its
+links to the host's own paths, or to http, https or mailto in a new tab,
+without a referrer, in colors of its own that show on light stages and dark
+ones, and a fenced block of SVG, a whole document, as a figure: an image of
+it, from a `data:` URL, which the browser draws apart from the page, with no
+script, fetch or link of its own, on a light ground, with its source in a fold
+under it. It sets a theme's values on the page as CSS variables, `--glui-` and
+a value's name, and a look's stylesheet draws with them, over `web/glui.css`:
+`web/native.css`, the design doc's native look, or `web/log.css`, after wui's
+log. `make js-test` runs its cases in a stand-in DOM (`lem/test/*_dom.txt`),
+with a form of its controls, `lem/test/form.lem`.
 
 In a browser, `make web-serve` serves the web look's two pages.
 `web/demo.html` shows the approval HUD, a page of a log, or the form, in
@@ -362,19 +364,21 @@ view (glem's `Reveal`); where the stretches of rows that came don't meet, a
 marker at either side asks for the rows between as it comes near the screen. A
 message, and an item, has a star (glui's `Entry`'s `star`), after its line's
 number, faint until it's set: setting or clearing it sends `Star(line, on)`,
-and the host sets or clears `Stars(line)`. A log's panel shows beside it as
-the host says (`Aside(shown)`), in a HUD: the lines starred, under their
-turns, as the host sends them (`Pin`), a starred answer with the user's
-messages that it answers; and the outline of the log's turns. A click on a pin
-jumps to its line, and one on a turn visits it (`Visit(turn)`): a jump to the
-line where it first shows that brings its mark into view, and opens nothing.
-Restoring a place (`Restore(line)`), as a page does where it was left, is a
-jump to the row that starts at a line, which opens nothing either, and brings
-the row to the top of the screen, unmarked; and going to the log's start
-(`Start`) brings its first turn's mark there so. An item's body comes the same
-way, when its entry is first opened: the program sends `Load(line)`, and the
-host answers with `Body` facts, or `Failed(line, why)`.
-`lem/test/contexts_ticks.txt` and `contexts_dom.txt` test it.
+and the host sets or clears `Stars(line)`. A row's text is in the code's font
+where it's a tool's, an error's or the log's own, such as a command or a
+sample's figures (`web/contexts.css`). A log's panel shows beside it as the
+host says (`Aside(shown)`), in a HUD: the lines starred, under their turns, as
+the host sends them (`Pin`), a starred answer with the user's messages that it
+answers; and the outline of the log's turns. A click on a pin jumps to its
+line, and one on a turn visits it (`Visit(turn)`): a jump to the line where it
+first shows that brings its mark into view, and opens nothing. Restoring a
+place (`Restore(line)`), as a page does where it was left, is a jump to the
+row that starts at a line, which opens nothing either, and brings the row to
+the top of the screen, unmarked; and going to the log's start (`Start`) brings
+its first turn's mark there so. An item's body comes the same way, when its
+entry is first opened: the program sends `Load(line)`, and the host answers
+with `Body` facts, or `Failed(line, why)`. `lem/test/contexts_ticks.txt` and
+`contexts_dom.txt` test it.
 
 In a browser, `web/contexts.js` is the host's part. The node server's pages
 show tabs: the index's, and one for each context that's open, each a runtime

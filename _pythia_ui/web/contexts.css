@@ -35,6 +35,13 @@ top:var(--contexts-strip,0px);z-index:5;padding:.3rem 0;border-bottom:1px solid 
 .g-log.contexts-tabbed .g-window>.g-row:first-child,
 .g-log.contexts-log .g-window>.g-row:first-child{background:var(--glui-stage)}
 .contexts-log{scroll-padding-top:calc(var(--contexts-head,3.4rem) + .25rem)}
+/* A row's text in the code's font where it's a tool's, an error's or the
+   log's own, such as a command, what it gave, or a sample's figures; as
+   prose where it's reasoning or a compaction's summary. */
+.g-entry.g-tone-tool>.g-entry-head>.g-entry-text,.g-entry.g-tone-tool>details>.g-entry-head>.g-entry-text,
+.g-entry.g-tone-error>.g-entry-head>.g-entry-text,.g-entry.g-tone-error>details>.g-entry-head>.g-entry-text,
+.g-entry.g-tone-dim>.g-entry-head>.g-entry-text,.g-entry.g-tone-dim>details>.g-entry-head>.g-entry-text{
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}
 .contexts-ends{display:none;position:fixed;right:1rem;bottom:1rem;z-index:15;flex-direction:column;gap:.35rem}
 .contexts-log .contexts-ends{display:flex}
 .contexts-aside .contexts-ends{right:calc(var(--contexts-panel,min(22rem,40vw)) + 2rem)}

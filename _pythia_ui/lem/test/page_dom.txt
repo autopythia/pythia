@@ -29,15 +29,16 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-user
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-fold.g-tone-tool
         details
           summary.g-entry-head
-            a.g-entry-mark "2"
             span.g-entry-label "[tool-call] exec_command"
+            a.g-entry-mark "2"
+            span.g-entry-arrow aria-hidden="true"
             span.g-entry-text "git diff"
           div.g-entry-body
 
@@ -63,15 +64,16 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-user
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-fold.g-tone-tool
         details open
           summary.g-entry-head
-            a.g-entry-mark "2"
             span.g-entry-label "[tool-call] exec_command"
+            a.g-entry-mark "2"
+            span.g-entry-arrow aria-hidden="true"
             span.g-entry-text "git diff"
           div.g-entry-body
             pre.g-code.g-diff
@@ -103,15 +105,16 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-dim
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-fold.g-tone-tool
         details open
           summary.g-entry-head
-            a.g-entry-mark "2"
             span.g-entry-label "[tool-call] exec_command"
+            a.g-entry-mark "2"
+            span.g-entry-arrow aria-hidden="true"
             span.g-entry-text "git diff"
           div.g-entry-body
             pre.g-code.g-diff
@@ -143,15 +146,16 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-dim
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-fold.g-tone-tool
         details
           summary.g-entry-head
-            a.g-entry-mark "2"
             span.g-entry-label "[tool-call] exec_command"
+            a.g-entry-mark "2"
+            span.g-entry-arrow aria-hidden="true"
             span.g-entry-text "git diff"
           div.g-entry-body
 
@@ -177,14 +181,14 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-dim
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-tone-tool
         div.g-entry-head
-          a.g-entry-mark "2"
           span.g-entry-label "[tool-call] exec_command"
+          a.g-entry-mark "2"
           span.g-entry-text "git diff"
         div.g-entry-body
 
@@ -210,14 +214,14 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-dim
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-tone-tool
         div.g-entry-head
-          a.g-entry-mark "2"
           span.g-entry-label "[tool-call] exec_command"
+          a.g-entry-mark "2"
           span.g-entry-text "git diff"
         div.g-entry-body
 
@@ -240,13 +244,13 @@ main.g-window
     div.g-panel-body
       div.g-entry.g-tone-dim
         div.g-entry-head
-          a.g-entry-mark "1"
           span.g-entry-label "[user]"
+          a.g-entry-mark "1"
           span.g-entry-text "Let's start stage 8."
         div.g-entry-body
       div.g-entry.g-tone-tool
         div.g-entry-head
-          a.g-entry-mark "2"
           span.g-entry-label "[tool-call] exec_command"
+          a.g-entry-mark "2"
           span.g-entry-text "git diff"
         div.g-entry-body

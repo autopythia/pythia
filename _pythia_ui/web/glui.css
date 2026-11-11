@@ -114,14 +114,22 @@ padding:.5em;border:1px solid var(--glui-rule-line);border-radius:3px;background
 .g-prose-source>summary{width:max-content;color:var(--glui-text-dim);font-size:.85em;cursor:pointer}
 .g-prose-source>pre{margin:.3em 0 0}
 
-/* A log's entry: its mark, label and text on a line, then its body, with
-   its children, if it has any. */
+/* A log's entry: its label, its line's mark, its star, and, if it folds,
+   an arrow that turns as it opens, then its text, on a line; then its body,
+   with its children, if it has any. The arrow takes the place of the
+   browser's own marker, which would come first, so that entries that fold
+   and those that don't start alike. */
 .g-entry-mark:not(:empty),.g-entry-label:not(:empty){margin-right:.5em}
 .g-entry-mark{text-decoration:none}
 .g-entry-mark[href]:hover{text-decoration:underline}
 .g-entry-body{display:flex;flex-direction:column;gap:var(--glui-gap-down)}
 .g-entry-body:empty{display:none}
 .g-entry summary{cursor:pointer}
+summary.g-entry-head{list-style:none}
+summary.g-entry-head::-webkit-details-marker{display:none}
+.g-entry-arrow{display:inline-block;width:.9em;margin-right:.3em;color:var(--glui-text-dim);text-align:center}
+.g-entry-arrow::before{content:"\25B8"}
+details[open]>.g-entry-head>.g-entry-arrow::before{content:"\25BE"}
 /* An entry's star: faint until its entry is pointed at or it has the focus,
    and in the accent once it's starred. */
 .g-entry-star{font:inherit;line-height:1;margin:0 .35em 0 0;padding:0 .1em;border:0;background:none;
