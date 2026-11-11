@@ -69,9 +69,10 @@ border-bottom:var(--glui-outline) solid var(--glui-rule-line)}
 .g-native .g-header>*{font-weight:600;color:var(--glui-text-strong)}
 /* A log's entries: a rule at the left in the tone's color, as the Log
    look draws it, or the rule's own for a normal one, and none for a dim
-   one; its mark, label and body. Code, as an item's body or a message's
-   text, in the code's font, with no background of its own; in prose, a
-   rule at its left sets it apart from the text. */
+   one; its head, then its body below, from the head's left edge, where its
+   label starts. Code, as an item's body or a message's text, in the code's
+   font, with no background of its own; in prose, a rule at its left sets
+   it apart from the text. */
 .g-native .g-entry{padding-left:var(--glui-margin);border-left:var(--glui-rule-width) solid var(--glui-rule-line)}
 .g-native .g-entry.g-tone-user,.g-native .g-entry.g-tone-assistant,.g-native .g-entry.g-tone-tool,
 .g-native .g-entry.g-tone-error{border-left-color:var(--g-tone)}
@@ -79,7 +80,7 @@ border-bottom:var(--glui-outline) solid var(--glui-rule-line)}
 .g-native .g-entry-mark{font-size:var(--glui-mark-size);color:var(--glui-text-dim);
 font-variant-numeric:tabular-nums}
 .g-native .g-entry-label{font-weight:600;color:var(--g-tone)}
-.g-native .g-entry-body{margin:var(--glui-gap-down) 0 0 var(--glui-margin)}
+.g-native .g-entry-body{margin:var(--glui-gap-down) 0 0}
 .g-native .g-code{padding:.1em 0}
 .g-native .g-prose pre.g-code{padding:.15em 0 .15em var(--glui-margin);border-left:var(--glui-rule-width) solid var(--glui-rule-line)}
 
