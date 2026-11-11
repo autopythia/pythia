@@ -405,7 +405,9 @@ fetches the program and the themes, compiled, from `web/compiled/`, which
 `make compiled` writes, and a test checks against the files they're compiled
 from. A log's page starts at its end, and keeps the first row on the screen in
 place as rows come, above it or below, but for a screen at the log's end,
-which stays at its end as the log grows, and two buttons, at the bottom right,
+which stays at its end as the log grows: what the log gained comes with its
+new rows, which the page asks for at once, and they show together, so that its
+end never shows as missing in between; and two buttons, at the bottom right,
 go to its start and its end. A page's title, a log's or the index's, stays at
 the top of the screen as it scrolls, right below the strip of tabs, which is
 as wide on every tab, the panel's room being the log's alone. Every few

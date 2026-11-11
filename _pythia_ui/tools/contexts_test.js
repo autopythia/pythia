@@ -101,6 +101,36 @@
     ["+", "Run", { line: 1, turn: 0, last: 2, text: "2 other" }]
   ];
 
+  // What the log gains, three lines, turn 2's; and the rows that they make:
+  // its message, then a run, as the page asks for them after line 6.
+  var GROWN = [
+    ["-", "Length", { lines: 6 }],
+    ["+", "Length", { lines: 9 }],
+    ["+", "Turn", { n: 2, label: "Turn 2 \u00b7 3 items", title: "Go on", line: 7 }]
+  ];
+  var LATER = [
+    ["+", "Chunk", { first: 7, last: 9 }],
+    ["+", "Message", { line: 7, turn: 2, tone: "User", label: "[user]", text: "Go on" }],
+    ["+", "Run", { line: 8, turn: 2, last: 9, text: "2 tool calls: exec_command 2" }]
+  ];
+
+  // A page whose `keep` notes, after each update, whether the marker of
+  // later rows shows at the end of the rows: what a browser would show,
+  // since it shows nothing within the task that runs it.
+  function marked(more) {
+    var it = page(Object.assign({}, more, {
+      keep: function (update) {
+        it.kept++;
+        update();
+        it.marks.push(facts(it, "Near").some(function (fact) {
+          return fact.indexOf("Near(After,") === 0;
+        }) ? "the marker of later rows shows" : "no marker of later rows");
+      }
+    }));
+    it.marks = [];
+    return it;
+  }
+
   // The panel's pins: the user's message, and the answer, line 6.
   var PIN3 = ["+", "Pin", { line: 3, turn: 1, tone: "User", label: "[user]", gist: "Plan the GUI" }];
   var PIN6 = ["+", "Pin", { line: 6, turn: 1, tone: "Assistant", label: "[assistant]", gist: "Done." }];
@@ -428,25 +458,146 @@
       ]
     ],
     [
-      "a log that grows: the page asks what it gained, one request at a time, and its later rows come near the screen",
+      "a log that grows: the page asks what it gained, one request at a time; with the log's end, it asks for the new rows too, and shows both in one task, with no marker of later rows between",
       function () {
-        var it = page();
+        var it = marked();
         it.tick();
         var before = it.asked.length;
         answer(it, "/f/page", null, LOG);
         it.tick();
         it.tick();
-        answer(it, "/f/grow/6", null, [
-          ["-", "Length", { lines: 6 }],
-          ["+", "Length", { lines: 9 }],
-          ["+", "Turn", { n: 2, label: "Turn 2 \u00b7 2 items", title: "Go on", line: 7 }]
-        ]);
-        var near = facts(it, "Near");
+        answer(it, "/f/grow/6", null, GROWN);
+        var meanwhile = facts(it, "Length").concat(facts(it, "Turn").length + " turns");
+        it.tick();
+        answer(it, "/f/after/6", null, LATER);
+        var shown = facts(it, "Last").concat(facts(it, "Length"), facts(it, "Turn").length + " turns", facts(it, "Near"));
         it.tick();
         answer(it, "/f/grow/9", null, []);
-        return [before + " asked before its facts"].concat(it.asked, near, facts(it, "Length"), facts(it, "Turn").length + " turns");
+        return [before + " asked before its facts"].concat(meanwhile, it.asked, it.kept + " kept", it.marks, shown);
       },
-      ["1 asked before its facts", "/f/page", "/f/grow/6", "/f/grow/9", "Near(After, Later(6))", "Near(Before, Earlier(3))", "Length(9)", "3 turns"]
+      [
+        "1 asked before its facts",
+        "Length(6)",
+        "2 turns",
+        "/f/page",
+        "/f/grow/6",
+        "/f/after/6",
+        "/f/grow/9",
+        "1 kept",
+        "no marker of later rows",
+        "Last(9)",
+        "Length(9)",
+        "3 turns",
+        "Near(Before, Earlier(3))"
+      ]
+    ],
+    [
+      "a log whose last run grows, as tool calls come: its row, the same element, says so, with no marker of later rows between",
+      function () {
+        var it = marked();
+        answer(it, "/f/page", null, LOG.concat([["-", "Length", { lines: 6 }], ["+", "Length", { lines: 9 }]], GROWN.slice(2), LATER));
+        var run = function () {
+          return facts(it, "Entry").filter(function (fact) {
+            return fact.indexOf("Entry(RunBox(8),") === 0;
+          });
+        };
+        var row = function () {
+          var found = null;
+          it.view.widgets.forEach(function (w) {
+            if (w.key === "RunBox(8)") {
+              found = w.made.element;
+            }
+          });
+          return found;
+        };
+        var was = run();
+        var element = row();
+        it.tick();
+        answer(it, "/f/grow/9", null, [
+          ["-", "Length", { lines: 9 }],
+          ["+", "Length", { lines: 10 }],
+          ["+", "Turn", { n: 2, label: "Turn 2 \u00b7 4 items", title: "Go on", line: 7 }]
+        ]);
+        answer(it, "/f/after/9", null, [
+          ["+", "Chunk", { first: 8, last: 10 }],
+          ["+", "Run", { line: 8, turn: 2, last: 10, text: "3 tool calls: exec_command 3" }],
+          ["+", "Item", { line: 10, run: 8, tone: "Tool", label: "[tool-call] exec_command", gist: "ls", body: true }]
+        ]);
+        var same = element !== null && row() === element ? "the run's row is the same element" : "the run's row is a new element";
+        return was.concat(run(), it.asked, it.kept + " kept", it.marks, same, facts(it, "Last"));
+      },
+      [
+        'Entry(RunBox(8), "2 tool calls: exec_command 2", "", "8", Dim, True, "/f/item/8", False, False, False, Log, 16)',
+        'Entry(RunBox(8), "3 tool calls: exec_command 3", "", "8", Dim, True, "/f/item/8", False, False, False, Log, 16)',
+        "/f/page",
+        "/f/grow/9",
+        "/f/after/9",
+        "1 kept",
+        "no marker of later rows",
+        "the run's row is the same element",
+        "Last(10)"
+      ]
+    ],
+    [
+      "a log that grows while its page hasn't its end: what it gained shows alone, and the marker of later rows asks for them near the screen, as before",
+      function () {
+        var it = marked();
+        answer(it, "/f/page", null, LOG.concat([["-", "Length", { lines: 6 }], ["+", "Length", { lines: 7 }]]));
+        it.tick();
+        answer(it, "/f/grow/7", null, [["-", "Length", { lines: 7 }], ["+", "Length", { lines: 9 }]]);
+        return it.asked.concat(it.marks, facts(it, "Near"), facts(it, "Length"));
+      },
+      [
+        "/f/page",
+        "/f/grow/7",
+        "the marker of later rows shows",
+        "Near(After, Later(6))",
+        "Near(Before, Earlier(3))",
+        "Length(9)"
+      ]
+    ],
+    [
+      "a log's new rows that can't come with what it gained: it shows alone, without a word, and the marker of later rows asks for them near the screen, as before",
+      function () {
+        var it = marked();
+        answer(it, "/f/page", null, LOG);
+        it.tick();
+        answer(it, "/f/grow/6", null, GROWN);
+        answer(it, "/f/after/6", "502 Bad Gateway", null);
+        it.tick();
+        return it.asked.concat(it.marks, facts(it, "Near"), facts(it, "Length"), it.said.slice(1));
+      },
+      [
+        "/f/page",
+        "/f/grow/6",
+        "/f/after/6",
+        "/f/grow/9",
+        "the marker of later rows shows",
+        "Near(After, Later(6))",
+        "Near(Before, Earlier(3))",
+        "Length(9)"
+      ]
+    ],
+    [
+      "a log's new rows that the program refuses: what it gained shows, the end of the rows says why, as when the program asks for them, and the page goes on asking what changed",
+      function () {
+        var it = marked();
+        answer(it, "/f/page", null, LOG);
+        it.tick();
+        answer(it, "/f/grow/6", null, GROWN);
+        answer(it, "/f/after/6", null, [["+", "Chunk", { first: 7, last: "nine" }]]);
+        it.tick();
+        return it.asked.concat(facts(it, "LaterFailed"), facts(it, "Length"), it.said.slice(1));
+      },
+      [
+        "/f/page",
+        "/f/grow/6",
+        "/f/after/6",
+        "/f/grow/9",
+        'LaterFailed(6, "Chunk\'s `last` is an Int, not a string")',
+        "Length(9)",
+        "wrong: error: Chunk's `last` is an Int, not a string"
+      ]
     ],
     [
       "a log's dot follows what its context is doing, as the page asks what it gained, with lines or without",

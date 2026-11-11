@@ -30,8 +30,9 @@
 // items, or with RunFailed(run, why); and its Load(line) with the item's
 // body, or with Failed(line, why). Every few seconds, while the page shows,
 // it asks what a log gained, or an index's facts anew, and tells the program
-// what changed. Like lem.js, it's a plain script that defines one global,
-// `contexts`, and it starts itself on a page that gives `data-facts`.
+// what changed; for a log whose page has its end, with its new rows, at once.
+// Like lem.js, it's a plain script that defines one global, `contexts`, and
+// it starts itself on a page that gives `data-facts`.
 var contexts = (function () {
   "use strict";
 
@@ -107,7 +108,9 @@ var contexts = (function () {
   //   while the page shows, when a log asks what it gained, and an index its
   //   facts anew, one request at a time. What a log gained is steps; what
   //   an index's facts gained and lost, the host works out. Should either
-  //   fail, the page says why, and asks no more;
+  //   fail, the page says why, and asks no more. A log that grew, whose
+  //   page has its end, asks for its new rows too, as the program's
+  //   LoadAfter would, and shows them with what it gained, at once;
   // - o.stars, for a log, is the URL that keeps a star, set or cleared, and
   //   o.post(url, value, done) sends it JSON, and calls done(null), or
   //   done(why): the program's Star(line, on) changes Stars on the page at
@@ -378,8 +381,30 @@ var contexts = (function () {
       }
     });
 
+    // The line after which a log's new rows start, if `steps`, what it
+    // gained, make it longer, and the page has its end: its rows reach the
+    // length that it had (the program's Last), and aren't coming already;
+    // else null, as for a length that isn't a number, which the program
+    // refuses.
+    function grownEnd(steps) {
+      var now = lengthOf(steps, length);
+      var prog = view.runtime.prog.lem;
+      var r = prog.rel("Last");
+      if (typeof asks.LoadAfter.url !== "string" || typeof now !== "number" || !(now > length) || r < 0) {
+        return null;
+      }
+      var last = view.runtime.lem.relFacts(r);
+      var mine = last.length === 1 && last[0].tuple[0] === length;
+      return mine && !loading.has(asks.LoadAfter.url + " " + length) ? length : null;
+    }
+
     // Asks what changed, unless a request is out, or the page isn't shown
-    // yet, or asks no more.
+    // yet, or asks no more. A log that grew, whose page has its end, asks
+    // for its new rows too, before it shows either, and then shows both in
+    // one task: else the rows' end would show as missing in between, with
+    // its marker, until the program asked for them, and a screen at the
+    // log's end would move down a line, and back. Rows that can't come leave
+    // them to the program, which asks for them as it does for any.
     function tick() {
       if (asking || !live || !ready || (log && length === null)) {
         return;
@@ -387,37 +412,63 @@ var contexts = (function () {
       var url = log ? o.grow.split("{lines}").join(String(length)) : o.facts;
       asking = true;
       o.get(url, function (why, steps) {
-        asking = false;
         if (why === null && !Array.isArray(steps)) {
           why = "what changed isn't a list of steps";
         }
-        var change = why === null && !log ? changed(facts, byText(steps)) : steps;
-        if (why === null && change.length > 0) {
-          refused = null;
-          if (log) {
-            keep(function () {
-              view.update(change);
-            });
-          } else {
-            view.update(change);
-          }
-          why = refused;
-        }
-        if (why !== null) {
-          live = false;
-          status("live updates stopped: " + why, true);
+        var end = why === null && log ? grownEnd(steps) : null;
+        if (end === null) {
+          took(why, steps, null, null);
           return;
         }
-        if (log) {
-          length = lengthOf(steps, length);
-        } else {
-          facts = byText(steps);
-        }
-        if (soon) {
-          soon = false;
-          tick();
-        }
+        var name = asks.LoadAfter.url + " " + end;
+        loading.add(name);
+        o.get(asks.LoadAfter.url.split("{line}").join(String(end)), function (lost, rows) {
+          loading.delete(name);
+          took(why, steps, lost === null && Array.isArray(rows) ? rows : null, end);
+        });
       });
+    }
+
+    // Shows what changed, `steps`, or says why it couldn't come (tick); and
+    // a log's new rows after line `end`, `rows`, if they came, in the same
+    // task. Rows that the program refuses fail as when it asks for them.
+    function took(why, steps, rows, end) {
+      asking = false;
+      var change = why === null && !log ? changed(facts, byText(steps)) : steps;
+      if (why === null && change.length > 0) {
+        refused = null;
+        if (log) {
+          var lost = null;
+          keep(function () {
+            view.update(change);
+            if (refused === null && rows !== null) {
+              view.update(rows);
+              lost = refused;
+              refused = null;
+            }
+          });
+          if (lost !== null) {
+            fail(asks.LoadAfter, end, lost);
+          }
+        } else {
+          view.update(change);
+        }
+        why = refused;
+      }
+      if (why !== null) {
+        live = false;
+        status("live updates stopped: " + why, true);
+        return;
+      }
+      if (log) {
+        length = lengthOf(steps, length);
+      } else {
+        facts = byText(steps);
+      }
+      if (soon) {
+        soon = false;
+        tick();
+      }
     }
     if (o.every) {
       o.every(tick);
