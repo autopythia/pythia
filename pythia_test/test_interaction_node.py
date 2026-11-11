@@ -1512,20 +1512,25 @@ class ViewTests(WorkspaceTest):
             (5, 17, "3 tool calls: apply_patch 1, exec_command 1, update_plan 1; 1 reasoning; "
              "3 other"),
             (19, 21, "2 other"), (22, 23, "1 tool call: compact 1"),
-            (25, 29, "1 tool call: exec_command 1; 2 other"), (31, 33, "2 other"),
+            (26, 29, "1 tool call: exec_command 1; 1 other"), (31, 33, "2 other"),
             (36, 47, "3 tool calls: exec_command 1, icron 1, retry 1; 3 other"),
             (49, 51, "2 other"), (52, 53, "1 tool call: config 1"), (57, 59, "3 other"),
             (61, 63, "2 other")])
-        # A compaction, between the runs before and after it: a row alone, whose item, of
-        # its own run, comes with it, in the tone of what's read.
+        # A compaction, between the runs before and after it: its checkpoint, and its
+        # record, each a row alone, as the CLI shows them, whose item, of its own run,
+        # comes with it, in the tone of what's read, or of the log's own.
         lones = {fact["line"]: fact for fact in self.facts(steps, "Lone")}
         alone = {fact["line"]: fact for fact in self.facts(steps, "Item")}
-        self.assertEqual(sorted(lones), [24, 56])
+        self.assertEqual(sorted(lones), [24, 25, 56])
         self.assertEqual([(line, fact["run"], fact["tone"], fact["label"], fact["body"])
                           for line, fact in sorted(alone.items())],
                          [(24, 24, "Normal", "[context prefix] 1 item", True),
+                          (25, 25, "Dim", "[compaction]", False),
                           (56, 56, "Normal", "[compaction]", False)])
+        self.assertEqual(alone[25]["gist"], "protocol=coldstart input=0 output=0 total=0 "
+                         "cached=0 elapsed=0.02s attempts=0")
         self.assertEqual(self.get("lem/run/1/24").status, 404)  # no run's
+        self.assertEqual(self.get("lem/run/1/25").status, 404)
         context = contexts.Roots(self.ws.registry).get(LOCAL).refresh()
         rows = {**messages, **runs, **lones}
         self.assertEqual({line: fact["turn"] for line, fact in rows.items()},
@@ -1673,8 +1678,9 @@ class ViewTests(WorkspaceTest):
                                      "\U0001f469\u200d\U0001f4bb", False)])
         self.assertEqual(body(54), [(0, "Look at this.", False),
                                     (1, "[image] image/png 11.7 KiB", False)])
-        self.assertEqual(body(24), [(0, pointer(21), False), (1, "[user]", False),
-                                    (2, pointer(21), False)])  # the prefix, and its item
+        # A context prefix's text, once: its item, the pointer itself, isn't shown a second
+        # time, as in the CLI, which shows a prefix's summary or pointer alone.
+        self.assertEqual(body(24), [(0, pointer(21), False)])
         for path, why in (("lem/body/1/0", "local-0 (1) has no line 0."),
                           ("lem/body/1/64", "local-0 (1) has no line 64."),
                           ("lem/body/1/x", "local-0 (1) has no line x."),

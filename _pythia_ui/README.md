@@ -335,9 +335,11 @@ why it can't be reached, and dims its row, before its roots, by ids of their
 own, as `NAME/ID`; or, for a log, its length, `Length`, a `Turn` for each
 turn, with the line where it starts, and the log's last rows: a `Chunk`, the
 lines that they cover, and a row for each message, with its text, `Message`;
-for each compaction, a row alone, `Lone`, with its `Item`, which shows in the
-log where its row is, as a run's items show in their run; and for each run of
-other items between two of those within a turn, with what's in it, `Run`.
+for each compaction, its checkpoint and its record, a row alone each, as the
+CLI shows them, `Lone`, with its `Item`, the checkpoint's body its summary or
+its pointer to the log, without the items that it keeps again, which shows in
+the log where its row is, as a run's items show in their run; and for each run
+of other items between two of those within a turn, with what's in it, `Run`.
 Reasoning and compactions are in the normal tone, to be read; the rest of what
 isn't said or a tool's, dim. Before each context, in the index, and before a
 log's title, a dot (glui's `Dot`) says what the context is doing, as the host

@@ -57,7 +57,7 @@ from ..display import _format_byte_count as byte_count
 from .activity import GRAY, activity
 from .contexts import Context, parse, shown_path
 from .store import Store
-from .pages import (GIST_CHARS, TITLE_CHARS, Block, Fold, Inline, Line, Nest, Note, Pages,
+from .pages import (GIST_CHARS, TITLE_CHARS, Block, Fold, Inline, Line, Note, Pages,
                     Renderer, Response, cut, gist, h, hidden, when)
 
 # _pythia_ui/ in the checkout that holds the package: pythia's installs are
@@ -108,10 +108,12 @@ CHUNK_ROWS = 200
 MESSAGE_CUT = 100_000
 # A run's summary names this many tools at most.
 SUMMARY_TOOLS = 3
-# The lines that are rows alone: a user's message, or the assistant's; and a compaction,
-# which stands between the runs before it and after it.
+# The lines that are rows alone: a user's message, or the assistant's; and a compaction's,
+# its checkpoint and its record, which the CLI shows as items of their own, standing
+# between the runs before them and after them.
 _TALK = (("message", "user"), ("message", "assistant"))
-_COMPACTIONS = frozenset(("context_prefix", "context_compaction", "opaque_compaction"))
+_COMPACTIONS = frozenset(("context_prefix", "context_compaction", "opaque_compaction",
+                          "compaction_metadata"))
 
 
 def _alone(kind) -> bool:
@@ -162,8 +164,10 @@ def turn_label(name: str, count: int) -> str:
 
 def texts(renderer: Renderer, parts) -> List[Tuple[str, bool]]:
     """An item's parts as its body's texts, each with whether it's a diff: a block, cut as
-    the plain pages cut it, then how much more it has; a fold's parts, without its
-    summary; and an item within it, its label, then its parts."""
+    the plain pages cut it, then how much more it has; and a fold's parts, without its
+    summary. The items that a context prefix keeps (a Nest) show nothing, as in the CLI:
+    the log showed each where it first appeared, and the prefix's own text, its summary or
+    its pointer to the log, is its body already."""
     found: List[Tuple[str, bool]] = []
     for part in parts:
         if isinstance(part, Block):
@@ -179,12 +183,6 @@ def texts(renderer: Renderer, parts) -> List[Tuple[str, bool]]:
                 found.append((part.text, False))
         elif isinstance(part, Fold):
             found.extend(texts(renderer, part.parts))
-        elif isinstance(part, Nest):
-            for record in part.records:
-                shown = renderer.shown(record)
-                if shown is not None:
-                    found.append((shown.label, False))
-                    found.extend(texts(renderer, shown.parts))
     return found
 
 
